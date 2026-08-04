@@ -38,13 +38,22 @@ from chemclaw.science.bo.campaign_record import (
     read_campaign_thread,
     record_suggestion,
 )
-from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
+from chemclaw.science.bo.engine import (
+    factorial_design,
+    initial_candidates,
+    predict_at,
+    propose_candidates,
+    surrogate_fit_quality,
+)
 from chemclaw.science.bo.featurize import featurize_problem
 from chemclaw.science.bo.problem import (
     Candidate,
+    FitQuality,
     Objective,
     Observation,
     OptimizationProblem,
+    ParamValue,
+    Prediction,
     ScreeningDesign,
     observed_value,
     pareto_front,
@@ -207,11 +216,34 @@ def _require_observed_params_match(
     Raises:
         ValueError: Naming the offending observation's index and the parameter(s) at fault.
     """
+    _require_params_match(problem, [observation.params for observation in history], "observations")
+
+
+def _require_points_match(
+    problem: OptimizationProblem, points: list[dict[str, ParamValue]]
+) -> None:
+    """The same check for the points `predict_outcome` is asked about (W5).
+
+    A prediction goes through `strategy.predict`, not through the acquisition step, so a missing
+    column surfaces as a different library error than the one the observation check was written
+    for — but the caller's mistake and the sentence that repairs it are identical, so the message
+    is shared rather than restated.
+
+    Raises:
+        ValueError: Naming the offending point's index and the parameter(s) at fault.
+    """
+    _require_params_match(problem, points, "points")
+
+
+def _require_params_match(
+    problem: OptimizationProblem, assignments: list[dict[str, ParamValue]], noun: str
+) -> None:
+    """The one definition of "these parameters are the problem's parameters"."""
     declared = {parameter.name for parameter in problem.parameters}
-    for index, observation in enumerate(history):
-        observed = set(observation.params)
-        missing = sorted(declared - observed)
-        undeclared = sorted(observed - declared)
+    for index, params in enumerate(assignments):
+        given = set(params)
+        missing = sorted(declared - given)
+        undeclared = sorted(given - declared)
         if not missing and not undeclared:
             continue
         faults = []
@@ -220,7 +252,7 @@ def _require_observed_params_match(
         if undeclared:
             faults.append(f"a value for {undeclared}, which the problem does not declare")
         raise ValueError(
-            f"observations[{index}] has {' and '.join(faults)} — every observation must give a "
+            f"{noun}[{index}] has {' and '.join(faults)} — every entry must give a "
             "value for exactly the parameters the problem declares. Add the missing value(s), "
             "drop the extra one(s), or change the problem's parameters to match the runs you have."
         )
@@ -522,3 +554,88 @@ async def generate_screening_design(
         n_repetitions,
         randomize,
     )
+
+
+class SurrogateAnswer(BaseModel):
+    """What the model expects at points the chemist named, and how well it predicts (W5).
+
+    Both halves come from **one** fit — the same fit `suggest_next_experiment` proposes from — so
+    the prediction and the score it should be read against cannot describe two different models.
+    """
+
+    predictions: list[Prediction]
+    fit: list[FitQuality]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> str:
+        """The fit quality first, because it is what licenses reading the predictions at all."""
+        return " ".join([quality.summary for quality in self.fit])
+
+
+@server.tool()
+async def predict_outcome(
+    problem: OptimizationProblem,
+    observations: list[Observation] | str,
+    points: list[dict[str, float | str]] | str,
+    assess_fit: bool = True,
+) -> SurrogateAnswer:
+    """What does the model expect at *these* conditions? Ask instead of trusting a recommendation.
+
+    Use this when the chemist names a point rather than asking what to run — "what would it give at
+    90 °C in toluene with L3?", "is 60 °C enough?", "what about the corner we never tried?" — and
+    when they want to know whether the model is worth listening to before they act on a suggestion.
+    Answering from the surrogate is the difference between a number and a guess, and the surrogate
+    it asks is the same one `suggest_next_experiment` proposes from.
+
+    **This endorses nothing.** A candidate is the optimizer's recommendation; a prediction is an
+    answer about a point you chose. Each `Prediction.summary` says so — quote it rather than
+    presenting a prediction as a suggestion.
+
+    **An unexplored corner is a posterior-sd question, and this is the tool for it.** To answer "has
+    the search been circling one region, or is there somewhere it has not looked", predict at a few
+    corners of the space and compare their `sds` to a point among the runs already done. A much
+    larger sd is a region the model knows nothing about; a similar one means the search has already
+    covered it. Do not answer that from the run list alone.
+
+    **Out-of-range points are answered, not refused** — with `in_domain: false` and a much wider sd,
+    because the model extrapolates rather than clamping. Say that the point is outside the declared
+    range and that the mean there is unconstrained; do not quietly present it as a prediction like
+    any other.
+
+    Args:
+        problem: The decision space and objective(s), in the same shape `suggest_next_experiment`
+            takes — pass the one `resume_campaign` returned, or the one you just built.
+        observations: The runs the model should learn from. At least two, and every run must give a
+            value for every parameter the problem declares.
+        points: The conditions to predict at, each naming **every** parameter — one dict per
+            question. These are not proposals and are not recorded against the campaign.
+        assess_fit: Cross-validate the surrogate and return the score (default true). Set it false
+            only when the fit quality is already known from an earlier call in the same
+            conversation; it costs a few extra fits and is what tells a chemist whether the
+            prediction is worth anything.
+
+    Returns:
+        One `Prediction` per point — the predicted value, the posterior sd, and whether the point is
+        inside the declared space — plus the cross-validated fit quality per objective.
+    """
+    problem = OptimizationProblem.model_validate(problem)
+    # Same tolerance the other tools have: the model sometimes emits an array JSON-encoded as one
+    # string, and rejecting the call teaches it nothing.
+    if isinstance(observations, str):
+        observations = json.loads(observations)
+    named = json.loads(points) if isinstance(points, str) else points
+    asked: list[dict[str, ParamValue]] = [dict(point) for point in named]
+    history = [Observation.model_validate(item) for item in observations]
+    _require_observed_params_match(problem, history)
+    require_observations_cover_objectives(problem, history)
+    _require_points_match(problem, asked)
+    # Featurized for the same reason the suggestion path is: descriptors change how the surrogate
+    # models a categorical space, so a prediction made without them would answer about a different
+    # model than the one that proposed.
+    featurized = await featurize_problem(default_store(), problem)
+    predictions = await asyncio.to_thread(predict_at, featurized.problem, history, asked)
+    fit: list[FitQuality] = []
+    if assess_fit:
+        fit = await asyncio.to_thread(surrogate_fit_quality, featurized.problem, history)
+    return SurrogateAnswer(predictions=predictions, fit=fit)

@@ -105,3 +105,64 @@ Left open in `docs/planning/BACKLOG.md`: validating solvent names at the tool bo
 cause behind two findings), du-03's behavioural half, the repeated-tool-call cost, the full
 230-probe sweep (which needs a corpus worth sweeping — this repo ships 38 notes), and an
 Entra-enforced pass.
+
+---
+
+# Task: the BO capability audit and its five-wave roadmap
+
+Branches `claude/bofire-capabilities-roadmap-pmeipd` (#111) then one per wave: W1 #114, W2 #117,
+W3 #118, W4 #119, W5 #120. Map: `docs/reference/bo-capability-map.md`. Register:
+`docs/decisions/D-2026-08-04-what-bofire-does-when-you-actually-run-it.md`; one ADR per wave.
+
+**The question was what the BO layer can already do for chemical and analytical development, what
+BoFire offers that we never call, and in what order to close the gap.** The answer turned on a
+decision made at the start: **measure BoFire rather than read it.** The previous BO roadmap had been
+written from a code audit and was wrong — it called threading `n_generators` a one-line change
+because the parameter exists and its docstring explains it, and the parameter is inert on the only
+domain shape that reaches us. So eight measurements ran first. Three changed a wave, and one
+**reversed a refusal**: cross-validated fit quality had been ruled out because reaching it means
+naming a surrogate class, and `strategy.surrogate_specs` turned out to expose the one BoFire itself
+chose.
+
+**All five waves shipped.** Campaign health with a required `assay_noise` and an observed-spread
+scale for the sd (W1); continuous factors in a screen, plus centre points, replication and seeded
+run-order randomisation (W2); multi-objective with a computed Pareto front and a `best_of` that
+refuses to pick an axis (W3); linear constraints and a scoped categorical exclusion (W4); and
+`predict_outcome` — what the model expects at a point the *chemist* named, with the cross-validated
+quality of the surrogate behind it (W5). Story 3.3 went `PARTIAL` → `SERVED`; 3.4 and 3.5 gained
+what they were missing.
+
+**The recurring defect was a refusal outliving its refusal.** Four times a wave made an earlier
+"we cannot do this" false — in a tool description, a skill instruction, an eval probe and a test
+assertion — and each had to die in the same commit as the code, or the model would be taught to
+decline a capability that exists. `tests/test_bo_tools.py`'s description test broke on purpose in
+three separate waves and now records all four states. One of those was **missed and caught later**:
+W4's ADR said `op-17` needed no rewrite because it asks for a coupled constraint; the probe actually
+asks for two limits, only one of them conditional, and would have graded the correct new answer as a
+failure. W5's ADR carries the correction.
+
+**Three things the measurements caught that reading would not have.**
+`discrete_candidate_count` returned the product of the category counts, which an exclusion makes an
+over-count — 2×2×2 minus one forbidden pairing is six, not eight — and both its readers act on that
+number. The roadmap claimed the exclusion would work for a screen; measured,
+`FractionalFactorialStrategy` rejects *every* constraint class at construction. And a constraint
+costs about three times an unconstrained ask at one candidate and ~9s per further candidate, which
+is why two tests blew CI's timeout and why the tool now tells the model to keep constrained batches
+small.
+
+**One number is retracted.** The register's "R² 0.948 / MAE 1.47" cannot be reproduced: the script
+that produced it passes `get_metric` a string where an enum is required, and raises. The *finding*
+reproduces at 0.935, 0.950 and 0.813 across three routes; the pair does not, and the maintained map
+says so.
+
+**Verification, at the end rather than only per wave.** The register was re-run whole against the
+finished tree — everything reproduces bar the retraction above — and the three probes the roadmap
+exists for were driven on their own data: `op-13`'s untried corner carries **9.4×** the posterior sd
+of an explored point, `op-16`'s front is **4 of 6** supplied runs by dominance, and `op-17`'s volume
+limit is honoured by construction while its conditional half is still refused. Those are the answers
+those probes were graded *fabricated* for asserting, now computed.
+
+Left open in `docs/planning/BACKLOG.md`: the `method` note type, which is what analytical method
+development is actually waiting on and is a schema row rather than a BO one. `DEFERRED.md` carries
+nonlinear and `NChooseK` constraints, interpoint/blocking, model-based optimal design (cyipopt +
+SCIP), and feature importance, each with the trigger that would reopen it.

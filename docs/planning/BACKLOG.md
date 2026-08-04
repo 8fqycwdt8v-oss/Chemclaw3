@@ -278,7 +278,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       and the validator names the caller's own continuous parameters rather than repeating BoFire's
       "pure categorical/discrete search spaces".
 
-- [ ] **W5 — nothing reads the surrogate back** — [S]. (i) `predict_outcome`: "what would the model
+- [x] **W5 — nothing reads the surrogate back** — [S]. (i) `predict_outcome`: "what would the model
       predict for 90 °C in toluene with L3", the question a chemist asks *instead of* trusting a
       recommendation. Measured (M-6): `predict()` accepts a params-only frame, works on a featurized
       domain, and does **not** clamp an out-of-bounds point — it extrapolates with the sd rising
@@ -291,6 +291,17 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       is already installed via `bofire[optimization]`, so nothing here costs a dependency. Needs the
       "a CV score over ten observations will be over-read" caveat as a `computed_field`, not a
       docstring.
+      **Closed by D-2026-08-04-the-model-can-be-asked-not-only-obeyed.** Both halves ship behind one
+      `predict_outcome` tool over **one** fit, which is what makes the score mean anything: a
+      quality measured off a separately configured strategy would describe a model nobody's
+      recommendation came from. The register's exact pair does **not** reproduce and is retracted — its
+      script passes `get_metric` a string where an enum is required and raises — but the finding
+      does, at R² 0.935 / MAE 1.695 corrected, 0.950 / 1.36 through the shipped code and 0.813 /
+      3.45 on `op-13`'s twelve real runs. The extrapolation signal is starker than measured: sd 0.97
+      in range against 18.6 at T=400. One correction to the plan: `get_metric`
+      returns a `pd.Series`, and its `combine_folds=True` default pools the held-out predictions,
+      which is the number to report — a mean of per-fold R² weights a two-point fold like a
+      ten-point one. `op-13`'s posterior half closes with it.
 
 - [ ] **The `method` note type is what analytical method development is actually waiting on** —
       [M], and it is a schema row rather than a BO one. 24 stories sit in §7/§8 and a

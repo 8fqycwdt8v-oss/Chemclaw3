@@ -21,17 +21,21 @@ endpoint:
     - resume_campaign
     - generate_screening_design
     - campaign_progress
+    - predict_outcome
   # The two design tools propose experiments and return them; neither runs one. `resume_campaign`
   # only reads the campaign record back — it is what makes the `campaign_id` that
   # `suggest_next_experiment` hands out worth quoting, since without it a later session could
   # recover an optimization's history only from the chat transcript. `campaign_progress` is pure
-  # arithmetic over the runs it is handed and asks no surrogate at all. The job below *does*
-  # persist state, and is gated by being a job.
+  # arithmetic over the runs it is handed and asks no surrogate at all. `predict_outcome` fits a
+  # surrogate and queries it, and records nothing: the points are the caller's questions, not
+  # proposals, so no campaign row is written for them. The job below *does* persist state, and is
+  # gated by being a job.
   read_only:
     - suggest_next_experiment
     - resume_campaign
     - generate_screening_design
     - campaign_progress
+    - predict_outcome
 
 jobs:
   - name: start_optimization_campaign

@@ -255,5 +255,6 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with](D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with.md) | A plateau needs the noise you measured it with |
 | [D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds](D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds.md) | A screen may hold a continuous factor at its bounds |
 | [D-2026-08-04-a-trade-off-has-no-single-best-point](D-2026-08-04-a-trade-off-has-no-single-best-point.md) | A trade-off has no single best point |
+| [D-2026-08-04-the-model-can-be-asked-not-only-obeyed](D-2026-08-04-the-model-can-be-asked-not-only-obeyed.md) | The model can be asked, not only obeyed |
 | [D-2026-08-04-the-schema-is-a-file](D-2026-08-04-the-schema-is-a-file.md) | A warehouse ELN's schema is a binding document, not an adapter |
 | [D-2026-08-04-what-bofire-does-when-you-actually-run-it](D-2026-08-04-what-bofire-does-when-you-actually-run-it.md) | What BoFire does when you actually run it, and the roadmap that survived it |
