@@ -56,8 +56,12 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 
 Closed by this pass: the storm's two missing families (E and H are wired, and `FAMILIES` plus the
 coverage table make an overstatement structurally impossible), and **SCALE-3** — see
-`docs/archive/storm-2026-08-04.md` for the per-cap table (**the knee is cap 16**, measured
-over three samples per cap against the sweep's own 9 % noise floor) and the mutation results.
+`docs/archive/storm-2026-08-04.md` for the per-cap tables and the mutation results. **The
+measurement is closed; the finest question it asks is not.** Raising the cap from 2 to 8 buys
+29–38 % goodput per step, far outside any measured noise — settled. Above 8 the steps buy 6–15 %
+against floors of 9 % and 15 %, so two back-to-back sweeps disagreed and the second correctly
+refused to name a knee. Whether 16 beats 8 needs more samples per cap (`--sweep-repeats`) or a
+quieter machine; the shipped default of 8 sits at the top of the resolved range.
 
 ## Open — Left by the live full-stack pass (2026-08-04)
 

@@ -146,9 +146,10 @@ property-based, mutation or concurrency testing existed at all.
 events for one call** (`c-fragmented` 10/1, `c-parallel` 18/6 → 1/1 and 6/6 after the fix) — a
 defect on the seam the target deployment uses, which CI and 3,000 tests had no way to see. A
 SIGKILLed connector worker costs **583 s** before its job resumes, because one setting must both
-tolerate a CREST-sized heartbeat gap and detect a dead worker. And **SCALE-3's knee is cap 16** — three
-samples per cap against a measured 9 % noise floor; the first, single-sample answer said cap 8 and
-was an artefact.
+tolerate a CREST-sized heartbeat gap and detect a dead worker. And **SCALE-3 is measured**: goodput rises 2.1×
+across the cap range, the 2 → 8 steps buy 29–38 % each (settled), and above 8 the steps are inside
+the sweep's own noise — two back-to-back sweeps disagreed and the second refused to name a knee,
+which is the harness reporting what it could not see rather than a number.
 
 **Four of the seven findings were in the measurement, not the product**, which is what happens the
 first time a signal is used:
@@ -165,9 +166,11 @@ first time a signal is used:
 5. **The knee was declared against a threshold nobody had measured**, one day after
    D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with said not to. Three single-sample
    runs straddled it, so the same stack answered "cap 8" twice and "no knee" once. Judged against
-   the sweep's own measured spread, the answer is **cap 16**. And the correction introduced its own
-   failure — a noise floor makes a knee fire *sooner*, so a sweep that could see nothing would have
-   named cap 2 — caught only by writing the test for the opposite behaviour and watching it fail.
+   the sweep's own measured spread, two sweeps still disagreed (knee at 16, then unresolvable) —
+   so the answer is that the fine question is open and the harness now says so. And the correction
+   introduced its own failure: a noise floor makes a knee fire *sooner*, so a sweep that could see
+   nothing would have named cap 2 — caught only by writing the test for the opposite behaviour and
+   watching it fail.
 
 **One thing proven rather than asserted.** The audit-chain concurrency tests were shown to kill
 the mutant they exist for: with `pg_advisory_xact_lock` replaced by `pass`, both fail; restored,
