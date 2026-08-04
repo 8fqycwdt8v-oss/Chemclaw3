@@ -3,6 +3,33 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the live lane (2026-08-04, D-2026-08-04-a-lane-that-only-runs-where-docker-runs)
+
+The lane itself is done: `make live-infra` / `live-up` / `live-jobs` / `live-probes`, six mechanical
+checks green against a real Temporal + Postgres in a container with no Docker daemon. What it did
+not close:
+
+- [ ] **The Temporal-backed tests still skip wherever `temporal.download` is blocked** — [M]. All
+      13 modules fetch the *time-skipping* test server, so a live broker on 7233 cannot substitute:
+      a workflow that sleeps would really sleep. But not every one of them skips time — the ones
+      that only need a real server (`test_connector_job_workflow`, `test_workers`) could take
+      `WorkflowEnvironment.from_client()` against `settings.temporal_address` when it answers, which
+      would turn a silent skip into a real run in exactly the environments that currently prove
+      least. Needs a per-module judgement about which tests depend on time skipping, which is why
+      it was not guessed at inside the lane's own change.
+
+- [ ] **Stage B has never been run** — [S]. `make live-probes` with the four workers up is the
+      first time the `du-*` probes and the `expects_job` → Temporal resolution meet a real model,
+      and it needs an `ANTHROPIC_API_KEY` that no CI runner or agent container here has. Everything
+      it depends on is verified; the run itself is outstanding, and its findings are unknown rather
+      than assumed absent.
+
+- [ ] **`make live-jobs` exercises one connector** — [S]. `compute_reaction_energy` on `connector-calc`
+      is deliberate (in-process `tblite`, no HPC, writes to the cache so D-011 is observable), but
+      `connector-bo`'s campaign and `connector-qm`'s Nextflow job take different shapes — a campaign
+      outlives its turn, and QM needs a cluster. The BO one is reachable now and is the obvious
+      second case; the QM one belongs with the deferred cluster work.
+
 ## Open — Found while fixing the grounded live run (2026-08-03)
 
 - [ ] **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up

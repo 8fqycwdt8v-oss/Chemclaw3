@@ -249,3 +249,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-02-work-repeated-every-time-for-no-reason](D-2026-08-02-work-repeated-every-time-for-no-reason.md) | Two costs proportional to the whole corpus, paid on every run |
 | [D-2026-08-03-a-metric-must-declare-what-it-can-see](D-2026-08-03-a-metric-must-declare-what-it-can-see.md) | A metric must declare what it can see |
 | [D-2026-08-03-the-refactor-closes-what-it-measured](D-2026-08-03-the-refactor-closes-what-it-measured.md) | Closing the grand refactor on re-measured numbers |
+| [D-2026-08-04-a-lane-that-only-runs-where-docker-runs](D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md) | A lane that only runs where Docker runs is a lane that does not run |

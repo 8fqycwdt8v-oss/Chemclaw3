@@ -34,9 +34,12 @@ from typing import Any
 import httpx
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
+from temporalio.service import RPCError
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.quantities import is_rounding_of, stated_numerals
+from chemclaw.core.temporal_client import connect as temporal_connect
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.kg.note import cited_ids
 
@@ -101,6 +104,17 @@ class ProbeOutcome(BaseModel):
     error_code: str | None = None
     degraded: list[str] = Field(default_factory=list)
     jobs_started: list[str] = Field(default_factory=list)
+    # What the *broker* says became of each id in `jobs_started`, keyed by workflow id. Filled only
+    # for probes declaring `expects_job`, and filled from Temporal rather than from the turn.
+    #
+    # This is the same correction D-2026-08-03 made to the citation score, applied one layer out.
+    # There, "cited a note no tool returned" was derived from a 200-character preview and graded
+    # nine true answers as fabrication; the fix was to score against the untruncated fact instead
+    # of the readable summary of it. A launched job has exactly that shape: the turn can only say
+    # it started one, and "started" is not "ran". `RUNNING` here is not a failure — a long job
+    # legitimately outlives the turn — but `FAILED`, `TIMED_OUT` or an id the broker has never
+    # heard of is a finding no judge could have found by reading prose.
+    job_outcomes: dict[str, str] = Field(default_factory=dict)
     notes_proposed: list[str] = Field(default_factory=list)
     asked_clarifying: bool = False
     # The same act down the other path: the turn ended on a question written as prose rather than
@@ -306,7 +320,37 @@ async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
     outcome.asked_clarifying_in_prose = _asked_in_prose(outcome)
     if probe.expects_tools:
         outcome.expected_tools_met = any(t in outcome.tools_called for t in probe.expects_tools)
+    if probe.expects_job:
+        outcome.job_outcomes = await _job_outcomes(outcome.jobs_started)
     return outcome
+
+
+async def _job_outcomes(job_ids: list[str]) -> dict[str, str]:
+    """Ask Temporal what became of each launched workflow — the only authority on whether it ran.
+
+    Best-effort by construction: a probe run against a deployment whose broker this process cannot
+    reach must still produce its other signals, so an unreachable Temporal records `unreachable`
+    against every id rather than failing the probe. Recording the reason beats recording nothing,
+    because "the eval could not tell" and "the job did not run" are different findings and only
+    one of them is about the system under test.
+    """
+    if not job_ids:
+        return {}
+    try:
+        client = await temporal_connect()
+    except SubsystemUnavailableError as exc:
+        logger.warning("cannot reach Temporal to resolve job outcomes: %s", exc)
+        return dict.fromkeys(job_ids, "unreachable")
+
+    outcomes: dict[str, str] = {}
+    for job_id in job_ids:
+        try:
+            description = await client.get_workflow_handle(job_id).describe()
+        except RPCError:
+            outcomes[job_id] = "not-found"
+            continue
+        outcomes[job_id] = description.status.name if description.status else "unknown"
+    return outcomes
 
 
 async def run_probes(
