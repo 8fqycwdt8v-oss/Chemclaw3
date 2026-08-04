@@ -224,6 +224,11 @@ class ScreeningDesign(BaseModel):
     the field that makes a reduced design safe to return at all: a fractional design *looks* like a
     smaller full grid, and a reader who is not told otherwise will read 16 rows over 7 factors as
     "every combination that matters". The runs alone cannot say which of the two they are.
+
+    `two_level_continuous` is the same idea one level down (W2). A continuous factor admitted to a
+    screen is held at its two **bounds** — a temperature column reading 20 and 120 and nothing
+    between them is a two-level encoding of a range, not a decision that those are the interesting
+    temperatures, and it looks identical to a deliberate pair of levels.
     """
 
     runs: list[dict[str, ParamValue]] = Field(default_factory=list)
@@ -231,6 +236,18 @@ class ScreeningDesign(BaseModel):
     # main effects are confounded with each other, which is not a design anyone can interpret —
     # BoFire refuses to generate one, and so does this field.
     resolution: int | None = Field(default=None, ge=3)
+    # Continuous factors screened at their two bounds. Named rather than counted: which factor was
+    # collapsed is what a reader needs to know before reading an effect off the screen.
+    two_level_continuous: list[str] = Field(default_factory=list)
+    # Centre runs added per categorical combination — the rows that detect curvature a two-level
+    # design otherwise cannot see. Zero unless asked for, and only meaningful with a continuous
+    # factor present.
+    n_center: int = Field(default=0, ge=0)
+    # How many times the factorial part is replicated. Replication is what gives a screen a
+    # pure-error estimate; without it no effect the screen reports has a significance.
+    n_repetitions: int = Field(default=1, ge=1)
+    # Whether the run order was shuffled, so a drift over the day is not read as a factor effect.
+    randomized: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -245,16 +262,47 @@ class ScreeningDesign(BaseModel):
         """
         factors = len(self.runs[0]) if self.runs else 0
         if self.resolution is None:
-            return (
-                f"Full factorial: every one of the {len(self.runs)} combinations of "
-                f"{factors} factor(s). Exhaustive."
+            head = (
+                f"Full factorial over {factors} factor(s), {len(self.runs)} run(s) in total. "
+                "Exhaustive over the levels stated: every combination of them is run."
             )
-        confounding = _CONFOUNDING.get(self.resolution, _HIGH_CONFOUNDING)
-        return (
-            f"Fractional factorial, resolution {_roman(self.resolution)}: {len(self.runs)} runs "
-            f"of the {2**factors} a full two-level grid over {factors} factors would need. "
-            f"NOT exhaustive — most combinations are deliberately not run. {confounding}"
-        )
+        else:
+            confounding = _CONFOUNDING.get(self.resolution, _HIGH_CONFOUNDING)
+            head = (
+                f"Fractional factorial, resolution {_roman(self.resolution)}: {len(self.runs)} "
+                f"run(s) against the {2**factors} a full two-level grid over {factors} factors "
+                f"would need. NOT exhaustive — most combinations are deliberately not run. "
+                f"{confounding}"
+            )
+        return " ".join([head, *self._design_clauses()])
+
+    def _design_clauses(self) -> list[str]:
+        """One sentence per non-default choice, so nothing about the design is left implicit."""
+        clauses = []
+        if self.two_level_continuous:
+            named = ", ".join(self.two_level_continuous)
+            clauses.append(
+                f"{named} {'is' if len(self.two_level_continuous) == 1 else 'are'} continuous and "
+                "held at the two ends of the declared range — this screen says nothing about what "
+                "happens between them."
+            )
+        if self.n_center:
+            clauses.append(
+                f"{self.n_center} centre run(s) per combination of the categorical factors sit at "
+                "the midpoint of every continuous factor; they are what would reveal curvature a "
+                "two-level design cannot otherwise see."
+            )
+        if self.n_repetitions > 1:
+            clauses.append(
+                f"The factorial part is replicated {self.n_repetitions} times, which is what gives "
+                "the screen a pure-error estimate to judge an effect against."
+            )
+        if self.randomized:
+            clauses.append(
+                "Run order is randomized, so a drift over the session is not read as a factor "
+                "effect — run them in the order given."
+            )
+        return clauses
 
 
 class CampaignSpec(BaseModel):
