@@ -172,8 +172,16 @@ class WarehouseElnAdapter:
         `sync_entries` already gives every adapter that raises that type.
         """
         binding = self._ingest
+        # A field the source was silent about is *omitted*, not passed as `None`, so the model's own
+        # default applies. The two are not the same for every field: `outcome_class` is not optional
+        # and defaults to SUCCESS, so a NULL status column passed through as `None` would reject an
+        # otherwise-perfect reaction — a row rejected for the one thing the schema already has an
+        # answer for. Omission also keeps `reaction_id` honest: leaving it out raises "field
+        # required", which is the message that names the actual problem.
         fields = {
-            name: _read(field, raw.payload) for name, field in sorted(binding.reaction.items())
+            name: value
+            for name, field in sorted(binding.reaction.items())
+            if (value := _read(field, raw.payload)) is not None
         }
         inputs, outcomes = self._components(raw.payload)
         provenance = _provenance(binding.provenance, raw.payload, raw.entry_id)

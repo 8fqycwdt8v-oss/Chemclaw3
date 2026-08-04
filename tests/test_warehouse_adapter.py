@@ -394,3 +394,39 @@ def test_a_missing_credential_fails_naming_the_variable(
 
     with pytest.raises(ElnMappingError, match="TEST_WH_ABSENT"):
         asyncio.run(adapter.fetch_new_entries(datetime(2026, 1, 1, tzinfo=UTC)))
+
+
+def test_a_null_column_leaves_the_schema_default_rather_than_rejecting_the_row() -> None:
+    """A field the source was silent about is omitted, not passed as `None`.
+
+    The two are not the same for every field. `outcome_class` is not optional and defaults to
+    SUCCESS, so passing the silence through would reject an otherwise-perfect reaction over the one
+    thing the schema already has an answer for — and it would do it to every row whose status column
+    happens to be NULL, which on a real ELN is most of the old ones.
+    """
+    binding = _binding()
+    binding["ingest"]["reaction"]["outcome_class"] = {
+        "path": "root.RESULT_FLAG",
+        "transform": [{"value_map": {"map": {"OK": "success", "FAIL": "failure"}}}],
+    }
+    tables = _rows()
+    tables["V_REACTION"][0]["RESULT_FLAG"] = None
+
+    reaction = _one_reaction(binding, tables)
+    assert reaction.outcome_class.value == "success", "the model's own default applied"
+
+    tables["V_REACTION"][0]["RESULT_FLAG"] = "FAIL"
+    tables["V_REACTION"][0]["FAILURE_NOTE"] = "decomposed on scale"
+    binding["ingest"]["reaction"]["failure_reason"] = {"path": "root.FAILURE_NOTE"}
+    assert _one_reaction(binding, tables).outcome_class.value == "failure", "and a value still maps"
+
+
+def test_a_missing_reaction_id_names_the_field_rather_than_a_type_error() -> None:
+    """Omitting silence must still fail loudly for the one field that is the note's identity."""
+    tables = _rows()
+    tables["V_REACTION"][0]["REACTION_ID"] = "RX-1"
+    adapter, entries = _fetch(_binding(), tables)
+    entries[0].payload["root"]["REACTION_ID"] = None
+
+    with pytest.raises(ElnMappingError, match="reaction_id"):
+        adapter.map_to_ord(entries[0])

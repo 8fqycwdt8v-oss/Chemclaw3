@@ -74,7 +74,7 @@ def entry_statement(
     if entry.where:
         predicate += f" AND ({entry.where})"
     sql = (
-        f"SELECT * FROM {entry.relation} "  # noqa: S608 - identifiers are validated, values bound
+        f"SELECT * FROM {entry.relation} "  # identifier checked by `binding._check_identifier`
         f"WHERE {predicate} "
         f"ORDER BY {watermark} ASC "
         f"LIMIT {placeholder}"
@@ -96,7 +96,7 @@ def related_statement(
         raise BindingError("related_statement needs at least one entry key")
     markers = ", ".join(placeholder for _ in keys)
     sql = (
-        f"SELECT * FROM {block.relation} "  # noqa: S608 - identifiers are validated, values bound
+        f"SELECT * FROM {block.relation} "  # identifier checked by `binding._check_identifier`
         f"WHERE {block.foreign_key} IN ({markers})"
     )
     if block.order_by:
@@ -142,7 +142,7 @@ def vector_statement(
     params.extend(filter_params)
     where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
     sql = (
-        f"SELECT {columns}, "  # noqa: S608 - identifiers are validated, values bound
+        f"SELECT {columns}, "  # identifier checked by `binding._check_identifier`
         f"{function}({vector.vector_column}, {embedded}) AS {SCORE_COLUMN} "
         f"FROM {vector.relation}{where} "
         f"ORDER BY {SCORE_COLUMN} {direction} "

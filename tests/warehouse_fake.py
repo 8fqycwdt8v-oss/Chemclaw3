@@ -49,7 +49,6 @@ class FakeWarehouse:
         """Prime the relations this warehouse can answer for."""
         self.tables: dict[str, list[dict[str, Any]]] = tables or {}
         self.executed: list[tuple[str, list[Any]]] = []
-        self.closed = False
         self.fail_with: Exception | None = None
         self.connect_options: dict[str, Any] = {}
         self._placeholder = placeholder
@@ -70,10 +69,6 @@ class FakeWarehouse:
     async def cursor(self) -> AsyncIterator[FakeCursor]:
         """A cursor for one statement."""
         yield FakeCursor(self)
-
-    async def close(self) -> None:
-        """Record that the engine released the connection."""
-        self.closed = True
 
 
 # The warehouse `open_fake` will hand out next. A module-level slot because `connection.driver` is

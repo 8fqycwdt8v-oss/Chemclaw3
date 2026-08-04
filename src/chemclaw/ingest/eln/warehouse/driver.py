@@ -63,9 +63,12 @@ class Warehouse(Protocol):
         ...
 
     def cursor(self) -> AbstractAsyncContextManager[WarehouseCursor]:
-        """A cursor for one statement, released on exit."""
-        ...
+        """A cursor for one statement, released on exit.
 
-    async def close(self) -> None:
-        """Release the connection. Idempotent — the engine may close a source more than once."""
+        The only method, and there is deliberately no `close`. The data-source seam builds a half
+        and never disposes it — there is no lifecycle hook to call one from — so a connection lives
+        for the process's life by design, and a `close()` nobody can reach would be an interface
+        promise with no mechanism behind it. A driver that needs teardown does it in its own
+        `__del__` or leaves it to the process exit its session timeout already assumes.
+        """
         ...

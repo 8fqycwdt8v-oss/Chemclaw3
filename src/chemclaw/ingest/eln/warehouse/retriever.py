@@ -122,14 +122,13 @@ class WarehouseVectorRetriever:
 
     def _chunks(self, rows: list[dict[str, Any]]) -> list[EvidenceChunk]:
         """Turn ranked rows into evidence, dropping the ones that already became notes."""
-        notes = _merged_note_ids() if self._vector.suppress_ingested else set()
         chunks: list[EvidenceChunk] = []
         suppressed = 0
         for row in rows:
             key = str(row.get(self._vector.key, "")).strip()
             if not key:
                 continue
-            if note_id_for_reaction(key) in notes:
+            if self._vector.suppress_ingested and _is_merged_note(key):
                 suppressed += 1
                 continue
             content = self._describe(row)
@@ -169,15 +168,17 @@ class WarehouseVectorRetriever:
         return "\n".join(parts)
 
 
-def _merged_note_ids() -> set[str]:
-    """The reaction notes already merged into the knowledge graph, by note id.
+def _is_merged_note(key: str) -> bool:
+    """Whether this reaction already has a merged note in the knowledge graph.
 
-    Read from disk rather than queried, because the graph *is* the checkout: `kg` keeps notes as
-    Markdown in git, so "has this reaction been reviewed and merged" is a filename. Read per call
-    rather than cached — a merge lands between two queries, and a stale set would keep surfacing a
-    reaction that a reviewer had just signed off on, which is the exact duplication this prevents.
+    Asked per hit rather than by listing the directory, because the question is about a handful of
+    ids and the answer for each is one filename: the graph *is* the checkout (`kg` keeps notes as
+    Markdown in git, laid out `<type>/<id>.md`), so this is a `stat` per returned row instead of a
+    full `readdir` of a corpus that grows without bound. On the chat hot path that difference is the
+    whole cost of the check.
+
+    Deliberately not cached: a merge lands between two queries, and a stale answer would keep
+    surfacing a reaction a reviewer had just signed off on — the exact duplication this prevents.
     """
-    directory = Path(settings.knowledge_path) / "reaction"
-    if not directory.is_dir():
-        return set()
-    return {path.stem for path in directory.glob("*.md")}
+    note = Path(settings.knowledge_path) / "reaction" / f"{note_id_for_reaction(key)}.md"
+    return note.is_file()

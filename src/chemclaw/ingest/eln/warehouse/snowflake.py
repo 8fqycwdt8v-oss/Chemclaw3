@@ -28,7 +28,6 @@ fan-out for the duration of a warehouse query.
 """
 
 import asyncio
-import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -37,8 +36,6 @@ from cryptography.hazmat.primitives import serialization
 
 from chemclaw.ingest.eln.warehouse.binding import BindingError
 from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
-
-logger = logging.getLogger(__name__)
 
 
 def _client() -> Any:
@@ -176,9 +173,3 @@ class SnowflakeWarehouse:
             yield _SnowflakeCursor(raw, client)
         finally:
             await asyncio.to_thread(raw.close)
-
-    async def close(self) -> None:
-        """Release the connection. Idempotent — the engine may close a source more than once."""
-        if self._connection is not None:
-            connection, self._connection = self._connection, None
-            await asyncio.to_thread(connection.close)
