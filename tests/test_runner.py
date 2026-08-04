@@ -868,3 +868,52 @@ def test_a_whole_call_delivered_as_a_structured_object_still_announces_immediate
     calls = [e for e in events if isinstance(e, ToolCallEvent)]
     assert len(calls) == 1
     assert json.loads(calls[0].arguments) == {"a": 1}
+
+
+class _ResultOnlyContent:
+    """A function-result content: it carries a `call_id` and a `result`, and no `arguments` at all.
+
+    Distinct from `_CallContent`, which always defines `arguments` (as None when absent). The
+    difference is the point: `ToolCallTrace.feed` admits a content when it has *either* an
+    `arguments` attribute *or* a `call_id`, and a result content is the shape that has only the
+    second one. A class that defined both would make the guard untestable.
+    """
+
+    def __init__(self, *, call_id: str, result: str) -> None:
+        self.call_id = call_id
+        self.result = result
+
+
+def test_a_content_carrying_only_a_call_id_is_still_read() -> None:
+    """The duck-typing guard is `or`, not `and`, and a result content is why.
+
+    Found by mutation testing (2026-08-04): flipping
+    `hasattr(content, "arguments") or hasattr(content, "call_id")` to `and` survived every test of
+    this module. Under `and`, a function-result content — which has a `call_id` and no `arguments`
+    attribute — is skipped outright: no `tool_result` event, nothing appended to `outputs`, and
+    therefore no evidence for the answer verifier to score the answer against. Every citation in
+    that turn would read as fabricated.
+
+    That is the same species as the defect this module shipped on 2026-08-04, where a guard was
+    written against a stream shape somebody believed rather than one somebody had captured. So the
+    two shapes are asserted separately: a call announced from `arguments` alone, and a result read
+    from `call_id` alone.
+    """
+    trace = runner_trace.ToolCallTrace()
+    update = _Update()
+    update.contents = [_CallContent(name="find_notes", call_id="c1", arguments={"text": "x"})]
+    calls = trace.feed(update)
+    assert [event.tool for event in calls if isinstance(event, ToolCallEvent)] == ["find_notes"]
+
+    result_update = _Update()
+    result_update.contents = [_ResultOnlyContent(call_id="c1", result='[{"id": "note-a"}]')]
+    events = trace.feed(result_update)
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert [event.tool for event in results] == ["find_notes"], (
+        "a result content carries no name — it is matched back to its call by id, and dropping it "
+        "would leave the turn with a call nothing ever answered"
+    )
+    assert trace.outputs == ['[{"id": "note-a"}]'], (
+        "the full result text is what the answer verifier scores against; without it every "
+        "citation in the turn reads as fabricated"
+    )

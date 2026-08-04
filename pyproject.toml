@@ -218,7 +218,9 @@ also_copy = [
     "README.md",
     "SECURITY.md",
     ".env.example",
+    ".github",
     "data",
+    "src",
     "deploy",
     "docs",
     "examples",
@@ -230,3 +232,38 @@ also_copy = [
 # The suite twice over is the honest budget here. A mutant that merely makes a test *slow* is not
 # killed by it, and the default multiplier declares a timeout a kill.
 timeout_multiplier = 4.0
+# **Which tests a mutant is run against, and why it is not "all of them".**
+#
+# The first attempt ran the whole suite and never reached a mutant. This repository's tests read the
+# *source tree itself* as data — `test_repo_map.py` walks every directory against `ARCHITECTURE.md`,
+# `test_docstring_paths.py` resolves every backticked module pointer, `test_deploy_chart.py` renders
+# the chart — and mutmut works by copying a partial tree into `mutants/` and running pytest there.
+# Those tests fail on the copy for reasons that have nothing to do with any mutant, and none of them
+# could kill one in these seven modules anyway: a mutated branch in `authz.py` is invisible to a
+# test that reads Markdown.
+#
+# So the selection is the tests that can actually kill these mutants. That also makes the run
+# tractable — the full suite is ~4 minutes, and a mutant that has to pay it is a mutant not tested —
+# and it is the scope DA-7 asks about: the July pass found 3 of 5 hand-made mutants surviving their
+# own test file while dying under the whole suite, so "does a narrow run mislead?" is the question,
+# and this is the narrow run.
+pytest_add_cli_args_test_selection = [
+    "tests/test_authz.py",
+    "tests/test_tool_authz.py",
+    "tests/test_audit.py",
+    "tests/test_audit_store.py",
+    "tests/test_audit_chain.py",
+    "tests/test_audit_anchor.py",
+    "tests/test_concurrency_audit_chain.py",
+    "tests/test_budget.py",
+    "tests/test_concurrency_claims.py",
+    "tests/test_runner.py",
+    "tests/test_disconnect_teardown.py",
+    "tests/test_note.py",
+    "tests/test_note_proposals.py",
+    "tests/test_properties_core.py",
+    "tests/test_pr_gate.py",
+    "tests/test_pr_gate_read_window.py",
+    "tests/test_store.py",
+    "tests/test_postgres_store.py",
+]

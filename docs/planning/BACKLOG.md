@@ -39,9 +39,24 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       pass. On OpenShift, where pod eviction is routine rather than exotic, this is ten minutes of
       dead time per eviction.
 
+- [ ] **103 mutants survive in the seven invariant-bearing modules, and two files hold two thirds
+      of them** — [M]. `make mutants`, 686 mutants, 506 killed. The distribution is the finding:
+      `api/runner_trace.py` **37**, `kg/pr_gate.py` **29**, `kg/note.py` 16,
+      `science/calc/store.py` 11, `agent/authz.py` 8, `agent/audit_store.py` 2. The two leaders are
+      not a coincidence — `runner_trace.py` shipped a real defect on 2026-08-04, and `pr_gate.py`
+      is the GxP control whose read window this same pass measured. Three survivors were already
+      closed by the tests they asked for (budget token accumulation, the empty-role-list
+      convention, the `or`-vs-`and` duck-typing guard); these are what is left.
+      **Read them with the equivalent mutants subtracted.** `chain_hash`'s `chars=None` is
+      genuinely equivalent (64 chars either way), and most `authz.py` survivors are string
+      mutations that `pytest.raises(match=...)` cannot kill because it searches a substring. The
+      work is to walk the two leading files, not to drive the number to zero.
+      One notable non-string survivor: `PostgresAuditSink.record` with
+      `statement_timeout_seconds=None` — nothing asserts the audit insert carries a timeout.
+
 Closed by this pass: the storm's two missing families (E and H are wired, and `FAMILIES` plus the
 coverage table make an overstatement structurally impossible), and **SCALE-3** — see
-`docs/archive/storm-2026-08-04.md` for the per-cap table.
+`docs/archive/storm-2026-08-04.md` for the per-cap table and the mutation results.
 
 ## Open — Left by the live full-stack pass (2026-08-04)
 

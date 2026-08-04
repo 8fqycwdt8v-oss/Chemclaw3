@@ -251,3 +251,8 @@ Thumbs.db
 # is not here: `make live-jobs` writes its report to `tasks/live-test/transcripts/`, which is
 # committed, because a live result nobody can read back later is a claim rather than evidence.
 .live/
+
+# mutmut copies the tree here to run mutants against it (`make mutants`); it is regenerated
+# on every run and holds a partial, deliberately-broken copy of `src/`.
+/mutants/
+.mutmut-cache
