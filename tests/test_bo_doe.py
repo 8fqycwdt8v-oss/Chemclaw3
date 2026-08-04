@@ -38,8 +38,16 @@ def test_factorial_design_enumerates_every_combination() -> None:
     assert all(run["base"] in {"K2CO3", "Cs2CO3", "Et3N"} for run in design.runs)
 
 
-def test_factorial_design_rejects_a_continuous_parameter() -> None:
-    """A continuous factor is rejected rather than silently dropped from the design (gate G4)."""
+def test_a_continuous_factor_is_screened_at_its_two_bounds_and_said_to_be() -> None:
+    """The refusal this test used to assert is gone, and what replaced it is the disclosure (W2).
+
+    A continuous factor used to raise, because BoFire silently fractionates one to its two bounds
+    and a design that looks complete while quietly reshaping a factor is worse than a refusal
+    (D-092). That held while nothing in the return could say what had been done. It now can, so the
+    factor is admitted — at exactly its two bounds, with nothing in between — and both the field and
+    the summary name it. A design that collapsed a range *without* saying so would be the original
+    defect; this test is the guard against re-introducing it.
+    """
     problem = OptimizationProblem(
         parameters=[
             ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
@@ -47,8 +55,13 @@ def test_factorial_design_rejects_a_continuous_parameter() -> None:
         ],
         objective=Objective(name="yield", direction="maximize"),
     )
-    with pytest.raises(ValueError, match="temperature"):
-        factorial_design(problem)
+    design = factorial_design(problem)
+    assert {run["temperature"] for run in design.runs} == {20.0, 100.0}
+    assert {run["solvent"] for run in design.runs} == {"THF", "toluene"}
+    assert len(design.runs) == 4
+    assert design.two_level_continuous == ["temperature"]
+    assert "temperature" in design.summary
+    assert "held at the two ends of the declared range" in design.summary
 
 
 def test_generate_screening_design_tool_matches_the_engine() -> None:
@@ -170,3 +183,135 @@ def test_the_tool_can_ask_for_a_reduced_design() -> None:
     design = asyncio.run(generate_screening_design(_seven_two_level_factors(), n_generators=1))
     assert len(design.runs) == 64
     assert design.resolution == 7
+
+
+# --- the knobs that make a screen worth analysing (W2) ---------------------------------------
+
+
+def _mixed_problem() -> OptimizationProblem:
+    """Two continuous factors beside one two-level categorical — the shape M-5 measured."""
+    return OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="T", lower=20.0, upper=120.0),
+            ContinuousParameter(name="equiv", lower=1.0, upper=3.0),
+            CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
+        ],
+        objective=Objective(name="yield", direction="maximize"),
+    )
+
+
+def test_centre_runs_sit_at_the_midpoint_of_every_continuous_factor() -> None:
+    """What centre points are *for*: the only rows a two-level screen has that can see curvature."""
+    design = factorial_design(_mixed_problem(), n_center=2)
+    midpoints = [
+        run for run in design.runs if run["T"] == 70.0 and run["equiv"] == pytest.approx(2.0)
+    ]
+    assert midpoints, "no centre run at the midpoint of both continuous factors"
+    assert design.n_center == 2
+    assert "centre run(s)" in design.summary
+
+
+def test_centre_runs_are_added_per_categorical_combination_not_once() -> None:
+    """The count trap M-5 found, pinned: the total is not `corners + n_center`.
+
+    Measured shape is `4·2^k + n_center·2^k` over k categorical factors. With two continuous
+    factors and one two-level categorical that is 8 corners plus 2x2 = 12, not 8 + 2 = 10. A
+    chemist handed "10 runs" for a design that is 12 cannot plan a plate from it.
+    """
+    corners = factorial_design(_mixed_problem(), n_center=0)
+    with_centres = factorial_design(_mixed_problem(), n_center=2)
+    assert len(corners.runs) == 8
+    assert len(with_centres.runs) == 12
+    assert str(len(with_centres.runs)) in with_centres.summary
+
+
+def test_the_default_is_no_centre_runs_although_bofire_defaults_to_one() -> None:
+    """BoFire's own `n_center` default is 1; leaving it unset would emit midpoints unasked.
+
+    This is the second trap in the same class as `n_generators`: a default that is not ours, on a
+    parameter we now pass, silently changing what a chemist is handed. Every construction site sets
+    it explicitly, and this is what proves it.
+    """
+    design = factorial_design(_mixed_problem())
+    assert design.n_center == 0
+    assert len(design.runs) == 8
+    assert {run["T"] for run in design.runs} == {20.0, 120.0}
+    assert "centre run" not in design.summary
+
+
+def test_replication_doubles_the_factorial_part_and_says_why() -> None:
+    """Without replication no effect a screen reports has a significance to quote."""
+    design = factorial_design(_mixed_problem(), n_repetitions=2)
+    assert len(design.runs) == 16
+    assert design.n_repetitions == 2
+    assert "pure-error estimate" in design.summary
+
+
+def test_centre_runs_are_refused_on_an_all_categorical_problem() -> None:
+    """Measured inert there (M-5), so it is refused rather than threaded into a no-op.
+
+    This is the lesson `n_generators` taught, applied before the same mistake could be made twice:
+    an argument that BoFire ignores must not be accepted as though it did something.
+    """
+    with pytest.raises(ValueError, match="n_center needs at least one continuous factor"):
+        factorial_design(_screening_problem(), n_center=2)
+
+
+def test_replication_is_refused_on_an_all_categorical_problem() -> None:
+    """Same measurement, same refusal, and the message says to repeat the runs by hand instead."""
+    with pytest.raises(ValueError, match="n_repetitions needs at least one continuous factor"):
+        factorial_design(_screening_problem(), n_repetitions=2)
+
+
+def test_centre_runs_are_refused_on_a_reduced_design_that_still_has_categoricals() -> None:
+    """A re-encoded categorical has no midpoint: 0.5 decodes to neither of its two levels."""
+    with pytest.raises(ValueError, match="halfway between them"):
+        factorial_design(_mixed_problem(), n_generators=1, n_center=1)
+
+
+def test_a_reduced_design_fractionates_the_continuous_and_categorical_halves_together() -> None:
+    """M-8: the union is one factor set, so the stated resolution describes the whole design.
+
+    The alternative — fractionating only part of the factors while reporting a resolution derived
+    from all of them — is exactly the "looks complete while omitting a factor" failure the
+    two-level refusal exists to prevent, and it is why this was measured before being built.
+    """
+    full = factorial_design(_mixed_problem())
+    reduced = factorial_design(_mixed_problem(), n_generators=1)
+    assert len(full.runs) == 8
+    assert len(reduced.runs) == 4
+    assert reduced.resolution is not None
+    # The categorical is decoded back to real labels, not left as the 0/1 it was fractionated as.
+    assert {run["solvent"] for run in reduced.runs} <= {"THF", "toluene"}
+    assert {run["T"] for run in reduced.runs} <= {20.0, 120.0}
+
+
+def test_a_randomized_order_is_reproducible_under_a_seed_and_varies_across_seeds() -> None:
+    """A design that differs run to run is not a design anyone can hand to two chemists."""
+    first = factorial_design(_screening_problem(), randomize=True, seed=1)
+    again = factorial_design(_screening_problem(), randomize=True, seed=1)
+    other = factorial_design(_screening_problem(), randomize=True, seed=2)
+    assert first.runs == again.runs
+    assert first.runs != other.runs
+    assert first.randomized is True
+    assert sorted(map(str, first.runs)) == sorted(map(str, other.runs)), "shuffle changed the set"
+    assert "Run order is randomized" in first.summary
+
+
+def test_randomization_works_on_an_all_categorical_screen() -> None:
+    """The one knob of the four that is *not* inert on an all-categorical domain (M-5)."""
+    plain = factorial_design(_screening_problem())
+    shuffled = factorial_design(_screening_problem(), randomize=True, seed=3)
+    assert plain.randomized is False
+    assert len(shuffled.runs) == len(plain.runs)
+    assert shuffled.runs != plain.runs
+
+
+def test_the_tool_reaches_every_knob() -> None:
+    """A capability expressible in `science/` and unreachable from a tool call is not shipped."""
+    design = asyncio.run(
+        generate_screening_design(_mixed_problem(), n_center=1, n_repetitions=2, randomize=True)
+    )
+    assert design.n_center == 1
+    assert design.n_repetitions == 2
+    assert design.randomized is True

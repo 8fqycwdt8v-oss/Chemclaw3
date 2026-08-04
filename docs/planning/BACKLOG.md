@@ -139,7 +139,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       fields rather than one verdict. Rounding the second up to the first would have been `op-13`'s
       error with the sign flipped.
 
-- [ ] **W2 — a screen cannot hold a continuous factor, and that is what makes three knobs inert** —
+- [x] **W2 — a screen cannot hold a continuous factor, and that is what makes three knobs inert** —
       [S]. Measured (M-5): on the all-categorical domain `factorial_design` accepts today,
       `n_generators`, `n_repetitions` **and** `n_center` are all no-ops — 8 runs at every value —
       and only `randomize_runorder` bites. On a mixed domain all four work: `n_generators=1` halves
@@ -151,6 +151,13 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       the diff:** `n_center` defaults to **1**, so a naive change starts silently returning midpoint
       rows; and it adds `n_center` rows *per categorical combination* (4·2^k + n_center·2^k), so the
       run count is not `corners + n_center`. Closes the rest of 2.3 and 4.4.
+      **Closed by D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds.** M-8 settled
+      the reduced half before it was built: two real continuous factors beside three re-encoded
+      categoricals give 32/16/8 runs at `n_generators` 0/1/2, so the union fractionates as one
+      factor set and the stated resolution describes the whole design. `randomize` is shuffled at
+      our own boundary rather than through `randomize_runorder`, so both design paths randomize
+      identically under one `bo_seed`. `block_feature_key` stays unbuilt — it needs a block factor
+      (a day, a plate, an operator) and none exists in `src/`.
 
 - [ ] **W3 — multi-objective is unrepresentable, on a corpus that records a trade-off** — [M].
       Every ELN run carries `yield_percent`, `purity_percent` *and* `impurities[].area_percent`;

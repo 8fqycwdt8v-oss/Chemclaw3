@@ -395,14 +395,25 @@ async def resume_campaign(campaign_id: str) -> CampaignThread:
 
 @server.tool()
 async def generate_screening_design(
-    problem: OptimizationProblem, n_generators: int = 0
+    problem: OptimizationProblem,
+    n_generators: int = 0,
+    n_center: int = 0,
+    n_repetitions: int = 1,
+    randomize: bool = False,
 ) -> ScreeningDesign:
-    """Generate a factorial screening design over categorical conditions — full grid or reduced.
+    """Generate a factorial screening design — full grid or reduced, categorical or continuous.
 
-    Use this for the *other* classical DoE question — "run every combination of these discrete
-    choices" — e.g. every catalyst x solvent x base combination before narrowing to a BO campaign,
-    or a robustness matrix of discrete method parameters. This is a complete, up-front design a
-    human runs as a batch; it does not adapt to results the way `suggest_next_experiment` does.
+    Use this for the *other* classical DoE question — "run every combination of these conditions" —
+    e.g. every catalyst x solvent x base combination before narrowing to a BO campaign, or a
+    robustness matrix of method parameters. This is a complete, up-front design a human runs as a
+    batch; it does not adapt to results the way `suggest_next_experiment` does.
+
+    **A continuous factor is allowed and is held at the two ends of its declared range.** So
+    temperature 20-120 enters the screen as 20 and 120 and nothing between — which is what a
+    two-level screen *is*, and is fine for asking "does this factor matter at all". The return names
+    every factor treated this way; say so to the chemist, because a temperature column reading
+    20/120 looks like a considered choice of levels rather than a collapsed range. When the question
+    is where in the range the optimum sits, that is `suggest_next_experiment`, not a screen.
 
     **When the full grid does not fit the plate, reduce it.** `n_generators` halves the run count
     per generator: seven two-level factors are 128 runs at 0, then 64, 32, 16 — so a screen that
@@ -411,24 +422,43 @@ async def generate_screening_design(
     saying exactly which combinations were given up and which effects are confounded as a result.
     **Repeat that summary to the chemist.** A fractional design presented as if it were the whole
     screen is the failure this field exists to prevent. Every factor must have exactly two levels
-    for a reduced design; a three-level factor is refused rather than crossed in full.
+    for a reduced design; a three-level categorical is refused rather than crossed in full.
 
-    Only categorical parameters are supported: a continuous parameter (temperature, equivalents)
-    raises rather than being silently ignored from the design. Discretize it into levels first
-    (e.g. temperature as "low"/"high") if it belongs in the screen, or use
-    `suggest_next_experiment` for a continuous decision space.
+    **Three knobs worth reaching for, and one caution on each.**
+
+    - `n_center` adds centre runs at the midpoint of every continuous factor. They are the only
+      thing in a two-level screen that can reveal curvature — a factor that helps up to a point and
+      then hurts reads as "no effect" without them. Note the count: BoFire adds them **per
+      combination of the categorical factors**, so the total is not `corners + n_center`.
+    - `n_repetitions` replicates the design, which is what gives it a pure-error estimate; without
+      any replication no effect the screen shows has a significance to quote.
+    - `randomize` shuffles the run order, so a drift over the session (a decaying reagent, a warming
+      room) is not read as a factor effect. Tell the chemist to run them in the order returned.
+
+    Both `n_center` and `n_repetitions` need at least one continuous factor and are **refused** on
+    an all-categorical problem: BoFire ignores them there, and a silently ignored argument is worse
+    than an error. Repeat an all-categorical screen yourself if you want replicates.
 
     Args:
-        problem: The decision variables (categorical only) and the objective (its direction is
-            not used by a screening design, but the same `OptimizationProblem` shape is reused so
-            observations from the screen can seed a follow-up `suggest_next_experiment` campaign).
+        problem: The decision variables and the objective (its direction is not used by a screening
+            design, but the same `OptimizationProblem` shape is reused so observations from the
+            screen can seed a follow-up `suggest_next_experiment` campaign).
         n_generators: 0 (default) for every combination. Each step above 0 halves the design and
             requires every factor to have exactly two levels.
+        n_center: Centre runs per categorical combination. Needs a continuous factor, and is not
+            available on a reduced design that also has categorical factors.
+        n_repetitions: How many times to replicate the design. Needs a continuous factor.
+        randomize: Shuffle the run order (reproducibly).
 
     Returns:
-        The runs to perform, plus `resolution` and a `summary` stating whether the design is
-        exhaustive or a stated fraction of the grid.
+        The runs to perform, plus `resolution`, `two_level_continuous`, and a `summary` stating
+        whether the design is exhaustive, what was collapsed, and what is confounded.
     """
     return await asyncio.to_thread(
-        factorial_design, OptimizationProblem.model_validate(problem), n_generators
+        factorial_design,
+        OptimizationProblem.model_validate(problem),
+        n_generators,
+        n_center,
+        n_repetitions,
+        randomize,
     )
