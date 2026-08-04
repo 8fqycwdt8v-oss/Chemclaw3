@@ -94,9 +94,15 @@ _TERMINAL = {
 
 @dataclass
 class TurnResult:
-    """One turn, as the event stream reported it. The unit every family is counted in."""
+    """One turn, as the event stream reported it. The unit every family is counted in.
 
-    behaviour: str
+    Every field is read by some check. That is not a coincidence to preserve by hand — four
+    others (`behaviour`, `tools_called`, `jobs_started`, `event_counts`) were collected here and
+    never looked at once, three of them from the first version and one left behind when family D
+    moved to asking the database instead of the stream. A record nobody reads is not evidence
+    kept in reserve; it is a field that will be wrong for a while before anyone finds out.
+    """
+
     session_id: str = ""
     status: int = 0
     seconds: float = 0.0
@@ -109,16 +115,13 @@ class TurnResult:
     # defect this family found.
     announced: int = 0
     returned: int = 0
-    tools_called: list[str] = field(default_factory=list)
     tools_failed: list[str] = field(default_factory=list)
     # What each tool actually returned, as the stream previewed it. The adversarial family
     # needs this: a malformed call that comes back as a *result* is only acceptable if the
     # result says it failed, and 'a tool_result arrived' cannot tell those apart.
     result_previews: list[str] = field(default_factory=list)
-    jobs_started: list[str] = field(default_factory=list)
     error_code: str | None = None
     transport_error: str | None = None
-    event_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -132,14 +135,18 @@ class Finding:
     detail: str = ""
 
 
-async def run_turn(client: httpx.AsyncClient, behaviour: str, message: str) -> TurnResult:
+async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
     """Ask the front door one turn and fold its SSE stream into a result.
 
     A transport failure is recorded rather than raised, the discipline `evals/live.run_probe`
     established: a storm of thousands of turns must not lose all of them because one connection
     dropped, and "the front door stopped answering" is itself the finding.
+
+    The behaviour is not a parameter: it travels inside `message` as the `[[name]]` selector the
+    mock reads, so passing it separately meant two places could disagree about which scenario a
+    turn was. `storm` asserts the selector is present, which is the check that actually matters.
     """
-    result = TurnResult(behaviour=behaviour)
+    result = TurnResult()
     started = time.monotonic()
     try:
         created = await client.post("/sessions", json={})
@@ -161,17 +168,13 @@ async def run_turn(client: httpx.AsyncClient, behaviour: str, message: str) -> T
                 except ValueError:
                     continue
                 kind = str(event.get("type", ""))
-                result.event_counts[kind] = result.event_counts.get(kind, 0) + 1
                 if kind == "tool_call":
-                    result.tools_called.append(str(event.get("tool", "")))
                     result.announced += 1
                 elif kind == "tool_result":
                     result.returned += 1
                     result.result_previews.append(str(event.get("preview", "")))
                 elif kind == "tool_failed":
                     result.tools_failed.append(str(event.get("tool", "")))
-                elif kind == "job_started":
-                    result.jobs_started.append(str(event.get("job_id", "")))
                 elif kind == "answer":
                     result.answered = bool(str(event.get("text", "")).strip())
                 elif kind == "error":
@@ -214,8 +217,7 @@ async def storm(
 
         async def one(index: int) -> TurnResult:
             async with semaphore:
-                text = message or f"storm turn {index} [[{behaviour}]]"
-                return await run_turn(client, behaviour, text)
+                return await run_turn(client, message or f"storm turn {index} [[{behaviour}]]")
 
         return list(await asyncio.gather(*(one(i) for i in range(turns))))
 
@@ -602,8 +604,8 @@ async def _chaos_client_disconnect() -> Finding:
 
     The CHAOS-1 regression, made permanent. The 2026-07 load test measured 63 seconds before a
     disconnected session accepted a new turn — the full `service_turn_claim_lease_seconds` — because
-    nothing released the claim when the generator was closed. `routes/turns.py` now releases both
-    the in-process slot and the durable claim in the stream's `finally`, which runs on client
+    nothing released the claim when the generator was closed. `api/routes/turns.py` now releases
+    both the in-process slot and the durable claim in the stream's `finally`, which runs on client
     disconnect; that is the claim, and this is the measurement of it.
 
     Measured as time-to-accept rather than as an inspection of the lock, because a lock that is
@@ -672,7 +674,7 @@ async def _chaos_worker_killed_mid_job() -> Finding:
     activity in `Started` against a worker identity that no longer exists, and Temporal has no
     other liveness signal for it — so the job resumes only when `xtb_job_heartbeat_timeout_seconds`
     expires. Measured here at **600 s**, exactly the configured value, with the activity pinned at
-    `species 1/5` the whole time. That is the documented design (`config/calculators.py`: "the
+    `species 1/5` the whole time. That is the documented design (`core/config/calculators.py`: "the
     heartbeat below — not this timeout — is what detects a dead worker"), and it had never been
     measured, so the wait budget below is derived from the setting rather than guessed: a check
     that timed out at 240 s reported a durability failure that was a ten-minute detection window.

@@ -168,10 +168,18 @@ omit = ["*/__init__.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# Regression floor, set safely below the measured offline baseline (86% with the Postgres/Temporal
-# tests skipped; CI runs those and is higher still). Ratchet upward as coverage climbs; never lower
-# it to make a red build pass — add the missing test instead.
-fail_under = 80
+# Regression floor. Ratchet upward as coverage climbs; never lower it to make a red build pass —
+# add the missing test instead.
+#
+# **Re-measured 2026-08-04 against a live Postgres: 85.30 %**, over 3,205 passing tests with the 22
+# Temporal test-server files still skipped (CI runs those, so CI is higher). The floor moves 80 →
+# 84, which is the first time it has moved: 80 was set against a much smaller tree and had stopped
+# being a floor.
+#
+# The gap between 84 and 85.30 is deliberate headroom, not slack to spend. It is roughly one
+# refactor's worth, so a legitimate change does not have to move this line in the same commit —
+# and it is small enough that a genuine regression still trips it.
+fail_under = 84
 
 # Mutation testing (`make mutants`). Coverage says which lines ran; this says whether anything
 # would have noticed them being wrong — the only question that distinguishes a test suite from an

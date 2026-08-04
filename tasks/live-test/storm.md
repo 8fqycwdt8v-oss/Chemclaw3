@@ -4,9 +4,9 @@ Front door `http://127.0.0.1:8000` · Temporal `localhost:7233` ·
 Postgres `localhost:5432/chemclaw`
 
 - **families planned / ran**: 8 / 8
-- **mock requests served**: 390
+- **mock requests served**: 260
 - **ANTHROPIC_API_KEY set**: False
-- **wall clock**: 814 s
+- **wall clock**: 818 s
 - **disk free**: 19 GB
 
 ## Coverage
@@ -15,7 +15,7 @@ Postgres `localhost:5432/chemclaw`
 
 | family | what it covers | checks |
 | --- | --- | ---: |
-| A | volume, and the admission cap swept end to end | 2 |
+| A | volume, and the admission cap swept end to end | 3 |
 | B | tool bodies really ran, asked of the audit trail | 2 |
 | C | the same call whole, fragmented, and in parallel | 3 |
 | D | identical durable launches colliding | 2 |
@@ -28,13 +28,15 @@ Postgres `localhost:5432/chemclaw`
 
 Offered load held at 48 concurrent, 48 turns per step; the front door restarted at each cap.
 
-| cap | accepted | shed/error | p50 s | p95 s | turns/s |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 6 | 42 | 5.9 | 6.1 | 6.65 |
-| 4 | 8 | 40 | 6.6 | 7.1 | 6.46 |
-| 8 | 15 | 33 | 8.2 | 10.4 | 4.59 |
-| 16 | 22 | 26 | 11.6 | 13.3 | 3.59 |
-| 32 | 32 | 16 | 19.2 | 19.5 | 2.45 |
+| cap | accepted | shed/error | p50 s | p95 s | answered/s | offered drained/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 6 | 42 | 5.9 | 6.1 | 0.82 | 6.56 |
+| 4 | 8 | 40 | 6.8 | 7.8 | 1.01 | 6.05 |
+| 8 | 16 | 32 | 8.1 | 10.4 | 1.52 | 4.55 |
+| 16 | 23 | 25 | 11.8 | 14.5 | 1.58 | 3.29 |
+| 32 | 32 | 16 | 17.6 | 17.9 | 1.78 | 2.67 |
+
+The last column is not throughput — it counts a shed turn as a drained one, so refusing fast reads as going fast. `answered/s` is the measurement.
 
 ## Findings
 
@@ -43,8 +45,8 @@ Offered load held at 48 concurrent, 48 turns per step; the front door restarted 
 | C | c-whole: announcements match results (1 expected) | PASS | announced/returned per turn: ['1/1', '1/1', '1/1'] |
 | C | c-fragmented: announcements match results (1 expected) | PASS | announced/returned per turn: ['1/1', '1/1', '1/1'] |
 | C | c-parallel: announcements match results (6 expected) | PASS | announced/returned per turn: ['6/6', '6/6', '6/6'] |
-| D | 12 simultaneous identical launches share one run | PASS | 0 distinct workflow id(s) announced across 12 turns |
-| D | the collision computed at most one result set | PASS | calculation_results 113 → 113; job_records 14 → 14 |
+| D | 12 simultaneous identical launches produce exactly one run | PASS | 1 job_records row(s) written across 12 simultaneous turns |
+| D | the collision computed at most one result set | PASS | calculation_results 122 → 122 (one cold run writes ~3-6 rows) |
 | F | a truncated argument document is reported, not swallowed | PASS | HTTP 200, answered=False, error=empty_answer, tools_failed=[], result[0]='Error: Argument parsing failed.' |
 | F | LOAD-1's own shape is visible rather than counted as a call | PASS | HTTP 200, answered=False, error=empty_answer, tools_failed=[], result[0]='Error: Argument parsing failed.' |
 | F | a tool the system does not have fails loudly | PASS | HTTP 200, answered=False, error=empty_answer, tools_failed=[], result[0]='Error: Requested function "tool_that_does_not_exist" not found.' |
@@ -56,16 +58,17 @@ Offered load held at 48 concurrent, 48 turns per step; the front door restarted 
 | G | a message over 100000 chars is refused | PASS | HTTP 422 |
 | G | the per-user event-stream cap refuses with 429 | PASS | codes [200, 200, 200, 200, 200, 429, 429, 429] |
 | H | unicode survives the round trip through Postgres | PASS | 1 session_messages row(s) hold the exact string; answered=True |
-| H | an injection string is treated as a search string | PASS | audit_events 1793 → 1794 (a dropped table reads as 0) |
+| H | an injection string is treated as a search string | PASS | audit_events 2100 → 2101 (a dropped table reads as 0) |
 | H | an unparseable reaction SMILES does not kill the turn | PASS | HTTP 200, answered=False, error=empty_answer, result[0]='[]' |
 | H | arguments that parse and cannot be true are refused, not answered | PASS | HTTP 200, answered=False, error=empty_answer, tools_failed=['compute_reaction_energy'], result[0]="Error: the 'compute_reaction_energy' job ran and failed: ValueError: s" |
 | A | every offered turn is accounted for at every cap | PASS | 5 cap(s) swept, 0 with unaccounted turns |
-| A | the admission cap is load-bearing (throughput rises with it) | **FAIL** | cap 2: 6.65 turns/s → cap 32: 2.45 turns/s |
+| A | the admission cap is load-bearing (goodput rises with it) | PASS | cap 2: 0.82 answered/s → cap 32: 1.78 answered/s |
+| A | the sweep reached the knee rather than running out of range | PASS | goodput stops improving at cap 8 |
 | E | a disconnected session accepts a new turn without waiting out the lease | PASS | accepted after 0.2s (lease is 60.0s); status codes [409, 200] |
-| E | a job survives its connector worker being SIGKILLed mid-flight | PASS | at kill: RUNNING; after restart: COMPLETED 583s later (heartbeat timeout is 600s); job_records rows: 1 |
-| E | the front door recovers from a Postgres restart without being restarted itself | PASS | 22/24 in-flight turns survived the bounce; a fresh turn answered 1.7s after it |
+| E | a job survives its connector worker being SIGKILLed mid-flight | PASS | at kill: RUNNING; after restart: COMPLETED 582s later (heartbeat timeout is 600s); job_records rows: 1 |
+| E | the front door recovers from a Postgres restart without being restarted itself | PASS | 18/24 in-flight turns survived the bounce; a fresh turn answered 1.7s after it |
 | E | a durable launch with no broker reaches the asker as an error, not as an answer | PASS | HTTP 200, answered=True, error=None, tools_failed=['compute_reaction_energy'], result[0]="Error: the 'compute_reaction_energy' job could not be confirmed as sta" |
-| B | find_notes bodies ran | PASS | 1669 audited call(s) |
-| B | gather_evidence bodies ran | PASS | 8 audited call(s) |
+| B | find_notes bodies ran | PASS | 1927 audited call(s) |
+| B | gather_evidence bodies ran | PASS | 9 audited call(s) |
 
-**26/27 checks passed**, over the families that ran.
+**28/28 checks passed**, over the families that ran.
