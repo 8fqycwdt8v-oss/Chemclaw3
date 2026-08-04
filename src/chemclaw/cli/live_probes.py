@@ -20,6 +20,7 @@ import logging
 from collections import Counter
 from pathlib import Path
 
+from chemclaw.connectors.registry import job_names
 from chemclaw.core.config import settings
 from chemclaw.evals.live import ProbeOutcome, load_probes, run_probes
 from chemclaw.evals.live_judge import Judgement, judge_outcome, judgement_from_transcript
@@ -83,12 +84,32 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
     if job_states:
         summary = " · ".join(f"{state} {count}" for state, count in sorted(job_states.items()))
         lines.append(f"| …and what Temporal says became of them | {summary} |")
-        expected_job = [p.id for p in probes if p.expects_job]
-        launched = {o.probe_id for o in outcomes if o.job_outcomes}
-        missed = sorted(set(expected_job) - launched)
+
+    # Whether an `expects_job` probe reached the durable path at all — asked of the *tool calls*,
+    # not of the `job_started` events.
+    #
+    # This distinction is the first thing the signal got wrong, on its first live run. A job that
+    # answers inside `inline_wait_seconds` is deliberately never announced (`connectors/jobs.py`:
+    # an already-finished run would never emit the matching `job_completed`, so the surface would
+    # draw a row that stays "running" forever), so du-01 ran `compute_reaction_energy` end to end
+    # through Temporal — workflow `calc-compute_reaction_energy-4cf212292f8f8e4e`, COMPLETED — and
+    # was reported as having started no job. A signal that calls a *working* durable path a miss is
+    # worse than no signal, because it spends the reader's attention on the one thing that was fine.
+    if any(p.expects_job for p in probes):
+        jobs = set(job_names())
+        ran_a_job = {o.probe_id for o in outcomes if o.job_outcomes or (jobs & set(o.tools_called))}
+        inline = {
+            o.probe_id for o in outcomes if not o.job_outcomes and (jobs & set(o.tools_called))
+        }
+        missed = sorted({p.id for p in probes if p.expects_job} - ran_a_job)
+        if inline:
+            lines.append(
+                f"| …of which finished inside the turn (never announced) | {len(inline)} |"
+            )
         if missed:
-            names = ", ".join(missed)
-            lines.append(f"| **probes needing a job that started none** | **{names}** |")
+            lines.append(
+                f"| **probes needing a durable job that ran none** | **{', '.join(missed)}** |"
+            )
 
     latencies = sorted(o.latency_seconds for o in outcomes)
     if latencies:

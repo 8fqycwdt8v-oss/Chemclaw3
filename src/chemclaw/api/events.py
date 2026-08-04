@@ -74,6 +74,21 @@ class JobCompletedEvent(BaseModel):
     summary: dict[str, object] = {}
 
 
+class JobFailedEvent(BaseModel):
+    """An async job failed after its turn ended, and the asker is told rather than left waiting.
+
+    The counterpart `JobCompletedEvent` had no opposite, so a job that was announced as running and
+    then failed produced exactly nothing on this channel — the promise stood indefinitely and the
+    failure was reachable only by polling `get_durable_job_status` with an id the chemist would have
+    had to keep. `reason` is the innermost message in Temporal's failure chain, because the outer
+    ones say "Child Workflow execution failed" and the inner one says what actually went wrong.
+    """
+
+    type: Literal["job_failed"] = "job_failed"
+    job_id: str
+    reason: str = ""
+
+
 class QuestionEvent(BaseModel):
     """The agent needs the chemist to disambiguate before it can answer well (gap AGT-5).
 
@@ -238,6 +253,12 @@ ErrorCode = Literal[
     "budget_exhausted",
     "loop_cap_reached",
     "bad_tool_arguments",
+    # The turn ran to completion and wrote nothing. Its own code rather than `internal`, because
+    # nothing broke: the model simply never produced prose, and a surface should offer "ask
+    # something narrower" rather than "an internal error occurred". Added after a live turn made
+    # 29 tool calls over 197 s and emitted an empty answer with no error at all — the silent death
+    # every live pass since 2026-07 has found, and the one shape a user cannot even report.
+    "empty_answer",
 ]
 
 
@@ -286,6 +307,7 @@ Event = (
     | TokenEvent
     | JobStartedEvent
     | JobCompletedEvent
+    | JobFailedEvent
     | CapabilityDegradedEvent
     | ApprovalRequestEvent
     | NoteProposedEvent

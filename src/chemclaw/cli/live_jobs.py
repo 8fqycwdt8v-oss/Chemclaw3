@@ -329,19 +329,28 @@ async def check_pending_when_worker_wedged(run_dir: Path) -> Check:
 
 
 async def check_audit_chain() -> Check:
-    """The GxP hash chain still verifies after the run — the same check `make audit-verify` runs."""
+    """The GxP hash chain still verifies after the run — the same check `make audit-verify` runs.
+
+    **The row count is reported, not just the verdict.** An empty `audit_events` verifies trivially,
+    and the first live pass of this smoke passed this check against exactly that: zero rows, because
+    the audit sink records *agent tool calls* and a durable job launched from a script never makes
+    one. "Verifies" and "verifies over something" are different claims, and a check that cannot tell
+    them apart is the same species of defect as a metric that measures its grader's blindfold
+    (D-2026-08-03). The count makes a vacuous pass legible instead of reassuring.
+    """
+    events = await _scalar("select count(*) from audit_events")
     completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
         [sys.executable, "-m", "chemclaw.cli.verify_audit_chain"],
         capture_output=True,
         text=True,
         check=False,
     )
+    output = (completed.stdout or completed.stderr).strip()
+    verdict = output.splitlines()[-1] if output else f"exit {completed.returncode}"
     return Check(
         name="audit chain verifies",
         passed=completed.returncode == 0,
-        observed=(completed.stdout or completed.stderr).strip().splitlines()[-1:][0]
-        if (completed.stdout or completed.stderr).strip()
-        else f"exit {completed.returncode}",
+        observed=f"{verdict} (over {events} audit event(s))",
     )
 
 

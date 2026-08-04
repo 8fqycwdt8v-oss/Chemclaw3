@@ -415,9 +415,41 @@ async def run_turn(
                 retryable=False,
                 correlation_id=correlation_id,
             )
-        answer = await build_answer_event(
-            "".join(answer_parts), tool_trace.outputs, tool_trace.called_tools
-        )
+        # A turn that produced no prose at all is a *silent* failure, and it must not be one.
+        #
+        # There is already a guard for the harness loop hitting its cap, but that path only runs
+        # with `harness_enabled` — and the case measured on 2026-08-04 had the harness off: du-03
+        # made 29 tool calls (find_past_jobs ×8, load_skill ×6, find_notes ×5, …), never reached the
+        # capability the question needed, and ended with an empty `AnswerEvent` after 197 s. No
+        # error, no tokens, nothing to read. `evals.live` scores exactly this as `failed_loudly=
+        # False` because it is the worst shape a turn can take: a user cannot retry what never said
+        # it went wrong, and every prior live pass has found one (`docs/archive/vibe-test-2026-07`).
+        #
+        # An `ErrorEvent` rather than inventing an answer: the system genuinely has nothing to say,
+        # and saying so is the honest outcome. Retryable, unlike the loop cap — a turn that spent
+        # its budget circling retrieval may well succeed on a narrower question, and the message
+        # says so.
+        text = "".join(answer_parts)
+        if not text.strip():
+            METRICS.increment("chemclaw_turn_empty_answers_total")
+            logger.warning(
+                "turn for session %s ended with no answer text after %d tool call(s)",
+                session.session_id,
+                len(tool_trace.called_tools),
+            )
+            yield ErrorEvent(
+                message=(
+                    "The turn ended without producing an answer, after "
+                    f"{len(tool_trace.called_tools)} tool call(s). Nothing was written, so "
+                    "there is nothing below to read — this is a failure, not an empty result. "
+                    "A narrower or more specific question is the useful next step "
+                    f"(session {session.session_id})."
+                ),
+                code="empty_answer",
+                retryable=True,
+                correlation_id=correlation_id,
+            )
+        answer = await build_answer_event(text, tool_trace.outputs, tool_trace.called_tools)
         # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
         # has already committed this turn's rows and they are a complete, paired exchange — there is
         # nothing half-written left to undo. The cancellation that reaches a finished turn is

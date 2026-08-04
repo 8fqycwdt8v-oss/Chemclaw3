@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowFailureError
 from temporalio.worker import Worker
 
 from chemclaw.agent.session_events import record_session_event
@@ -298,3 +298,91 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     # know nothing about the record.
     assert "the reviewer asked whether benzene behaves the same way" in published[0][0].body
     assert _EXPECTED_ID in published[0][0].body
+
+
+def test_a_failed_connector_job_wakes_the_session_before_the_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job that fails after its turn ended must reach the asker, and carry why.
+
+    Found by the 2026-08-04 live pass, not by this suite, and the reason it was missed is worth
+    keeping: `ConnectorJobWorkflow` awaited its child with no failure path at all, so every test
+    here exercised the success path and the wrapper's obligations on failure were simply never
+    stated. In the live run a `compare_solvents` screen was launched, the turn told the chemist it
+    was running, and the child died ~30 s later on an unknown ALPB solvent name. No event of any
+    kind was emitted; the "started" promise stood indefinitely, and the reason existed only in
+    Temporal's history under an id nobody had kept.
+
+    Two assertions, and the second is the one with teeth. That an event fires is easy to satisfy
+    trivially; that the *innermost* failure message survives is what makes the event worth
+    delivering, because Temporal's outer frames say only "Child Workflow execution failed".
+    """
+    notified: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def _fake_record(*args: Any, **kwargs: Any) -> None:
+        bound = inspect.signature(record_session_event).bind(*args, **kwargs)
+        notified.append(
+            (bound.arguments["session_id"], bound.arguments["kind"], bound.arguments["payload"])
+        )
+
+    class _CapturingSink:
+        async def record(self, record: JobRecord) -> None:
+            pass
+
+    monkeypatch.setattr("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink)
+    monkeypatch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
+    monkeypatch.setattr("chemclaw.core.config.settings.background_task_queue", _CORE_QUEUE)
+    tool = _fixture_job_tool(monkeypatch)
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+
+            async def _connect() -> Client:
+                return client
+
+            monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+            core = Worker(
+                client,
+                task_queue=_CORE_QUEUE,
+                workflows=[ConnectorJobWorkflow],
+                activities=[
+                    publish_memory_note_activity,
+                    record_session_event_activity,
+                    record_job,
+                ],
+            )
+            connector = Worker(client, task_queue=_CONNECTOR_QUEUE, workflows=[FixtureJobWorkflow])
+            async with core, connector:
+                from chemclaw.core.identity_context import (
+                    reset_current_identity,
+                    set_current_identity,
+                )
+                from chemclaw.core.session_context import (
+                    reset_current_session_id,
+                    set_current_session_id,
+                )
+
+                token = set_current_session_id(_SESSION)
+                identity = set_current_identity(_ACTOR, frozenset())
+                try:
+                    job_id = await tool(
+                        tool.__annotations__["params"](subject="boom"),
+                        "prove a failed job still reaches the chemist who asked for it",
+                    )
+                finally:
+                    reset_current_identity(identity)
+                    reset_current_session_id(token)
+                handle = client.get_workflow_handle(job_id, result_type=ConnectorJobResult)
+                with pytest.raises(WorkflowFailureError):
+                    await handle.result()
+
+    asyncio.run(_run())
+
+    assert len(notified) == 1, "a failed job emitted no session event at all — the original defect"
+    session_id, kind, payload = notified[0]
+    assert session_id == _SESSION
+    assert kind == "job_failed"
+    assert "the fixture job was asked to fail" in payload["reason"], (
+        "the innermost cause must survive; Temporal's outer frames say only that a child failed"
+    )

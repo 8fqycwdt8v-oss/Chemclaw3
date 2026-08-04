@@ -1,87 +1,107 @@
-# Task: the Snowflake ELN — a schema nobody knows yet
+# Task: a live-test lane for Temporal + durable workflows + LLM + Postgres
 
-Planned 2026-08-04. Branch: `claude/snowflake-eln-generic-concept-6aikvz`.
+Branch: `claude/temporal-workflows-llm-testing-5nziyp`. Decision:
+`docs/decisions/D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md`.
 
-**Question asked:** the final ELN integration will be Snowflake, carrying reaction SMILES, protocol
-text, project ids, child tables of charged amounts, yield, purity, "many more data tables" and a
-per-reaction vector in a warehouse vector table — and nobody knows today which tables or fields
-exist. Come up with a generic concept that makes connecting easy later.
+**The question was whether the durable engine can be live-tested together with the model and the
+database. It could not be — not because the pieces were missing, but because nothing crossed
+them.** The Temporal tests use the time-skipping test server with no model and no database; the
+live probe run uses a real model and a real database with no broker, and said so in its own probe
+headers; the Postgres tests use neither. The path a durable capability actually takes had been
+exercised only in pieces.
 
-**Answer shipped:** the schema is a file, not an adapter. `chemclaw.ingest.eln.warehouse` is a
-generic engine naming no table and no column; the site's schema is a *binding* in the source's
-manifest. Attaching the real warehouse is writing YAML. Decision:
-`docs/decisions/D-2026-08-04-the-schema-is-a-file.md`; concept:
-`docs/guides/warehouse-eln-concept.md`.
+_(The previous occupant of this file was the Snowflake-ELN warehouse concept (#113, `23f0d61`),
+which landed on `main` while this branch was in flight; it is in `git log`, and its outcome is in
+`chemclaw.ingest.eln.warehouse` and its own ADR. Before that, the BoFire capability map (#111) and
+the 2026-08-03 grounded-live-run fix list.)_
 
-## Work packages
+---
 
-- [x] **W1** The binding engine — `binding.py` (the document's schema, `extra="forbid"`),
-      `expr.py` (paths + a closed transform vocabulary), `sql.py` (checked identifiers written,
-      every value bound), `driver.py` (Protocols only, no vendor import), `connect.py` (late-bound
-      driver, credentials read from named env vars).
-- [x] **W2** The unmapped-column problem — `attributes: dict[str, str]` on `OrdReaction` and
-      `Component`, rendered last in the note body by `ingest/eln/note.py`. Bounded; never reaches
-      `transformation_smiles` or either fingerprint.
-- [x] **W3** Both halves — `WarehouseElnAdapter` (`COALESCE` watermark so amendments count as new;
-      one child query per table per batch) and `WarehouseVectorRetriever` (ANN inside the warehouse,
-      cites `<source>:<row>`, `suppress_ingested` keeps the no-double-surfacing rule). Plus
-      `snowflake.py`, the only module that knows a vendor exists.
-- [x] **W4** The worked manifest `sources/eln-snowflake/datasource.yaml` (discovered, not enabled)
-      and the offline suite: `tests/warehouse_fake.py` + adapter/retriever/binding tests.
-- [x] **W5** `--construct` on `make datasource-validate`, so an operator can check a mounted binding
-      offline — binding the kwargs alone cannot see inside a binding document.
-- [x] **W6** Docs and registers: ADR + ledger row, concept guide, package README, seam README,
-      `DEFERRED.md` rewritten, `BACKLOG.md`, `CLAUDE.md`, capability-map row.
+## Plan
 
-## Verification
+- [x] **1. Bootstrap the stack without Docker.** `infra/live/bootstrap.sh` — defers to
+      `docker compose` when a daemon answers, otherwise builds pgvector and the Temporal CLI from
+      git clones and starts a native cluster on the same ports.
+- [x] **2. Supervise the processes.** `infra/live/processes.sh` — connectors, the four Temporal
+      workers, the front door; readiness-polled, never slept; one probe port per worker.
+- [x] **3. Stage A, the durable smoke.** `chemclaw.cli.live_jobs` — a real declared job through
+      the real generated tool, six mechanical checks against Temporal and Postgres, no model.
+- [x] **4. Stage B, the model on top.** `data/evals/probes/durable.yaml` (4 probes),
+      `Probe.expects_job`, and `evals/live._job_outcomes` resolving every launched workflow id
+      against the broker instead of believing the turn.
+- [x] **5. Un-hard-code the deployment from the corpus.** Six probe directions across three files
+      asserted "Temporal is not running in this test"; rewritten to grade behaviour, with a test
+      that pins the class.
+- [x] **6. Targets, tests, docs.** Seven `make live-*` targets; `tests/test_live_jobs.py` and five
+      new cases in `tests/test_live_probes.py`; runbook section, README port fix, ADR, BACKLOG.
 
-`make lint type test` green: **2913 passed, 127 sandbox-skipped**. `make ci` green through every
-validator (`datasource-validate` also passes with `--construct`); `helm-validate` fails only because
-`helm` is not installed in this sandbox, unrelated to this change and the same as the previous task.
+---
 
-What the fake-driver suite actually proves, with no tenant and no client installed:
+## Review — what was actually measured
 
-- the cursor filters and orders on `COALESCE(modified, created)`, asserted on the emitted SQL —
-  the failure this prevents is silent (an amended run simply never re-arrives, no error, no reject);
-- child tables are fetched once per batch, not once per reaction;
-- a new child table reaches the payload with **no Python change** — the claim, as a test;
-- the site's `SM`/`SOLV`/`PROD` vocabulary maps to `Role`; grams → mg; minutes → h;
-- unmapped columns survive into `attributes`, bounded, without repeating consumed fields, and
-  **without changing `transformation_smiles()` or `reaction_smiles()`**;
-- an unmapped vocabulary value rejects its row rather than dropping a field silently;
-- the retriever ranks and truncates server-side, cites the row, and suppresses a reaction already
-  merged as a note;
-- an unreachable *or misconfigured* warehouse costs that leg of the fan-out and nothing else.
+**The stack, in this container, with no Docker daemon:** PostgreSQL 16 + pgvector **0.8.6** on
+5432, Temporal **Server 1.31.2** (CLI 1.8.2, built from source) on 7233, all 34 migrations applied,
+six connectors on 8810, four workers ready on 9000-9003.
 
-## Review
+**`make live-jobs` — 6/6**, on a workflow started by that run
+(`calc-compute_reaction_energy-f47443a513e5db4b`):
 
-**Three things the work found that the plan had not.**
+| check | observed |
+| --- | --- |
+| workflow reached COMPLETED | COMPLETED, started 2026-08-04T05:54:06+00:00 |
+| calculation cached in Postgres | 6 `xtb*` rows in `calculation_results` |
+| job recorded in Postgres | `calc/compute_reaction_energy` by `service-account`, with its rationale |
+| duplicate launch rejoins the same run | id matches; cache rows 12 → 12 (nothing recomputed) |
+| wedged worker yields a pending job | returned the id after 20 s, then COMPLETED once resumed |
+| audit chain verifies | OK: the audit trail hash chain is intact |
 
-*The canonical record has no place for the impurity profile through a scalar field binding.*
-`purity_percent` is one column, but the impurity table behind it is rows. Added `impurities:` as a
-block mirroring `components:`, reusing the same reader — otherwise the first real binding could not
-carry a profile that `OrdReaction` already models, which would have been a hole in "connect without
-code" on a field the question named explicitly.
+**`make lint type test`:** green — 3015 passed, 34 skipped. Worth noting what changed underneath
+that number: with Postgres up, the 22 Postgres-backed test files **ran** rather than skipped. A
+green suite in an offline sandbox had been reporting on a suite that largely did not execute.
 
-*A tree-walking test imports every first-party module.* `tests/test_publish.py` enumerates the error
-hierarchy that way, so a module-scope `import snowflake.connector` would have made this repository's
-own suite depend on a client only a real deployment has. The driver's client import moved inside a
-function — the one departure from the seam's "import at module scope" corollary, and it departs for
-a reason that corollary does not cover: that rule is about which *process* pays for an import, this
-is about a package installed in none of them.
+### Three things the lane caught while being built, which is the argument for it
 
-*`gather_evidence` fans out with a plain `asyncio.gather`, no `return_exceptions`.* So a raising
-retriever does not degrade a question, it loses it. The first version caught transient failures and
-would have let a `BindingError` — a driver package the image lacks — escape and break every question
-in the process. Now caught, and logged at ERROR rather than WARNING because it recurs until someone
-changes the deployment.
+1. **The pid files recorded the wrong process.** `uv run python -m …` puts `uv` in the pid file and
+   the worker one fork below it, so `kill` reached the launcher. Found only because the
+   wedged-worker check sends a signal and got `ProcessLookupError`. Fixed by resolving the
+   interpreter once and starting it directly — a layer removed rather than worked around.
+2. **The wedged-worker payload was invalid.** It inherited the smoke's symmetry numbers onto a
+   different equation, and `_checked_symmetry_numbers` rejected it correctly. The lane reported a
+   real failure; the failure was mine. Now pinned by a test, because a bad probe that reads as a
+   system fault is the worst kind.
+3. **A rerun would have passed on residue.** A durable job's id is a hash of its payload and a
+   duplicate launch deliberately rejoins rather than recomputes — so with a fixed payload the
+   *second* `make live-jobs` against one database starts nothing, computes nothing, and passes
+   every check against the first run's rows. The payload now varies per run on a real physical
+   input. This is the failure the whole lane exists to remove; building it into the lane would have
+   been the joke writing itself.
 
-**One thing stated plainly rather than glossed.** This is *not* zero core edits. `attributes` on
-`OrdReaction` and `Component`, the note renderer, four names in the non-retryable list, one runtime
-hook in the log-redaction inventory, and the pinned source set in `tests/test_no_egress.py` all
-changed. Each is small and each is argued in the ADR — but the seam did not hold perfectly, and the
-honest framing is that one typed field was the price of "a new column is a line of YAML".
+---
 
-**Deliberately not built.** A schema-introspection CLI drafting a binding from `INFORMATION_SCHEMA`.
-It can only be written against a real warehouse's metadata; written against an imagined one it would
-draft bindings nobody can use.
+## Follow-up: the full live pass (same day, with a key)
+
+Stage B ran. Record: `docs/archive/live-full-stack-2026-08-04.md`; decision:
+`docs/decisions/D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed.md`.
+
+Every layer up at once for the first time — Temporal 1.31.2, four workers, Postgres 16 + pgvector
+0.8.6, six connectors, the front door, and `claude-sonnet-5`. Stage A **6/6** (now over 139 audit
+events rather than zero). Harness slice **2/2 answered, 2/2 tool reach, 0 silent failures** — the
+chart's configuration meeting a live model.
+
+**Four defects, one class.** A job that failed after its turn told nobody; a job that failed inside
+its turn reached the model as `Error: Function failed.`; a turn that wrote nothing said nothing;
+and — twice — a *check* passed vacuously. All fixed, all with regression tests.
+
+**Two of the four were in the measurement, not the product,** and that is the part worth keeping:
+the smoke's audit check had been verifying an empty chain, and the durable-reach signal flagged
+du-01 as having run no job while Temporal held its workflow in COMPLETED. Both were written this
+same session to *find* problems. A signal that has never been wrong has usually never been used.
+
+**And one fix was wrong for an hour, measurably.** `failure_reason` first walked to the innermost
+cause and reported the tblite internals; the sentence written for a chemist — naming "2-MeTHF" and
+the solvents that would work — sat one frame above. Depth is not specificity.
+
+Left open in `docs/planning/BACKLOG.md`: validating solvent names at the tool boundary (the root
+cause behind two findings), du-03's behavioural half, the repeated-tool-call cost, the full
+230-probe sweep (which needs a corpus worth sweeping — this repo ships 38 notes), and an
+Entra-enforced pass.

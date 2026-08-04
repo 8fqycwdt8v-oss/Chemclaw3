@@ -35,13 +35,13 @@ this module imports nothing from any connector — and moving a workflow between
 manifest change rather than a code change (`docs/archive/plans/connector-plan.md` §5.3).
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import workflow
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -52,6 +52,42 @@ with workflow.unsafe.imports_passed_through():
 
 from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note_best_effort
 from chemclaw.durable.registry import durable_workflow
+
+
+def failure_reason(exc: BaseException) -> str:
+    """The application's own account of why a job failed, for a human to read.
+
+    Public because two callers need the identical sentence: this wrapper, pushing the failure
+    back to a session that has already been told the job is running, and `connectors.jobs`,
+    framing a job that failed *inside* the turn's inline wait. Two walkers would be two
+    answers to "why did it fail" for one failure.
+
+    Temporal nests structurally — `ChildWorkflowError` wraps `ActivityError` wraps whatever the
+    code raised — and the outer frames say only "Child Workflow execution failed" / "Activity task
+    failed". So the structural frames are skipped and the *first* application-level message is
+    taken.
+
+    Only the two *workflow-side* wrappers are skipped here. A client awaiting a handle gets one more
+    on top, `temporalio.client.WorkflowFailureError`, and that one is stripped by the caller
+    (`connectors.jobs`) rather than here: this module is imported inside the workflow sandbox, and
+    reaching for the client package to name a type would drag the whole client into it for a string.
+
+    **Not the innermost one**, which is the version this function shipped with and which a live run
+    corrected within the hour. For the `compare_solvents` failure the chain was:
+
+        ChildWorkflowError → ActivityError
+          → "unknown ALPB solvent '2-methyltetrahydrofuran'; common valid names are water, …"
+            → "String value for epsilon was not found among database of solvents"
+
+    Walking to the bottom returned the library's internals — true, and useless to the chemist who
+    typed "2-MeTHF" — while the frame directly above was the sentence the product had deliberately
+    written for exactly this moment, naming the offending value and the accepted ones. Depth is not
+    specificity: the deepest frame belongs to whoever is furthest from the user.
+    """
+    cause: BaseException = exc
+    while isinstance(cause, (ChildWorkflowError, ActivityError)) and cause.__cause__ is not None:
+        cause = cause.__cause__
+    return str(cause) or type(cause).__name__
 
 
 class ConnectorJobInput(BaseModel):
@@ -188,10 +224,33 @@ class ConnectorJobWorkflow:
         that launched it reports `failed` through `get_durable_job_status` — deliberately unlike the
         note publish and the push-back below, which are best-effort because the scientific result is
         already durable by the time they run.
+
+        **A failure is pushed back to the session before it propagates.** Propagating is correct;
+        propagating *silently* was not. A job that outlives its turn has already told the chemist
+        "this is running", and the only completion path back to them was `job_completed` — so a job
+        that failed afterwards left that promise standing forever, with the failure visible only
+        to someone who thought to poll `get_durable_job_status` with an id they would have had to
+        keep. Measured on 2026-08-04: `compare_solvents` was launched for a three-solvent screen,
+        the turn reported it running, and the run failed ~30 s later on an unknown ALPB solvent
+        name. Nothing reached the asker. Same lesson as the unreachable broker that reached the
+        model as "Error: Function failed." — an outcome that says nothing is not neutral, it is an
+        invitation to assume the good one.
         """
         # `workflow.now()` and not `time.monotonic()`: a workflow's clock must come from the one
         # Temporal records in history, or a replay would measure the replay rather than the run.
         started_at = workflow.now()
+        try:
+            result = await self._run_child(job)
+        except ActivityError as exc:
+            await self._notify_failure(job, exc)
+            raise
+        except ChildWorkflowError as exc:
+            await self._notify_failure(job, exc)
+            raise
+        return await self._finish(job, result, started_at)
+
+    async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
+        """Start the bundle's own workflow on its queue and wait for its result."""
         result: ConnectorJobResult = await workflow.execute_child_workflow(
             job.workflow,
             job.payload,
@@ -217,6 +276,33 @@ class ConnectorJobWorkflow:
             retry_policy=BAD_DATA_RETRY,
             execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
         )
+        return result
+
+    async def _notify_failure(self, job: ConnectorJobInput, exc: BaseException) -> None:
+        """Tell the session its job failed, before the failure propagates and closes this run.
+
+        Best-effort and never raising, for the same reason the completion push-back is: the run is
+        already failing, and a push-back that failed on top would replace one lost message with two.
+        The reason is carried as text because that is what the asker needs — the same discipline
+        `SubsystemUnavailableError` applies to an outage, one layer out.
+        """
+        if not job.session_id:
+            return
+        await notify_session_best_effort(
+            job.session_id,
+            "job_failed",
+            {
+                "job_id": workflow.info().workflow_id,
+                "connector": job.connector,
+                "job": job.job,
+                "reason": failure_reason(exc),
+            },
+        )
+
+    async def _finish(
+        self, job: ConnectorJobInput, result: ConnectorJobResult, started_at: datetime
+    ) -> ConnectorJobResult:
+        """Record the run, offer its note to the PR-gate, and push the completion back."""
         record = job_record_for(
             workflow.info().workflow_id,
             job,

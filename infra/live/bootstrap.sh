@@ -43,6 +43,8 @@ readonly PGVECTOR_VERSION="${CHEMCLAW_LIVE_PGVECTOR_VERSION:-v0.8.6}"
 # rather than hard-coding the path also means a machine with two clusters uses the one whose
 # `pg_config` is first, which is the same one `pg_isready` and `psql` will talk to.
 readonly PGBIN="$(pg_config --bindir)"
+# Where the PR-gate writes. Never the working checkout — see `ensure_note_repo`.
+readonly NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}"
 # The role/password/database the default DSN in `core/config/store.py` already names, written
 # once. Every admin command below connects over TCP with this password rather than through the
 # trusted local socket, so bootstrap fails here if the credential the application will use is
@@ -107,6 +109,27 @@ ensure_temporal_cli() {
       -ldflags "-X github.com/temporalio/cli/internal/temporalcli.Version=${TEMPORAL_CLI_VERSION#v}" \
       -o /usr/local/bin/temporal ./cmd/temporal )
   log "temporal CLI installed ($(temporal --version | head -1))"
+}
+
+# ---------------------------------------------------------------------------- knowledge repo
+
+ensure_note_repo() {
+  if [ -d "$NOTE_REPO_DIR/.git" ]; then
+    log "note repo clone already present ($NOTE_REPO_DIR)"
+    return
+  fi
+  # A *dedicated* clone, because the PR-gate refuses anything else and is right to:
+  # `GitNoteSubmitter` starts every submission with `git reset --hard` + `git clean -fd`
+  # (poisoned-index recovery), so pointing it at the working checkout would destroy uncommitted
+  # work. `note_repo_dir` defaults to "." — the checkout — so a lane that does not set this
+  # starts workers whose every note submission is refused before a git command runs (G4).
+  #
+  # That is not a small subset of the system: the PR-gate is the one path job results, reports and
+  # distilled playbooks all take (D-005), so without this the entire knowledge-contribution half
+  # of a live run is unreachable. Found by running the ELN sync against a lane that lacked it.
+  log "cloning a dedicated knowledge repo for the PR-gate ($NOTE_REPO_DIR)"
+  mkdir -p "$(dirname "$NOTE_REPO_DIR")"
+  git clone --quiet "$REPO_ROOT" "$NOTE_REPO_DIR"
 }
 
 # ---------------------------------------------------------------------------- postgres
@@ -214,6 +237,7 @@ case "${1:-up}" in
     log "no docker daemon — bringing the stack up natively"
     ensure_pgvector
     ensure_temporal_cli
+    ensure_note_repo
     ensure_cluster
     start_postgres
     start_temporal

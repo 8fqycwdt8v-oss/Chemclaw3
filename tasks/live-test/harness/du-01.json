@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "compare_solvents"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a reaction energy, enthalpy or free energy the job did not return",
+      "a job id for a run that was not started",
+      "a rate, an activation barrier or a time to completion"
+    ],
+    "direction": "This is the durable calculator's home ground and it answers inside the turn: the job carries `inline_wait_seconds`, so a correctly-launched run usually returns its numbers before the answer is written. Grade three things. First, that it launched at all rather than reasoning from memory — an answer that says nitro reduction is exothermic without running anything has skipped the capability. Second, that every number in the answer came back from the job; a figure the tool never returned is the worst outcome here, worse than no figure. Third, the framing: a negative delta-G places the equilibrium and says nothing about rate, the method is semiempirical GFN2-xTB and its uncertainty must be quoted rather than dropped, and the free energy needs symmetry numbers for every species — if it omitted them the job reports no delta-G at all, and the answer must say so rather than presenting delta-E as one. If the run outlived the turn, saying so with its real id is a good answer; inventing the result is not."
+  },
+  "outcome": {
+    "probe_id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "answer": "This is a single, self-contained calculation, so I'll just run it rather than spin up a planning cycle.\n\nA quick safety note first: nitrobenzene + H2 is a real reduction with known hazards (nitro groups, catalytic hydrogenation), so I'll screen the species while I'm at it, and I'll run the reaction-energy calculation you described.Good — the hazard screen returned no flags (not a clearance, just no rule matched in the curated table; nitro-reduction hazards like pyrophoric intermediates/catalyst fires aren't in scope for this screen).\n\nThe actual calculation call was refused because we're in **plan mode** — `compute_reaction_energy` is a job-launching tool and needs plan approval first. Here's the plan:\n\n**Plan: Nitrobenzene hydrogenation thermodynamics**\n1. Run `compute_reaction_energy` (quick level, GFN2-xTB) for:\n   `[O-][N+](=O)c1ccccc1 + 3 [HH] >> Nc1ccccc1 + 2 O`\n   with symmetry numbers: H2 → 2, H2O → 2, nitrobenzene/aniline → 1 (no rotational symmetry).\n2. Report ΔE, ΔH, and ΔG with the method's stated uncertainty, and state plainly that this is an equilibrium-position answer only — no rate/mechanism/catalyst information, consistent with the `reaction-thermodynamics` skill's guidance.\n3. No note-worthy new knowledge here (a one-off sanity check), so no `propose_knowledge_note` unless you want it recorded.\n\nThis is a single quick calculation with no ambiguity in the question, so I don't think further clarification is needed. Shall I switch to execute mode and run it?",
+    "answered": true,
+    "tools_called": [
+      "compute_reaction_energy",
+      "screen_hazards"
+    ],
+    "tool_results": [
+      {
+        "tool": "compute_reaction_energy",
+        "preview": "Refused: compute_reaction_energy changes stored data or starts work, and the plan it is part of has not been approved yet; review the plan and approve it, then ask again"
+      },
+      {
+        "tool": "screen_hazards",
+        "preview": "{\n  \"flags\": [],\n  \"verdict\": \"No rule in the hazard table matched. This is not a safety assessment.\"\n}\n{\"flags\": [], \"verdict\": \"No rule in the hazard table matched. This is not a safety assessment.\""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 37.63,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

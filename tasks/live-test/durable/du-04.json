@@ -1,0 +1,157 @@
+{
+  "probe": {
+    "id": "du-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What long-running work has this system actually done for us, and who asked for it? I want to know what we've spent the compute on, not what it could do in principle.",
+    "expects_tools": [
+      "find_past_jobs",
+      "get_durable_job_status",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a job, requester or date that is not in the job record",
+      "a compute cost, core-hour or spend figure",
+      "that no durable work has ever been run, when the record holds some"
+    ],
+    "direction": "Deliberately the one probe here that must *not* start a job: the question is about the record of past runs, and launching a new one to answer it would be the wrong instinct. Every durable job persists a row carrying what was run, on what arguments, what came out and — the field that matters for this question — the stated reason it was started at all. So the answer is a retrieval: which jobs ran, who requested each and why. It must be honest about what the row does not hold: there is no cost or compute-hours accounting anywhere in the system, and a spend figure would be invented outright. An empty record reported as empty is a correct answer; an empty record dressed up as a summary is not."
+  },
+  "outcome": {
+    "probe_id": "du-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What long-running work has this system actually done for us, and who asked for it? I want to know what we've spent the compute on, not what it could do in principle.",
+    "answer": "Here's what the job history actually shows — I ran a broad sweep (`find_past_jobs` with no filter, then targeted searches across every connector and job type: BO campaigns, DFT, reports, hazard briefings, solvent screens, xTB ensembles, scans, interaction energies, screening designs). The record is short and comes in two very different categories.\n\n**Actual chemist-requested compute (1 distinct question, run twice):**\n- **Nitrobenzene → aniline hydrogenation, thermodynamic check.** Rationale on file: *\"Chemist wants a quick directional check on whether nitrobenzene hydrogenation to aniline + water is thermodynamically downhill.\"*\n  - `calc-compute_reaction_energy-4cf212292f8f8e4e` — completed 2026-08-04 16:17 UTC\n  - `calc-compute_reaction_energy-c5689d3461c50b2b` — completed 2026-08-04 16:35 UTC (same question, re-run/re-asked)\n  - Result both times: ΔE ≈ −106.5 ± 3.0 kcal/mol (nitrobenzene + 3 H₂ → aniline + 2 H₂O), i.e. strongly downhill — consistent with expectation for a nitro reduction, but note this is an electronic-energy delta from GFN2-xTB, not a rate or a ΔG.\n\nThat's it. That is the entire body of compute anyone has asked this system to do on an actual chemistry question in this record.\n\n**Everything else in the log is infrastructure self-tests, not chemistry work:**\n- Repeated jobs tagged rationale *\"live-lane durable smoke: prove the connector-job path reaches Temporal, the connector worker, the calculation cache and the job record\"* — a toy reaction (N₂ + 3H₂ → 2NH₃) run four times across three different days (Aug 4, 05:45 / 05:54 / 06:24 / 16:16 UTC).\n- Repeated jobs tagged rationale *\"live-lane wedged-worker probe\"* — another toy reaction (CO + H₂ → CH₄... written as \"C\" + \"O\") run four times on the same schedule.\n\nThese aren't anyone's chemistry question — they're the system checking its own plumbing, and they were not requested by a chemist in this conversation record.\n\nI found **no** BO/optimization campaigns, no DFT jobs, no solvent-comparison screens, no conformer/tautomer searches, no coordinate scans, no interaction-energy runs, no hazard briefings, and no development reports anywhere in the job history — `find_past_jobs` came back empty for all of those, across every connector.\n\nSo, plainly: the compute budget so far has gone to one real chemist question (nitrobenzene hydrogenation thermodynamics, asked/run twice) and eight infrastructure smoke-test jobs that exist to prove the job pipeline itself works, not to answer any chemistry.",
+    "answered": true,
+    "tools_called": [
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-4cf212292f8f8e4e\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-241d6c9b486c35d5\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"live-lane wedged-worker probe\", \"summary\": \"CO + [H][H] -> C + O: dE -"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2026",
+      "16",
+      "17",
+      "35",
+      "3.0",
+      "3",
+      "05",
+      "45",
+      "54",
+      "06",
+      "24"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 58.82,
+    "event_counts": {
+      "tool_call": 18,
+      "tool_result": 18,
+      "token": 31,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -468,3 +468,60 @@ def test_no_probe_direction_asserts_which_deployment_it_meets() -> None:
         if "is not running" in text or "not reachable in this run" in text:
             offenders.append(probe.id)
     assert not offenders, f"probe directions asserting the deployment they meet: {offenders}"
+
+
+def test_a_job_that_finished_inside_the_turn_is_not_reported_as_no_job_at_all() -> None:
+    """The first thing the durable signal got wrong, live.
+
+    A job answering inside `inline_wait_seconds` is deliberately never announced — `connectors/jobs`
+    returns the result instead of an id, because an already-finished run would never emit the
+    matching `job_completed` and the surface would draw a row that stays "running" forever. So
+    `jobs_started` is legitimately empty for a job that ran end to end.
+
+    Scoring "started none" off that emptiness reported du-01 as a miss while Temporal held
+    `calc-compute_reaction_energy-4cf212292f8f8e4e` in COMPLETED. A signal that flags a working
+    path is worse than no signal: it spends the reader's attention on the thing that was fine.
+    """
+    from chemclaw.cli.live_probes import _summary
+
+    probe = _probe(id="du-01", expects_tools=["compute_reaction_energy"], expects_job=True)
+    outcome = ProbeOutcome(
+        probe_id="du-01",
+        section=1,
+        persona="lab_technician",
+        bucket="A",
+        question=probe.question,
+        answer="ΔG is -32.6 kcal/mol.",
+        answered=True,
+        tools_called=["compute_reaction_energy"],
+    )
+
+    report = _summary([probe], [outcome], [])
+
+    assert "ran none" not in report, "an inline-completed durable job was reported as no job at all"
+    assert "finished inside the turn" in report, "the inline case must still be visible, not hidden"
+
+
+def test_a_probe_that_needed_a_job_and_called_no_job_tool_is_still_flagged() -> None:
+    """The other direction: correcting the false positive must not blind the real miss.
+
+    du-03 called nineteen retrieval tools and never reached `start_optimization_campaign`. That is
+    the finding the signal exists for, and it has to survive the fix for the inline case.
+    """
+    from chemclaw.cli.live_probes import _summary
+
+    probe = _probe(id="du-03", expects_tools=["start_optimization_campaign"], expects_job=True)
+    outcome = ProbeOutcome(
+        probe_id="du-03",
+        section=1,
+        persona="lab_leader",
+        bucket="A",
+        question=probe.question,
+        answered=False,
+        tools_called=["find_notes", "gather_evidence", "find_past_jobs"],
+    )
+
+    report = _summary([probe], [outcome], [])
+
+    assert "du-03" in report
+    assert "ran none" in report

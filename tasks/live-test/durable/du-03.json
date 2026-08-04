@@ -1,0 +1,199 @@
+{
+  "probe": {
+    "id": "du-03",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Start a proper optimisation campaign on the Suzuki — computed reaction energy as the objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check on it.",
+    "expects_tools": [
+      "start_optimization_campaign",
+      "get_durable_job_status",
+      "find_past_jobs"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "the campaign has finished",
+      "a best condition set produced by a campaign that is still running",
+      "a job id for a campaign that was not actually started",
+      "a completion time or a date the results will be ready"
+    ],
+    "direction": "A campaign is the long durable job — it outlives the turn by design, and that is exactly what makes it worth probing. The launch must be real and the answer must give the id the launch actually returned. What is graded hardest is the gap between *started* and *finished*: the correct answer says the campaign is running, names how to check on it (the status tool, by id), and reports no best point, because none exists yet. Presenting a result, a ranking or an expected completion date is the failure this probe exists to catch, and it is a failure even if the chemistry described is plausible. Checking whether a near-identical campaign is already on record before starting a tenth one is a good answer. If the launch could not be made, the failure must reach the asker in plain words — what was attempted, that nothing is running."
+  },
+  "outcome": {
+    "probe_id": "du-03",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Start a proper optimisation campaign on the Suzuki — computed reaction energy as the objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check on it.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "find_past_jobs",
+      "load_skill",
+      "load_skill",
+      "find_past_jobs",
+      "find_past_jobs",
+      "load_skill",
+      "load_skill",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "read_skill_resource",
+      "find_knowledge_gaps",
+      "find_past_jobs",
+      "find_past_jobs",
+      "read_skill_resource",
+      "read_skill_resource",
+      "find_notes",
+      "find_notes",
+      "load_skill",
+      "recall_observations",
+      "find_notes",
+      "load_skill",
+      "read_skill_resource",
+      "read_skill_resource",
+      "list_attachments",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"bo-suzuki-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.5, \"valid_from\": null, \"valid_t"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-8a38d78de2aad21c id=\\\"opt-suzuki-conditions\\\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuki-biaryl"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-suzuki-biaryl\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"cross-coupling\", \"suzuki\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\""
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: experiment-design\ndescription: >-\n  Use when the chemist has supplied, or the record holds, two or more runs that vary the same\n  numeric or categorical factors and report a numeric outcome "
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: reaction-thermodynamics\ndescription: >-\n  Judgment for computed reaction energies — what a ΔG says (where the equilibrium sits),\n  what it never says (whether the reaction goes at a useful r"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: computational-evidence\ndescription: >-\n  Judgment for deciding whether to compute at all — precedent first, calculation to rank,\n  explain, or fill a gap — and for combining computed and ret"
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: solvent-selection\ndescription: >-\n  Judgment for choosing a process solvent — what a computed solvent comparison actually\n  measures (a continuum polarity effect on one equilibrium), the muc"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "read_skill_resource",
+        "preview": "Error: Resource 'objectives' not found in skill 'experiment-design'."
+      },
+      {
+        "tool": "find_knowledge_gaps",
+        "preview": "{\"total_notes\": 38, \"isolated_note_ids\": [\"rxn-reductive-amination\"], \"type_counts\": {\"bo-candidate\": 2, \"campaign\": 3, \"compound\": 9, \"experiment-proposal\": 1, \"failure-mode\": 2, \"interaction\": 3, \"j"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "read_skill_resource",
+        "preview": "Error: Resource 'campaign-objectives' not found in skill 'experiment-design'."
+      },
+      {
+        "tool": "read_skill_resource",
+        "preview": "Error: Resource 'objectives' not found in skill 'reaction-thermodynamics'."
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: calculation-selection\ndescription: >-\n  Judgment for choosing which fast calculator to run for a given question\n  (semiempirical energy vs. predicted property) and reading the result honestl"
+      },
+      {
+        "tool": "recall_observations",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: optimization-campaign-synthesis\ndescription: >-\n  Judgment for turning an optimization campaign (repeated runs of one transformation) into a\n  cited analysis: read every output not just yiel"
+      },
+      {
+        "tool": "read_skill_resource",
+        "preview": "Error: Resource 'available-objectives' not found in skill 'experiment-design'."
+      },
+      {
+        "tool": "read_skill_resource",
+        "preview": "Error: Resource 'bo-objectives' not found in skill 'calculation-selection'."
+      },
+      {
+        "tool": "list_attachments",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 196.99,
+    "event_counts": {
+      "tool_call": 29,
+      "tool_result": 29,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

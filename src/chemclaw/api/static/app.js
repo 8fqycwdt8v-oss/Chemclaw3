@@ -51,6 +51,7 @@ function openEventStream(id) {
   if (events) events.close();
   events = new EventSource(`/sessions/${encodeURIComponent(id)}/events`);
   events.addEventListener("job_completed", (e) => applyEvent(JSON.parse(e.data), null));
+  events.addEventListener("job_failed", (e) => applyEvent(JSON.parse(e.data), null));
   // A dropped push-back connection must not be silent: the page would look identical to one where
   // no job ever finished. `EventSource` reconnects on its own, so this reports rather than retries.
   events.onerror = () => add("trace", "… job stream interrupted, reconnecting");
@@ -120,6 +121,11 @@ function applyEvent(evt, answerEl) {
     case "job_completed":
       // Arrives on the push-back stream, outside any turn — see `openEventStream`.
       add("trace", `✓ job ${evt.job_id} completed ${JSON.stringify(evt.summary || {})}`);
+      return answerEl;
+    case "job_failed":
+      // A failure lane, not the trace: this retracts a "job started" the reader has already been
+      // shown, so it must not scroll past as one more grey line.
+      add("warn", `\u2717 job ${evt.job_id} failed \u2014 ${evt.reason || "no reason reported"}`);
       return answerEl;
     case "capability_degraded":
       // Its own lane, not the trace: this qualifies the answer that follows, and an answer

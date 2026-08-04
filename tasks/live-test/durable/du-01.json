@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "compare_solvents"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a reaction energy, enthalpy or free energy the job did not return",
+      "a job id for a run that was not started",
+      "a rate, an activation barrier or a time to completion"
+    ],
+    "direction": "This is the durable calculator's home ground and it answers inside the turn: the job carries `inline_wait_seconds`, so a correctly-launched run usually returns its numbers before the answer is written. Grade three things. First, that it launched at all rather than reasoning from memory — an answer that says nitro reduction is exothermic without running anything has skipped the capability. Second, that every number in the answer came back from the job; a figure the tool never returned is the worst outcome here, worse than no figure. Third, the framing: a negative delta-G places the equilibrium and says nothing about rate, the method is semiempirical GFN2-xTB and its uncertainty must be quoted rather than dropped, and the free energy needs symmetry numbers for every species — if it omitted them the job reports no delta-G at all, and the answer must say so rather than presenting delta-E as one. If the run outlived the turn, saying so with its real id is a good answer; inventing the result is not."
+  },
+  "outcome": {
+    "probe_id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "answer": "**Yes — strongly downhill.**\n\nAt the quick (electronic-energy only) GFN2-xTB level:\n\n**PhNO₂ + 3 H₂ → PhNH₂ + 2 H₂O**\nΔE = **‑106.5 ± 3.0 kcal/mol**\n\nThat's a large exothermicity (the tool itself flags anything below ‑20 kcal/mol as \"strongly exothermic,\" and this is 5x that), so there's no ambiguity about direction — the equilibrium sits overwhelmingly on the aniline/water side.\n\nCaveats worth keeping in mind:\n- This is ΔE, not ΔG — no entropy correction was requested (you asked for quick, and a \"standard\"-level run with rotational symmetry numbers would give the free energy; here 3 equiv of H₂ are consumed, each carrying its own translational/rotational entropy loss on going to product, but with a swing this large the qualitative conclusion — downhill — won't flip even after that correction).\n- GFN2-xTB is semiempirical with a stated ±3 kcal/mol uncertainty here; treat the magnitude as approximate, but the sign/scale is not in doubt for a reaction this exothermic.\n- This says nothing about *rate* — no transition states or kinetics are computed here, so it doesn't speak to whether the reaction proceeds readily without a catalyst, only that thermodynamically it strongly favors products.\n\nIf you want the free-energy version (accounting for entropy loss of consuming 3 H₂), I can rerun at `standard` level with symmetry numbers (H₂ σ=2, H₂O σ=2, aniline σ=1, nitrobenzene σ=1) — just say so.",
+    "answered": true,
+    "tools_called": [
+      "compute_reaction_energy"
+    ],
+    "tool_results": [
+      {
+        "tool": "compute_reaction_energy",
+        "preview": "{\"summary\": \"[O-][N+](=O)c1ccccc1 + [HH] + [HH] + [HH] -> Nc1ccccc1 + O + O: dE -106.5 \\u00b1 3.0 kcal/mol\", \"data\": {\"kind\": \"reaction\", \"summary\": \"[O-][N+](=O)c1ccccc1 + [HH] + [HH] + [HH] -> Nc1cc"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "3",
+      "3.0",
+      "1"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 19.67,
+    "event_counts": {
+      "tool_call": 1,
+      "tool_result": 1,
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

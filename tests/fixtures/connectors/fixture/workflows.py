@@ -16,6 +16,7 @@ the requesting actor travels — deliberately beside the payload rather than ins
 from typing import Any
 
 from temporalio import workflow
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.connector_job import ConnectorJobResult
@@ -24,7 +25,11 @@ with workflow.unsafe.imports_passed_through():
 
 @workflow.defn(name="FixtureJobWorkflow")
 class FixtureJobWorkflow:
-    """Echo the job's subject back through the result envelope, with a note to PR-gate."""
+    """Echo the job's subject back through the result envelope, with a note to PR-gate.
+
+    The subject `boom` raises instead, which is what gives the wrapper's failure push-back a real
+    child failure to carry.
+    """
 
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> ConnectorJobResult:
@@ -37,6 +42,12 @@ class FixtureJobWorkflow:
         attributable (`connectors/qm/workflows.py` is the real case).
         """
         subject = str(payload["subject"])
+        # One reserved subject that fails, so the wrapper's *failure* path has something real to
+        # run against. Raising inside the connector's own workflow is exactly how a live failure
+        # arrives — `compare_solvents` died on an unknown ALPB solvent name — and the wrapper's
+        # obligation is to tell the launching session before the failure propagates.
+        if subject == "boom":
+            raise ApplicationError("the fixture job was asked to fail", non_retryable=True)
         return ConnectorJobResult(
             summary=f"fixture job ran on {subject}",
             data={

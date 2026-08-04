@@ -1,0 +1,189 @@
+{
+  "probe": {
+    "id": "du-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it cost me another calculation, or do I get the same answer back for free? Explain what actually happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.",
+    "expects_tools": [
+      "compare_solvents",
+      "find_past_jobs",
+      "get_durable_job_status"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a ranking or delta-G the job did not return",
+      "that results are recomputed from scratch on every request",
+      "a cost, a runtime or a compute-hours figure"
+    ],
+    "direction": "Two things, and the explanation is the harder one. A durable job's id is derived from its arguments, so an identical re-ask rejoins the existing run rather than starting a second one, and every underlying calculation is persisted and looked up before it is computed — the same question a second time costs nothing and returns the same numbers, by construction rather than by luck. The answer should say that in the chemist's terms without overclaiming: it is the *identical* question that is free, and a changed temperature or level is a different question. Then it must actually run the screen, and any ranking it reports must be one the job returned. Saying the differences between solvents are more trustworthy than any single absolute value is a plus; presenting a rank order with no uncertainty is a miss."
+  },
+  "outcome": {
+    "probe_id": "du-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it cost me another calculation, or do I get the same answer back for free? Explain what actually happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.",
+    "answer": "First, the caching question — then where the actual run stands.\n\n**How the \"does it cost twice\" question actually resolves:**\n\nEvery calculation here is content-addressed by (calculator, version, exact input, parameters). Two things are true at once:\n\n- **`find_past_jobs` found no prior run of this exact solvent comparison.** I searched by text (\"amide coupling solvent\", \"ethyl acetate toluene 2-MeTHF\"), by connector (`bo`), and swept the whole recent job history — nothing matches ethyl acetate / 2-MeTHF / toluene run against this amide coupling. `find_calculations` for `calc_type=\"solvents\"` and for the benzoic-acid SMILES also came back empty. So whatever happened yesterday, it isn't visible in this system's durable job record or calculation store under this input.\n- What *is* on file is a different, earlier solvent screen: **`opt-amide-solvent`** (human-authored, confidence 0.8) screened **DMF, MeCN, DCM, and 2-MeTHF** for this same EDC coupling (benzoic acid + benzylamine) — DMF/MeCN ~80%, DCM 12 points lower, 2-MeTHF 76%. That's a real, cited prior result, but it isn't the ethyl acetate/toluene comparison you're asking about now, and it's an experimental yield screen, not this tool's computed ΔG comparison.\n\nSo concretely: if an *identical* call (same reactants/products/solvents/params) had already been run, it would rejoin the cached result for free — that's what \"identical requests share one job id\" means for `compare_solvents`. But nothing identical exists in the record for this exact triplet, so this is a fresh calculation, not a free repeat. If it turns out you ran it in a session I can't see (context does age out of view), tell me and I'll take the job id straight to `get_durable_job_status` rather than re-running.\n\n**The run itself:** I launched `compare_solvents` on the EDC-type amide coupling (benzoic acid + benzylamine → the amide + water) across ethyl acetate, 2-MeTHF (as THF proxy — xTB's ALPB solvent table doesn't have 2-MeTHF as a distinct entry, only `thf`) and toluene, with symmetry numbers set (water=2, everything else=1) so it reports ΔG, not just ΔE.\n\n`screen_hazards` on all species (benzoic acid, benzylamine, the amide product, ethyl acetate, THF/2-MeTHF, toluene) returned no flags — not a safety clearance, just nothing in the rule table matched.\n\nThe comparison job (`calc-compare_solvents-14399f0b0f730650`) is still running as of my last poll. I'll give you the ranked ΔG result — with the appropriate caveat that this is a continuum-solvation electronic/thermodynamic comparison on one equilibrium, not the same thing as the measured-yield screen in `opt-amide-solvent` — as soon as it completes; poll it yourself with `get_durable_job_status` on that id if you don't want to wait on me.",
+    "answered": true,
+    "tools_called": [
+      "find_past_jobs",
+      "gather_evidence",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_calculations",
+      "find_calculations",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "expand_note",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_calculations",
+      "screen_hazards",
+      "compare_solvents",
+      "compare_solvents",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-8a38d78de2aad21c id=\\\"opt-amide-solvent\\\">\\nSolvent screen for the EDC coupling: DMF, MeCN, DCM, 2-MeTHF.\\n\\n- transformation: rxn-amide-edc\\n- DMF and MeCN comparable (8"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_calculations",
+        "preview": "{\"result\": []}"
+      },
+      {
+        "tool": "find_calculations",
+        "preview": "{\"result\": []}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\"result\": null}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\"result\": null}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"ethyl acetate\",\n  \"smiles\": \"CCOC(C)=O\",\n  \"name\": \"ethyl acetate\",\n  \"source\": \"synonym\"\n}\n{\"result\": {\"query\": \"ethyl acetate\", \"smiles\": \"CCOC(C)=O\", \"name\": \"ethyl acetate\", \"source\""
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"2-MeTHF\",\n  \"smiles\": \"CC1CCCO1\",\n  \"name\": \"2-methyltetrahydrofuran\",\n  \"source\": \"synonym\"\n}\n{\"result\": {\"query\": \"2-MeTHF\", \"smiles\": \"CC1CCCO1\", \"name\": \"2-methyltetrahydrofuran\", \"s"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"toluene\",\n  \"smiles\": \"Cc1ccccc1\",\n  \"name\": \"toluene\",\n  \"source\": \"synonym\"\n}\n{\"result\": {\"query\": \"toluene\", \"smiles\": \"Cc1ccccc1\", \"name\": \"toluene\", \"source\": \"synonym\"}}"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-amide-edc\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"amide-coupling\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\": null, \"valid"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_calculations",
+        "preview": "{\"result\": []}"
+      },
+      {
+        "tool": "screen_hazards",
+        "preview": "{\n  \"flags\": [],\n  \"verdict\": \"No rule in the hazard table matched. This is not a safety assessment.\"\n}\n{\"flags\": [], \"verdict\": \"No rule in the hazard table matched. This is not a safety assessment.\""
+      },
+      {
+        "tool": "compare_solvents",
+        "preview": "Error: the 'compare_solvents' job ran and failed: ValueError: unknown ALPB solvent '2-methyltetrahydrofuran'; common valid names are water, methanol, ethanol, acetonitrile, acetone, thf, dmso, toluene"
+      },
+      {
+        "tool": "compare_solvents",
+        "preview": "calc-compare_solvents-14399f0b0f730650"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"status\": \"running\", \"summary\": null, \"result\": {}, \"rationale\": \"\"}"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"status\": \"running\", \"summary\": null, \"result\": {}, \"rationale\": \"\"}"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"status\": \"running\", \"summary\": null, \"result\": {}, \"rationale\": \"\"}"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"status\": \"running\", \"summary\": null, \"result\": {}, \"rationale\": \"\"}"
+      }
+    ],
+    "tools_failed": [
+      "compare_solvents"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "0.8",
+      "80",
+      "12",
+      "76",
+      "1"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "calc-compare_solvents-14399f0b0f730650"
+    ],
+    "job_outcomes": {
+      "calc-compare_solvents-14399f0b0f730650": "RUNNING"
+    },
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 142.07,
+    "event_counts": {
+      "tool_call": 24,
+      "tool_result": 24,
+      "tool_failed": 1,
+      "job_started": 1,
+      "token": 34,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

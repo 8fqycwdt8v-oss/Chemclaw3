@@ -86,6 +86,11 @@ _COUNTERS: dict[str, str] = {
     # firing was invisible to everything outside the process. A rising rate here is an agent that
     # keeps planning more work than a turn can close — a prompt or skill problem, not an outage.
     "chemclaw_turn_loop_caps_total": "Turns stopped by the harness loop's iteration cap.",
+    # Distinct from the cap above, and the distinction is the point: a capped turn *has* an answer
+    # and is marked partial, while this one produced no prose at all. Counted because the shape is
+    # invisible in every other signal — a live turn made 29 tool calls and emitted an empty answer
+    # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
+    "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
     "chemclaw_audit_sink_failures_total": (
         "GxP audit records that could not be persisted (the trail is incomplete)."
     ),

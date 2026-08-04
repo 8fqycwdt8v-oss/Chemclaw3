@@ -45,6 +45,10 @@ export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
 export CHEMCLAW_SESSION_STORE="${CHEMCLAW_SESSION_STORE:-postgres}"
 export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
+# The PR-gate's dedicated clone, created by bootstrap.sh. Without it `note_repo_dir`
+# defaults to "." — this checkout — and every note submission is refused before a git
+# command runs, which silently removes the whole knowledge-contribution half of a run.
+export CHEMCLAW_NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}"
 
 # The connector URLs come from `connectors_dev.build_composite()` itself rather than being
 # rebuilt here from the same string pattern. One reader for one shape: if the dev runner ever
@@ -92,14 +96,29 @@ llm_configured() {
 
 # Poll a URL until it answers 200, or fail naming the log to read. Never a bare sleep: a fixed
 # wait is either too short (a flaky lane) or too long (a slow one), and it reports nothing.
+#
+# The budget is 300s, not 90. Measured: on a *cold* page cache — a fresh container, or the first
+# start after one is reclaimed — importing this dependency set (torch, rdkit, bofire) pages in
+# ~1 GB and the process sits in uninterruptible disk sleep for minutes. At 90s the lane declared
+# a healthy process dead and killed the run; the second start, with the cache warm, took ten
+# seconds. A readiness budget has to cover the slowest legitimate start, not the typical one.
+#
+# A process that has genuinely died is not made slower to detect by this: the liveness check below
+# fails within a second of the pid going away, so only real waiting waits.
 wait_for() {
-  local name="$1" url="$2" attempts="${3:-90}"
+  local name="$1" url="$2" attempts="${3:-300}"
+  local pidfile="$RUN_DIR/$name.pid"
   for _ in $(seq 1 "$attempts"); do
     # `-s` without `-S`: a poll that has not succeeded yet is not an error to report,
     # and printing one per second buries the line that says which process never came up.
     if curl -fs -o /dev/null --max-time 2 "$url"; then
       log "$name ready"
       return
+    fi
+    # Exited processes are reported as exited rather than waited out. Without this the lane spends
+    # the whole budget on a process that crashed on its first line, and then blames the timeout.
+    if [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      die "$name exited before becoming ready — see $LIVE_DIR/$name.log"
     fi
     sleep 1
   done
