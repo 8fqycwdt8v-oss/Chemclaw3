@@ -135,6 +135,104 @@ probes, real model, real tool calls, real front door.
       whole job is that question. `similar_molecules`/`similar_reactions` should distinguish an
       empty index from an empty result, and the health surface should report the row counts.
 
+## Open — BO capability roadmap (2026-08-04, D-2026-08-04-what-bofire-does-when-you-actually-run-it)
+
+Five waves out of `docs/reference/bo-capability-map.md`. **Every BoFire behaviour each row depends
+on was measured before the row was written** — the previous BO roadmap said "just thread
+`n_generators` through" about a parameter that turned out to be inert
+(D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate). The measured numbers are in the
+ADR; three of the seven measurements changed a row below, and one reversed a refusal.
+
+- [ ] **W1 — nothing computes the campaign health the answers already assert** — [S]. No BoFire
+      change and no compatibility risk, which is why it is first: you cannot judge whether a later
+      wave helped without a convergence read. (i) A `campaign_progress` tool — best-so-far,
+      improvement over the last *k* rounds, evaluations since a real improvement, a plateau verdict,
+      and `design_space` (reuse `discrete_candidate_count`) beside the distinct-candidate count,
+      which makes "best point in 11 proposals against a 96-cell grid" a computed claim rather than
+      the refusal `op-28` had to give. **`assay_noise` is a required argument with no default** —
+      `op-13` was graded *fabricated* for calling 1–2% gains real against a ±2% reproducibility the
+      user had stated in the question, and a default noise would reproduce that error with a tool's
+      authority behind it. (ii) An observed-spread scale on the suggestion return, so `predicted_sd`
+      can be read against what the objective's numbers actually span, and a `None` sd is stated as
+      "a space-filling seed point, no surrogate had an opinion" instead of reading as endorsement.
+      (iii) The explore/exploit section the `experiment-design` skill's front matter advertises and
+      its body does not contain. Closes 3.5 and 3.4; gives 3.6 its defensible half.
+
+- [ ] **W2 — a screen cannot hold a continuous factor, and that is what makes three knobs inert** —
+      [S]. Measured (M-5): on the all-categorical domain `factorial_design` accepts today,
+      `n_generators`, `n_repetitions` **and** `n_center` are all no-ops — 8 runs at every value —
+      and only `randomize_runorder` bites. On a mixed domain all four work: `n_generators=1` halves
+      32 runs to 16, `n_center=0` returns exactly the corners at the two bounds, `n_repetitions=2`
+      replicates the factorial part. So admitting continuous factors is the **precondition** for the
+      other knobs, not a companion to them. The refusal being removed (`engine.py`) was right when a
+      fractional design did not exist; `_fractional_design` now performs that re-encoding
+      deliberately and `ScreeningDesign.summary` names what was given up. **Two measured traps for
+      the diff:** `n_center` defaults to **1**, so a naive change starts silently returning midpoint
+      rows; and it adds `n_center` rows *per categorical combination* (4·2^k + n_center·2^k), so the
+      run count is not `corners + n_center`. Closes the rest of 2.3 and 4.4.
+
+- [ ] **W3 — multi-objective is unrepresentable, on a corpus that records a trade-off** — [M].
+      Every ELN run carries `yield_percent`, `purity_percent` *and* `impurities[].area_percent`;
+      `OptimizationProblem` has one `objective` field, and `op-16` was graded *fabricated* for
+      promising "both objectives" anyway. Measured (M-1): `MoboStrategy` validates with no reference
+      point, fits at **n=2** (so `MIN_SEED_OBSERVATIONS` is unchanged), and returns
+      `<objective>_pred`/`_sd` per objective in the naming `_frame_to_candidates` already reads.
+      `objectives: list[Objective]` with a `mode="before"` validator that accepts the singular
+      spelling **permanently** — it is on disk in every `bo_campaigns.problem` row and in every
+      in-flight `CampaignSpec` in Temporal history. `best_of` stays scalar and raises; a separate
+      `pareto_front` in pure Python (not `compute_hypervolume` — `problem.py` is imported into the
+      agent process as the campaign job's `params_model`, and a test exists to keep `torch` out).
+      **Two things not to get wrong.** `campaign_id_for` dumps parameters with a *denylist*, so any
+      new field forks every id in the database invisibly; M-2 captured the baseline ids
+      (`campaign-6958b7edaa261c83`, `campaign-55e5f929fe83a9a5`, `campaign-109f34eac28892ab`) and
+      confirmed an allowlist reproduces them byte-identically. And the stale refusals — the tool's
+      "they are unrepresentable" and the skill's "pick the one they lead with" — must die in the
+      same commit, or the model is taught to refuse a capability that exists. Inline only: the
+      durable registry is `Callable[..., Awaitable[float]]` with two demo entries. Closes 3.3's
+      objective half; unblocks 4.5's "objectives" plural.
+
+- [ ] **W4 — a limit the chemist states cannot be expressed** — [M]. `Domain(constraints=…)` is
+      never passed, so "keep base plus acid under 3 equivalents" has to be smuggled into a bound or
+      silently ignored. Measured (M-3), and the question that mattered was not SOBO but
+      `RandomStrategy`, which seeds every cold start: **0 violations of 20** random points, **0 of
+      5** SOBO proposals, and an equality constraint puts **10 of 10** random points exactly on the
+      simplex — so no rejection-sampling path is needed and the wave stays [M]. One neutral
+      `LinearConstraint{parameters, coefficients, relation, rhs}` over `<=`/`>=`/`==`; a
+      five-member discriminated union would be the single biggest comprehensibility regression
+      available to an LLM-facing schema. BoFire itself refuses a constraint naming a categorical, so
+      our validator is for the message, not the safety. The mixture/formulation case *is*
+      `relation: "=="` and comes free — ship the mechanism, say nothing about formulations in the
+      skill until a dataset can validate it. `CategoricalExcludeConstraint` joins in scoped form
+      (M-4: refused on a mixed domain, **0 violations** on a pure categorical one), so "never
+      combine Pd(OAc)₂ with DMSO" is expressible for a screen. `note_from_campaign_result`'s
+      "Searched over:" block becomes untrue the moment constraints reach the durable path — it would
+      describe a box when the campaign searched a polytope — so it gains a "Subject to:" block in
+      the same diff. Closes 3.3's constraint half.
+
+- [ ] **W5 — nothing reads the surrogate back** — [S]. (i) `predict_outcome`: "what would the model
+      predict for 90 °C in toluene with L3", the question a chemist asks *instead of* trusting a
+      recommendation. Measured (M-6): `predict()` accepts a params-only frame, works on a featurized
+      domain, and does **not** clamp an out-of-bounds point — it extrapolates with the sd rising
+      about sixfold, which is an honest signal to surface rather than a reason to refuse. (ii)
+      Cross-validated fit quality for the model behind the current recommendation. **This one was
+      refused and the measurement reversed it** (M-7): the objection was that reaching
+      `cross_validate` means naming a surrogate class and risking a number describing a different
+      model, and in fact `strategy.surrogate_specs.surrogates[0]` exposes the surrogate BoFire
+      itself chose — 10 rows, 5 folds → R² 0.948, MAE 1.47, with no class named in our code. `shap`
+      is already installed via `bofire[optimization]`, so nothing here costs a dependency. Needs the
+      "a CV score over ten observations will be over-read" caveat as a `computed_field`, not a
+      docstring.
+
+- [ ] **The `method` note type is what analytical method development is actually waiting on** —
+      [M], and it is a schema row rather than a BO one. 24 stories sit in §7/§8 and a
+      method-development BO campaign today has neither factors nor responses to sit on: nothing can
+      record "we ran this gradient on this column and it resolved these peaks", and the story
+      audit's grep counts `mobile phase` 0, `C18` 0, `system suitability` 0. Same shape as the
+      `reaction` note that already exists; `user-story-capability-map.md` scores it as unblocking
+      eight stories alone. Only once it lands are `TargetObjective`/`CloseToTargetObjective` (a
+      stated spec: "resolution ≥ 2.0, run time ≤ 12 min") and W2's centre points and replication
+      worth building — which is why they are named in the map and not scheduled.
+
 ## Open — Found while closing the refactor (R5.3, 2026-08-03)
       **Closed. A `FingerprintSearch` envelope carries the distinction as a `computed_field` (a bare
       property would not survive `model_dump()`), the emptiness probe runs only when a search found

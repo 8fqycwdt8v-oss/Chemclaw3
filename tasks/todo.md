@@ -10,8 +10,10 @@ live probe run uses a real model and a real database with no broker, and said so
 headers; the Postgres tests use neither. The path a durable capability actually takes had been
 exercised only in pieces.
 
-_(The previous occupant of this file was the 2026-08-03 grounded-live-run fix list, completed; it
-is in `git log` and `docs/planning/BACKLOG.md`.)_
+_(The previous occupant of this file was the BoFire capability map and roadmap (#111, `3ed77cf`),
+which landed on `main` while this branch was in flight; it is in `git log`, and its outcome is in
+`docs/reference/bo-capability-map.md` and its own ADR. Before that, the 2026-08-03
+grounded-live-run fix list.)_
 
 ---
 
