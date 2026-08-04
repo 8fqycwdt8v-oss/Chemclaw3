@@ -50,6 +50,10 @@ class Component(BaseModel):
     # green-chemistry checks, so it is kept in milligrams when known.
     amount_mmol: float | None = Field(default=None, ge=0.0)
     mass_mg: float | None = Field(default=None, ge=0.0)
+    # Whatever else the source recorded about this species — a lot number, a supplier, an
+    # equivalents figure, an assay. See `OrdReaction.attributes` for why this is a bag of strings
+    # and not a set of fields.
+    attributes: dict[str, str] = Field(default_factory=dict)
 
 
 class StepKind(StrEnum):
@@ -191,6 +195,26 @@ class OrdReaction(BaseModel):
     # prose, kept verbatim so nothing a chemist wrote is dropped on ingest.
     steps: list[ReactionStep] = Field(default_factory=list)
     procedure_text: str | None = None
+    # Everything the source recorded that this schema has no field for, as the source labelled it.
+    #
+    # It exists because of what a declaratively-bound source is: `ingest.eln.warehouse` maps a
+    # site's own tables onto this model from a YAML binding, and no schema written today can name
+    # the columns a corporate ELN will carry — a lot number, an equivalents figure, an assay, a
+    # vessel id, whichever of a dozen child tables the site keeps. Without somewhere for them to
+    # land, each newly-interesting column costs an edit to this model, to `eln.note` and to their
+    # tests; with it, that column is a line of YAML. That is the whole trade, and it is the reason
+    # this field is here rather than a set of typed ones.
+    #
+    # **Strings, not values.** These are unmodelled by definition, so there is no type to validate
+    # against and no unit to normalise to. Stringifying keeps the note body deterministic (it is
+    # rendered, and amendment detection compares bodies byte-for-byte) and keeps this from becoming
+    # a second, untyped schema competing with the fields above. A datum that earns a real question
+    # earns a real field, in its own change.
+    #
+    # **Never chemistry.** `reaction_smiles`, `transformation_smiles` and both fingerprint paths
+    # ignore this entirely — a structure reaching the corpus through an unvalidated bag of strings
+    # is exactly the failure the typed fields exist to prevent.
+    attributes: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _roles_are_consistent(self) -> "OrdReaction":

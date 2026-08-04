@@ -23,7 +23,11 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
   declares and `tests/test_helm_chart.py` pins, Temporal self-hosted.
 - **F7** the generic `DataSource` seam (`chemclaw.ingest.sources`) — ELN re-hosted unchanged; a new source is one
   `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
-  core edits (D-120). First live connector (deferred): a custom Snowflake ELN source.
+  core edits (D-120). The first live connector — a Snowflake ELN — went one step further
+  (D-2026-08-04-the-schema-is-a-file): `chemclaw.ingest.eln.warehouse` is a generic engine naming no
+  table and no column, and the site's schema is a *binding* in the manifest, because a schema nobody
+  can see yet cannot be written into Python. Both halves ship, proven against a fake driver; only the
+  tenant is missing.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See

@@ -1,0 +1,194 @@
+"""Turning a binding into statements. Every value is bound; only checked identifiers are written.
+
+The rule this module exists to hold: **a binding contributes identifiers, the engine contributes
+structure, and everything else is a parameter.** Relation and column names reach the statement text,
+and each one was matched against `binding._IDENTIFIER` before it got here. The cursor timestamp, the
+entry keys of a batch, the query vector and the row limit are bound. There is no path by which a
+column *value* — anything a chemist typed into the ELN — becomes SQL.
+
+The one deliberate exception is `where:`, inserted literally. It is authored in the same file as the
+`module:callable` the same seam imports, by the same person, and reviewed the same way; a predicate
+language that could express "the site's notion of finished" without being a predicate would be a
+worse trade than trusting the file we already trust.
+
+Statements are built as text rather than through a query builder because there are four of them and
+they are shaped by the binding, not by the caller. A builder would add a dependency and an
+indirection to save nothing, and it would make the thing a test wants to assert — the exact string
+that would be sent — harder to see rather than easier.
+"""
+
+from collections.abc import Sequence
+from datetime import datetime
+from typing import Any
+
+from chemclaw.ingest.eln.warehouse.binding import (
+    BindingError,
+    EntryBinding,
+    RelatedBinding,
+    VectorBinding,
+)
+
+# How each metric is called and which way it sorts. One table because the two facts move together:
+# a distance sorts ascending and a similarity descending, and a metric added with the wrong pairing
+# would return the *least* similar rows while looking entirely correct.
+_METRICS: dict[str, tuple[str, str]] = {
+    "cosine": ("VECTOR_COSINE_SIMILARITY", "DESC"),
+    "inner": ("VECTOR_INNER_PRODUCT", "DESC"),
+    "l2": ("VECTOR_L2_DISTANCE", "ASC"),
+}
+
+# The alias the similarity expression gets, so ordering and reading agree on one name and a site
+# column called `score` cannot collide with it.
+SCORE_COLUMN = "CHEMCLAW_SCORE"
+
+
+def watermark_expression(entry: EntryBinding) -> str:
+    """The column the sync's cursor filters and orders on.
+
+    `COALESCE(modified, created)` when the source records amendments, because the ELN sync's
+    contract is that an amended entry counts as new (`chemclaw.ingest.eln.adapter.entry_window`
+    says so, and both file-drop adapters honour it). Filtering on creation alone would ingest a run
+    once and never see the correction a chemist made to it the following week.
+    """
+    if entry.modified_at:
+        return f"COALESCE({entry.modified_at}, {entry.created_at})"
+    return entry.created_at
+
+
+def entry_statement(
+    entry: EntryBinding, placeholder: str, since: datetime, limit: int
+) -> tuple[str, list[Any]]:
+    """Every reaction at or after the cursor, oldest first, bounded.
+
+    **Oldest first and bounded together.** The durable sync drains a source in chunks, persisting
+    its cursor after each one; that only makes progress if each fetch returns the *earliest*
+    outstanding rows. Ordering ascending and taking the first `limit` is exactly that, and it is
+    what keeps a first sync of a warehouse with a decade of history from being one query that tries
+    to materialise the decade.
+
+    `SELECT *` because the binding's `attributes.include: ['*']` means "every column the row has",
+    and a projection would have to know them — which is the thing nobody knows today.
+    """
+    watermark = watermark_expression(entry)
+    predicate = f"{watermark} >= {placeholder}"
+    if entry.where:
+        predicate += f" AND ({entry.where})"
+    sql = (
+        f"SELECT * FROM {entry.relation} "  # noqa: S608 - identifiers are validated, values bound
+        f"WHERE {predicate} "
+        f"ORDER BY {watermark} ASC "
+        f"LIMIT {placeholder}"
+    )
+    return sql, [since, limit]
+
+
+def related_statement(
+    block: RelatedBinding, placeholder: str, keys: Sequence[str]
+) -> tuple[str, list[Any]]:
+    """One child table's rows for a whole batch of entries — one query per block, not per row.
+
+    Per row would be the obvious loop and would issue a query per reaction per table; a batch of a
+    hundred reactions across four child tables would be four hundred round trips to a warehouse
+    that charges for them. The `IN (...)` list is a fixed number of placeholders, so the values are
+    still bound.
+    """
+    if not keys:
+        raise BindingError("related_statement needs at least one entry key")
+    markers = ", ".join(placeholder for _ in keys)
+    sql = (
+        f"SELECT * FROM {block.relation} "  # noqa: S608 - identifiers are validated, values bound
+        f"WHERE {block.foreign_key} IN ({markers})"
+    )
+    if block.order_by:
+        sql += f" ORDER BY {block.foreign_key}, {block.order_by} ASC"
+    return sql, list(keys)
+
+
+def vector_statement(
+    vector: VectorBinding,
+    placeholder: str,
+    query: str | Sequence[float],
+    filters: dict[str, Any],
+    top_k: int,
+    embedding_dim: int,
+) -> tuple[str, list[Any]]:
+    """The similarity search, ranked and truncated inside the warehouse.
+
+    Ranking server-side is the whole reason this half exists: the embedding column is already there,
+    over a corpus larger than what gets ingested, and the alternative is pulling rows out to score
+    them here. `LIMIT` is bound so the warehouse returns `top_k` rows rather than a corpus.
+
+    `query` is the embedded vector under `embedding: local`, and the raw query text under `server`,
+    where the warehouse's own function embeds it — the two paths differ only in what stands in the
+    similarity call's second argument.
+    """
+    function, direction = _METRICS[vector.metric]
+    params: list[Any] = []
+    if vector.embedding == "server":
+        # A model-taking embedder (Cortex) binds the model name ahead of the text; a plain UDF
+        # takes only the text. Both are bound, so neither reaches the statement as literal SQL.
+        if vector.server_embed_model:
+            embedded = f"{vector.server_embed_function}({placeholder}, {placeholder})"
+            params.extend([vector.server_embed_model, query])
+        else:
+            embedded = f"{vector.server_embed_function}({placeholder})"
+            params.append(query)
+    else:
+        embedded = f"{placeholder}::VECTOR(FLOAT, {embedding_dim})"
+        params.append(list(query))
+
+    columns = ", ".join([vector.key, *vector.content_columns])
+    predicates, filter_params = _vector_predicates(vector, placeholder, filters)
+    params.extend(filter_params)
+    where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    sql = (
+        f"SELECT {columns}, "  # noqa: S608 - identifiers are validated, values bound
+        f"{function}({vector.vector_column}, {embedded}) AS {SCORE_COLUMN} "
+        f"FROM {vector.relation}{where} "
+        f"ORDER BY {SCORE_COLUMN} {direction} "
+        f"LIMIT {placeholder}"
+    )
+    params.append(top_k)
+    return sql, params
+
+
+def _vector_predicates(
+    vector: VectorBinding, placeholder: str, filters: dict[str, Any]
+) -> tuple[list[str], list[Any]]:
+    """Translate the honoured evidence filters onto the site's own columns.
+
+    Only the keys the binding mapped are applied. An unmapped filter is ignored rather than guessed
+    at — inventing a column name would either error on every query or, worse, match a column that
+    means something else at this site.
+    """
+    predicates: list[str] = []
+    params: list[Any] = []
+    if vector.where:
+        predicates.append(f"({vector.where})")
+    if (tag := filters.get("tag")) and "tag" in vector.filter_columns:
+        predicates.append(f"{vector.filter_columns['tag']} = {placeholder}")
+        params.append(tag)
+    if (since := filters.get("since")) and "since" in vector.filter_columns:
+        predicates.append(f"{vector.filter_columns['since']} >= {placeholder}")
+        params.append(since)
+    if (until := filters.get("until")) and "until" in vector.filter_columns:
+        predicates.append(f"{vector.filter_columns['until']} <= {placeholder}")
+        params.append(until)
+    return predicates, params
+
+
+def normalise_score(metric: str, raw: float) -> float:
+    """Map a metric's raw result onto the 0..1 an `EvidenceChunk` carries.
+
+    A distance and a similarity are not the same quantity, and the chunk's field is documented as a
+    similarity. A distance is folded through `1/(1+d)`, which is monotonic; cosine already lands in
+    -1..1 and is clamped.
+
+    **The returned order is authoritative, not this number.** The warehouse has already ranked the
+    rows, this system fuses sources by rank position rather than by score, and an inner product is
+    genuinely unbounded — so clamping it can tie two hits at 1.0 without changing which one the
+    agent sees first. Rank is what carries the ranking; this is what a reader sees beside a chunk.
+    """
+    if metric == "l2":
+        return 1.0 / (1.0 + max(raw, 0.0))
+    return max(0.0, min(1.0, raw))

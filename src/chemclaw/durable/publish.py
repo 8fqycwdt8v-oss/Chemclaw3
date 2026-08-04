@@ -56,6 +56,16 @@ _BAD_DATA_TYPES = [
     # (Science-4, `chemclaw.science.bo.engine`). Deterministic in the data: the same duplicate
     # or degenerate points collapse the same kernel on a retry, so this is bad-data, not transient.
     "SurrogateFitError",
+    # The four ways a declaratively-bound warehouse source fails (`chemclaw.ingest.eln.warehouse`),
+    # all of them deterministic in something a retry cannot change. `BindingError`/`PathSyntaxError`
+    # are a malformed binding — the manifest is the same file on the next attempt. `TransformError`
+    # is a row carrying a value the binding's vocabulary does not cover; `WarehouseQueryError` is a
+    # relation or column the site does not have. An unreachable warehouse is deliberately *not*
+    # here: the driver raises `ConnectionError` for that, precisely so it stays retryable.
+    "BindingError",
+    "PathSyntaxError",
+    "TransformError",
+    "WarehouseQueryError",
     # A vendored dataset that is absent, malformed, or does not match its manifest checksum
     # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
     # layer and reaches the same conclusion, and the fix is a rebuild.
