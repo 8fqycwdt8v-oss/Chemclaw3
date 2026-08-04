@@ -215,16 +215,21 @@ def test_the_seeding_path_with_no_observations_is_unaffected() -> None:
 
 
 def test_the_tool_the_model_sees_states_what_is_and_is_not_supported() -> None:
-    """The description must be true about *both* halves of story 3.3, and they now differ.
+    """The description has to keep pace with the capability, and it has twice failed to.
 
-    This test used to assert the opposite — that the description said "One objective, no
-    constraints … they are unrepresentable" — because both were, and a live probe (`op-16`) was
-    graded `fabricated` for answering that it had optimized "both objectives" anyway.
+    Four states so far, and each transition broke this test on purpose — which is the point of
+    having it. Originally it asserted "One objective, no constraints … they are unrepresentable",
+    because both were, and probe `op-16` was graded `fabricated` for answering that it had optimized
+    "both objectives" anyway. W3 shipped multi-objective, so half that sentence became wrong and was
+    replaced while the constraint half survived verbatim. W4 shipped constraints, so the other half
+    went — and then, within the same wave, the exclusion turned out to be buildable after all, so
+    "a forbidden combination of categories cannot be expressed" had to go too, one commit after it
+    was written.
 
-    Multi-objective shipped in W3, so that sentence became **wrong**, and a refusal instruction that
-    outlives its refusal is worse than none: it teaches the model to decline a capability that
-    exists. Constraints did not ship, so that half of the refusal has to survive verbatim. Inverting
-    the whole assertion would have been as wrong as leaving it.
+    A refusal that outlives its refusal is worse than no refusal: it teaches the model to decline a
+    capability that exists. What is still *not* supported is stated in its own right rather than
+    inherited from an older sentence — an exclusion needs an all-categorical problem, and a screen
+    carries no constraint at all.
 
     Asserted against the served MCP description rather than the Python docstring, because that is
     what actually travels to the model.
@@ -236,11 +241,15 @@ def test_the_tool_the_model_sees_states_what_is_and_is_not_supported() -> None:
     # Supported, and said so.
     assert "Several objectives are supported" in description
     assert "front" in description
-    # Still not supported, and still said so.
-    assert "Constraints are still unrepresentable" in description
-    # The stale refusal is gone.
+    assert "problem.constraints" in description
+    assert "forbidden pairing of options" in description
+    # Scoped, and said so in its own words rather than as a blanket refusal.
+    assert "all-categorical" in description
+    # Every stale refusal is gone.
     assert "One objective, no constraints" not in description
     assert "pick the one they led with" not in description
+    assert "Constraints are still unrepresentable" not in description
+    assert "cannot be expressed here" not in description
 
 
 # --- multi-objective (W3) ---------------------------------------------------------------------

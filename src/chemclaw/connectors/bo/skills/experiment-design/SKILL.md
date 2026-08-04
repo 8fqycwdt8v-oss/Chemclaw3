@@ -46,6 +46,23 @@ line of enquiry into a design space just because a design space is what this too
 
    Keep a single objective when the chemist has one. A trade-off between yield and a cost the
    record does not measure is not a second objective; it is a conversation.
+
+   **A limit across several parameters is a constraint.** "Base plus acid under 3 equivalents",
+   "water at most 5% of the solvent", "the three fractions sum to 1" go in `problem.constraints`,
+   and the optimizer honours them — every candidate it returns satisfies them, seed points included.
+   Three things to keep straight, because getting them wrong is silent:
+
+   - A limit on **one** parameter is that parameter's **bound**, not a constraint. Writing "T under
+     80 °C" as a constraint instead of an upper bound is a worse way to say the same thing.
+   - The linear form is **continuous only**. A forbidden *pairing* of categorical options — "never
+     Pd(OAc)₂ in DMSO" — is the other constraint shape, an exclusion, and it needs an
+     all-categorical problem; a forbidden option on its own is one you leave out of the list.
+   - Write the relation the chemist stated. `>=` is supported directly, so do not flip a limit round
+     by hand — an inverted constraint is the one mistake here that yields a confident wrong answer
+     instead of an error.
+
+   `generate_screening_design` **refuses** a problem carrying constraints: a factorial screen
+   enumerates corners and honours no limit, so it would hand back runs that violate one.
 2. **Choose the decision variables** the user can actually change: continuous (temperature,
    time, equivalents, concentration) with realistic bounds, categorical (solvent, catalyst,
    base) with the specific options in play. Do not invent variables the lab cannot set, and

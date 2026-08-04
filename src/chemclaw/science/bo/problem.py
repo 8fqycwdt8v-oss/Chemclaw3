@@ -7,13 +7,20 @@ the BoFire mapping is isolated in `chemclaw.science.bo.engine` (G6).
 **Multi-objective is inline only** (W3). `suggest_next_experiment` optimizes a trade-off and returns
 the Pareto front of the runs it was given; the *durable* campaign refuses one, because
 `bo.objectives`'s registry maps a name to a scalar-returning callable and a multi-output registry
-would be an abstraction with no real caller. Constraints remain unrepresentable until W4.
+would be an abstraction with no real caller.
+
+**Constraints come in two shapes** (W4). `LinearConstraint` expresses the couplings a bound cannot —
+"base plus acid under 3 equivalents", a mixture summing to 1 — over continuous parameters, and
+`ExcludeConstraint` forbids a *pairing* of two categorical options that are each fine alone. Both
+the seeding and the proposing strategy honour them (measured); a factorial screen honours neither,
+so `factorial_design` refuses a constrained problem rather than returning runs that violate it.
 
 This module is the campaign job's `params_model`, so it is imported into the agent process — which
 `tests/test_connector_isolation.py` keeps `torch` out of. Nothing here may import BoFire, even for
 something BoFire ships (`pareto_front` is hand-written for exactly that reason).
 """
 
+from itertools import product
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, model_validator
@@ -125,16 +132,125 @@ class Objective(BaseModel):
     direction: Literal["minimize", "maximize"] = "minimize"
 
 
-class OptimizationProblem(BaseModel):
-    """A full problem: the decision variables and the objective(s) to optimize.
+class LinearConstraint(BaseModel):
+    """A limit the chemist states across *several* parameters at once (W4).
 
-    One field rather than a lead objective plus a sidecar list (W3). The sidecar shape guarantees
-    that a lone objective sometimes lands in the wrong one, and it bakes a "primary" fiction into a
-    Pareto front where every axis is symmetric.
+    A limit on one parameter is its bound and belongs there. This type exists for the couplings a
+    bound cannot express — "base plus acid must not exceed 3 equivalents", "water is at most 5% of
+    the solvent", "these three fractions sum to 1" (which is the mixture/formulation case, and comes
+    free as `relation: "=="`).
+
+    **One kind, covering all three relations.** A discriminated union of five constraint types would
+    be the single biggest comprehensibility regression available to an LLM-facing schema, and the
+    linear family is the only one any continuous story asks for. `kind` discriminates it from the
+    one genuinely different shape (`ExcludeConstraint`), so widening later stays additive and never
+    changes a linear one's wire shape.
+
+    **Continuous parameters only.** The acquisition optimizer applies constraints to the continuous
+    subspace and enumerates the categorical one, and BoFire itself refuses a constraint naming a
+    categorical feature (measured) — so the validator here exists to turn a pydantic error into a
+    sentence naming the parameter, not to be the safety.
+    """
+
+    kind: Literal["linear"] = "linear"
+    parameters: list[str] = Field(min_length=1)
+    coefficients: list[float] = Field(min_length=1)
+    relation: Literal["<=", ">=", "=="] = "<="
+    rhs: float
+
+    @model_validator(mode="after")
+    def _one_coefficient_per_parameter(self) -> "LinearConstraint":
+        """A coefficient each, and no parameter named twice."""
+        if len(self.parameters) != len(self.coefficients):
+            raise ValueError(
+                f"constraint over {self.parameters!r} has {len(self.coefficients)} coefficient(s); "
+                "give exactly one per parameter"
+            )
+        if len(set(self.parameters)) != len(self.parameters):
+            raise ValueError(f"constraint names a parameter twice: {self.parameters!r}")
+        return self
+
+    def describe(self) -> str:
+        """The constraint in the chemist's own relation, for a note or a message."""
+        terms = " + ".join(
+            f"{coefficient:g}·{name}" if coefficient != 1.0 else name
+            for name, coefficient in zip(self.parameters, self.coefficients, strict=True)
+        )
+        return f"{terms} {self.relation} {self.rhs:g}"
+
+
+class ExcludeConstraint(BaseModel):
+    """Two categorical options that must never be combined — "no Pd(OAc)₂ in DMSO" (W4).
+
+    A forbidden *option* is one left out of a category list. This type is for the case a category
+    list cannot express: each option is fine on its own and only the *pairing* is forbidden, which
+    is how incompatibility usually arrives from a chemist.
+
+    **Exactly two parameters, both categorical**, mirroring `LinearConstraint`'s
+    parameter-and-its-value pairing so the two constraint shapes read the same way. BoFire's
+    equivalent takes exactly two features, and the `options` lists are ANDed: every pairing in the
+    cross product of the two lists is excluded.
+
+    **Only on an all-categorical problem.** Measured: BoFire refuses this constraint on a domain
+    that also holds a continuous parameter ("can only be used for pure categorical/discrete search
+    spaces"), and it refuses it for a factorial screen outright. Both refusals are re-stated here in
+    the caller's own vocabulary, because a pydantic error naming a BoFire class is not something a
+    caller can repair from.
+    """
+
+    kind: Literal["exclude"] = "exclude"
+    parameters: list[str] = Field(min_length=2, max_length=2)
+    options: list[list[str]] = Field(min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def _each_parameter_lists_options(self) -> "ExcludeConstraint":
+        """An option list each, non-empty, and no parameter named twice."""
+        if self.parameters[0] == self.parameters[1]:
+            raise ValueError(f"exclusion names one parameter twice: {self.parameters[0]!r}")
+        for name, options in zip(self.parameters, self.options, strict=True):
+            if not options:
+                raise ValueError(f"exclusion names no option of {name!r}; list at least one")
+            if len(set(options)) != len(options):
+                raise ValueError(f"exclusion lists an option of {name!r} twice: {options!r}")
+        return self
+
+    def describe(self) -> str:
+        """The exclusion in the chemist's own words, for a note or a message."""
+        sides = [
+            f"{name}={'|'.join(options)}"
+            for name, options in zip(self.parameters, self.options, strict=True)
+        ]
+        return f"never {sides[0]} with {sides[1]}"
+
+    def forbids(self, params: dict[str, ParamValue]) -> bool:
+        """Whether one parameter assignment is the pairing this excludes.
+
+        The one definition of "excluded", so the space accounting and any later filter cannot drift
+        apart the way a re-implemented predicate would.
+        """
+        return all(
+            params.get(name) in set(options)
+            for name, options in zip(self.parameters, self.options, strict=True)
+        )
+
+
+# Discriminated union so a serialized constraint round-trips to the right type. Two members, not
+# five: the linear family collapses into one shape, and an exclusion is the one thing that genuinely
+# is not a linear form.
+Constraint = Annotated[LinearConstraint | ExcludeConstraint, Field(discriminator="kind")]
+
+
+class OptimizationProblem(BaseModel):
+    """A full problem: the decision variables, the objective(s), and any cross-parameter limits.
+
+    One `objectives` field rather than a lead objective plus a sidecar list (W3). The sidecar shape
+    guarantees that a lone objective sometimes lands in the wrong one, and it bakes a "primary"
+    fiction into a Pareto front where every axis is symmetric.
     """
 
     parameters: list[Parameter] = Field(min_length=1)
     objectives: list[Objective] = Field(min_length=1)
+    constraints: list[Constraint] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -196,6 +312,78 @@ class OptimizationProblem(BaseModel):
         if clashes:
             raise ValueError(f"{clashes} is both a parameter and an objective; names must differ")
         return self
+
+    @model_validator(mode="after")
+    def _constraints_resolve(self) -> "OptimizationProblem":
+        """Every constraint names declared parameters, of the kind that constraint can hold.
+
+        BoFire refuses each of these too — a linear form naming a categorical (`Feature solvent is
+        not a continuous input feature`), an exclusion on a domain that also holds a continuous
+        parameter ("pure categorical/discrete search spaces") — so this validator is about the
+        *message*: a pydantic error naming a BoFire internal is not something a caller can repair
+        from, and an undeclared parameter would otherwise surface far from the mistake.
+        """
+        declared = {p.name for p in self.parameters}
+        continuous = {p.name for p in self.parameters if isinstance(p, ContinuousParameter)}
+        options = {
+            p.name: set(p.categories)
+            for p in self.parameters
+            if isinstance(p, CategoricalParameter)
+        }
+        for constraint in self.constraints:
+            unknown = sorted(set(constraint.parameters) - declared)
+            if unknown:
+                raise ValueError(
+                    f"constraint {constraint.describe()!r} names undeclared parameter(s) "
+                    f"{unknown}; this problem declares {sorted(declared)}"
+                )
+            if isinstance(constraint, LinearConstraint):
+                categorical = sorted(set(constraint.parameters) - continuous)
+                if categorical:
+                    raise ValueError(
+                        f"constraint {constraint.describe()!r} names categorical parameter(s) "
+                        f"{categorical}. A linear constraint applies to continuous parameters "
+                        "only — to forbid a *combination* of two options use an exclusion instead, "
+                        "and to forbid one option leave it out of the category list."
+                    )
+                continue
+            self._check_exclusion(constraint, continuous, options)
+        return self
+
+    def _check_exclusion(
+        self,
+        constraint: ExcludeConstraint,
+        continuous: set[str],
+        options: dict[str, set[str]],
+    ) -> None:
+        """An exclusion needs two categorical parameters, real options, and no continuous knob.
+
+        The whole-problem condition is the surprising one and belongs on the exclusion that caused
+        it: BoFire applies this constraint by enumerating the search space, so a single continuous
+        parameter anywhere in the problem makes it unenumerable and the constraint unusable.
+        """
+        named_continuous = sorted(set(constraint.parameters) & continuous)
+        if named_continuous:
+            raise ValueError(
+                f"exclusion {constraint.describe()!r} names continuous parameter(s) "
+                f"{named_continuous}; an exclusion pairs two *categorical* options. State a "
+                "continuous limit as a linear constraint or as that parameter's bounds."
+            )
+        for name, stated in zip(constraint.parameters, constraint.options, strict=True):
+            unknown = sorted(set(stated) - options[name])
+            if unknown:
+                raise ValueError(
+                    f"exclusion {constraint.describe()!r} names option(s) {unknown} that "
+                    f"{name!r} does not have; its categories are {sorted(options[name])}"
+                )
+        if continuous:
+            raise ValueError(
+                f"exclusion {constraint.describe()!r} needs an all-categorical problem, and this "
+                f"one declares continuous parameter(s) {sorted(continuous)}. BoFire applies an "
+                "exclusion by enumerating the search space, which a continuous parameter makes "
+                "infinite. Fix the continuous parameters to a short list of levels, or drop the "
+                "exclusion and reject the forbidden pairing when you read the suggestions."
+            )
 
 
 class Observation(BaseModel):
@@ -612,14 +800,33 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
     all-categorical problem it is the product of the category counts — the size at
     which unique-candidate proposals exhaust the space and BoFire's discrete
     acquisition can no longer return a fresh point.
+
+    **An exclusion removes whole cells, so the product over-counts** (W4): a 2×2×2 space minus one
+    forbidden catalyst/solvent pairing holds six candidates, not eight. Every caller of this number
+    acts on it — the seeding guard refuses `n` above it, and `space_exhausted` decides a campaign is
+    finished by it — so an over-count would let a loop keep asking for points that cannot exist.
+    The feasible cells are counted by enumeration rather than by inclusion–exclusion, because
+    exclusions can overlap and this space is small by construction: it is the space a unique-seeding
+    loop already walks one point at a time. The enumeration is skipped entirely when there is
+    nothing to exclude, so the cost appears only where the exclusion does.
     """
+    counts: list[tuple[str, list[str]]] = []
     total = 1
     for parameter in problem.parameters:
         if isinstance(parameter, CategoricalParameter):
+            counts.append((parameter.name, list(parameter.categories)))
             total *= len(parameter.categories)
         else:
             return None
-    return total
+    exclusions = [c for c in problem.constraints if isinstance(c, ExcludeConstraint)]
+    if not exclusions:
+        return total
+    names = [name for name, _ in counts]
+    return sum(
+        1
+        for cell in product(*(options for _, options in counts))
+        if not any(x.forbids(dict(zip(names, cell, strict=True))) for x in exclusions)
+    )
 
 
 def params_key(params: dict[str, ParamValue]) -> tuple[tuple[str, ParamValue], ...]:

@@ -248,12 +248,24 @@ async def suggest_next_experiment(
     "best" point for a multi-objective problem, because there is not one. Every observation must
     then report every objective, in its `values` map.
 
-    **Constraints are still unrepresentable.** There is no field for a limit of any kind — not
-    partially supported, absent. A limit the chemist stated ("keep the temperature under 80 °C", "no
-    more than 2 equivalents") has to be built into the parameter bounds or the category list,
-    because the optimizer will not honour it otherwise. A limit *across* parameters ("base plus acid
-    under 3 equivalents") cannot be expressed at all yet — say so rather than approximating it with
-    a bound that does not mean the same thing.
+    **A limit across several parameters is a constraint; give it as one.** "Base plus acid under 3
+    equivalents", "water at most 5% of the solvent", "these fractions sum to 1" go in
+    `problem.constraints` as `{parameters, coefficients, relation, rhs}`, and the optimizer honours
+    them — every candidate it returns satisfies them, including the space-filling seed points.
+
+    A limit on **one** parameter is not a constraint: "keep the temperature under 80 °C" is that
+    parameter's upper bound, and writing it as a constraint instead is a worse way to say the same
+    thing. That linear form applies to continuous parameters only. Note that a constraint makes the
+    search **several times slower** — measured, about three times the unconstrained cost for one
+    candidate and roughly nine seconds per further candidate — so ask for a small batch on a
+    constrained problem.
+
+    **A forbidden pairing of options is the other constraint shape.** "Never Pd(OAc)₂ in DMSO" is
+    `{"kind": "exclude", "parameters": [...], "options": [[...], [...]]}` — for options that are
+    each fine alone and only bad together. A forbidden option on its own is simply one you leave out
+    of the category list. An exclusion needs an **all-categorical** problem: BoFire applies it by
+    enumerating the space, so one continuous parameter anywhere makes it unusable and the tool will
+    say so.
 
     **Continuing an earlier campaign?** Call `resume_campaign(campaign_id)` first to recover the
     decision space and the runs it already has, then add the new results and call this tool.
@@ -270,9 +282,10 @@ async def suggest_next_experiment(
     data. This costs one fast calculation per option and is cached thereafter.
 
     Args:
-        problem: The decision variables (continuous/categorical) and the objective(s) — each a
-            name plus minimize/maximize. Set a categorical's `structures` when its options are
-            molecules.
+        problem: The decision variables (continuous/categorical), the objective(s) — each a name
+            plus minimize/maximize — and any `constraints`: a linear limit coupling two or more
+            continuous parameters, or an exclusion forbidding a pairing of categorical options.
+            Set a categorical's `structures` when its options are molecules.
         observations: Runs already done, each mapping the parameter values to the objective
             value. Every observation must give a value for *every* parameter `problem` declares
             and name no others — a run whose conditions you only partly know cannot seed this. For
@@ -480,6 +493,11 @@ async def generate_screening_design(
     Both `n_center` and `n_repetitions` need at least one continuous factor and are **refused** on
     an all-categorical problem: BoFire ignores them there, and a silently ignored argument is worse
     than an error. Repeat an all-categorical screen yourself if you want replicates.
+
+    **A problem carrying constraints is refused here.** A factorial screen enumerates the corners of
+    the space and honours no limit, so it would hand back runs that violate one. Either drop the
+    constraint and filter the returned runs yourself — saying that you did — or use
+    `suggest_next_experiment`, which does honour it.
 
     Args:
         problem: The decision variables and the objective (its direction is not used by a screening
