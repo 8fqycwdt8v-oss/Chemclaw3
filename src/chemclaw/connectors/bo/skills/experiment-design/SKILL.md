@@ -6,7 +6,8 @@ description: >-
   a screen, an optimization series, a factor table. Turns that into a concrete
   Bayesian-optimization problem, calls suggest_next_experiment or generate_screening_design, and
   presents the proposal as something a human still runs. Also for explaining why the optimizer
-  chose a point (explore vs exploit) and for judging whether a campaign has plateaued. Applies
+  chose a point (explore vs exploit), for answering what the model expects at conditions the
+  chemist names, and for judging whether a campaign has plateaued. Applies
   however the ask is phrased, including "what should I run next/tomorrow" — a clean table of runs
   is the trigger, not the wording.
 tools:
@@ -14,6 +15,7 @@ tools:
   - resume_campaign
   - generate_screening_design
   - campaign_progress
+  - predict_outcome
   - propose_knowledge_note
 ---
 
@@ -144,6 +146,33 @@ return's `summary` already makes the comparison; quote it rather than recomputin
 Do not turn the sd into a confidence interval on the outcome. It is what the model believed
 *before* the experiment; the measured value will come from the assay, and the two are different
 quantities.
+
+## Asking the model instead of trusting it
+
+`predict_outcome` answers a question about a point **the chemist named** — "what would it give at
+90 °C in toluene with L3?", "is 60 °C enough?" — from the same surrogate `suggest_next_experiment`
+proposes from. Reach for it whenever the ask is a *what-if* rather than a *what next*, and whenever
+someone is deciding whether to act on a suggestion at all.
+
+Three things it gives you and one it does not:
+
+- Each prediction's `sds` is the surrogate's spread at that point, read the same way a candidate's
+  is. Each prediction's `summary` states that it endorses nothing — **a prediction is not a
+  proposal**, and presenting one as a recommendation is the overclaim this tool makes easy to avoid.
+- `in_domain: false` means the point lies outside the declared range. The model **extrapolates**
+  there rather than refusing, so the mean is unconstrained and the sd widens sharply. Say both.
+- `fit` is the cross-validated quality of that surrogate, one score per objective, and its summary
+  carries the caveat. Quote it before quoting a prediction: an R² of 0.5 means the predictions
+  below it are worth very little, and over a handful of runs even a high one is a sanity check
+  rather than a measure of accuracy. Do not report a score without the run count beside it.
+- It does **not** record anything. The points are questions, not proposals, so nothing is added to
+  the campaign — use `suggest_next_experiment` when the chemist wants something to run.
+
+**"Is there an unexplored corner, or have we been circling one region?"** is a posterior question,
+not a run-list question — and this is the tool for it. Predict at a few corners of the space and
+compare their `sds` against a point among the runs already done: a much larger sd is a region the
+model knows nothing about, a similar one means the search has already covered it. Answering that
+from the observations alone is exactly the fabrication `op-13` was graded on.
 
 ## Has it plateaued?
 

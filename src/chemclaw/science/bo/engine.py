@@ -34,6 +34,7 @@ from bofire.data_models.constraints.api import (
     SelectionCondition,
 )
 from bofire.data_models.domain.api import Constraints, Domain, Inputs, Outputs
+from bofire.data_models.enum import RegressionMetricsEnum
 from bofire.data_models.features.api import (
     CategoricalDescriptorInput,
     CategoricalInput,
@@ -48,6 +49,7 @@ from bofire.data_models.strategies.api import (
     SoboStrategy,
 )
 from bofire.strategies import api as strategies
+from bofire.surrogates import api as surrogate_api
 from bofire.utils.doe import get_generator
 from botorch.exceptions.errors import BotorchError, ModelFittingError
 from linear_operator.utils.errors import NanError, NotPSDError
@@ -61,13 +63,16 @@ from chemclaw.science.bo.problem import (
     Constraint,
     ContinuousParameter,
     ExcludeConstraint,
+    FitQuality,
     Observation,
     OptimizationProblem,
     ParamValue,
+    Prediction,
     ScreeningDesign,
     discrete_candidate_count,
     observed_value,
     params_key,
+    point_in_domain,
 )
 
 
@@ -375,6 +380,30 @@ def propose_candidates(
         raise ValueError(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
+    strategy, _ = _fitted_strategy(problem, observations, seed)
+    with _translating_surrogate_errors(f"asking for {n} candidate(s)"):
+        candidates = strategy.ask(n)
+    return _frame_to_candidates(problem, candidates)
+
+
+def _fitted_strategy(
+    problem: OptimizationProblem, observations: list[Observation], seed: int | None
+) -> tuple[Any, pd.DataFrame]:
+    """Build the strategy the problem calls for and fit it to the observations.
+
+    Shared by the three things that need a fitted model — propose, predict, cross-validate — so all
+    three speak about *the same* surrogate rather than three independently configured ones. That is
+    the whole reason `surrogate_fit_quality` is trustworthy: BoFire picks the surrogate class from
+    the domain, so a fit quality measured off this strategy describes the model that made the
+    recommendation, and no surrogate class is named in our code (measured, M-7).
+
+    The fitted frame is returned beside the strategy because cross-validation needs the same rows,
+    and rebuilding them would be a second definition of "the experiments".
+    """
+    if len(observations) < MIN_SEED_OBSERVATIONS:
+        raise ValueError(
+            f"a surrogate needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
+        )
     domain = _to_domain(problem)
     resolved = _resolve_seed(seed)
     specification = (
@@ -383,11 +412,119 @@ def propose_candidates(
         else SoboStrategy(domain=domain, seed=resolved)
     )
     strategy = strategies.map(specification)
+    frame = _observations_to_frame(problem, observations)
     context = f"fitting the surrogate to {len(observations)} observation(s)"
     with _translating_surrogate_errors(context):
-        strategy.tell(_observations_to_frame(problem, observations))
-        candidates = strategy.ask(n)
-    return _frame_to_candidates(problem, candidates)
+        strategy.tell(frame)
+    return strategy, frame
+
+
+def predict_at(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    points: list[dict[str, ParamValue]],
+    seed: int | None = None,
+) -> list[Prediction]:
+    """Answer "what would the model predict at these conditions?" (W5).
+
+    The question a chemist asks *instead of* trusting a recommendation — "what does it expect at
+    90 °C in toluene with L3?" — answered from the same fit `propose_candidates` uses, so the two
+    cannot disagree.
+
+    Measured (M-6): `predict()` exists after `tell`, accepts a frame of parameters with no objective
+    columns, and works on a `CategoricalDescriptorInput` domain, which is the shape a featurized
+    problem actually reaches the engine as. An out-of-domain point is **not** clamped — it
+    extrapolates, with the sd rising about sixfold — so the point is answered and labelled rather
+    than refused; `Prediction.in_domain` carries the label and its summary states it.
+
+    Raises:
+        ValueError: Below the surrogate's observation floor, or with no point to predict.
+    """
+    if not points:
+        raise ValueError("predict_at needs at least one point to predict")
+    strategy, _ = _fitted_strategy(problem, observations, seed)
+    frame = pd.DataFrame(
+        [{p.name: point.get(p.name) for p in problem.parameters} for point in points]
+    )
+    with _translating_surrogate_errors(f"predicting at {len(points)} point(s)"):
+        predicted = strategy.predict(frame)
+    return [
+        Prediction(
+            params={p.name: _cast(p, frame.iloc[index][p.name]) for p in problem.parameters},
+            values={
+                objective.name: float(predicted.iloc[index][f"{objective.name}_pred"])
+                for objective in problem.objectives
+            },
+            sds={
+                objective.name: float(predicted.iloc[index][f"{objective.name}_sd"])
+                for objective in problem.objectives
+            },
+            in_domain=point_in_domain(problem, points[index]),
+        )
+        for index in range(len(points))
+    ]
+
+
+def _metric(results: Any, metric: RegressionMetricsEnum) -> float:
+    """One number from a `CvResults`, pooled across folds rather than averaged over them.
+
+    `get_metric` returns a `pd.Series`, and its default `combine_folds=True` computes the metric
+    once over *all* held-out predictions together. That is the number to report: a mean of
+    per-fold R² weights a fold of two points the same as a fold of ten, and at campaign sizes the
+    folds are exactly that uneven.
+    """
+    return float(results.get_metric(metric).iloc[0])
+
+
+def surrogate_fit_quality(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    folds: int | None = None,
+    seed: int | None = None,
+) -> list[FitQuality]:
+    """Cross-validate the surrogate behind the recommendation, one score per objective (W5).
+
+    **This capability was refused, and a measurement reversed the refusal.** The objection was that
+    reaching `cross_validate` means naming a surrogate class here, permanently coupling us to
+    BoFire's model zoo and risking a number that describes a *different* model than the one that
+    made the recommendation. Measured (M-7), `strategy.surrogate_specs.surrogates` exposes the
+    surrogates BoFire itself chose from the domain — `MixedSingleTaskGPSurrogate` for a mixed
+    domain, `SingleTaskGPSurrogate` for a featurized one — and `cross_validate` runs straight off
+    them. So no class is named below, and the score describes *the* model.
+
+    `folds` defaults to `bo_cv_folds`. Metrics come back keyed by `RegressionMetricsEnum`, not by
+    string, so the enum is what is read.
+
+    Raises:
+        ValueError: Below the observation floor, or with fewer observations than folds.
+    """
+    resolved_folds = settings.bo_cv_folds if folds is None else folds
+    if resolved_folds < 2:
+        raise ValueError(f"cross-validation needs at least 2 folds; got {resolved_folds}")
+    strategy, frame = _fitted_strategy(problem, observations, seed)
+    if len(observations) < resolved_folds:
+        raise ValueError(
+            f"cannot cross-validate {len(observations)} observation(s) over {resolved_folds} "
+            "folds: each fold would hold out less than one run. Supply more runs, or ask for "
+            "fewer folds."
+        )
+    scores = []
+    with _translating_surrogate_errors(f"cross-validating over {resolved_folds} folds"):
+        for objective, specification in zip(
+            problem.objectives, strategy.surrogate_specs.surrogates, strict=True
+        ):
+            surrogate = surrogate_api.map(specification)
+            _, test, _ = surrogate.cross_validate(frame, folds=resolved_folds)
+            scores.append(
+                FitQuality(
+                    objective=objective.name,
+                    r2=_metric(test, RegressionMetricsEnum.R2),
+                    mae=_metric(test, RegressionMetricsEnum.MAE),
+                    folds=resolved_folds,
+                    n_observations=len(observations),
+                )
+            )
+    return scores
 
 
 def _resolution(generator: str) -> int:

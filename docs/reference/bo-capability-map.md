@@ -73,9 +73,9 @@ statement about *why* it proposed a point reaches the note a human signs.
 | 4.3 | which reagents/catalysts should go in the campaign | `SERVED` for the electronic axis | `featurize.py`'s xTB descriptors let the surrogate speak about a ligand nobody has run. **No steric axis** — two ligands differing mainly in bulk look alike |
 | 2.3 / 4.4 | a screening plan; the full grid or a smarter reduced one | `SERVED` | `generate_screening_design` — full grid or a fractional design whose `resolution` and `summary` state what was confounded, over categorical **and** continuous factors (the latter held at their two bounds and named as such), plus centre points, replication and seeded run-order randomisation (W2) |
 | — | pick the best molecule from a library without evaluating all of it | `SERVED` | `molecule_library_problem` + candidate-set BO by exhaustive discrete acquisition |
-| 3.4 | explain why it suggests these conditions (exploring vs exploiting) | `SERVED` | `ExperimentSuggestion.scale` gives what the objective spans in the runs supplied, and its `summary` reads each candidate's `predicted_sd` against that spread in three bands, naming a missing sd as a seed point rather than as confidence (W1) |
+| 3.4 | explain why it suggests these conditions (exploring vs exploiting) | `SERVED` | `ExperimentSuggestion.scale` gives what the objective spans in the runs supplied, and its `summary` reads each candidate's `predicted_sd` against that spread in three bands, naming a missing sd as a seed point rather than as confidence (W1). `predict_outcome` extends the same reading to a point the *chemist* named, with the cross-validated fit quality of the surrogate behind it (W5) |
 | 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | `SERVED` | `objectives` is a list; `MoboStrategy` searches the trade-off and `ExperimentSuggestion.front` returns the non-dominated subset of the runs supplied, `best_of` raising rather than picking an axis (W3). `constraints` carries a linear limit over continuous parameters (`<=`/`>=`/`==`, so a mixture summing to 1 comes free) or an exclusion forbidding a pairing of categorical options; both the seeding and the proposing strategy honour them, and a screen refuses them (W4) |
-| 3.5 | has this optimization plateaued | `SERVED` | `campaign_progress(problem, observations, assay_noise, window)` — evaluations since a gain beyond the noise, the recent window's spread, a plateau verdict, and a summary stating the limit. `assay_noise` is required with no default, which is what stops `op-13`'s fabrication recurring with a tool behind it (W1) |
+| 3.5 | has this optimization plateaued | `SERVED` | `campaign_progress(problem, observations, assay_noise, window)` — evaluations since a gain beyond the noise, the recent window's spread, a plateau verdict, and a summary stating the limit. `assay_noise` is required with no default, which is what stops `op-13`'s fabrication recurring with a tool behind it (W1). `op-13`'s other half — is there an unexplored corner — is a posterior question, answered by predicting at corners and comparing sds (W5) |
 | 4.5 | rank a completed campaign against my objectives | `PARTIAL` | plural objectives now expressible (W3), so what remains is the aggregate-over-a-set half — a retrieval gap, not a BO one |
 | 3.6 | how much effort did optimization save versus screening | `PARTIAL` | no cost or labour field exists on any record, so the effort half stays blocked. The design-space half is served: `campaign_progress` reports distinct conditions against the full grid, which is a defensible efficiency claim with zero labour data (W1) |
 | 7.x / 8.x | HPLC method development: starting conditions, robustness, transfer | `BLOCKED-UPSTREAM` | not a BO gap. See §4 |
@@ -138,11 +138,12 @@ link into the calculation cache that a fingerprint has no equivalent of.
 
 **Surrogates and diagnostics** — the whole model zoo is unconfigured, which is fine: BoFire's
 per-domain default is a reasonable choice and naming a class would couple us to its model zoo
-permanently. What is *not* fine is that nothing reads the fit back. `cross_validate` and
-`permutation_importance` are reachable **through the surrogate BoFire itself chose**
-(`strategy.surrogate_specs`) — measured, see §5 W5. `strategy.predict()` answers a chemist's
-what-if. `IterativeTrimming` (outlier-robust GP), `PairwiseGPSurrogate` (preference learning),
-`RobustSingleTaskGPSurrogate`: no caller.
+permanently. Reading the fit back was the gap, and **W5 closed it without naming a class**:
+`predict_outcome` answers a chemist's what-if from `strategy.predict()` and reports
+`cross_validate`'s score off the surrogate `strategy.surrogate_specs` says BoFire chose, so the
+number describes the model that made the recommendation. `permutation_importance` is reachable the
+same way and stays unbuilt (`DEFERRED.md`). `IterativeTrimming` (outlier-robust GP),
+`PairwiseGPSurrogate` (preference learning), `RobustSingleTaskGPSurrogate`: no caller.
 
 **Strategies with no caller at all** — `ActiveLearningStrategy`, `MultiFidelity*`,
 `ShortestPathStrategy`, `StepwiseStrategy`, `LLMStrategy`, `EntingStrategy` (which defaults to a

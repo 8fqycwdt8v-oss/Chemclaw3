@@ -445,6 +445,89 @@ class Candidate(BaseModel):
     predicted_sds: dict[str, float] = Field(default_factory=dict)
 
 
+class Prediction(BaseModel):
+    """What the surrogate believes about a point **the caller** named (W5).
+
+    A separate type from `Candidate` on purpose, holding the same two numbers. A candidate is
+    something the optimizer chose and therefore carries an implicit endorsement — run this next.
+    A prediction is an answer to a question the chemist asked instead of trusting a recommendation,
+    and it endorses nothing. Sharing one type would make the two indistinguishable at the point
+    where the difference matters most, which is a summary a human reads before booking lab time.
+
+    `in_domain` is false when any parameter falls outside its declared range or category list.
+    Measured: BoFire does **not** clamp such a point — it extrapolates, with the posterior sd
+    rising roughly sixfold (1.60/2.60 in range against 16.08 at T=400 on a 20–120 bound). That
+    rising sd is an honest signal and a better answer than a refusal, provided the reader is told
+    which side of the bound they are on, which is what this flag is for.
+    """
+
+    params: dict[str, ParamValue]
+    values: dict[str, float]
+    sds: dict[str, float]
+    in_domain: bool = True
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> str:
+        """The prediction in one sentence, with what it is not.
+
+        A `computed_field` rather than a plain property, because a bare property is not serialized
+        and the caveat would then never reach the model that asked (the idiom W1 established).
+        """
+        stated = "; ".join(
+            f"{name} {value:.4g} ± {self.sds.get(name, 0.0):.3g}"
+            for name, value in sorted(self.values.items())
+        )
+        answer = (
+            f"The model predicts {stated} here. This is an answer about a point you named, not a "
+            "recommendation to run it — the optimizer was not asked what to try next."
+        )
+        if self.in_domain:
+            return answer
+        return (
+            f"{answer} This point is **outside** the declared range, so the model is "
+            "extrapolating: nothing constrains the mean, and the widened sd is the only part of "
+            "this prediction that is honest about that."
+        )
+
+
+class FitQuality(BaseModel):
+    """How well the surrogate behind a recommendation predicts held-out runs (W5).
+
+    Cross-validated on the observations supplied, per objective. `folds` and `n_observations` are
+    carried because a score without them cannot be read: R² 0.95 over ten runs and R² 0.95 over two
+    hundred are different claims, and only one of them is about the chemistry.
+    """
+
+    objective: str
+    r2: float
+    mae: float = Field(ge=0.0)
+    folds: int = Field(ge=2)
+    n_observations: int = Field(ge=2)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> str:
+        """The score with the caveat attached, for the same reason `Prediction.summary` has one.
+
+        The caveat is not decoration. A cross-validated R² over a campaign's worth of runs is the
+        most over-readable number this module produces: it looks like a statement about the
+        chemistry and is a statement about ten points.
+        """
+        stated = (
+            f"Cross-validated on {self.n_observations} run(s) over {self.folds} folds, the "
+            f"surrogate for {self.objective!r} predicts held-out runs with R² {self.r2:.3f} and "
+            f"mean absolute error {self.mae:.3g}."
+        )
+        if self.n_observations >= settings.bo_fit_quality_trustworthy_observations:
+            return stated
+        return (
+            f"{stated} Read it as a sanity check, not as accuracy: with fewer than "
+            f"{settings.bo_fit_quality_trustworthy_observations} runs each fold holds out a "
+            "handful of points, so this number moves a lot on one unlucky split."
+        )
+
+
 # What a design's resolution means for the reader, in the terms the reader cares about. Only III and
 # IV change how a screen's effects may be read; V and above confound nothing below a three-factor
 # interaction, which a screening design is not trying to estimate anyway — hence one shared sentence
@@ -827,6 +910,28 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
         for cell in product(*(options for _, options in counts))
         if not any(x.forbids(dict(zip(names, cell, strict=True))) for x in exclusions)
     )
+
+
+def point_in_domain(problem: OptimizationProblem, params: dict[str, ParamValue]) -> bool:
+    """Whether every parameter of one point lies inside its declared range or category list (W5).
+
+    Not a validator — a *label*. BoFire does not clamp an out-of-domain point (measured); it
+    extrapolates, and the honest answer is the prediction plus the fact that it is an extrapolation.
+    A refusal would withhold a number the chemist can read correctly once told which side of the
+    bound they are on, so this decides what a `Prediction` says about itself rather than whether one
+    exists at all. Constraints are deliberately not consulted: they bound where the *optimizer* may
+    propose, and a chemist may legitimately ask what the model expects at a point they cannot run.
+    """
+    for parameter in problem.parameters:
+        value = params.get(parameter.name)
+        if isinstance(parameter, ContinuousParameter):
+            if not isinstance(value, int | float) or not (
+                parameter.lower <= float(value) <= parameter.upper
+            ):
+                return False
+        elif value not in parameter.categories:
+            return False
+    return True
 
 
 def params_key(params: dict[str, ParamValue]) -> tuple[tuple[str, ParamValue], ...]:
