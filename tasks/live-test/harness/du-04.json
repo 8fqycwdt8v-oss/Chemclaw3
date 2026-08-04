@@ -1,0 +1,176 @@
+{
+  "probe": {
+    "id": "du-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What long-running work has this system actually done for us, and who asked for it? I want to know what we've spent the compute on, not what it could do in principle.",
+    "expects_tools": [
+      "find_past_jobs",
+      "get_durable_job_status",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a job, requester or date that is not in the job record",
+      "a compute cost, core-hour or spend figure",
+      "that no durable work has ever been run, when the record holds some"
+    ],
+    "direction": "Deliberately the one probe here that must *not* start a job: the question is about the record of past runs, and launching a new one to answer it would be the wrong instinct. Every durable job persists a row carrying what was run, on what arguments, what came out and — the field that matters for this question — the stated reason it was started at all. So the answer is a retrieval: which jobs ran, who requested each and why. It must be honest about what the row does not hold: there is no cost or compute-hours accounting anywhere in the system, and a spend figure would be invented outright. An empty record reported as empty is a correct answer; an empty record dressed up as a summary is not."
+  },
+  "outcome": {
+    "probe_id": "du-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What long-running work has this system actually done for us, and who asked for it? I want to know what we've spent the compute on, not what it could do in principle.",
+    "answer": "I'll start by surveying what durable jobs actually exist in the system's record — that tells me the shape of the answer before I plan how to present it.This first sweep already shows something important: several of these aren't real chemistry requests at all — they're infrastructure smoke tests (\"live-lane durable smoke: prove the connector-job path reaches Temporal...\", \"live-lane wedged-worker probe\"). I need to separate those from actual chemist-requested work, and check whether this list is complete or just a default page. Let me probe other connectors and search terms.That confirms the full picture — the search returns nothing more, so this is the complete job history: 11 durable jobs total, all under the `calc` connector. No BO campaigns, DFT jobs, development reports, hazard briefings, conformer/interaction/scan jobs have ever been run. Let me pull the full results for the two substantive chemist-driven jobs to report actual numbers, not just summaries.I now have complete, verified detail on every durable job on record. Here is the honest accounting.\n\n## What has actually run\n\n**11 durable jobs, total — all under the `calc` connector.** No BO/optimization campaigns, no DFT jobs, no development reports, no hazard briefings, no conformer/interaction-energy/coordinate-scan jobs have ever been launched, despite all of those being available. This isn't a filtered view — `find_past_jobs` with an empty query and no connector filter returns the complete record, and every connector/keyword I searched against it besides `calc` came back empty.\n\nOf the 11, only **2 distinct pieces of work were actually chemist-requested and chemistry-motivated**; the other 9 are infrastructure self-tests, not process R&D.\n\n### 1. Amide-coupling solvent comparison — `compare_solvents`\n- **Job:** `calc-compare_solvents-14399f0b0f730650`, completed 2026-08-04 16:38\n- **Who/why (recorded rationale):** a chemist had already screened DMF/MeCN/DCM/2-MeTHF for an EDC amide coupling (tracked as the `opt-amide-solvent` campaign note) and came back asking to check ethyl acetate, 2-MeTHF, and toluene as additional candidates for the same equilibrium — this run was also explicitly re-requested to check caching behavior.\n- **Result:** ranked ethyl acetate, THF, toluene (plus an unlabeled 4th solvent) on ΔG for benzoic acid + benzylamine → amide + water. Ethyl acetate came out most favorable, but the spread across all four is only 2.1 kcal/mol against the method's own ±3.0 kcal/mol uncertainty — **the calculation does not actually distinguish these solvents**, and the job's own warning says so.\n\n### 2. Nitrobenzene hydrogenation directionality — `compute_reaction_energy`\n- **Jobs:** `calc-compute_reaction_energy-c5689d3461c50b2b` (16:35) and an identical earlier run `...4cf212292f8f8e4e` (16:17) — same reaction, re-run and cache-rejoined.\n- **Who/why:** a chemist wanted a quick directional check on whether nitrobenzene → aniline + water (hydrogenation) is thermodynamically downhill.\n- **Result:** ΔE ≈ **-106.5 ± 3.0 kcal/mol** — strongly exothermic, confirms the reaction is thermodynamically downhill at the electronic-energy level (this was a `quick`-level run, so no ΔG/entropy was computed, just ΔE).\n\n### The other 9 jobs: infrastructure probes, not chemistry\nAll computed the same two trivial reactions repeatedly (CO + H₂ → C + H₂O, N₂ + 3H₂ → 2NH₃) with rationales like *\"live-lane wedged-worker probe\"* and *\"live-lane durable smoke: prove the connector-job path reaches Temporal, the connector worker, the calculation cache and the job record\"* — run in clusters on 2026-08-04 at 05:45, 05:53–05:54, 06:24, and 16:16. These were engineering checks that the job pipeline itself works, not chemist requests, and I'm flagging them as such rather than folding them into \"work done for the lab.\"\n\n## Bottom line\nThe compute budget on record has gone almost entirely to **pipeline self-tests**, not to campaigns. The only two real asks were a solvent screen for an amide coupling (inconclusive, by the calculation's own admission) and a directional thermodynamics check on nitrobenzene hydrogenation (conclusive: strongly downhill). Nothing has been spent on BO optimization, DFT, hazard briefings, or any of the heavier connectors — that's not a permissions gap, it's simply that no one has asked for that work yet.",
+    "answered": true,
+    "tools_called": [
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_notes",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "find_past_jobs",
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"connector\": \"calc\", \"job\": \"compare_solvents\", \"rationale\": \"Chemist previously screened DMF/MeCN/DCM/2-MeTHF for the EDC amide coupling (opt-ami"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"connector\": \"calc\", \"job\": \"compare_solvents\", \"rationale\": \"Chemist previously screened DMF/MeCN/DCM/2-MeTHF for the EDC amide coupling (opt-ami"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"connector\": \"calc\", \"job\": \"compare_solvents\", \"rationale\": \"Chemist previously screened DMF/MeCN/DCM/2-MeTHF for the EDC amide coupling (opt-ami"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"connector\": \"calc\", \"job\": \"compare_solvents\", \"rationale\": \"Chemist previously screened DMF/MeCN/DCM/2-MeTHF for the EDC amide coupling (opt-ami"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"bo-amide-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.45, \"valid_from\": null, \"valid_t"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"connector\": \"calc\", \"job\": \"compare_solvents\", \"rationale\": \"Chemist previously screened DMF/MeCN/DCM/2-MeTHF for the EDC amide coupling (opt-ami"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"Chemist wants a quick directional check on whether nitrobenzene hydrog"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[{\"job_id\": \"calc-compute_reaction_energy-241d6c9b486c35d5\", \"connector\": \"calc\", \"job\": \"compute_reaction_energy\", \"rationale\": \"live-lane wedged-worker probe\", \"summary\": \"CO + [H][H] -> C + O: dE -"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "{\"job_id\": \"calc-compare_solvents-14399f0b0f730650\", \"status\": \"completed\", \"summary\": \"most favourable of 4: ethylacetate (spread 2.1 kcal/mol)\", \"result\": {\"kind\": \"solvents\", \"summary\": \"most favou"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "{\"job_id\": \"calc-compute_reaction_energy-c5689d3461c50b2b\", \"status\": \"completed\", \"summary\": \"[O-][N+](=O)c1ccccc1 + [HH] + [HH] + [HH] -> Nc1ccccc1 + O + O: dE -106.5 \\u00b1 3.0 kcal/mol\", \"result\":"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "1",
+      "2026",
+      "16",
+      "38",
+      "2.1",
+      "3.0",
+      "35",
+      "17",
+      "-106.5",
+      "05",
+      "45",
+      "53",
+      "54",
+      "06",
+      "24"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 100.85,
+    "event_counts": {
+      "token": 54,
+      "tool_call": 21,
+      "tool_result": 21,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

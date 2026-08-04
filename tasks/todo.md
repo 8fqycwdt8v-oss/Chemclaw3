@@ -76,9 +76,32 @@ green suite in an offline sandbox had been reporting on a suite that largely did
    input. This is the failure the whole lane exists to remove; building it into the lane would have
    been the joke writing itself.
 
-### What is not done
+---
 
-Stage B (`make live-probes`) needs an `ANTHROPIC_API_KEY`, which this container does not have —
-`ANTHROPIC_BASE_URL` is set without one. Everything it depends on is verified and it runs
-unchanged the moment a key is present. That and two smaller follow-ups are in
-`docs/planning/BACKLOG.md`.
+## Follow-up: the full live pass (same day, with a key)
+
+Stage B ran. Record: `docs/archive/live-full-stack-2026-08-04.md`; decision:
+`docs/decisions/D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed.md`.
+
+Every layer up at once for the first time — Temporal 1.31.2, four workers, Postgres 16 + pgvector
+0.8.6, six connectors, the front door, and `claude-sonnet-5`. Stage A **6/6** (now over 139 audit
+events rather than zero). Harness slice **2/2 answered, 2/2 tool reach, 0 silent failures** — the
+chart's configuration meeting a live model.
+
+**Four defects, one class.** A job that failed after its turn told nobody; a job that failed inside
+its turn reached the model as `Error: Function failed.`; a turn that wrote nothing said nothing;
+and — twice — a *check* passed vacuously. All fixed, all with regression tests.
+
+**Two of the four were in the measurement, not the product,** and that is the part worth keeping:
+the smoke's audit check had been verifying an empty chain, and the durable-reach signal flagged
+du-01 as having run no job while Temporal held its workflow in COMPLETED. Both were written this
+same session to *find* problems. A signal that has never been wrong has usually never been used.
+
+**And one fix was wrong for an hour, measurably.** `failure_reason` first walked to the innermost
+cause and reported the tblite internals; the sentence written for a chemist — naming "2-MeTHF" and
+the solvents that would work — sat one frame above. Depth is not specificity.
+
+Left open in `docs/planning/BACKLOG.md`: validating solvent names at the tool boundary (the root
+cause behind two findings), du-03's behavioural half, the repeated-tool-call cost, the full
+230-probe sweep (which needs a corpus worth sweeping — this repo ships 38 notes), and an
+Entra-enforced pass.

@@ -1318,11 +1318,13 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
     asyncio.run(_run())
 
 
-def test_events_route_claims_only_job_completed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The push-back route scopes its (destructive) claim to `job_completed` in the claim itself.
+def test_events_route_claims_only_the_job_outcome_kinds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The push-back route scopes its (destructive) claim to the job-outcome kinds in the claim.
 
     The claim marks rows consumed atomically; claiming every kind and filtering afterwards would
-    silently destroy events of other kinds meant for other consumers.
+    silently destroy events of other kinds meant for other consumers. Both outcomes are claimed:
+    a job that failed after its turn ended has the same claim on the asker's attention as one that
+    succeeded, and until 2026-08-04 only the successful one had any way of reaching them.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -1339,7 +1341,45 @@ def test_events_route_claims_only_job_completed(monkeypatch) -> None:  # type: i
         with client.stream("GET", f"/sessions/{session_id}/events") as res:
             for _line in res.iter_lines():
                 pass
-    assert captured["kinds"] == ("job_completed",)
+    assert captured["kinds"] == ("job_completed", "job_failed")
+
+
+def test_a_failed_job_reaches_the_asker_with_its_reason(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A durable job that fails after its turn must say so, and say why.
+
+    Found live (2026-08-04): `compare_solvents` was launched, the turn told the chemist it was
+    running, and it failed ~30 s later on an unknown ALPB solvent name. `ConnectorJobWorkflow`
+    awaited its child with no failure path, so `notify_session_best_effort` was never reached and
+    no event of any kind was emitted — the "job started" promise stood forever and the reason was
+    reachable only by polling `get_durable_job_status` with an id nobody had kept.
+
+    The reason travels because a failure without one is the defect this repository has now met
+    three times: an outcome that says nothing is an invitation to assume the good one.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+
+    async def _fake_stream(session_id: str, **kwargs: object) -> object:
+        yield SessionEvent(
+            session_id=session_id,
+            kind="job_failed",
+            payload={
+                "job_id": "calc-compare_solvents-abc",
+                "reason": "unknown ALPB solvent '2-methyltetrahydrofuran'",
+            },
+        )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            body = "".join(line for line in res.iter_lines())
+
+    assert "job_failed" in body
+    assert "calc-compare_solvents-abc" in body
+    assert "2-methyltetrahydrofuran" in body, (
+        "the reason must survive to the client, not just the type"
+    )
 
 
 def test_a_session_with_no_plan_has_nothing_to_decide_on() -> None:

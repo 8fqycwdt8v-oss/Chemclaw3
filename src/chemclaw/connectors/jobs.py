@@ -30,6 +30,7 @@ from importlib import import_module
 from typing import Any
 
 from pydantic import BaseModel, Field, create_model
+from temporalio.client import WorkflowFailureError
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -51,6 +52,7 @@ from chemclaw.durable.connector_job import (
     ConnectorJobInput,
     ConnectorJobResult,
     ConnectorJobWorkflow,
+    failure_reason,
 )
 
 # The declared parameter types, mapped to the annotations the generated model is built from.
@@ -420,7 +422,34 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 "truly did not start, the same call will work once the fault clears."
             ) from exc
         if job.inline_wait_seconds is not None:
-            finished = await _await_briefly(handle, job.inline_wait_seconds)
+            try:
+                finished = await _await_briefly(handle, job.inline_wait_seconds)
+            except WorkflowFailureError as exc:
+                # A job that fails *inside* the turn must say why, in words the model can relay.
+                # `_await_briefly` deliberately lets a genuine failure raise rather than degrading
+                # to a job id — correct, and until 2026-08-04 incomplete: `WorkflowFailureError` is
+                # neither a `ChemclawError` nor a `SubsystemUnavailableError`, so
+                # `agent.tool_authz.surface_domain_errors` passed it through untouched and MAF
+                # rendered it as "Error: Function failed."
+                #
+                # That is the third appearance of one defect. The first made a model fabricate a
+                # whole development report when the broker was unreachable; the second was the
+                # launch that could not be confirmed, framed a few lines above. The pattern is
+                # always the same — a failure that reaches the model wordless is not read as "this
+                # failed", it is read as "proceed" — so a real failure gets a real sentence, and
+                # `failure_reason` gives it the same one the session push-back carries.
+                #
+                # `exc.__cause__` and not `exc`: the client wraps every workflow failure in
+                # `WorkflowFailureError("Workflow execution failed")`, and `failure_reason` only
+                # skips the two workflow-side frames (see its docstring — the client type is
+                # deliberately not named inside the workflow sandbox). Measured chain for the live
+                # failure: WorkflowFailureError → ChildWorkflowError → ActivityError → "unknown
+                # ALPB solvent '2-methyltetrahydrofuran'; common valid names are …" → the tblite
+                # internals. Passing `exc` straight in stops at the first frame and reports
+                # "Workflow execution failed", which is the generic sentence this exists to replace.
+                raise ConnectorJobError(
+                    f"the {job.name!r} job ran and failed: {failure_reason(exc.__cause__ or exc)}"
+                ) from exc
             if finished is not None:
                 # It answered inside the turn, so there is no background work to announce and
                 # nothing for the chemist to poll — the result *is* the tool's return value.

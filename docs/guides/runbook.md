@@ -115,6 +115,14 @@ whether a job whose worker is wedged comes back *pending* rather than hanging or
 whether the audit chain still verifies. Nothing is scored from prose. The report lands in
 `tasks/live-test/transcripts/durable-smoke.md`.
 
+**Two prerequisites the corpus layer needs, or the probes measure an empty database.** `make
+reindex` fills `note_index`; the fingerprint tables are filled only as a side effect of the ELN
+sync, so start `ElnSyncWorkflow` on `background-jobs` once. The PR-gate needs a *dedicated* clone —
+`bootstrap.sh` creates `.live/knowledge-repo` and `processes.sh` points `CHEMCLAW_NOTE_REPO_DIR` at
+it, because `note_repo_dir` defaults to the working checkout and every submission begins
+`git reset --hard` + `git clean -fd`, so the gate refuses it (G4) and the whole
+knowledge-contribution half of a run silently disappears.
+
 **Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
 `data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
 probe launches is resolved against Temporal rather than taken from the turn's account of it — a job

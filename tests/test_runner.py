@@ -786,3 +786,43 @@ def test_a_hanging_broker_does_not_hold_up_the_turn(monkeypatch: pytest.MonkeyPa
     elapsed = time.perf_counter() - started
     assert _degraded(events) == [runner._DURABLE_SUBSYSTEM]
     assert elapsed < 5, f"the probe was not bounded: the turn took {elapsed:.1f}s"
+
+
+class _SilentAgent:
+    """Runs, yields no text at all, and ends the turn — the shape a live turn actually took."""
+
+    mcp_tools: list[object] = []
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
+        async def _gen() -> Any:
+            yield _Update(text="")
+
+        return _gen()
+
+
+def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> None:
+    """The silent death, made loud.
+
+    Measured on 2026-08-04 with the harness *off*: a turn made 29 tool calls over 197 s, never
+    reached the capability the question needed, and ended with an empty `AnswerEvent`. No error, no
+    tokens — nothing a user could read, retry or report. The existing guard covers only the harness
+    loop cap (`loop_cap_reached`), so this path had none at all, and `evals.live` scores exactly
+    this shape as `failed_loudly=False` because it is the worst outcome a turn can have: a user
+    cannot retry what never said it went wrong.
+
+    The assertion is on the `ErrorEvent`, not on the answer text: the system genuinely had nothing
+    to say, and inventing prose to fill the gap would be the other, worse failure.
+    """
+    events = _events(_SilentAgent())
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert errors, "a turn that produced no text emitted no error — the silent death itself"
+    assert errors[0].code == "empty_answer"
+    assert errors[0].retryable is True, "a narrower question can succeed; this is not terminal"

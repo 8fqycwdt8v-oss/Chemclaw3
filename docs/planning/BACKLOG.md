@@ -3,6 +3,42 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the live full-stack pass (2026-08-04)
+
+Full record with the measurements: `docs/archive/live-full-stack-2026-08-04.md`. Every layer live
+at once for the first time — real broker, workers, Postgres, front door and model. Four defects
+found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). What it left open:
+
+- [ ] **`compare_solvents` accepts a solvent name that only fails deep inside the durable job** —
+      [S], and it is the root cause behind two of that ADR's three findings rather than a cosmetic
+      one. A chemist said "2-MeTHF" — among the most common process solvents there is — the model
+      passed it faithfully, and the run died ~30 s later inside an activity on
+      `String value for epsilon was not found among database of solvents`. `JobSpec.precondition`
+      exists for exactly this and runs in `prepare_job_launch` *before* any durable work starts, so
+      validating solvent names against the ALPB set would turn a 30-second durable failure into an
+      immediate, correctable message. Deliberately not done in that ADR, which is about the
+      reporting seam; this is the chemistry surface.
+
+- [ ] **du-03: 29 tool calls, no answer, and the capability never reached** — [M]. The turn now
+      says so (`empty_answer`), which is the reporting half. The behavioural half is untouched: it
+      looped `find_past_jobs` ×8, `load_skill` ×6, `find_notes` ×5 and never called
+      `start_optimization_campaign`, which is what the question needed. Whether that is a
+      retrieval-loop problem, a prose problem, or a 38-note corpus giving it nothing to stop on is
+      not yet measured — and the corpus caveat means it cannot be settled on this data alone.
+
+- [ ] **A repeated tool call returning nothing is retried unchanged** — [S]. `find_past_jobs` was
+      called 7-8 times in a single turn across three separate probes. Cheap each time, so it is a
+      turn-latency and token cost rather than a correctness issue (median turn 128-142 s here
+      against 16.9 s on the archived run), but it is the same call with the same arguments.
+
+- [ ] **The full 230-probe corpus has still not been run against a live model** — [M]. This pass
+      ran the four `du-*` probes and a two-probe harness slice. The wide sweep needs a corpus worth
+      sweeping: against the 38-note seed graph it would measure the corpus, not the system, and
+      produce numbers that read as comparable to `live-grounded-2026-08-03.md` and are not.
+
+- [ ] **Entra-enforced pass** — [M]. Everything ran `entra_required=false`. The documented approach
+      is a local RSA keypair + self-served JWKS + minted tokens (`docs/archive/live-gates-2026-07.md`).
+
 ## Open — Left by the live lane (2026-08-04, D-2026-08-04-a-lane-that-only-runs-where-docker-runs)
 
 The lane itself is done: `make live-infra` / `live-up` / `live-jobs` / `live-probes`, six mechanical
@@ -18,11 +54,10 @@ not close:
       least. Needs a per-module judgement about which tests depend on time skipping, which is why
       it was not guessed at inside the lane's own change.
 
-- [ ] **Stage B has never been run** — [S]. `make live-probes` with the four workers up is the
-      first time the `du-*` probes and the `expects_job` → Temporal resolution meet a real model,
-      and it needs an `ANTHROPIC_API_KEY` that no CI runner or agent container here has. Everything
-      it depends on is verified; the run itself is outstanding, and its findings are unknown rather
-      than assumed absent.
+- [x] **Stage B has never been run** — **closed 2026-08-04.** Run with a real key against the full
+      live stack. It found four defects, two of them in the signal itself (a vacuous audit check and
+      a false positive that flagged a working durable path), which is the argument for having run it
+      rather than reasoned about it. Record: `docs/archive/live-full-stack-2026-08-04.md`.
 
 - [ ] **`make live-jobs` exercises one connector** — [S]. `compute_reaction_energy` on `connector-calc`
       is deliberate (in-process `tblite`, no HPC, writes to the cache so D-011 is observable), but
