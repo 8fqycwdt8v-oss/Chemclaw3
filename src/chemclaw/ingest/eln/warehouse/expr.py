@@ -139,10 +139,17 @@ def _value_map(value: Any, options: Mapping[str, Any]) -> Any:
     would turn a vocabulary the site extended — a new material type, a new status code — into
     rows that ingest with a field quietly missing, which is the failure mode a mapping layer
     exists to prevent. `default:` is how a binding says "and everything else is this".
+
+    **Both sides are compared as text, and that is not cosmetic.** A transform's options are
+    untyped (`transform: list[dict[str, Any]]`), so YAML's own scalar rules decide what a map key
+    becomes: a site with numeric material-type codes writes `map: {1: reactant, 2: solvent}` and
+    gets *integer* keys. Comparing the row's text against those matched nothing, so every row was
+    rejected — with `no entry for '1'; known: [1, 2]`, a message showing the key apparently
+    present. Stringifying both sides is what makes a numeric vocabulary work at all.
     """
     if value is None:
         return None
-    table: Mapping[str, Any] = options["map"]
+    table = {as_text(name): mapped for name, mapped in options["map"].items()}
     key = as_text(value).strip()
     if key in table:
         return table[key]
@@ -296,6 +303,51 @@ def validate_transform(step: Mapping[str, Any]) -> None:
         )
     if name == "clamp" and not set(options):
         raise PathSyntaxError("transform 'clamp' needs at least one of 'min' or 'max'")
+    if name == "value_map":
+        _check_map_keys(options["map"])
+    if name == "regex":
+        _check_pattern(options)
+
+
+def _check_pattern(options: Mapping[str, Any]) -> None:
+    """Compile a `regex` transform's pattern at load, and check the group it asks for exists.
+
+    Both failures are otherwise invisible until a row reaches them: an unbalanced bracket raises
+    `re.error` on the first row of the first sync, and a `group:` the pattern does not have raises
+    on the first row that *matches* — which may be days later and on a subset of the corpus.
+    """
+    try:
+        compiled = re.compile(str(options["pattern"]))
+    except re.error as exc:
+        raise PathSyntaxError(f"transform 'regex' has an invalid pattern: {exc}") from exc
+    group = int(options.get("group", 0))
+    if group > compiled.groups:
+        raise PathSyntaxError(
+            f"transform 'regex' asks for group {group} but {options['pattern']!r} has "
+            f"{compiled.groups}"
+        )
+
+
+def _check_map_keys(table: Any) -> None:
+    """Reject a `value_map` whose keys YAML turned into booleans, naming the fix.
+
+    `_value_map` compares as text, so an integer key is fine — `1` and `"1"` agree. A *boolean* one
+    does not: `ON`, `OFF`, `YES`, `NO`, `Y` and `N` are all YAML booleans, so a site whose status
+    flags use any of them arrives here as `True`/`False` with the original spelling already gone.
+    Worse, `True` and `1` are the same dict key in Python, so a map carrying both silently loses one
+    entry before this code ever sees it.
+
+    Neither is recoverable, so this refuses at load and says which line to quote, rather than
+    letting every row fail later against a vocabulary that reads correctly in the file.
+    """
+    if not isinstance(table, Mapping):
+        raise PathSyntaxError(f"transform 'value_map' needs a mapping for 'map', got {table!r}")
+    booleans = [name for name in table if isinstance(name, bool)]
+    if booleans:
+        raise PathSyntaxError(
+            f"transform 'value_map' has boolean key(s) {booleans} — YAML reads ON/OFF/YES/NO/Y/N "
+            'as booleans, losing the spelling the source actually uses. Quote them: "Y": ...'
+        )
 
 
 def apply_transforms(value: Any, chain: Sequence[Mapping[str, Any]]) -> Any:
