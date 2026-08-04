@@ -36,3 +36,13 @@ class BoSettings(BaseSettings):
     # losing every already-paid evaluation. Generous versus the default of 10 rounds; a spec
     # beyond it is rejected at build time, not terminated by the server mid-campaign.
     bo_max_rounds: int = Field(default=500, ge=1)
+    # How many recent evaluations `science.bo.progress` reads for its "have the last N results
+    # moved at all" statement, and how many consecutive noise-sized evaluations make a plateau.
+    # Five is a working default rather than a statistical claim: it is short enough that a chemist
+    # asking mid-campaign gets an answer about recent work, and long enough that one flat pair does
+    # not read as convergence. The caller overrides it per question.
+    bo_plateau_window: int = Field(default=5, ge=1)
+    # Below this many evaluations `campaign_progress` refuses a plateau verdict instead of giving
+    # one. A trend read off three points is the failure the whole tool exists to prevent, so the
+    # floor is stated rather than left to the caller's judgement.
+    bo_plateau_min_observations: int = Field(default=6, ge=2)

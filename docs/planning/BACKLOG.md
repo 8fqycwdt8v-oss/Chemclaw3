@@ -178,7 +178,7 @@ on was measured before the row was written** — the previous BO roadmap said "j
 (D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate). The measured numbers are in the
 ADR; three of the seven measurements changed a row below, and one reversed a refusal.
 
-- [ ] **W1 — nothing computes the campaign health the answers already assert** — [S]. No BoFire
+- [x] **W1 — nothing computes the campaign health the answers already assert** — [S]. No BoFire
       change and no compatibility risk, which is why it is first: you cannot judge whether a later
       wave helped without a convergence read. (i) A `campaign_progress` tool — best-so-far,
       improvement over the last *k* rounds, evaluations since a real improvement, a plateau verdict,
@@ -192,6 +192,14 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       "a space-filling seed point, no surrogate had an opinion" instead of reading as endorsement.
       (iii) The explore/exploit section the `experiment-design` skill's front matter advertises and
       its body does not contain. Closes 3.5 and 3.4; gives 3.6 its defensible half.
+      **Closed by D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with, with one correction
+      the data forced.** The planned `op-13` replay asserted `plateaued=True` and that is wrong:
+      ordered by equivalents, the 83→88% jump at 2.2 eq is a real five-point gain four runs from the
+      end, so `evaluations_since_improvement` is **3** and a five-evaluation window is not satisfied.
+      What is true is the grader's own narrower sentence — the last four runs span 2.0 against a
+      stated ±2.0, so they are not distinguishable from each other — and both facts are now separate
+      fields rather than one verdict. Rounding the second up to the first would have been `op-13`'s
+      error with the sign flipped.
 
 - [ ] **W2 — a screen cannot hold a continuous factor, and that is what makes three knobs inert** —
       [S]. Measured (M-5): on the all-categorical domain `factorial_design` accepts today,

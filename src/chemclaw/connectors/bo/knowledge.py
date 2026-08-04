@@ -78,7 +78,8 @@ def note_from_campaign_result(
     body = (
         f"Bayesian-optimization recommendation for objective `{objective_name}`, "
         f"from {len(result.history)} evaluation(s).\n\n"
-        f"- objective value: {best.value:.6g} ({best.provenance}; {_surrogate_belief(best)})\n"
+        f"- objective value: {best.value:.6g} "
+        f"({best.provenance}; {_surrogate_belief(best, result.history)})\n"
         f"- direction: {problem.objective.direction} `{problem.objective.name}`\n\n"
         f"Recommended conditions:\n{conditions}\n\n"
         f"Searched over:\n{space}\n"
@@ -164,7 +165,7 @@ def _recommended_molecule(by_name: dict[str, Parameter], best: Observation) -> s
     return named[0] if len(named) == 1 else None
 
 
-def _surrogate_belief(best: Observation) -> str:
+def _surrogate_belief(best: Observation, history: list[Observation]) -> str:
     """What the model thought of this point before it was evaluated, in one clause (F8-T1).
 
     Two honest readings, and the distinction is the one a reviewer needs. A recorded sd means the
@@ -175,10 +176,21 @@ def _surrogate_belief(best: Observation) -> str:
 
     Never phrased as the uncertainty *of* the reported value: that value came from the evaluator,
     not from the surrogate, and the sd is what the model believed beforehand.
+
+    **The spread comes with it**, because an sd alone is not a reading. ±3 is an exploit when the
+    campaign's values span 40 and an excursion when they span 4, and a reviewer deciding whether to
+    book lab time needs the comparison rather than the raw number. `ExperimentSuggestion.summary`
+    makes the same comparison for the inline tool; they are written together so the note and the
+    tool cannot drift into two answers to one question.
     """
     if best.surrogate_sd is None:
         return "a space-filling seed point, proposed before any surrogate had an opinion"
-    return f"surrogate posterior sd ±{best.surrogate_sd:.3g} at the time it was proposed"
+    belief = f"surrogate posterior sd ±{best.surrogate_sd:.3g} at the time it was proposed"
+    values = [observation.value for observation in history]
+    spread = max(values) - min(values) if len(values) > 1 else 0.0
+    if spread <= 0:
+        return belief
+    return f"{belief}, against an observed spread of {spread:.3g} across the campaign"
 
 
 def _parameter_range(parameter: Parameter) -> str:

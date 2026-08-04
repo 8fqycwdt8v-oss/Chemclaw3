@@ -13,6 +13,7 @@ tools:
   - suggest_next_experiment
   - resume_campaign
   - generate_screening_design
+  - campaign_progress
   - propose_knowledge_note
 ---
 
@@ -97,6 +98,55 @@ was wrong.
   a reviewer approving "run this next" should not have to learn two note kinds for one decision.
   `bo-candidate` is a different thing and is not yours to write: it is what a *durable* campaign
   (`start_optimization_campaign`) mints for itself when a round completes.
+
+## Reading the sd: is this point an exploit or an excursion?
+
+`suggest_next_experiment` returns each candidate's `predicted_sd` — the surrogate's posterior
+spread at that point, before anyone runs it — and a `scale` giving what the objective actually
+spans in the runs you supplied. **The sd only means something against that spread**, and the
+return's `summary` already makes the comparison; quote it rather than recomputing it.
+
+- A small sd relative to the spread is an **exploit**: the model is refining chemistry it has
+  already learned, and the predicted value is the part worth quoting.
+- A large one is an **excursion**: the model is proposing a region it has no evidence about, so the
+  predicted value is close to meaningless and the reason to run it is information, not yield. Say
+  that plainly, and name what is being extrapolated — a solvent never tried, a temperature beyond
+  the observed range — along with any safety or selectivity risk there.
+- `predicted_sd` of `None` is **not** a small sd. It means the point came from the space-filling
+  seed design and no surrogate had an opinion at all. Never present a seed point as a model
+  recommendation.
+
+Do not turn the sd into a confidence interval on the outcome. It is what the model believed
+*before* the experiment; the measured value will come from the assay, and the two are different
+quantities.
+
+## Has it plateaued?
+
+When the chemist asks whether to keep going — "have we plateaued", "is there more in it", "I don't
+want to burn another two weeks" — **answer that question rather than reflexively proposing another
+candidate.** `campaign_progress(...)` takes the decision space, the runs in the order they were
+performed, the assay's own noise and a window, and reads the runs back: the best so far, how many
+evaluations since a gain larger than that noise, and whether the most recent results differ from
+each other at all.
+
+**Get `assay_noise` from the chemist.** It is the assay's reproducibility in the objective's own
+units — "reproducibility is about ±2%" is `assay_noise=2.0` for a yield. If they have not said,
+**ask before calling**. Do not supply one yourself: a 1–2% gain against a ±2% assay is not a gain,
+and asserting that it is has already been graded a fabrication once.
+
+Two calls, two different claims, and they must not be merged:
+
+- `campaign_progress` says what the **record** did. It asks no surrogate.
+- `suggest_next_experiment` says what the **model expects**. Compare its candidates'
+  `predicted_value` against the same `assay_noise`: a predicted improvement inside the noise is not
+  a reason to run another experiment, and a large `predicted_sd` somewhere untried is — that is the
+  difference between "nothing left here" and "nothing left *where we have looked*".
+
+Close with the limit the return states and never round it up: this shows that recent points in the
+region already explored have not beaten the noise. It cannot show a global optimum has been
+reached, and an untried corner of the space is not evidence either way. Then give the leader a
+decision they can defend — a stopping criterion, or one specific run and what it would have to
+return to change the conclusion.
 
 ## Picking a campaign back up
 
