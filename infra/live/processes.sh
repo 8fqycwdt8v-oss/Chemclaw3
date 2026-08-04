@@ -226,9 +226,32 @@ status() {
   done
 }
 
+# Stop one named process and bring the stack back to full — the shape every chaos check needs.
+#
+# `up` is already idempotent (it skips what is running and ready-checks what it starts), so
+# "restart X" is "stop X, then up" and nothing else. Written as a verb rather than left to the
+# caller because the caller is a test: a harness that stopped a process and then started a
+# *replacement* by hand would be measuring recovery of something the lane never runs.
+restart() {
+  local name="$1" pidfile
+  pidfile="$RUN_DIR/$name.pid"
+  [ -e "$pidfile" ] || die "no $pidfile — is the lane up?"
+  local pid
+  pid="$(cat "$pidfile")"
+  # SIGKILL, not SIGTERM: a restart check that let the process drain first would be testing a
+  # graceful shutdown, and the failure worth knowing about is the ungraceful one.
+  kill -9 "$pid" 2>/dev/null || true
+  # Wait for the pid to actually go, so `up` does not see a still-live process and skip the start.
+  for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  rm -f "$pidfile"
+  log "$name killed (pid $pid)"
+  up
+}
+
 case "${1:-up}" in
   up) up ;;
   down) down ;;
   status) status ;;
-  *) die "usage: processes.sh [up|down|status]" ;;
+  restart) [ $# -ge 2 ] || die "usage: processes.sh restart <name>"; restart "$2" ;;
+  *) die "usage: processes.sh [up|down|status|restart <name>]" ;;
 esac

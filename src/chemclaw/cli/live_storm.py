@@ -22,21 +22,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shutil
 import statistics
+import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
+from temporalio.client import WorkflowExecutionStatus
 
+from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
+from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect as db_connect
+from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,46 @@ logger = logging.getLogger(__name__)
 # the same reason `connectors_dev` keeps its port here: no deployment reads them.
 FRONT_DOOR = "http://127.0.0.1:8000"
 MOCK_STATS = "http://127.0.0.1:8820/__mock/stats"
+
+# The scripts that own this lane. The chaos family restarts things *through them* rather than by
+# calling `kill` and `pg_ctl` itself, so a process it brings back is started exactly as the lane
+# starts it — a recovery check that restarted a differently-configured replacement would measure
+# something the deployment never runs.
+_LANE_DIR = Path(__file__).resolve().parents[3] / "infra" / "live"
+
+# Every family this harness plans to run, declared once. `report` compares this against the
+# families that actually produced a finding and names the difference.
+#
+# It exists because the previous version had no such comparison: `run_storm` wired six of the eight
+# families the behaviour catalogue described, and the run printed "17/17 checks passed" — true of
+# what ran, and silent about the two that did not. A count of passes cannot say anything about
+# coverage, so the coverage has to be declared somewhere a run can be checked against.
+FAMILIES: dict[str, str] = {
+    "A": "volume, and the admission cap swept end to end",
+    "B": "tool bodies really ran, asked of the audit trail",
+    "C": "the same call whole, fragmented, and in parallel",
+    "D": "identical durable launches colliding",
+    "E": "chaos — disconnects, killed workers, a bounced database, a dead broker",
+    "F": "adversarial model output a real model will not produce on request",
+    "G": "the front door's own limits, asked for deliberately",
+    "H": "pathological data: bad chemistry, impossible arguments, unicode, injection",
+}
+
+# The admission caps the SCALE-3 sweep restarts the front door at. Powers of two around the
+# shipped default (8) — the row that has been open since July asks where throughput stops
+# improving, and that cannot be answered by varying *offered* load alone, which is all the
+# previous sweep did.
+_ADMISSION_CAPS = (2, 4, 8, 16, 32)
+
+# The states a workflow never leaves. Asked for rather than assumed, so a wait ends on the truth it
+# found instead of on the truth it wanted — the same set `cli/live_jobs.py` polls against.
+_TERMINAL = {
+    WorkflowExecutionStatus.COMPLETED,
+    WorkflowExecutionStatus.FAILED,
+    WorkflowExecutionStatus.CANCELED,
+    WorkflowExecutionStatus.TERMINATED,
+    WorkflowExecutionStatus.TIMED_OUT,
+}
 
 
 @dataclass
@@ -137,14 +183,28 @@ async def run_turn(client: httpx.AsyncClient, behaviour: str, message: str) -> T
 
 
 async def storm(
-    behaviour: str, *, turns: int, concurrency: int, timeout: float = 300.0
+    behaviour: str,
+    *,
+    turns: int,
+    concurrency: int,
+    timeout: float = 300.0,
+    message: str | None = None,
 ) -> list[TurnResult]:
     """Fire `turns` turns of one behaviour, `concurrency` of them in flight at once.
 
     Concurrency is the offered load, not the accepted load — the front door's admission semaphore
     (`service_max_concurrent_turns`) is the thing under test in family A, so this must be able to
     offer far more than it will accept.
+
+    `message` overrides the turn text for the families where the *user's own words* are the thing
+    under test — family H sends unicode and an injection string, and the only way to prove either
+    survived Postgres is to put it in the message that Postgres stores. The behaviour selector must
+    still be in it, since that is how the mock chooses what to do, so this asserts rather than
+    trusts: a custom message that forgot the selector would silently run the default behaviour and
+    the family would pass having tested nothing.
     """
+    if message is not None and f"[[{behaviour}]]" not in message:
+        raise ValueError(f"a custom storm message must carry the [[{behaviour}]] selector")
     semaphore = asyncio.Semaphore(concurrency)
     limits = httpx.Limits(max_connections=concurrency + 16, max_keepalive_connections=concurrency)
 
@@ -154,9 +214,32 @@ async def storm(
 
         async def one(index: int) -> TurnResult:
             async with semaphore:
-                return await run_turn(client, behaviour, f"storm turn {index} [[{behaviour}]]")
+                text = message or f"storm turn {index} [[{behaviour}]]"
+                return await run_turn(client, behaviour, text)
 
         return list(await asyncio.gather(*(one(i) for i in range(turns))))
+
+
+def _lane(script: str, *args: str, env: Mapping[str, str] | None = None) -> str:
+    """Run one of the lane's own scripts, returning its output and failing loudly if it fails.
+
+    Synchronous and therefore always called through `asyncio.to_thread`: `processes.sh restart`
+    ready-checks everything it starts, which takes tens of seconds on a cold page cache, and
+    blocking the event loop for that long would stall the very in-flight turns a chaos check exists
+    to observe.
+    """
+    completed = subprocess.run(  # noqa: S603 - fixed argv from this module, no shell
+        ["/bin/bash", str(_LANE_DIR / script), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **(env or {})},
+        timeout=900,
+    )
+    output = (completed.stdout + completed.stderr).strip()
+    if completed.returncode != 0:
+        raise RuntimeError(f"{script} {' '.join(args)} failed ({completed.returncode}): {output}")
+    return output
 
 
 async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
@@ -442,10 +525,495 @@ async def family_b_tool_truth(expect_tools: Sequence[str]) -> list[Finding]:
     return findings
 
 
+# The reaction the chaos family kills a worker in the middle of. Benzene hydrogenation rather than
+# the ammonia synthesis `cli/live_jobs.py` uses, for two independent reasons: its species appear in
+# no other payload in this repository, so the first run of a storm cannot be answered from a cache
+# some earlier lane filled — and it is *slow enough to interrupt*. A job that finishes before the
+# SIGKILL lands would report a passing durability check having tested nothing, which is the vacuous
+# pass this harness has now had to correct three times.
+#
+# The temperature varies per process for the reason `live_jobs._RUN_TEMPERATURE_K` does: the
+# workflow id is a hash of the payload, so a fixed one makes every rerun a rejoin of the first.
+_CHAOS_TEMPERATURE_K = 300.0 + (int(time.time()) % 971) / 100.0
+_CHAOS_PAYLOAD: dict[str, Any] = {
+    "kind": "reaction",
+    "reactants": ["c1ccccc1", "[H][H]", "[H][H]", "[H][H]"],
+    "products": ["C1CCCCC1"],
+    # `standard`, not `quick`, and that is the difference between a check and a decoration. At
+    # `quick` this job optimises and reports ΔE, which for these three species finished in under
+    # four seconds — measured: the first run of this check killed the worker with the workflow
+    # already COMPLETED and correctly reported that it had proved nothing. `standard` adds the
+    # thermochemistry, so there are Hessians on a 12-atom and an 18-atom molecule to interrupt.
+    "level": "standard",
+    "temperature_k": _CHAOS_TEMPERATURE_K,
+    "symmetry_numbers": {"c1ccccc1": 12, "[H][H]": 2, "C1CCCCC1": 6},
+}
+
+
+async def _workflow_status(workflow_id: str) -> WorkflowExecutionStatus | None:
+    """The broker's own view of a workflow — the only authority on whether it survived the kill."""
+    client = await temporal_connect()
+    description = await client.get_workflow_handle(workflow_id).describe()
+    return description.status
+
+
+async def _chaos_client_disconnect() -> Finding:
+    """E1 · a client that walks away mid-turn must free the session at once, not after the lease.
+
+    The CHAOS-1 regression, made permanent. The 2026-07 load test measured 63 seconds before a
+    disconnected session accepted a new turn — the full `service_turn_claim_lease_seconds` — because
+    nothing released the claim when the generator was closed. `routes/turns.py` now releases both
+    the in-process slot and the durable claim in the stream's `finally`, which runs on client
+    disconnect; that is the claim, and this is the measurement of it.
+
+    Measured as time-to-accept rather than as an inspection of the lock, because a lock that is
+    released and a session that answers are different statements and only the second one is what a
+    chemist experiences.
+    """
+    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=60.0) as client:
+        created = await client.post("/sessions", json={})
+        created.raise_for_status()
+        session_id = str(created.json()["session_id"])
+
+        # `f-slow` thinks for eight seconds, so leaving after the first event leaves a turn that is
+        # genuinely still running — the case the lease exists for.
+        async with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "chaos [[f-slow]]"}
+        ) as response:
+            async for _ in response.aiter_lines():
+                break
+
+        started = time.monotonic()
+        codes: list[int] = []
+        for _ in range(300):
+            # `stream`, not `post`. A successful re-POST returns an SSE body that only ends when
+            # the *whole next turn* does, so reading it measured 25.5 s of turn on the first
+            # attempt at this and reported it as 25.5 s of lock. The question is when the session
+            # stops answering 409, which is knowable from the status line alone.
+            async with client.stream(
+                "POST",
+                f"/sessions/{session_id}/messages",
+                json={"message": "after the disconnect [[a-cheap]]"},
+            ) as probe:
+                codes.append(probe.status_code)
+            if codes[-1] != 409:
+                break
+            await asyncio.sleep(0.2)
+        waited = time.monotonic() - started
+
+    lease = settings.service_turn_claim_lease_seconds
+    return Finding(
+        family="E",
+        name="a disconnected session accepts a new turn without waiting out the lease",
+        # Five seconds, not "half the lease": the claim is that the release is *explicit*, and an
+        # explicit release is an order of magnitude away from a lease expiry, not a factor of two.
+        # A threshold at lease/2 would have passed a release that never happened on a lane whose
+        # lease was configured short.
+        ok=codes[-1] == 200 and waited < 5.0,
+        observed=f"accepted after {waited:.1f}s (lease is {lease}s); status codes {codes[:4]}",
+        detail="CHAOS-1 regression: this was 63 s before the claim was released on disconnect",
+    )
+
+
+async def _chaos_worker_killed_mid_job() -> Finding:
+    """E2 · SIGKILL the connector worker mid-job; Temporal must still finish the job.
+
+    The whole reason durability lives in Temporal rather than in MAF (`CLAUDE.md`, layer 2), and
+    until now asserted rather than shown: the thirteen Temporal test modules run against the
+    time-skipping test server, where no worker is ever killed. `make live-jobs` freezes a worker
+    with SIGSTOP and resumes it, which tests a *stall*; this kills the process outright and starts
+    a new one, which is what a pod eviction does.
+
+    The workflow's state at the moment of the kill is reported, not assumed. A job that had already
+    completed would make this check pass having interrupted nothing — the same vacuous shape as an
+    audit chain that verifies over zero rows.
+
+    **The recovery latency is the deliverable, not the pass.** A SIGKILLed worker leaves its
+    activity in `Started` against a worker identity that no longer exists, and Temporal has no
+    other liveness signal for it — so the job resumes only when `xtb_job_heartbeat_timeout_seconds`
+    expires. Measured here at **600 s**, exactly the configured value, with the activity pinned at
+    `species 1/5` the whole time. That is the documented design (`config/calculators.py`: "the
+    heartbeat below — not this timeout — is what detects a dead worker"), and it had never been
+    measured, so the wait budget below is derived from the setting rather than guessed: a check
+    that timed out at 240 s reported a durability failure that was a ten-minute detection window.
+    """
+    connector, job = find_job("compute_reaction_energy")
+    tool = build_job_tool(connector, job)
+    params_type = tool.__annotations__["params"]
+    workflow_id = job_workflow_id(connector, "compute_reaction_energy", _CHAOS_PAYLOAD)
+
+    launch = asyncio.create_task(
+        tool(params_type(**_CHAOS_PAYLOAD), "storm chaos: SIGKILL the connector worker mid-job")
+    )
+    # Poll for RUNNING and kill the instant it is, rather than sleeping a guessed interval. A fixed
+    # sleep has to be long enough for the workflow to start and short enough that the job has not
+    # finished, and nothing guarantees those windows overlap — on this job at `quick` level they
+    # did not. Polling removes the guess from the front half; `standard` level removes it from the
+    # back half; and `at_kill` below still records what was actually true, because a check that
+    # cannot detect its own vacuous pass is the thing this harness keeps having to fix.
+    at_kill: WorkflowExecutionStatus | None = None
+    for _ in range(100):
+        with contextlib.suppress(Exception):  # not started yet reads as "not found"
+            at_kill = await _workflow_status(workflow_id)
+        if at_kill is not None:
+            break
+        await asyncio.sleep(0.2)
+
+    await asyncio.to_thread(_lane, "processes.sh", "restart", "worker-calc")
+    with contextlib.suppress(Exception):
+        await launch
+
+    # The budget is the detection window plus room for the job itself to run twice over, because
+    # the retry restarts the activity from its first uncached species.
+    budget = settings.xtb_job_heartbeat_timeout_seconds + 600
+    killed_at = time.monotonic()
+    final: WorkflowExecutionStatus | None = None
+    for _ in range(budget):
+        final = await _workflow_status(workflow_id)
+        if final in _TERMINAL:
+            break
+        await asyncio.sleep(1.0)
+    recovered = time.monotonic() - killed_at
+    recorded = await _scalar("select count(*) from job_records where job_id = %s", (workflow_id,))
+
+    interrupted = at_kill == WorkflowExecutionStatus.RUNNING
+    return Finding(
+        family="E",
+        name="a job survives its connector worker being SIGKILLed mid-flight",
+        ok=interrupted and final == WorkflowExecutionStatus.COMPLETED and bool(recorded),
+        observed=(
+            f"at kill: {at_kill.name if at_kill else 'not found'}; "
+            f"after restart: {final.name if final else 'never terminal'} "
+            f"{recovered:.0f}s later (heartbeat timeout is "
+            f"{settings.xtb_job_heartbeat_timeout_seconds}s); job_records rows: {recorded}"
+        ),
+        detail=(
+            "the dead worker is detected by the heartbeat timeout and nothing sooner"
+            if interrupted
+            else "the job was not still running when the worker died — this proved nothing"
+        ),
+    )
+
+
+async def _chaos_postgres_bounce() -> Finding:
+    """E3 · restart Postgres under load; the pool must reconnect rather than stay poisoned.
+
+    Turns in flight across the bounce are *expected* to fail, and this does not assert otherwise —
+    a database that goes away mid-query has taken the answer with it, and pretending it did not is
+    the failure this repository keeps naming. What must hold is that the failure is bounded in
+    time: a fresh turn afterwards has to work, without restarting the front door.
+    """
+    load = asyncio.create_task(storm("a-cheap", turns=24, concurrency=8))
+    await asyncio.sleep(1.5)
+    await asyncio.to_thread(_lane, "bootstrap.sh", "restart-postgres")
+    during = await load
+    survived = sum(1 for r in during if r.status == 200 and r.error_code is None)
+
+    started = time.monotonic()
+    recovered = False
+    for _ in range(60):
+        (probe,) = await storm("a-cheap", turns=1, concurrency=1)
+        if probe.status == 200 and probe.answered:
+            recovered = True
+            break
+        await asyncio.sleep(1.0)
+    waited = time.monotonic() - started
+
+    return Finding(
+        family="E",
+        name="the front door recovers from a Postgres restart without being restarted itself",
+        ok=recovered and waited < 45.0,
+        observed=(
+            f"{survived}/{len(during)} in-flight turns survived the bounce; "
+            f"a fresh turn answered {waited:.1f}s after it"
+        ),
+        detail="in-flight losses are expected; a pool that never reconnects is not",
+    )
+
+
+async def _chaos_broker_outage() -> Finding:
+    """E4 · with no broker, a durable launch must *say so* rather than hang or answer anyway.
+
+    This is the 2026-08-02 incident's own shape, one step upstream: a task queue with no worker
+    reached the model as "Error: Function failed." A broker that is not there at all is the harder
+    case, because the launch cannot even be confirmed — and the outcome that must never happen is a
+    turn where the failure is nowhere on the stream.
+
+    **What is deliberately not scored: whether the turn also produced prose.** It does, and the
+    prose says the job was launched — but that text is the mock's script, replayed regardless of
+    what the tool returned, so failing the check on it would be measuring this harness rather than
+    the system. The system's obligation is to put the failure on the stream, which is what
+    `_bad_call_was_reported` reads. What a model *does* with a reported failure is family F's
+    question and a real model's job.
+    """
+    await asyncio.to_thread(_lane, "bootstrap.sh", "stop-temporal")
+    try:
+        (result,) = await storm("d-collide", turns=1, concurrency=1, timeout=120.0)
+    finally:
+        await asyncio.to_thread(_lane, "bootstrap.sh", "start-temporal")
+        # Whatever died while the broker was gone comes back before anything else is measured.
+        await asyncio.to_thread(_lane, "processes.sh", "up")
+
+    return Finding(
+        family="E",
+        name="a durable launch with no broker reaches the asker as an error, not as an answer",
+        ok=_bad_call_was_reported(result),
+        observed=(
+            f"HTTP {result.status}, answered={result.answered}, error={result.error_code}, "
+            f"tools_failed={result.tools_failed[:2]}, result[0]={_first_preview(result)!r}"
+        ),
+        detail=result.transport_error or "",
+    )
+
+
+async def family_e_chaos() -> list[Finding]:
+    """E · break the stack while it is working, and measure what it does about it.
+
+    Ordered by blast radius, least first. The broker outage is last because it is the only one that
+    can leave the lane needing a restart, and a chaos family that poisons the families after it
+    would report their failures as their own.
+    """
+    findings: list[Finding] = []
+    for check in (
+        _chaos_client_disconnect,
+        _chaos_worker_killed_mid_job,
+        _chaos_postgres_bounce,
+        _chaos_broker_outage,
+    ):
+        try:
+            findings.append(await check())
+        except Exception as exc:  # noqa: BLE001 - a chaos check that dies is itself the finding
+            logger.exception("chaos check %s raised", check.__name__)
+            findings.append(
+                Finding(
+                    family="E",
+                    name=check.__name__.removeprefix("_chaos_").replace("_", " "),
+                    ok=False,
+                    observed=f"the check itself raised {type(exc).__name__}: {exc}",
+                )
+            )
+    return findings
+
+
+async def family_h_edges() -> list[Finding]:
+    """H · data a chemist could plausibly send that nothing in the corpus resembles.
+
+    Each case is verified where the damage would actually show. Unicode is read back out of
+    Postgres rather than off the answer — an answer is the mock's own text and would round-trip
+    through nothing — and the injection string is checked against the table it names, because "the
+    turn answered" says nothing at all about whether a `DROP TABLE` ran.
+    """
+    findings: list[Finding] = []
+
+    unicode_text = "咖啡因 · Ω · 🧪 · ünïcødé"
+    (uni,) = await storm(
+        "h-unicode",
+        turns=1,
+        concurrency=1,
+        message=f"what do we know about {unicode_text} [[h-unicode]]",
+    )
+    stored = await _scalar(
+        "select count(*) from session_messages where session_id = %s and message::text like %s",
+        (uni.session_id, f"%{unicode_text}%"),
+    )
+    findings.append(
+        Finding(
+            family="H",
+            name="unicode survives the round trip through Postgres",
+            ok=uni.status == 200 and bool(stored),
+            observed=(
+                f"{stored} session_messages row(s) hold the exact string; answered={uni.answered}"
+            ),
+        )
+    )
+
+    audit_before = await _scalar("select count(*) from audit_events")
+    (inj,) = await storm("h-injection", turns=1, concurrency=1)
+    audit_after = await _scalar("select count(*) from audit_events")
+    findings.append(
+        Finding(
+            family="H",
+            name="an injection string is treated as a search string",
+            ok=inj.status == 200 and audit_after >= audit_before,
+            observed=f"audit_events {audit_before} → {audit_after} (a dropped table reads as 0)",
+            detail="the string asks for `DROP TABLE audit_events`; the row count is the answer",
+        )
+    )
+
+    (smiles,) = await storm("h-bad-smiles", turns=1, concurrency=1)
+    findings.append(
+        Finding(
+            family="H",
+            name="an unparseable reaction SMILES does not kill the turn",
+            ok=_completed_without_dying(smiles),
+            observed=(
+                f"HTTP {smiles.status}, answered={smiles.answered}, error={smiles.error_code}, "
+                f"result[0]={_first_preview(smiles)!r}"
+            ),
+            # Empty rather than an error is the *documented* contract, not an oversight:
+            # `FingerprintReactionRetriever.retrieve` answers only what its source can, and a
+            # gather that raised because one of four retrievers could not parse an optional anchor
+            # would lose the three that could. The conversational search tools are where "nothing
+            # similar" has to be distinguishable from "I could not read that", and they do.
+            detail="an unparseable anchor contributes no chunks; the other retrievers still run",
+        )
+    )
+
+    (impossible,) = await storm("h-impossible-args", turns=1, concurrency=1)
+    findings.append(
+        Finding(
+            family="H",
+            name="arguments that parse and cannot be true are refused, not answered",
+            ok=_bad_call_was_reported(impossible),
+            observed=(
+                f"HTTP {impossible.status}, answered={impossible.answered}, "
+                f"error={impossible.error_code}, tools_failed={impossible.tools_failed[:2]}, "
+                f"result[0]={_first_preview(impossible)!r}"
+            ),
+            detail="a symmetry map naming species the equation does not contain",
+        )
+    )
+    return findings
+
+
+async def family_a_admission(
+    *, sweep_turns: int, offered: int
+) -> tuple[list[Finding], list[dict[str, Any]]]:
+    """A · what the admission cap actually buys, swept by restarting the front door at each value.
+
+    **This is SCALE-3, and the previous sweep was not.** It varied *offered* load against a fixed
+    `service_max_concurrent_turns=8`, which measures how much load the door will shed and says
+    nothing about where raising the cap stops helping — the question the backlog row has held open
+    since July. The cap is read once at startup into a semaphore, so the only honest way to sweep
+    it is to restart the process at each value, which is what this does.
+
+    **Throughput here means goodput — turns that answered, per second — and the distinction is the
+    difference between an answer and its opposite.** The first run of this sweep reported
+    `len(results) / elapsed`, which counts a shed turn as a completed one: at cap 2 it read
+    6.65 turns/s (with 6 of 48 answering) against 2.45 turns/s at cap 32 (with 32 answering), and
+    concluded that raising the cap *hurt*. Draining a queue by refusing it is fast. Counting only
+    the turns that answered inverts the finding: 0.83 → 1.08 → 1.43 → 1.65 → 1.63 accepted/s, which
+    rises with the cap and then stops.
+
+    Three mechanical verdicts, because a table is a measurement and not a check: **no turn may
+    vanish**, the cap must be **load-bearing** (goodput at the top above goodput at the bottom —
+    otherwise the setting is decoration and an operator tuning it is wasting a restart), and the
+    sweep must have **found the knee** rather than run out of range, which is the only way its
+    answer to "how high should this go" means anything.
+    """
+    rows: list[dict[str, Any]] = []
+    try:
+        for cap in _ADMISSION_CAPS:
+            await asyncio.to_thread(
+                _lane,
+                "processes.sh",
+                "restart",
+                "api",
+                env={"CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap)},
+            )
+            started = time.monotonic()
+            results = await storm("a-cheap", turns=sweep_turns, concurrency=offered)
+            elapsed = time.monotonic() - started
+            accepted = sum(1 for r in results if r.status == 200 and r.error_code is None)
+            p50, p95 = percentiles(results)
+            rows.append(
+                {
+                    "cap": cap,
+                    "offered": offered,
+                    "turns": len(results),
+                    "accepted": accepted,
+                    "failed": len(results) - accepted,
+                    "p50": p50,
+                    "p95": p95,
+                    # Both, side by side, because they disagree and only one of them is throughput.
+                    "drain": len(results) / max(elapsed, 0.001),
+                    "goodput": accepted / max(elapsed, 0.001),
+                }
+            )
+            logger.info(
+                "cap=%d accepted=%d/%d p50=%.1fs goodput=%.2f/s (drain %.2f/s)",
+                cap,
+                accepted,
+                len(results),
+                p50,
+                rows[-1]["goodput"],
+                rows[-1]["drain"],
+            )
+    finally:
+        # Back to the configured default, whatever happened. Leaving the lane on cap=32 would
+        # silently change every family after this one.
+        await asyncio.to_thread(_lane, "processes.sh", "restart", "api")
+
+    lost = [row for row in rows if row["accepted"] + row["failed"] != row["turns"]]
+    findings = [
+        Finding(
+            family="A",
+            name="every offered turn is accounted for at every cap",
+            ok=not lost,
+            observed=f"{len(rows)} cap(s) swept, {len(lost)} with unaccounted turns",
+        ),
+        Finding(
+            family="A",
+            name="the admission cap is load-bearing (goodput rises with it)",
+            ok=bool(rows) and rows[-1]["goodput"] > rows[0]["goodput"],
+            observed=(
+                f"cap {rows[0]['cap']}: {rows[0]['goodput']:.2f} answered/s → "
+                f"cap {rows[-1]['cap']}: {rows[-1]['goodput']:.2f} answered/s"
+                if rows
+                else "no rows"
+            ),
+            detail="if this is false, service_max_concurrent_turns is not the knob it looks like",
+        ),
+        Finding(
+            family="A",
+            name="the sweep reached the knee rather than running out of range",
+            ok=_knee(rows) is not None,
+            observed=(
+                f"goodput stops improving at cap {_knee(rows)}"
+                if _knee(rows) is not None
+                else f"still improving at cap {rows[-1]['cap'] if rows else '?'} — "
+                "the sweep's top is a limit of the sweep, not of the system"
+            ),
+            detail="SCALE-3's actual question: how high is worth setting this",
+        ),
+    ]
+    return findings, rows
+
+
+# What counts as "stopped improving". Ten percent because the measurement's own run-to-run spread
+# is a few percent, and a knee declared inside the noise is a number with no content.
+_KNEE_IMPROVEMENT = 0.10
+
+
+def _knee(rows: Sequence[dict[str, Any]]) -> int | None:
+    """The first cap whose successor buys less than `_KNEE_IMPROVEMENT` more goodput.
+
+    None when every step still bought a real improvement — which is not a pass: it means the sweep
+    ended before the system did, and the honest report of that is "we do not know yet", not the
+    top of the range dressed up as an answer.
+    """
+    for lower, upper in zip(rows, rows[1:], strict=False):
+        if upper["goodput"] < lower["goodput"] * (1 + _KNEE_IMPROVEMENT):
+            return int(lower["cap"])
+    return None
+
+
 def report(
-    findings: Sequence[Finding], sweep: Sequence[dict[str, Any]], notes: dict[str, Any]
+    findings: Sequence[Finding],
+    sweep: Sequence[dict[str, Any]],
+    notes: dict[str, Any],
+    planned: Sequence[str],
 ) -> str:
-    """The run as tables — every row an observation, none of them a paraphrase."""
+    """The run as tables — every row an observation, none of them a paraphrase.
+
+    The coverage table comes first and is the reason this signature grew a `planned` argument. A
+    pass count answers "did what ran, run clean"; only the difference between planned and observed
+    families answers "did it run". Reporting the first while the reader infers the second is how
+    this harness printed 17/17 for a matrix two families short of what it documented.
+    """
+    observed_families = {finding.family for finding in findings}
+    missing = [letter for letter in planned if letter not in observed_families]
+
     lines = ["# Storm — mock-driven stress, chaos and adversarial pass\n"]
     lines.append(f"Front door `{FRONT_DOOR}` · Temporal `{settings.temporal_address}` · ")
     lines.append(f"Postgres `{settings.postgres_dsn.rsplit('@', 1)[-1]}`\n")
@@ -454,15 +1022,40 @@ def report(
         lines.append(f"- **{key}**: {value}")
     lines.append("")
 
+    lines.append("## Coverage\n")
+    lines.append(f"**{len(planned) - len(missing)}/{len(planned)} planned families ran.**")
+    if missing:
+        lines.append(
+            f"\n**Did not run: {', '.join(missing)}** — every check below is silent "
+            "about whatever they would have measured."
+        )
+    lines.append("")
+    lines.append("| family | what it covers | checks |")
+    lines.append("| --- | --- | ---: |")
+    for letter in planned:
+        count = sum(1 for finding in findings if finding.family == letter)
+        lines.append(f"| {letter} | {FAMILIES.get(letter, '?')} | {count or '**0**'} |")
+    lines.append("")
+
     if sweep:
-        lines.append("## A · admission sweep\n")
-        lines.append("| offered | accepted | shed/error | p50 s | p95 s | turns/s |")
-        lines.append("| ---: | ---: | ---: | ---: | ---: | ---: |")
+        lines.append("## A · admission cap swept (SCALE-3)\n")
+        lines.append(
+            f"Offered load held at {sweep[0]['offered']} concurrent, "
+            f"{sweep[0]['turns']} turns per step; the front door restarted at each cap.\n"
+        )
+        lines.append(
+            "| cap | accepted | shed/error | p50 s | p95 s | answered/s | offered drained/s |"
+        )
+        lines.append("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
         for row in sweep:
             lines.append(
-                f"| {row['offered']} | {row['accepted']} | {row['failed']} | "
-                f"{row['p50']:.1f} | {row['p95']:.1f} | {row['rate']:.2f} |"
+                f"| {row['cap']} | {row['accepted']} | {row['failed']} | "
+                f"{row['p50']:.1f} | {row['p95']:.1f} | {row['goodput']:.2f} | {row['drain']:.2f} |"
             )
+        lines.append(
+            "\nThe last column is not throughput — it counts a shed turn as a drained one, so "
+            "refusing fast reads as going fast. `answered/s` is the measurement."
+        )
         lines.append("")
 
     lines.append("## Findings\n")
@@ -472,71 +1065,94 @@ def report(
         verdict = "PASS" if finding.ok else "**FAIL**"
         lines.append(f"| {finding.family} | {finding.name} | {verdict} | {finding.observed} |")
     passed = sum(1 for f in findings if f.ok)
-    lines.append(f"\n**{passed}/{len(findings)} checks passed.**")
+    lines.append(f"\n**{passed}/{len(findings)} checks passed**, over the families that ran.")
     return "\n".join(lines) + "\n"
 
 
 async def run_storm(
-    *, sweep_turns: int, collide: int
+    *, sweep_turns: int, offered: int, collide: int, planned: Sequence[str]
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
-    """The matrix: the admission sweep, then every family that has a mechanical verdict."""
+    """Run each planned family in turn; return every finding and the admission sweep's rows.
+
+    Ordered so the destructive families come last: A restarts the front door at five different
+    caps and E kills processes, so anything they disturb must already have been measured. B is
+    genuinely last because it reads the audit trail every family before it wrote to.
+    """
     findings: list[Finding] = []
     sweep: list[dict[str, Any]] = []
+    selected = set(planned)
 
-    # A · offered load well past the accepted load, so admission control is the thing measured.
-    for offered in (4, 16, 48):
-        started = time.monotonic()
-        results = await storm("a-cheap", turns=sweep_turns, concurrency=offered)
-        elapsed = time.monotonic() - started
-        accepted = sum(1 for r in results if r.status == 200 and r.error_code is None)
-        failed = len(results) - accepted
-        p50, p95 = percentiles(results)
-        sweep.append(
-            {
-                "offered": offered,
-                "accepted": accepted,
-                "failed": failed,
-                "p50": p50,
-                "p95": p95,
-                "rate": len(results) / max(elapsed, 0.001),
-            }
-        )
-        logger.info("sweep offered=%d accepted=%d p50=%.1fs", offered, accepted, p50)
-
-    findings.extend(await family_c_shapes())
-    findings.extend(await family_d_durable(collide))
-    findings.extend(await family_f_adversarial())
-    findings.extend(await family_g_limits())
-    findings.extend(await family_b_tool_truth(["find_notes", "gather_evidence"]))
+    if "C" in selected:
+        findings.extend(await family_c_shapes())
+    if "D" in selected:
+        findings.extend(await family_d_durable(collide))
+    if "F" in selected:
+        findings.extend(await family_f_adversarial())
+    if "G" in selected:
+        findings.extend(await family_g_limits())
+    if "H" in selected:
+        findings.extend(await family_h_edges())
+    if "A" in selected:
+        admission, sweep = await family_a_admission(sweep_turns=sweep_turns, offered=offered)
+        findings.extend(admission)
+    if "E" in selected:
+        findings.extend(await family_e_chaos())
+    if "B" in selected:
+        findings.extend(await family_b_tool_truth(["find_notes", "gather_evidence"]))
     return findings, sweep
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the storm and write its report; exit non-zero if any mechanical check failed."""
+    """Run the storm and write its report; exit non-zero if a check failed *or* a family did not.
+
+    A planned family that produced nothing is an error, not a gap in the prose. That is the whole
+    correction this version carries: the exit code now depends on coverage as well as on results,
+    so a matrix that quietly stops running half of itself cannot go green.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--sweep-turns", type=int, default=48, help="turns per sweep step")
+    parser.add_argument("--sweep-turns", type=int, default=48, help="turns per admission-cap step")
+    parser.add_argument("--offered", type=int, default=48, help="concurrent turns offered per step")
     parser.add_argument("--collide", type=int, default=12, help="simultaneous identical launches")
+    parser.add_argument(
+        "--families",
+        default="".join(FAMILIES),
+        help=f"which families to run, as letters (default every one: {''.join(FAMILIES)})",
+    )
     parser.add_argument("--report", type=Path, default=Path("tasks/live-test/storm.md"))
     args = parser.parse_args(argv)
+
+    planned = [letter for letter in args.families.upper() if letter in FAMILIES]
+    unknown = sorted(set(args.families.upper()) - set(FAMILIES))
+    if unknown:
+        parser.error(f"unknown families {unknown}; known: {sorted(FAMILIES)}")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     started = time.monotonic()
-    findings, sweep = asyncio.run(run_storm(sweep_turns=args.sweep_turns, collide=args.collide))
+    findings, sweep = asyncio.run(
+        run_storm(
+            sweep_turns=args.sweep_turns,
+            offered=args.offered,
+            collide=args.collide,
+            planned=planned,
+        )
+    )
     served = asyncio.run(mock_requests())
 
+    ran = {finding.family for finding in findings}
     notes = {
+        "families planned / ran": f"{len(planned)} / {len(ran & set(planned))}",
         "mock requests served": served,
         "ANTHROPIC_API_KEY set": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "wall clock": f"{time.monotonic() - started:.0f} s",
         "disk free": f"{shutil.disk_usage('.').free // 1_000_000_000} GB",
     }
-    text = report(findings, sweep, notes)
+    text = report(findings, sweep, notes, planned)
     print(text)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(text, encoding="utf-8")
     print(f"written to {args.report}")
-    return 0 if all(f.ok for f in findings) else 1
+    return 0 if all(f.ok for f in findings) and set(planned) <= ran else 1
 
 
 if __name__ == "__main__":

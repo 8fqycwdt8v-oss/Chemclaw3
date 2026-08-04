@@ -172,3 +172,33 @@ skip_covered = true
 # tests skipped; CI runs those and is higher still). Ratchet upward as coverage climbs; never lower
 # it to make a red build pass — add the missing test instead.
 fail_under = 80
+
+# Mutation testing (`make mutants`). Coverage says which lines ran; this says whether anything
+# would have noticed them being wrong — the only question that distinguishes a test suite from an
+# execution trace. The July pass did five mutations by hand and three of them survived their own
+# test file, which is why this is configured rather than remembered.
+#
+# **Scoped to the invariant-bearing modules, not the tree.** A full-repository run is thousands of
+# mutants over an hours-long suite, and most of them land in code where a surviving mutant means
+# nothing (a log message, a docstring-shaped constant). These seven are where a silently-wrong
+# answer is expensive: the authorization gate, the PR-gate and the note schema behind it, the
+# calculation cache's identity, the budget guard, the GxP audit chain, and `runner_trace.py` —
+# which shipped a real defect on 2026-08-04 and is therefore the best available test of whether
+# its own tests are any good.
+[tool.mutmut]
+source_paths = [
+    "src/chemclaw/agent/authz.py",
+    "src/chemclaw/agent/audit_store.py",
+    "src/chemclaw/api/budget.py",
+    "src/chemclaw/api/runner_trace.py",
+    "src/chemclaw/kg/note.py",
+    "src/chemclaw/kg/pr_gate.py",
+    "src/chemclaw/science/calc/store.py",
+]
+# `also_copy` is what the mutant run sees besides the sources: mutmut copies the tree into
+# `mutants/` and runs pytest there, so anything read at import or at test time has to come along.
+# `data/` and `knowledge/` are corpora the schema and the gate read from disk.
+also_copy = ["data", "knowledge", "skills", "connectors", "infra"]
+# The suite twice over is the honest budget here. A mutant that merely makes a test *slow* is not
+# killed by it, and the default multiplier declares a timeout a kill.
+timeout_multiplier = 4.0

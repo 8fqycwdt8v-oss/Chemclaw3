@@ -14,11 +14,19 @@ behaving badly" are different claims, and only one of them was ever testable wit
 * **F adversarial** — what a real model will not reliably do: malformed arguments, an unknown tool,
   an empty function name (the STREAM-1 shape), a 100 KB argument document, forty parallel calls,
   a turn with no prose, and an unbounded tool loop.
-* **H edges** — pathological chemistry and unicode driven through the real tools.
+* **H edges** — pathological chemistry, semantically impossible arguments, and unicode driven
+  through the real tools and the real database.
 
-Families B (tool-path truth), E (chaos) and G (limits) need no behaviour of their own: B is a
-cross-check over `audit_events` after the others, E perturbs the stack while A runs, and G attacks
-the front door's own limits rather than the model.
+Families B (tool-path truth) and G (limits) need no behaviour of their own: B is a cross-check over
+`audit_events` after the others, and G attacks the front door's own limits rather than the model.
+**E (chaos) borrows** — it kills processes around `a-cheap`, `f-slow` and a directly-launched
+durable job rather than asking the model for anything new.
+
+Every behaviour here is reached by some check in `cli/live_storm.py`, and that is enforced rather
+than intended: `FAMILIES` there declares the planned set and the report names any family that
+produced no findings. The first version of this file defined six behaviours nothing ever asserted
+against — `a-retrieval`, `d-status`, `f-slow`, `h-bad-smiles`, `h-injection`, `h-unicode` — while
+the run reported "17/17 checks passed", which is true of what ran and silent about what did not.
 """
 
 from __future__ import annotations
@@ -186,6 +194,36 @@ BEHAVIOURS: list[Behaviour] = [
         name="h-unicode",
         calls=[ToolCall(tool="find_notes", arguments={"text": "咖啡因 · Ω · 🧪 · ünïcødé"})],
         text="Unicode survived the round trip.",
+    ),
+    Behaviour(
+        name="h-impossible-args",
+        # Valid JSON, valid types, and impossible to answer: the symmetry-number map names species
+        # the equation does not contain. `_checked_symmetry_numbers` refuses exactly this, and it
+        # was found the only way such things are found — a chaos payload in `cli/live_jobs.py`
+        # inherited the wrong map, the job rejected it correctly, and the lane read as a system
+        # fault until someone looked. The missing negative in this family was the shape that is
+        # *well-formed and wrong*: a schema check passes it, so the only thing standing between it
+        # and a plausible answer is the tool's own domain validation.
+        calls=[
+            ToolCall(
+                tool="compute_reaction_energy",
+                arguments={
+                    "params": {
+                        "kind": "reaction",
+                        # Balanced on purpose, so the symmetry map is the *only* thing wrong with
+                        # it. An unbalanced equation would also be refused, and the check would
+                        # then pass for a reason other than the one it names.
+                        "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
+                        "products": ["N", "N"],
+                        "level": "quick",
+                        "symmetry_numbers": {"c1ccccc1": 12, "CCO": 1},
+                    },
+                    "rationale": "storm: arguments that parse and cannot be true",
+                },
+            )
+        ],
+        text="",
+        adversarial=True,
     ),
     Behaviour(
         name="h-injection",
