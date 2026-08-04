@@ -25,11 +25,21 @@ import pytest
 import yaml
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.kg.note import mentioned_ids
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes"
+
+
+def _fake_job_outcomes(states: dict[str, str]) -> object:
+    """A stand-in for the Temporal lookup that returns a fixed verdict per workflow id."""
+
+    async def _lookup(job_ids: list[str]) -> dict[str, str]:
+        return {job_id: states[job_id] for job_id in job_ids}
+
+    return _lookup
 
 
 def _probe(**overrides: object) -> Probe:
@@ -355,3 +365,106 @@ def test_outputs_land_beside_their_own_transcripts(tmp_path: Path) -> None:
     # The shared parent must hold neither, which is what made the collision possible.
     assert not (tmp_path / "summary.md").exists()
     assert not (tmp_path / "grades.json").exists()
+
+
+def test_a_probe_expecting_a_job_resolves_its_workflow_against_the_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`expects_job` is what turns "the turn said it started a job" into an observation.
+
+    The stream below is a *truthful* one: the turn really did start a workflow and really does say
+    so. That is exactly the case the event stream alone cannot grade, because a job tool returns an
+    id the moment the launch is accepted — so an answer can be honest about starting work the
+    broker never ran. The outcome must therefore carry what Temporal says, not what the turn said.
+    """
+    monkeypatch.setattr(
+        "chemclaw.evals.live._job_outcomes",
+        _fake_job_outcomes({"calc-compute_reaction_energy-abc": "FAILED"}),
+    )
+    outcome = _run(
+        _probe(expects_tools=["compute_reaction_energy"], expects_job=True),
+        {"type": "tool_call", "tool": "compute_reaction_energy", "arguments": "{}"},
+        {"type": "job_started", "job_id": "calc-compute_reaction_energy-abc"},
+        {"type": "answer", "text": "Started it — I'll have the energy shortly."},
+    )
+    assert outcome.jobs_started == ["calc-compute_reaction_energy-abc"]
+    assert outcome.job_outcomes == {"calc-compute_reaction_energy-abc": "FAILED"}
+
+
+def test_a_probe_not_expecting_a_job_never_asks_the_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lookup is opt-in, so an ordinary probe run costs no Temporal round trip.
+
+    Not merely an efficiency point: `_job_outcomes` records `unreachable` when it cannot connect,
+    and running it for every probe would put that string on 200-odd outcomes of a run that never
+    cared about durable work — noise indistinguishable from a finding.
+    """
+    called = False
+
+    async def _boom(job_ids: list[str]) -> dict[str, str]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("chemclaw.evals.live._job_outcomes", _boom)
+    outcome = _run(
+        _probe(expects_tools=["gather_evidence"]),
+        {"type": "job_started", "job_id": "calc-x"},
+        {"type": "answer", "text": "done"},
+    )
+    assert outcome.jobs_started == ["calc-x"]
+    assert outcome.job_outcomes == {}
+    assert called is False
+
+
+def test_an_unreachable_broker_is_recorded_as_such_rather_than_as_a_dead_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure to reach the broker and a failed job are different findings.
+
+    Collapsing them would make every probe run without a broker report fabricated durable work,
+    which is the mirror image of the defect this signal exists to catch.
+    """
+
+    async def _unreachable() -> object:
+        raise SubsystemUnavailableError("the durable execution backend is unreachable")
+
+    monkeypatch.setattr("chemclaw.evals.live.temporal_connect", _unreachable)
+    outcome = _run(
+        _probe(expects_job=True),
+        {"type": "job_started", "job_id": "calc-y"},
+        {"type": "answer", "text": "started"},
+    )
+    assert outcome.job_outcomes == {"calc-y": "unreachable"}
+
+
+def test_every_durable_probe_declares_the_job_expectation_it_is_named_for() -> None:
+    """The `du-*` corpus exists to exercise the durable path, so it must ask to be checked.
+
+    A `du-` probe with `expects_job` left off would run, pass and prove nothing about Temporal —
+    the precise shape of the gap the file was written to close.
+    """
+    durable = [p for p in load_probes(str(PROBE_DIR)) if p.id.startswith("du-")]
+    assert durable, "no durable probes found — this test would assert nothing"
+    # du-04 is deliberately the exception: it asks about the *record* of past jobs, and starting
+    # one to answer it would be the wrong instinct. Its direction says so; this pins that the
+    # exception is one probe rather than a habit.
+    expecting = [p.id for p in durable if p.expects_job]
+    assert expecting == ["du-01", "du-02", "du-03"]
+
+
+def test_no_probe_direction_asserts_which_deployment_it_meets() -> None:
+    """A grading key that names one configuration stops being true when the stack changes.
+
+    Six directions across three files asserted "Temporal is not running in this test". They were
+    honest when written and became wrong the day `make live-up` started the workers: a *successful*
+    launch would have been graded a failure. Directions describe behaviour; the environment is the
+    runner's business.
+    """
+    offenders: list[str] = []
+    for probe in load_probes(str(PROBE_DIR)):
+        text = probe.direction.lower()
+        if "is not running" in text or "not reachable in this run" in text:
+            offenders.append(probe.id)
+    assert not offenders, f"probe directions asserting the deployment they meet: {offenders}"

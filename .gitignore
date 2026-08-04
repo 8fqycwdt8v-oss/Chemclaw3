@@ -244,3 +244,10 @@ __marimo__/
 # System files
 .DS_Store
 Thumbs.db
+
+# The live lane's working directory (`infra/live/`). Holds the pgvector and Temporal CLI clones it
+# builds, the dev server's SQLite file, and one log plus one pid file per running process — all of
+# it machine-local state for a stack that is started and stopped, never source. The lane's *output*
+# is not here: `make live-jobs` writes its report to `tasks/live-test/transcripts/`, which is
+# committed, because a live result nobody can read back later is a claim rather than evidence.
+.live/

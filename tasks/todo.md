@@ -1,71 +1,87 @@
-# Task: analyse the BO capability, and plan the features worth adding
+# Task: the Snowflake ELN — a schema nobody knows yet
 
-Branch: `claude/bofire-capabilities-roadmap-pmeipd`. Deliverable: **documentation only, no `src/`
-change** — a capability map, an ADR holding the measured numbers, and the backlog/deferred rows
-that make the roadmap actionable.
+Planned 2026-08-04. Branch: `claude/snowflake-eln-generic-concept-6aikvz`.
 
-_(The previous occupant of this file was the 2026-08-03 grounded-live-run fix list, merged in
-`1f10ae3`; it is in `git log`.)_
+**Question asked:** the final ELN integration will be Snowflake, carrying reaction SMILES, protocol
+text, project ids, child tables of charged amounts, yield, purity, "many more data tables" and a
+per-reaction vector in a warehouse vector table — and nobody knows today which tables or fields
+exist. Come up with a generic concept that makes connecting easy later.
 
----
+**Answer shipped:** the schema is a file, not an adapter. `chemclaw.ingest.eln.warehouse` is a
+generic engine naming no table and no column; the site's schema is a *binding* in the source's
+manifest. Attaching the real warehouse is writing YAML. Decision:
+`docs/decisions/D-2026-08-04-the-schema-is-a-file.md`; concept:
+`docs/guides/warehouse-eln-concept.md`.
 
-## What was asked
+## Work packages
 
-Three things: which chemical- and analytical-development use cases the current BoFire wiring already
-serves; what BoFire can do that is not wired up; and a plan of features to integrate. Scope
-confirmed with the user as **analysis and roadmap only**, covering all four use-case families
-(reaction/process optimisation, DoE/HTE screening, analytical method development, campaign health).
+- [x] **W1** The binding engine — `binding.py` (the document's schema, `extra="forbid"`),
+      `expr.py` (paths + a closed transform vocabulary), `sql.py` (checked identifiers written,
+      every value bound), `driver.py` (Protocols only, no vendor import), `connect.py` (late-bound
+      driver, credentials read from named env vars).
+- [x] **W2** The unmapped-column problem — `attributes: dict[str, str]` on `OrdReaction` and
+      `Component`, rendered last in the note body by `ingest/eln/note.py`. Bounded; never reaches
+      `transformation_smiles` or either fingerprint.
+- [x] **W3** Both halves — `WarehouseElnAdapter` (`COALESCE` watermark so amendments count as new;
+      one child query per table per batch) and `WarehouseVectorRetriever` (ANN inside the warehouse,
+      cites `<source>:<row>`, `suppress_ingested` keeps the no-double-surfacing rule). Plus
+      `snowflake.py`, the only module that knows a vendor exists.
+- [x] **W4** The worked manifest `sources/eln-snowflake/datasource.yaml` (discovered, not enabled)
+      and the offline suite: `tests/warehouse_fake.py` + adapter/retriever/binding tests.
+- [x] **W5** `--construct` on `make datasource-validate`, so an operator can check a mounted binding
+      offline — binding the kwargs alone cannot see inside a binding document.
+- [x] **W6** Docs and registers: ADR + ledger row, concept guide, package README, seam README,
+      `DEFERRED.md` rewritten, `BACKLOG.md`, `CLAUDE.md`, capability-map row.
 
-## Done
+## Verification
 
-- [x] Map the implementation from source — one BoFire-importing module, three strategies, two
-      objectives, four feature types, `Domain(constraints=…)` never passed.
-- [x] Catalogue BoFire 0.4.1's full surface and diff it against that.
-- [x] Locate the demand side: `tasks/story-audit-optimization.md` §2/§3/§4,
-      `story-audit-analytical.md` §7/§8, and what `OrdReaction` actually records.
-- [x] **Run the measurement register M-1…M-7 before writing the roadmap** (`uv sync` first; bofire
-      was not installed in the session).
-- [x] `docs/reference/bo-capability-map.md` — §1 wiring, §2 what it serves, §3 what is unused,
-      §4 the gap by family, §5 five waves, §6 what the map does not tell you.
-- [x] `docs/decisions/D-2026-08-04-what-bofire-does-when-you-actually-run-it.md` + ledger row.
-- [x] BACKLOG rows (one per wave, plus the `method` note type), five DEFERRED rows with triggers,
-      the `docs/README.md` reference row.
-- [x] Gate: `make lint` · `make type` (537 files) · `make test` (2908 passed, 129 skipped) ·
-      `prose-validate` · `kg-validate` · `skill-validate` · `connector-validate` ·
-      `test_decision_log` · `test_deferred_register` · `test_repo_map`.
+`make lint type test` green: **2913 passed, 127 sandbox-skipped**. `make ci` green through every
+validator (`datasource-validate` also passes with `--construct`); `helm-validate` fails only because
+`helm` is not installed in this sandbox, unrelated to this change and the same as the previous task.
+
+What the fake-driver suite actually proves, with no tenant and no client installed:
+
+- the cursor filters and orders on `COALESCE(modified, created)`, asserted on the emitted SQL —
+  the failure this prevents is silent (an amended run simply never re-arrives, no error, no reject);
+- child tables are fetched once per batch, not once per reaction;
+- a new child table reaches the payload with **no Python change** — the claim, as a test;
+- the site's `SM`/`SOLV`/`PROD` vocabulary maps to `Role`; grams → mg; minutes → h;
+- unmapped columns survive into `attributes`, bounded, without repeating consumed fields, and
+  **without changing `transformation_smiles()` or `reaction_smiles()`**;
+- an unmapped vocabulary value rejects its row rather than dropping a field silently;
+- the retriever ranks and truncates server-side, cites the row, and suppresses a reaction already
+  merged as a note;
+- an unreachable *or misconfigured* warehouse costs that leg of the fan-out and nothing else.
 
 ## Review
 
-**The measurement register earned its cost, which was the open question going in.** It was run
-because `tasks/lessons.md` requires it — the last BO roadmap said "just thread `n_generators`
-through" about a parameter that was inert — and the worry was that it would only confirm a plan
-already written. It did not. Three of seven measurements changed a wave and one reversed a refusal:
+**Three things the work found that the plan had not.**
 
-- **M-5** turned "admit continuous factors, and also thread the four unused knobs" into "admitting
-  continuous factors is the *precondition* for three of those knobs" — on the all-categorical domain
-  `factorial_design` accepts today, `n_repetitions` and `n_center` are as inert as `n_generators`
-  was. The same trap as D-2026-08-02, two parameters wider, and it would have shipped as three
-  no-ops implemented elegantly.
-- **M-3** could have grown the constraints wave: `RandomStrategy` seeds every cold start, and had it
-  ignored `Domain.constraints` the schema would have claimed a limit was honoured while every seed
-  point violated it. It honours them, so no rejection-sampling path is needed.
-- **M-7** reversed a refusal already written down as settled. The argument against a
-  cross-validation tool was that it forces naming a surrogate class in `engine.py`;
-  `strategy.surrogate_specs` exposes the one BoFire itself chose, so the number describes the model
-  that made the recommendation and no class is named.
+*The canonical record has no place for the impurity profile through a scalar field binding.*
+`purity_percent` is one column, but the impurity table behind it is rows. Added `impurities:` as a
+block mirroring `components:`, reusing the same reader — otherwise the first real binding could not
+carry a profile that `OrdReaction` already models, which would have been a hole in "connect without
+code" on a field the question named explicitly.
 
-**The most useful finding is a negative one.** Analytical method development is the largest family
-by story count (24 stories) and gets no wave: it is blocked on a missing `method` note type, not on
-BO. Building `TargetObjective` for it first would have been building on air. Naming that explicitly
-is worth more than any single one of the five waves.
+*A tree-walking test imports every first-party module.* `tests/test_publish.py` enumerates the error
+hierarchy that way, so a module-scope `import snowflake.connector` would have made this repository's
+own suite depend on a client only a real deployment has. The driver's client import moved inside a
+function — the one departure from the seam's "import at module scope" corollary, and it departs for
+a reason that corollary does not cover: that rule is about which *process* pays for an import, this
+is about a package installed in none of them.
 
-**One process note.** `prose-validate` caught the map naming `science/bo/progress.py` — a file the
-roadmap proposes and the tree does not have. That is the validator working exactly as intended on a
-document class it was not written for: a roadmap that names paths reads as a claim about the tree.
-Rephrased to describe the module without asserting it exists.
+*`gather_evidence` fans out with a plain `asyncio.gather`, no `return_exceptions`.* So a raising
+retriever does not degrade a question, it loses it. The first version caught transient failures and
+would have let a `BindingError` — a driver package the image lacks — escape and break every question
+in the process. Now caught, and logged at ERROR rather than WARNING because it recurs until someone
+changes the deployment.
 
-## Not done, deliberately
+**One thing stated plainly rather than glossed.** This is *not* zero core edits. `attributes` on
+`OrdReaction` and `Component`, the note renderer, four names in the non-retryable list, one runtime
+hook in the log-redaction inventory, and the pinned source set in `tests/test_no_egress.py` all
+changed. Each is small and each is argued in the ADR — but the seam did not hold perfectly, and the
+honest framing is that one typed field was the price of "a new column is a line of YAML".
 
-No `src/` change. Each wave carries its own ADR, its own tests and its own gating measurement, and
-those are what stop these findings from rotting. The numbers were taken on one machine at
-`bofire==0.4.1`; a version bump invalidates them.
+**Deliberately not built.** A schema-introspection CLI drafting a binding from `INFORMATION_SCHEMA`.
+It can only be written against a real warehouse's metadata; written against an imagined one it would
+draft bindings nobody can use.

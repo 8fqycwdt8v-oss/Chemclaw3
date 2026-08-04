@@ -17,7 +17,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit
+.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -135,3 +135,30 @@ up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
 
 down:  ## Stop the local dev stack.
 	docker compose -f infra/docker-compose.yml down
+
+# The live lane. Four targets rather than one, because the stages answer different questions and
+# only the last needs a model credential: `live-infra` provides what `make up` provides where there
+# is no Docker daemon, `live-up` starts the six processes the README has always listed by hand,
+# `live-jobs` proves the durable path (Temporal + workers + Postgres, no LLM), and `live-probes`
+# adds the model on top. Run against a deployment, never on a diff — none of these is in `make ci`.
+
+live-infra:  ## Start Postgres/pgvector + Temporal for the live lane (uses Docker when available).
+	bash infra/live/bootstrap.sh up
+
+live-infra-down:  ## Stop the live lane's Postgres and Temporal.
+	bash infra/live/bootstrap.sh down
+
+live-up:  ## Start the live processes: connectors, the four Temporal workers, the front door.
+	bash infra/live/processes.sh up
+
+live-down:  ## Stop the live processes.
+	bash infra/live/processes.sh down
+
+live-status:  ## Show which live processes are running.
+	bash infra/live/processes.sh status
+
+live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
+	uv run python -m chemclaw.cli.live_jobs
+
+live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
+	uv run python -m chemclaw.cli.live_probes $(ARGS)

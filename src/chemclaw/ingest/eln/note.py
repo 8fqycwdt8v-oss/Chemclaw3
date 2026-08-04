@@ -31,6 +31,7 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         f"{_charge_block(reaction)}"
         f"{_impurity_block(reaction)}"
         f"{_procedure_block(reaction)}"
+        f"{_attribute_block(reaction)}"
     )
     return Note(
         id=note_id_for_reaction(reaction.reaction_id),
@@ -183,7 +184,18 @@ def _charge_line(component: Component) -> str:
     if component.amount_mmol is not None:
         amounts.append(f"{component.amount_mmol:g} mmol")
     detail = ", ".join(amounts) if amounts else "amount not recorded"
-    return f"`{component.smiles}` ({component.role.value}): {detail}"
+    line = f"`{component.smiles}` ({component.role.value}): {detail}"
+    # Whatever else the source recorded about this species, on the row it belongs to rather than in
+    # the reaction-level block: a lot number is a fact about *this* charge, and hoisting it would
+    # lose which species it described the moment a record charges two lots of the same reagent.
+    if component.attributes:
+        line += " — " + _attribute_text(component.attributes)
+    return line
+
+
+def _attribute_text(attributes: dict[str, str]) -> str:
+    """Render an attribute bag as `key: value` pairs, in the order the binding produced them."""
+    return ", ".join(f"{key}: {value}" for key, value in attributes.items())
 
 
 def _impurity_block(reaction: OrdReaction) -> str:
@@ -226,3 +238,21 @@ def _step_line(step: ReactionStep) -> str:
     if step.duration_h is not None:
         detail.append(f"{step.duration_h} h")
     return f"{step.text} ({', '.join(detail)})"
+
+
+def _attribute_block(reaction: OrdReaction) -> str:
+    """Render whatever the source recorded that this schema has no field for.
+
+    **Last in the body, deliberately.** A retrieval excerpt is a blind character prefix
+    (`retrieval.retrievers._excerpt`, `note_excerpt_chars`), so every block competes for the same
+    budget. These are the fields nobody has yet decided are worth a question — putting them ahead of
+    the procedure would push the actual recipe out of the excerpt to make room for a vessel id.
+
+    Rendered as a definition list rather than prose so the labels stay the source's own. This
+    section is the record saying "the ELN also carried these"; inventing readable names for them
+    here would assert a mapping nobody wrote.
+    """
+    if not reaction.attributes:
+        return ""
+    lines = "".join(f"- {key}: {value}\n" for key, value in reaction.attributes.items())
+    return f"\n## Recorded fields\n\n{lines}"

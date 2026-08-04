@@ -109,6 +109,15 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # exempted: it is the one sanctioned escalation of D-089's scope, and it earns its place
         # by being *local* — the two tests below hold it to that.
         "vendored",
+        # The corporate ELN in a SQL warehouse: the first source that reaches a remote host this
+        # repository does not control, and the reason this assertion is written by hand. It is
+        # sanctioned because it is *the deployment's own system* — an internal ELN behind the same
+        # identity boundary as everything else here — not a third-party corpus, which is what D-089
+        # was about. Two things hold it there: the address and credentials arrive entirely from
+        # configuration (the test above forbids a host literal anywhere in first-party code), and
+        # the source ships disabled, so a cluster reaches a warehouse only by naming it in
+        # `CHEMCLAW_DATA_SOURCES`.
+        "eln-snowflake",
     }
 
 

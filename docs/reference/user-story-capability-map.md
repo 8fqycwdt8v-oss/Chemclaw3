@@ -228,6 +228,7 @@ no record of what an audit is worth.
 | ICH Q3C/Q3D limit tables behind a lookup; a cited genotoxicity structural-alert table | D-2026-08-02-a-limit-is-data-a-classification-is-a-model | 8.10, 8.14, 8.15, 8.16 |
 | Volumes and densities for `stoichiometry_table` | D-2026-08-02-a-solvent-charge-is-a-volume | 6.9, 6.10 |
 | Reduced (fractional) screening designs | D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate | 4.1, 4.4 |
+| A warehouse ELN attachable by configuration rather than by an adapter, carrying both halves: curated reactions ingested through the PR-gate, and similarity search run inside the warehouse over its own embedding column, so the whole ELN is reachable as evidence and not only the ingested slice | D-2026-08-04-the-schema-is-a-file | 1.1 |
 
 **Two things did not change, and they are the two that matter most.** `project`, `method`,
 `document` and `near-miss` are still not entities, so the 30 `MISSING-ENTITY` rows are still 30.

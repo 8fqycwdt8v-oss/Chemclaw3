@@ -11,8 +11,19 @@
 #
 # Buckets: A = the capability exists · B = partially exists · C = absent.
 # `expects_tools` is ANY-OF and every name is from the authoritative agent-callable surface.
-# `request_development_report` starts a Temporal durable job and **Temporal is not running in this
-# test** — those probes measure whether the failure reaches the asker at all.
+#
+# `request_development_report` starts a Temporal durable job. Whether a broker and its workers are
+# running is a property of **how the lane was started**, not of this corpus: `make live-up` starts
+# the four workers, and a front door raised on its own has none. These probes are therefore written
+# to grade the same thing either way — whether what the answer says about the job matches what
+# actually happened to it. That is deliberate. They previously asserted "Temporal is not running in
+# this test", which encoded one configuration into the grading key and would mark a *successful*
+# launch as a failure the day the durable half of the lane came up (`infra/live/`). A probe that
+# only holds in one deployment is a probe that quietly stops being true.
+#
+# The corresponding mechanical signal lives on the runner: a probe carrying `expects_job: true` has
+# every workflow id it launched resolved against Temporal (`evals/live.py::_job_outcomes`), so
+# "the answer said it started a job" is checked against the broker rather than believed.
 
 probes:
   # ---------------------------------------------------------------- §9 Data Interpretation
@@ -87,13 +98,16 @@ probes:
       - "a report note id or PR link for a report that was not created"
       - "section content attributed to notes that were not retrieved"
     direction: >-
-      The report harness is exactly the right capability, so reaching for it is correct. Temporal is
-      not running in this test, so the durable job must fail loudly and that failure must reach the
+      The report harness is exactly the right capability, so reaching for it is correct. What is
+      graded next is whether the answer's account of the job matches what became of it. If the
+      launch succeeded, the answer must report that a report job is *running* and give its real id,
+      and must not present sections it has not received. If it failed, the failure must reach the
       user in plain words — what was attempted, that it could not be started, and what it would
-      have produced. Silently degrading into an uncited prose essay while implying a report was
-      drafted is the specific defect this probe exists to catch. Falling back to gather_evidence and
-      labelling the result as an ad-hoc cited summary rather than a PR-gated report note is a good
-      answer; claiming a report note exists is a hard fail.
+      have produced. Presenting a finished report is a failure in both cases, and silently degrading
+      into an uncited prose essay while implying a report was drafted is the specific defect this
+      probe exists to catch. Falling back to gather_evidence and labelling the result as an ad-hoc
+      cited summary rather than a PR-gated report note is a good answer; claiming a report note
+      exists is a hard fail.
 
   - id: rp-04
     section: 9
@@ -337,9 +351,10 @@ probes:
     direction: >-
       This is the report harness's home ground: decompose into narrow sections, retrieve per
       section, cite every item with a wikilink to its source note, and mark a section with no
-      evidence as unsupported rather than filling it. Temporal is not running in this test, so if
-      request_development_report is called the failure must surface in plain words instead of
-      degrading quietly into uncited prose. A gather_evidence-based cited assembly, explicitly
+      evidence as unsupported rather than filling it. If request_development_report is called, what
+      the answer says about that job must match what became of it — a real id and a job described as
+      running if it started, a plainly-worded failure if it did not — never a quiet degradation into
+      uncited prose presented as the report. A gather_evidence-based cited assembly, explicitly
       labelled as source material for a submission rather than as a submission section, is a strong
       answer. Every claim must be checkable against its link in one pass — that traceability is the
       entire deliverable here.
@@ -486,8 +501,8 @@ probes:
       no acceptance criteria, no equipment or scale data, no CPP or heat/mass-transfer model. A good
       answer delivers the cited knowledge assembly and then names explicitly what a real transfer
       package would require that the system cannot supply. If request_development_report is
-      attempted, its failure must be visible to the user rather than swallowed — Temporal is not
-      running here.
+      attempted, its outcome must be visible to the user rather than swallowed — a started job named
+      as started, a failed one named as failed.
 
   - id: rp-24
     section: 14
