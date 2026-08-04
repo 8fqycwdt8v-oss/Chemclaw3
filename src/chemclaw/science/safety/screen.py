@@ -147,19 +147,26 @@ def read_rule_table(path: str, model: type[_Table]) -> _Table:
     that cannot be read must stop the screen rather than yield an empty rule set, since an empty
     rule set reports "nothing matched" — indistinguishable from a clean molecule, and the one
     outcome both screens exist to prevent.
+
+    The message names the file rather than calling every table "hazard rules". This package works
+    hard to keep the process-safety screen and the genotoxicity screen distinct — they answer
+    different questions and one must never be reported as the other — and a malformed
+    `genotox_alerts.yaml` announcing itself as a hazard-rule fault sends the reader to the wrong
+    table.
     """
+    name = Path(path).name
     try:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise SafetyRulesError(f"cannot read hazard rules at {path}: {exc}") from exc
+        raise SafetyRulesError(f"cannot read the rule table {name} at {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise SafetyRulesError(
-            f"hazard rules at {path} must be a mapping, got {type(raw).__name__}"
+            f"the rule table {name} at {path} must be a mapping, got {type(raw).__name__}"
         )
     try:
         return model.model_validate(raw)
     except ValueError as exc:
-        raise SafetyRulesError(f"invalid hazard rules at {path}: {exc}") from exc
+        raise SafetyRulesError(f"invalid rule table {name} at {path}: {exc}") from exc
 
 
 def compile_smarts(smarts: str, rule_id: str) -> Chem.Mol:

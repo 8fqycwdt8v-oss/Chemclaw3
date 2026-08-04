@@ -43,7 +43,10 @@ probes, real model, real tool calls, real front door.
       (2) the judge prompt must state what the signal is — one verdict escalated "not in the
       preview" to "**mechanically verified as absent from the corpus**", which the harness never
       checked. Until both land, no fabrication number from this harness is quotable.
-      **Closed. `ToolResultEvent` now carries an untruncated `note_ids`, filled from the full tool output by `runner_trace`; `_score_citations` is a set difference against it, which also closed the hyphen-suffix hole the substring scan had. The judge prompt states what the signal does and does not claim, since telling a grader to trust a number obliges us to say what it sees.**
+      **Closed. `ToolResultEvent` now carries an untruncated `note_ids`, filled from the full tool
+      output by `runner_trace`; `_score_citations` is a set difference against it, which also closed
+      the hyphen-suffix hole the substring scan had. The judge prompt states what the signal does
+      and does not claim, since telling a grader to trust a number obliges us to say what it sees.**
 
 - [x] **Ask-before-search: 10 of 36 turns called no tool at all** — [M], **P1**. Every one answered
       with a clarifying question in prose. Six times the answer was in the corpus and one search
@@ -54,7 +57,12 @@ probes, real model, real tool calls, real front door.
       not find*; and there are **two clarification paths with only one instrumented** —
       `ask_clarifying_question` fired on 3 turns while 10 asked in plain prose, so `asked_clarifying`
       undercounts threefold and any metric on it is wrong in that direction.
-      **Closed, with the diagnosis corrected: "Look before you ask" was already in the instructions and was ignored on all ten turns, so restating it would have changed nothing. What is missing is that `ask_clarifying_question` is never *named* there — which is why 10 of 13 clarifications took the uninstrumented prose path — and that nothing forbade naming a tool you do not call. Both added, and `evals/live` counts the prose path separately so the metric stops being wrong in a known direction.**
+      **Closed, with the diagnosis corrected: "Look before you ask" was already in the instructions
+      and was ignored on all ten turns, so restating it would have changed nothing. What is missing
+      is that `ask_clarifying_question` is never *named* there — which is why 10 of 13
+      clarifications took the uninstrumented prose path — and that nothing forbade naming a tool you
+      do not call. Both added, and `evals/live` counts the prose path separately so the metric stops
+      being wrong in a known direction.**
 
 - [x] **A caller-fixable BO fault reaches the model as "an internal error occurred"** — [S], **P1**.
       `connectors/server.py:137` passes `ValueError` through and generalizes everything else. Right
@@ -68,7 +76,10 @@ probes, real model, real tool calls, real front door.
       `ValueError: no col for input feature 'base'`, and a re-run took a different route entirely.
       Finding it needs the real arguments, which the audit log truncates at 200 chars — the same
       defect as the row above.
-      **Closed by validating at the tool boundary, naming the parameter and the observation index. The exact live trigger is still unreproduced and the code says so rather than claiming otherwise. Measuring the two directions separately changed what the finding is — see the silent-drop row above, which is the worse half.**
+      **Closed by validating at the tool boundary, naming the parameter and the observation index.
+      The exact live trigger is still unreproduced and the code says so rather than claiming
+      otherwise. Measuring the two directions separately changed what the finding is — see the
+      silent-drop row above, which is the worse half.**
 
 - [x] **`request_development_report` leaked a raw Temporal transport error, and the model papered
       over it** — closed in this commit. `connect()` raised `RuntimeError('Failed client connect: …
@@ -98,7 +109,10 @@ probes, real model, real tool calls, real front door.
       empty index from an empty result, and the health surface should report the row counts.
 
 ## Open — Found while closing the refactor (R5.3, 2026-08-03)
-      **Closed. A `FingerprintSearch` envelope carries the distinction as a `computed_field` (a bare property would not survive `model_dump()`), the emptiness probe runs only when a search found nothing, and each bundle logs its index size at startup — the connector owns the table, so core never reaches into it. Extended to `substructure_matches`, which fails the same way.**
+      **Closed. A `FingerprintSearch` envelope carries the distinction as a `computed_field` (a bare
+      property would not survive `model_dump()`), the emptiness probe runs only when a search found
+      nothing, and each bundle logs its index size at startup — the connector owns the table, so
+      core never reaches into it. Extended to `substructure_matches`, which fails the same way.**
 
 - [ ] **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet
       machine the suite is green in ~312 s (2852 passed, 127 skipped, measured twice on
@@ -164,14 +178,15 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
       `similar_reactions` sees only it. `Match` carries no yield, so a facet or aggregate question
       ("rank the three base plates") is unanswerable — and an honest "I could not find it" is
       indistinguishable from "it is not there". Wants a coverage statement on the search result.
-- [ ] **The *eval's* citation check is still bounded by a UI budget** — [S]. Narrowed, not closed,
-      by D-2026-08-02-grounding-is-what-this-turn-saw: the runner now keeps every tool result in
-      full for the in-process verifier, but that text never leaves the process, so
-      `evals/live._score_citations` still scores against the 200-character `ToolResultEvent`
-      previews on the wire. A `gather_evidence` result is ~20,000 chars over 40 chunks, so one id
-      is visible and the rest read as uncited — the harness therefore *understates* citation
-      coverage. Wants an untruncated `note_ids` field on `ToolResultEvent` populated by the
-      retrieval tools. Do **not** raise `_ARG_PREVIEW_CHARS` — that budget is correct for the UI.
+- [x] **The *eval's* citation check is still bounded by a UI budget** — closed by
+      D-2026-08-03-a-metric-must-declare-what-it-can-see, and the cost of leaving it open is worth
+      recording: this row correctly predicted the mechanism *and* the fix ("wants an untruncated
+      `note_ids` field on `ToolResultEvent`", "do **not** raise `_ARG_PREVIEW_CHARS`"), and while it
+      sat open a live run graded 19 of 36 answers as fabrication with nine of nine checked verdicts
+      false — one of them escalating "not in the preview" into "mechanically verified as absent from
+      the corpus". The one thing the row got wrong is the direction: it says the harness
+      *understates* citation coverage, which is true of the coverage number and backwards for the
+      one anybody reads, because an id scored uncited is reported as a fabricated citation.
 - [ ] **The ICH Q3C revision label is unverified** — [XS, but it is on every Q3C citation].
       `science/safety/ich_q3c.yaml` cites "ICH Q3C(R9) … ICH Step 4 (2024)". An adversarial review
       verified all 62 transcribed values and the Q3D(R2)/2022 label, and could **not** verify this
@@ -1042,35 +1057,70 @@ claim about the world is to run it.
       code. Fix shape: drop `mode_set` from the injected surface, move the flip to an owner-scoped
       route recording `(session_id, plan_hash, actor, decided_at)` — mirroring
       `POST /approvals/{id}/decision`, which already got this right for jobs. Needs an ADR.
-      **Done (D-137).** `PlanApprovalModeProvider` retracts the `mode_set` tool MAF injects, and the only path into execute mode is now the owner-scoped `POST /sessions/{id}/plan/decision`, bound to a hash of the plan the human was shown and recorded in `plan_approvals`.
+      **Done (D-137).** `PlanApprovalModeProvider` retracts the `mode_set` tool MAF injects, and the
+      only path into execute mode is now the owner-scoped `POST /sessions/{id}/plan/decision`, bound
+      to a hash of the plan the human was shown and recorded in `plan_approvals`.
 - [x] **REV-2 [High] Nothing scrapes `/metrics`.** No ServiceMonitor, PodMonitor or scrape
       annotation anywhere under `deploy/`. Every metric in the system is uncollected in production.
-      **Done (D-143).** A ServiceMonitor on the front-door Service, selecting it by the `http` port *name* so a port change cannot orphan the scrape. Front door only: workers and connectors record through `chemclaw.metrics_bridge`, whose contract is that a metric recorded outside the front door is a no-op, so a scrape pointed at them would collect nothing and report up. `additionalLabels` is left empty for the operator's `serviceMonitorSelector`, which is release-specific. A test asserts the scraped *path* is a route the app actually serves — the D-142 shape, since a ServiceMonitor naming `/metric` renders, validates, deploys and collects nothing forever.
+      **Done (D-143).** A ServiceMonitor on the front-door Service, selecting it by the `http` port
+      *name* so a port change cannot orphan the scrape. Front door only: workers and connectors
+      record through `chemclaw.metrics_bridge`, whose contract is that a metric recorded outside the
+      front door is a no-op, so a scrape pointed at them would collect nothing and report up.
+      `additionalLabels` is left empty for the operator's `serviceMonitorSelector`, which is
+      release-specific. A test asserts the scraped *path* is a route the app actually serves — the
+      D-142 shape, since a ServiceMonitor naming `/metric` renders, validates, deploys and collects
+      nothing forever.
 - [x] **REV-3 [High] The two `expensive: true` CREST jobs heartbeat once** against a 600 s
       heartbeat timeout. `run_cached_ensemble`/`run_cached_interaction` have no `progress`
       parameter at all, so this is plumbing, not a kwarg. Each retry restarts CREST from zero
       (the store is written only on completion): ~50 min of saturated CPU to fail a job that would
       have succeeded. Third instance: `calc/reaction.py` at `level="thorough"`.
-      **Done.** `_beating` in `connectors/calc/activities.py` awaits the CREST work on a timer derived from the heartbeat timeout. A timer, not a progress callback: a single subprocess has no unit boundary to report at, and "still running" is the honest signal.
+      **Done.** `_beating` in `connectors/calc/activities.py` awaits the CREST work on a timer
+      derived from the heartbeat timeout. A timer, not a progress callback: a single subprocess has
+      no unit boundary to report at, and "still running" is the honest signal.
 - [x] **REV-4 [High] After-run compaction is a silent no-op under `session_store=postgres`** (the
       production default). MAF reads `session.state[source_id]["messages"]`, whose only writer is
       `InMemoryHistoryProvider`. So `session_messages` is read with no LIMIT every turn and a
       long-lived session re-reads its whole history before every model call. The docstring promises
       the opposite. **Confirmed by reading MAF, and the obvious fix is unsafe.**
-      **Documented and pinned, not fixed (D-143).** Confirmed exactly as described. Two corrections to the framing: the `before_run` half *does* work under Postgres, so the model's input is still bounded and this is not a context-window bug — what is unbounded is the per-turn read and the forever-growing stored history. And **a `LIMIT` on the load would corrupt data**: `get_messages` repairs unmatched tool-call pairings by *writing back*, and over a windowed read a `tool_result` whose `tool_use` fell outside the window is indistinguishable from a real orphan, so the repair would strip and commit a pairing that was intact on disk. Both docstrings that promised the opposite are corrected, and `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
-      **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call groups from `session_messages`. Either is a design change to a durable path with a data-loss failure mode and wants its own ADR.
-      **Done (D-151).** `save_messages` now runs the *same* strategy against the table after storing a turn — inline rather than on a schedule, because that is where MAF intends after-run compaction and the turn claim already guarantees one writer per session. Measured over 60 turns: uncompacted the table grows by exactly 4 rows/turn to 240; compacted it sits in a band (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads a partial history and so sidesteps the corruption class rather than accepting it.
+      **Documented and pinned, not fixed (D-143).** Confirmed exactly as described. Two corrections
+      to the framing: the `before_run` half *does* work under Postgres, so the model's input is
+      still bounded and this is not a context-window bug — what is unbounded is the per-turn read
+      and the forever-growing stored history. And **a `LIMIT` on the load would corrupt data**:
+      `get_messages` repairs unmatched tool-call pairings by *writing back*, and over a windowed
+      read a `tool_result` whose `tool_use` fell outside the window is indistinguishable from a real
+      orphan, so the repair would strip and commit a pairing that was intact on disk. Both
+      docstrings that promised the opposite are corrected, and
+      `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
+      **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the
+      load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call
+      groups from `session_messages`. Either is a design change to a durable path with a data-loss
+      failure mode and wants its own ADR.
+      **Done (D-151).** `save_messages` now runs the *same* strategy against the table after storing
+      a turn — inline rather than on a schedule, because that is where MAF intends after-run
+      compaction and the turn claim already guarantees one writer per session. Measured over 60
+      turns: uncompacted the table grows by exactly 4 rows/turn to 240; compacted it sits in a band
+      (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching
+      `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads
+      a partial history and so sidesteps the corruption class rather than accepting it.
 
 - [x] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
       so the only metrics that run a live retriever have zero drift coverage — verified by
       collapsing both to 0.0 and getting no alert. Also give `save_baseline` a Makefile target; it
       has no caller today, which is how the two metrics drifted out.
-      **Done.** Both metrics are in `baseline.json`, regenerated by `scripts/refresh_baseline.py` (`make eval-baseline`) rather than hand-edited — `save_baseline` had no caller, which is how they drifted out. A test asserts both are present and that a collapsed score now alerts.
+      **Done.** Both metrics are in `baseline.json`, regenerated by `scripts/refresh_baseline.py`
+      (`make eval-baseline`) rather than hand-edited — `save_baseline` had no caller, which is how
+      they drifted out. A test asserts both are present and that a collapsed score now alerts.
 - [x] **REV-6 [Med] `open_reachable`'s unreachable-connector list is discarded by all four
       callers**, though its docstring says it is "for the caller to surface". A turn answers with a
       silently degraded capability set; in `template_activities` the output enters the PR-gate with
       no marker.
-      **Done (D-139).** The announcement moved *into* `open_reachable` — a WARNING naming the connectors plus `chemclaw_connectors_unreachable_total`, counted per connector — because a return value that must be read had been forgotten four times out of four. The front door additionally yields a `CapabilityDegradedEvent` before the first token; the CLI prints to stderr, which its docstring had promised and never done. Still degrades rather than raising: one dark connector must not become a dead front door.
+      **Done (D-139).** The announcement moved *into* `open_reachable` — a WARNING naming the
+      connectors plus `chemclaw_connectors_unreachable_total`, counted per connector — because a
+      return value that must be read had been forgotten four times out of four. The front door
+      additionally yields a `CapabilityDegradedEvent` before the first token; the CLI prints to
+      stderr, which its docstring had promised and never done. Still degrades rather than raising:
+      one dark connector must not become a dead front door.
 - [ ] **REV-7 [Med] A push-back event lost between claim and delivery is lost permanently — and
       the fix is *not* the one this item first proposed.** The original recommendation (yield before
       marking rows consumed) is **refuted**: `agents/session_events.py` documents at-most-once as a
@@ -1082,8 +1132,20 @@ claim about the world is to run it.
       deadline, confirm on delivery, re-offer on expiry. That keeps COR-4's single-claim property
       (two tailers still cannot both hold a row) while making loss recoverable. A design change to a
       durable path, wanting its own ADR, not a reordering.
-      **Partly done (D-153).** The *second* defect in this area is fixed: `await_job_results` tailed the mailbox, whose claim is destructive, so a mid-turn resume waiting on job A consumed job B's push-back and discarded it — the front door's stream never saw it. It now asks Temporal about its own job ids and never touches the mailbox, so there is no shared queue to race over. Also strictly more informative: the model resumes with the `ConnectorJobResult` envelope rather than the one-line summary the event payload carried.
-      **Still open — and the cheap fix is refuted.** "Select, yield, then confirm" does not work: `stream_new_events` polls on a timer with no `try/finally`, so an event yielded but unconfirmed is re-selected every poll (`test_tailer_releases_its_connection_between_polls` would see ~37 deliveries instead of 1). Preventing re-selection *is* a visibility timeout. The fix stays as recorded above, and additionally needs a **per-stream** holder id (`_WORKER_ID` is per-process, so two streams in one pod would steal each other's leases) and a confirm shielded against cancellation (D-130's trap — the confirm is reached from a cancelled generator). It is an operator-facing contract change too.
+      **Partly done (D-153).** The *second* defect in this area is fixed: `await_job_results` tailed
+      the mailbox, whose claim is destructive, so a mid-turn resume waiting on job A consumed job
+      B's push-back and discarded it — the front door's stream never saw it. It now asks Temporal
+      about its own job ids and never touches the mailbox, so there is no shared queue to race over.
+      Also strictly more informative: the model resumes with the `ConnectorJobResult` envelope
+      rather than the one-line summary the event payload carried.
+      **Still open — and the cheap fix is refuted.** "Select, yield, then confirm" does not work:
+      `stream_new_events` polls on a timer with no `try/finally`, so an event yielded but
+      unconfirmed is re-selected every poll (`test_tailer_releases_its_connection_between_polls`
+      would see ~37 deliveries instead of 1). Preventing re-selection *is* a visibility timeout. The
+      fix stays as recorded above, and additionally needs a **per-stream** holder id (`_WORKER_ID`
+      is per-process, so two streams in one pod would steal each other's leases) and a confirm
+      shielded against cancellation (D-130's trap — the confirm is reached from a cancelled
+      generator). It is an operator-facing contract change too.
 
 - [ ] **The `eval_drift` push-back channel has no consumer.** `chemclaw.durable.eval_drift` writes
       `eval_drift` events to the `system-eval-drift` channel must-deliver, and nothing in the repo
@@ -1098,7 +1160,9 @@ claim about the world is to run it.
       raises when a closing async generator awaits something that suspends. The measured 63 s
       matches `service_turn_claim_lease_seconds`. Both previously discarded theories were about the
       wrong object; the detached-task experiment failed because the task had no strong reference.
-      **Done by main (D-130)** — turn teardown is shielded so its cleanup runs in a cancelled task. That is the root cause this review identified: the release was an await in a closing generator and the `RuntimeError` was swallowed.
+      **Done by main (D-130)** — turn teardown is shielded so its cleanup runs in a cancelled task.
+      That is the root cause this review identified: the release was an await in a closing generator
+      and the `RuntimeError` was swallowed.
 - [ ] **REV-9 [Med] Prompt caching: a large fixed prefix is re-paid every model call** — but
       **measure before building** (D-152), and this entry as first written overstated how reachable
       the saving is. Two corrections from verifying it:
@@ -1106,7 +1170,8 @@ claim about the world is to run it.
       Anthropic dev path. Production is `openai_compatible`, where `agent_framework_openai` contains
       **zero** occurrences of `cache_control` — the mechanism is not reachable from production at
       all, so this is upstream work in MAF, not a knob here.
-      **(b) "the ~3.5 k system half is cacheable" is false through `Agent`.** `SkillsProvider` merges
+      **(b) "the ~3.5 k system half is cacheable" is false through `Agent`.** `SkillsProvider`
+      merges
       the skills manifest into the instructions with an f-string, which would `repr()` a structured
       block list into a string. Marking that half cacheable is also an upstream change.
       Still true: MAF exposes no `cache_control` hook for `tools` (the 11 k that dominates), and the
@@ -1121,51 +1186,109 @@ claim about the world is to run it.
       and output before the counter sees it; cache-read/write are not read at all; the registry
       supports no labels, so no per-model or per-profile attribution. AG-11 (cost) still open. MAF
       already implements the full GenAI token model — reachable now that OTel can start.
-      **Done (D-144), the pricing half.** Four counters for the four priced dimensions, with `chemclaw_tokens_total` kept as the total. The budget guard still meters the total, so the 429 behaviour is unchanged — this splits what is published, not what is enforced. Cache counts are *not* folded into `input` (a provider reporting them has already excluded them, so folding would re-price cheap tokens as expensive), and a counter stays untouched rather than publishing a fabricated `0` when the provider reports nothing — the REV-19 rule.
-      **Done (D-152), the attribution half — and half of it turned out to be already solved.** Per-*model* attribution needs nothing built: MAF emits `gen_ai.client.token.usage` labelled by request model, response model, provider and token type, and the shipped chart turns OTel on. Duplicating that axis in this registry would mean two systems to reconcile, so it is deliberately not done — with two gaps recorded: MAF records only the `input`/`output` token types, so D-144's cache-read/cache-write dimensions are *not* in that histogram, and OTel has no notion of a Chemclaw `profile`. Per-*profile* attribution is the real gap and is what shipped: the registry gained declared labels (an undeclared label name raises exactly as an undeclared metric does, because a label typo's failure mode is a second silent time series rather than a crash), a per-counter series cap against the unbounded-map leak this codebase has already fixed three times, and the five spend counters carry `profile`. `/metrics` is unauthenticated, so `test_metrics_carry_no_identifiers_or_turn_content` became an allowlist of *declared* label names rather than "`le` is the only label": a profile is configuration, low-cardinality, and not user-derived.
+      **Done (D-144), the pricing half.** Four counters for the four priced dimensions, with
+      `chemclaw_tokens_total` kept as the total. The budget guard still meters the total, so the 429
+      behaviour is unchanged — this splits what is published, not what is enforced. Cache counts are
+      *not* folded into `input` (a provider reporting them has already excluded them, so folding
+      would re-price cheap tokens as expensive), and a counter stays untouched rather than
+      publishing a fabricated `0` when the provider reports nothing — the REV-19 rule.
+      **Done (D-152), the attribution half — and half of it turned out to be already solved.**
+      Per-*model* attribution needs nothing built: MAF emits `gen_ai.client.token.usage` labelled by
+      request model, response model, provider and token type, and the shipped chart turns OTel on.
+      Duplicating that axis in this registry would mean two systems to reconcile, so it is
+      deliberately not done — with two gaps recorded: MAF records only the `input`/`output` token
+      types, so D-144's cache-read/cache-write dimensions are *not* in that histogram, and OTel has
+      no notion of a Chemclaw `profile`. Per-*profile* attribution is the real gap and is what
+      shipped: the registry gained declared labels (an undeclared label name raises exactly as an
+      undeclared metric does, because a label typo's failure mode is a second silent time series
+      rather than a crash), a per-counter series cap against the unbounded-map leak this codebase
+      has already fixed three times, and the five spend counters carry `profile`. `/metrics` is
+      unauthenticated, so `test_metrics_carry_no_identifiers_or_turn_content` became an allowlist of
+      *declared* label names rather than "`le` is the only label": a profile is configuration, low-
+      cardinality, and not user-derived.
 - [x] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
       identity headers, not in `ConnectorJobInput`, not into HPC. ~4 lines to make the audit trail
       joinable across all four runtimes. Note that fixing OTel does not fix this.
-      **Done (D-141).** An `X-Chemclaw-Correlation-Id` header beside the actor/roles/session, and a `correlation_id` on `ConnectorJobInput` that becomes a workflow memo beside `requested_by`. Both follow the shape already established for the actor: advisory-never-authorization for the header, in the input rather than ambient for the job (a workflow has no request context), and a memo rather than `payload` so it is not something the model can write. HPC is unchanged — the bridge runs under a shared service identity and wants its own pass.
+      **Done (D-141).** An `X-Chemclaw-Correlation-Id` header beside the actor/roles/session, and a
+      `correlation_id` on `ConnectorJobInput` that becomes a workflow memo beside `requested_by`.
+      Both follow the shape already established for the actor: advisory-never-authorization for the
+      header, in the input rather than ambient for the job (a workflow has no request context), and
+      a memo rather than `payload` so it is not something the model can write. HPC is unchanged —
+      the bridge runs under a shared service identity and wants its own pass.
 - [x] **REV-12 [Med] Prediction calibration pools every calculator version.** `calc_version` is
       never passed when recording, so the unique index degenerates and a v2 prediction destroys
       v1's row; the read path has no version predicate either. `calculator_trust` reports the
       pooled figure. Dormant while `calibration_enabled` is off.
-      **Done (D-139).** Both halves — the tools pass the running version, and `calibration_for` now *requires* one and filters on it. The observation write stays version-blind on purpose: a measurement is a fact about the molecule, which is what makes a version-over-version comparison possible. Verified against live Postgres by simulating the pooled read, where a high version and a low one cancel to a bias of exactly 0.0.
+      **Done (D-139).** Both halves — the tools pass the running version, and `calibration_for` now
+      *requires* one and filters on it. The observation write stays version-blind on purpose: a
+      measurement is a fact about the molecule, which is what makes a version-over-version
+      comparison possible. Verified against live Postgres by simulating the pooled read, where a
+      high version and a low one cancel to a bias of exactly 0.0.
 - [x] **REV-13 [Med] `find_job` does filesystem I/O inside workflow code**, and the comment above
       it says it is I/O-free. `ConnectorError` is a `ValueError`, not a `FailureError`, and no
       `failure_exception_types` is declared — so it fails the *workflow task* and Temporal retries
       indefinitely. The run hangs rather than failing. No test constructs a `JobStep`.
-      **Done (D-140).** The lookup moved to a local activity, `resolve_job_step`, following `orchestrator.resolve_fan_out_limit`'s precedent — the resolution is now recorded in history rather than re-read from the replaying worker's disk. That also turns the `ConnectorError` into an `ActivityError`, which `BAD_DATA_RETRY` fails on the first attempt. `TemplateWorkflow` gains `failure_exception_types=[Exception]` for the sequencer's own raw raises. `tests/test_template_job_step.py` is the first test to construct a `JobStep`.
+      **Done (D-140).** The lookup moved to a local activity, `resolve_job_step`, following
+      `orchestrator.resolve_fan_out_limit`'s precedent — the resolution is now recorded in history
+      rather than re-read from the replaying worker's disk. That also turns the `ConnectorError`
+      into an `ActivityError`, which `BAD_DATA_RETRY` fails on the first attempt. `TemplateWorkflow`
+      gains `failure_exception_types=[Exception]` for the sequencer's own raw raises.
+      `tests/test_template_job_step.py` is the first test to construct a `JobStep`.
 - [x] **REV-14 [Med] Rehydrated and LRU-evicted sessions revert to the default profile**,
       permanently. The profile is never persisted. Eviction matters more than restart: no TTL, so
       session 1001 evicts session 1. All three rehydration tests discard the profile argument.
-      **Done (D-141).** Persisted as a nullable column on `session_owners` (`infra/sql/021`) and rehydrated onto. The old comment called the loss graceful — "the conversation resumes with the full tool surface rather than a narrowed one" — which has the direction backwards: a profile is attenuation only, so restoring the full surface is the control being switched off, and the LRU has no TTL so it happens on a live pod without any restart. `None` surviving as `None` is pinned separately; storing `""` would ask for a profile named empty-string.
+      **Done (D-141).** Persisted as a nullable column on `session_owners` (`infra/sql/021`) and
+      rehydrated onto. The old comment called the loss graceful — "the conversation resumes with the
+      full tool surface rather than a narrowed one" — which has the direction backwards: a profile
+      is attenuation only, so restoring the full surface is the control being switched off, and the
+      LRU has no TTL so it happens on a live pod without any restart. `None` surviving as `None` is
+      pinned separately; storing `""` would ask for a profile named empty-string.
 - [x] **REV-15 [Med] Chart parity test proves nothing about behaviour.** It constructs
       `Settings(**helm_values)`; `otel_enabled=True` constructs perfectly and then kills the pod.
       Two holes: keys from `templates/config.yaml` (`note_repo_dir`, `connector_urls`) are outside
       it, and there is no inverse test that a production value is *executed*. This is the test
       class that would have caught two of the three Criticals.
-      **Done (D-142).** The derived keys are discovered from `templates/config.yaml` and rendered offline, and `connector_urls` is now *asserted*, not merely constructed — a render of `{}` builds a valid `Settings` while pointing the front door at nothing. Writing it surfaced the sharper point: pydantic-settings JSON-decodes a complex field from an env var and **not** from an init kwarg, so the old model of "the pod environment" was the wrong mechanism for these keys, not just incomplete. The inverse direction now has tests too (below).
+      **Done (D-142).** The derived keys are discovered from `templates/config.yaml` and rendered
+      offline, and `connector_urls` is now *asserted*, not merely constructed — a render of `{}`
+      builds a valid `Settings` while pointing the front door at nothing. Writing it surfaced the
+      sharper point: pydantic-settings JSON-decodes a complex field from an env var and **not** from
+      an init kwarg, so the old model of "the pod environment" was the wrong mechanism for these
+      keys, not just incomplete. The inverse direction now has tests too (below).
 - [x] **REV-16 [Med] Dark-by-default flags that arguably should not be.** `budget_enabled` off
       (the load test that validated the system ran with budgets *on*); `audit_verify_enabled` off,
       so the tamper-evident chain is never verified; `connectors_required` off.
-      **Done (D-142), two of three.** `budget_enabled` and `audit_verify_enabled` are on in the chart, each pinned by an *executed* test rather than by asserting the flag. `connectors_required` deliberately stays false: unlike the other two its docstring is a real considered trade, and the review's argument for flipping it — that the degradation was silent — stopped being true when D-139 landed `CapabilityDegradedEvent`, the WARNING and the counter. Fail-fast would now trade availability away for visibility that already exists.
+      **Done (D-142), two of three.** `budget_enabled` and `audit_verify_enabled` are on in the
+      chart, each pinned by an *executed* test rather than by asserting the flag.
+      `connectors_required` deliberately stays false: unlike the other two its docstring is a real
+      considered trade, and the review's argument for flipping it — that the degradation was silent
+      — stopped being true when D-139 landed `CapabilityDegradedEvent`, the WARNING and the counter.
+      Fail-fast would now trade availability away for visibility that already exists.
 - [x] **REV-17 [Med] `deployment_revision` can never be set in production** — no chart key,
       Containerfile ARG or build step sets it, though its docstring says the image build injects
       the digest. AG-14 is unmet while reading as done.
-      **Done (D-140).** A `CHEMCLAW_REVISION` build ARG exported as `CHEMCLAW_DEPLOYMENT_REVISION`, with the image workflow passing the commit SHA — a build arg rather than a chart value because the image is the thing that has a revision, and one that disagrees with the running bytes is worse than an honest "unknown". The wiring is pinned offline in `test_deploy_chart.py`; the image job runs the built image and compares, because only that proves the value arrived.
+      **Done (D-140).** A `CHEMCLAW_REVISION` build ARG exported as `CHEMCLAW_DEPLOYMENT_REVISION`,
+      with the image workflow passing the commit SHA — a build arg rather than a chart value because
+      the image is the thing that has a revision, and one that disagrees with the running bytes is
+      worse than an honest "unknown". The wiring is pinned offline in `test_deploy_chart.py`; the
+      image job runs the built image and compares, because only that proves the value arrived.
 - [x] **REV-18 [Low] Missing validators** for combinations the config comments already forbid in
       prose: `session_store="memory"` with `uvicorn_workers > 1`, `mid_turn_resume_timeout >=
       turn_timeout`, `budget_enabled` with all caps zero, `embedding_dim` vs the `vector(N)` column.
-      **Done.** Four validators on the composed `Settings`. The `embedding_dim` check is scoped to `"vector" in data_sources`: unconditional, it rejected three hash-embedder unit tests that never touch pgvector — the tests were right and the validator was wrong.
+      **Done.** Four validators on the composed `Settings`. The `embedding_dim` check is scoped to
+      `"vector" in data_sources`: unconditional, it rejected three hash-embedder unit tests that
+      never touch pgvector — the tests were right and the validator was wrong.
 - [x] **REV-19 [Low] `chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` are never
       incremented** — a permanent `0`. The gauge path refuses to fabricate zeros; counters get no
       such protection. Increment them or delete them.
-      **Done (D-139).** Incremented at the durable-job launch and the PR-gate proposal. The note counter moves *after* the submitter returns: counting the attempt would report a healthy gate during exactly the outage the metric exists to reveal. `agents/audit.py`'s private `_record_metric` was promoted to `chemclaw/metrics_bridge.py` at its fourth caller rather than imported by its underscore name.
+      **Done (D-139).** Incremented at the durable-job launch and the PR-gate proposal. The note
+      counter moves *after* the submitter returns: counting the attempt would report a healthy gate
+      during exactly the outage the metric exists to reveal. `agents/audit.py`'s private
+      `_record_metric` was promoted to `chemclaw/metrics_bridge.py` at its fourth caller rather than
+      imported by its underscore name.
 - [x] **REV-20 [Low] Anthropic client ignores `llm_timeout_seconds`/`llm_max_retries`/CA bundle.**
       Actual timeout is the SDK's 600 s, not the configured 60 s. Default for CLI and dev.
-      **Done.** `AsyncAnthropic` now carries `llm_timeout_seconds`, `llm_max_retries` and the CA bundle. Verified against the live API.
+      **Done.** `AsyncAnthropic` now carries `llm_timeout_seconds`, `llm_max_retries` and the CA
+      bundle. Verified against the live API.
 - [x] **REV-21 [Low] Docs disagree with code:** `harness_max_loop_iterations` is 25, not the 15 in
       `docs/guides/harness-konzept.md`, and the cap applies in both modes, not only execute.
       `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
@@ -1185,7 +1308,9 @@ system writes down, what it throws away, and what it cannot reconstruct. Twelve 
 findings are closed (D-124, D-132, D-133, D-134, D-135); what remains is listed at the end of the
 section, and STO-5/11/13 stay deliberately open.
 
-      **Done.** `harness-konzept.md` says 25 and "both modes"; `template_job.py` no longer calls its lookup I/O-free; `chemclaw_agent.py` names what enforces the gate now that D-137 makes the claim true.
+      **Done.** `harness-konzept.md` says 25 and "both modes"; `template_job.py` no longer calls its
+      lookup I/O-free; `chemclaw_agent.py` names what enforces the gate now that D-137 makes the
+      claim true.
 - [x] **STO-1 [High] Every expensive by-product was deleted with its tempdir.** **Done (D-124,
       read path added by D-132):** content-addressed `artifact_blobs` + `calculation_artifacts`
       (migration 019), `calc/artifacts.py` + `calc/postgres_artifacts.py`, capture derived from
@@ -2337,7 +2462,8 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       Rule of Three across xTB/solubility/pKa). Name→calculator **registry deferred** (no dispatch
       consumer yet; would be a one-caller abstraction — D-015).
 - [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
-      **Blocked on user input** (which GNN + weights/license); the calculator contract makes the swap cheap.
+      **Blocked on user input** (which GNN + weights/license); the calculator contract makes the
+      swap cheap.
 - [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
       acidic O-H/S-H site + linear calibration (R²0.93 over 10 acids). Agent tool `predict_pka`. Real tests.
 - [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.

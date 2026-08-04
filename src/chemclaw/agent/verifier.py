@@ -22,10 +22,11 @@ passed whenever the note happened to exist, which is most of the time. The turn'
 are now threaded in from `api/runner.py` and are the only thing a citation is checked against.
 
 The eval harness has always scored against the turn's results rather than the graph, and states the
-reason (`chemclaw.evals.live._score_citations`) — but it reads them off the SSE event, which
-carries a 200-character preview, so its `uncited_note_ids` is a systematic *over*-count and does not
-yet agree with this. That gap is a backlog row; closing it wants an untruncated `note_ids` field on
-the event rather than a bigger preview.
+reason (`chemclaw.evals.live._score_citations`). It used to read them off the SSE event's
+200-character preview, which made its `uncited_note_ids` a systematic *over*-count — measured at
+19 of 36 answers graded as fabrication with nine of nine checked verdicts false. The event now
+carries an untruncated `note_ids` beside the preview and the harness scores against that, so the
+two agree (`docs/decisions/D-2026-08-03-a-metric-must-declare-what-it-can-see.md`).
 
 Beside the citation gate sits `ungrounded_parameter_shapes`: a deterministic scan for *method
 parameter shapes* in an answer that no tool in the turn produced. It is a heuristic keyed on shape,
@@ -165,10 +166,22 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     graph (the current, trusted evidence source), not for untrusted external text — when a source
     carrying such text lands (the deferred literature/Snowflake connectors), the envelope must move
     to escaped or randomized delimiters.
+
+    **One envelope per distinct content, naming every id it grounds — not one per chunk.**
+    `turn_evidence` emits a chunk per *(tool output x cited id)* pair, because the citation gate
+    downstream reads only `{chunk.source_note_id}` and needs one entry per id. Rendering that
+    shape verbatim sent the same text once per citation, which is quadratic in the thing this
+    system is trying to encourage: a `gather_evidence` result is ~20,000 characters and an answer
+    citing it well names ~40 ids, measured at a **40x** prompt (749,531 characters from an 18,669
+    character result). Grouping costs nothing — the judge is asked for *the* id a claim relies on,
+    and a multi-id envelope still lets it name one.
     """
+    by_content: dict[str, list[str]] = {}
+    for chunk in evidence:
+        by_content.setdefault(chunk.content, []).append(chunk.source_note_id)
     blocks = "\n".join(
-        f'<evidence note="{chunk.source_note_id}">\n{chunk.content}\n</evidence>'
-        for chunk in evidence
+        f'<evidence note="{" ".join(dict.fromkeys(ids))}">\n{content}\n</evidence>'
+        for content, ids in by_content.items()
     )
     return (
         "You are a strict verifier. Decide whether each factual claim in the ANSWER is supported "
@@ -264,8 +277,9 @@ def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChun
     grounding check: it made the question "does this note id exist?" when the question a verifier
     must ask is "did this turn see it?". A note id recalled from training resolves perfectly well
     on a graph that contains the note, so the old input could not fail the case it existed for.
-    `chemclaw.evals.live._score_citations` has scored against the turn's tool results since the
-    beginning and states this reason in a comment.
+    (`chemclaw.evals.live._score_citations` reaches for the turn's results too and states the same
+    reason — but against the truncated wire preview, so it does not yet corroborate this; see the
+    module docstring.)
 
     A cited id is *seen* when it appears in a tool result's text as a whole token, so a result that
     renders ids as `[[wikilinks]]`, as bare slugs, or inside JSON is read identically without this
