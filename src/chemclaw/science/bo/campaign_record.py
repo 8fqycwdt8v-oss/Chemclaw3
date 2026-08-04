@@ -40,6 +40,14 @@ from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProb
 logger = logging.getLogger(__name__)
 
 
+# The fields that *are* the decision space. An **allowlist**, not `exclude={"descriptors"}`: with a
+# denylist, any future field on a parameter silently forks every campaign id in the database, and
+# the failure is invisible — a new id, an empty history, a chemist told their campaign is new.
+# `descriptors` is absent because it is computed *from* `structures`, so a cache miss recomputing
+# the same values, or a calculator upgrade shifting the sixth decimal, is not a new problem.
+_SPACE_FIELDS = {"kind", "name", "lower", "upper", "categories", "structures"}
+
+
 def campaign_id_for(problem: OptimizationProblem) -> str:
     """The stable id of the campaign this problem *is*.
 
@@ -54,10 +62,20 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     space, and should be a different campaign.
     """
     space = [
-        parameter.model_dump(mode="json", exclude={"descriptors"})
-        for parameter in problem.parameters
+        parameter.model_dump(mode="json", include=_SPACE_FIELDS) for parameter in problem.parameters
     ]
-    identity = {"space": space, "objective": problem.objective.model_dump(mode="json")}
+    # The legacy key, always, spelled exactly as it was. A single-objective problem must hash to the
+    # byte-identical payload it hashed to before `objectives` existed, or every recorded campaign
+    # becomes unreachable — `read_campaign_thread` would tell each chemist their campaign is new.
+    identity: dict[str, Any] = {
+        "space": space,
+        "objective": problem.objective.model_dump(mode="json"),
+    }
+    # Added only when they carry information, for the same reason.
+    if len(problem.objectives) > 1:
+        identity["objectives"] = [
+            objective.model_dump(mode="json") for objective in problem.objectives
+        ]
     return f"campaign-{stable_hash(identity)}"
 
 

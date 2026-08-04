@@ -221,7 +221,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       identically under one `bo_seed`. `block_feature_key` stays unbuilt — it needs a block factor
       (a day, a plate, an operator) and none exists in `src/`.
 
-- [ ] **W3 — multi-objective is unrepresentable, on a corpus that records a trade-off** — [M].
+- [x] **W3 — multi-objective is unrepresentable, on a corpus that records a trade-off** — [M].
       Every ELN run carries `yield_percent`, `purity_percent` *and* `impurities[].area_percent`;
       `OptimizationProblem` has one `objective` field, and `op-16` was graded *fabricated* for
       promising "both objectives" anyway. Measured (M-1): `MoboStrategy` validates with no reference
@@ -240,6 +240,15 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       same commit, or the model is taught to refuse a capability that exists. Inline only: the
       durable registry is `Callable[..., Awaitable[float]]` with two demo entries. Closes 3.3's
       objective half; unblocks 4.5's "objectives" plural.
+      **Closed by D-2026-08-04-a-trade-off-has-no-single-best-point.** Two artefacts had to change
+      with the code rather than after it: the tool description, whose "One objective, no constraints"
+      sentence covered two halves that now differ (the objective half is replaced, the constraint
+      half survives verbatim until W4), and `data/evals/probes/optimization.yaml`'s `op-16`, which
+      graded the model on *refusing* multi-objective and would have marked the correct new behaviour
+      as a failure. Its `forbids_claims` now name the overclaims actually available: a single best
+      point, a front presented as a prediction, and a proof that no better trade-off exists.
+      `campaign_progress` gained the same refusal `best_of` has — a plateau is per axis, so a
+      trade-off must name which objective to read.
 
 - [ ] **W4 — a limit the chemist states cannot be expressed** — [M]. `Domain(constraints=…)` is
       never passed, so "keep base plus acid under 3 equivalents" has to be smuggled into a bound or

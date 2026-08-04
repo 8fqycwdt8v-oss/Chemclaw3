@@ -74,9 +74,9 @@ statement about *why* it proposed a point reaches the note a human signs.
 | 2.3 / 4.4 | a screening plan; the full grid or a smarter reduced one | `SERVED` | `generate_screening_design` — full grid or a fractional design whose `resolution` and `summary` state what was confounded, over categorical **and** continuous factors (the latter held at their two bounds and named as such), plus centre points, replication and seeded run-order randomisation (W2) |
 | — | pick the best molecule from a library without evaluating all of it | `SERVED` | `molecule_library_problem` + candidate-set BO by exhaustive discrete acquisition |
 | 3.4 | explain why it suggests these conditions (exploring vs exploiting) | `SERVED` | `ExperimentSuggestion.scale` gives what the objective spans in the runs supplied, and its `summary` reads each candidate's `predicted_sd` against that spread in three bands, naming a missing sd as a seed point rather than as confidence (W1) |
-| 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | ranges `SERVED`; the rest `UNREPRESENTABLE` | `OptimizationProblem` has two fields. There is no constraint concept and no second objective — the tool docstring spends a bold paragraph telling the model to refuse, and live probe `op-16` was graded *fabricated* for promising "both objectives" anyway |
+| 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | ranges and objectives `SERVED`; constraints `UNREPRESENTABLE` | `objectives` is a list; `MoboStrategy` searches the trade-off and `ExperimentSuggestion.front` returns the non-dominated subset of the runs supplied. `best_of` raises rather than picking an axis (W3). Constraints still have no field at all, and the tool now says exactly that rather than one sentence covering both halves |
 | 3.5 | has this optimization plateaued | `SERVED` | `campaign_progress(problem, observations, assay_noise, window)` — evaluations since a gain beyond the noise, the recent window's spread, a plateau verdict, and a summary stating the limit. `assay_noise` is required with no default, which is what stops `op-13`'s fabrication recurring with a tool behind it (W1) |
-| 4.5 | rank a completed campaign against my objectives | `PARTIAL` | plural objectives blocked by 3.3; the aggregate-over-a-set half is a retrieval gap, not a BO one |
+| 4.5 | rank a completed campaign against my objectives | `PARTIAL` | plural objectives now expressible (W3), so what remains is the aggregate-over-a-set half — a retrieval gap, not a BO one |
 | 3.6 | how much effort did optimization save versus screening | `PARTIAL` | no cost or labour field exists on any record, so the effort half stays blocked. The design-space half is served: `campaign_progress` reports distinct conditions against the full grid, which is a defensible efficiency claim with zero labour data (W1) |
 | 7.x / 8.x | HPLC method development: starting conditions, robustness, transfer | `BLOCKED-UPSTREAM` | not a BO gap. See §4 |
 
@@ -110,9 +110,11 @@ Grouped by what it would buy. The verdict column resolves in §4/§5.
 | `InterpointEqualityConstraint` | "all four wells share one temperature" | `REFUSED` — needs a plate entity |
 | `Nonlinear*`, `Product*` | — | `REFUSED` — `BotorchOptimizer` does not support nonlinear; would need pymoo |
 
-**Multi-objective** — `MoboStrategy` (`qLogNEHVI`), `QparegoStrategy`, the additive/multiplicative
-SOBO scalarisers, `bofire.utils.multiobjective.{get_pareto_front, compute_hypervolume,
-infer_ref_point}`, and `ExplicitReferencePoint` with moving reference values. **W3.**
+**Multi-objective** — `MoboStrategy` (`qLogNEHVI`) shipped in **W3**, inline only. Still unused:
+`QparegoStrategy`, the additive/multiplicative SOBO scalarisers, and
+`bofire.utils.multiobjective.{get_pareto_front, compute_hypervolume, infer_ref_point}` — the front
+is hand-written so `problem.py` stays importable in the agent process, and hypervolume has no caller.
+`MoboStrategy`'s reference point is derived per objective from the data rather than set by us.
 
 **Objectives beyond min/max** — `TargetObjective`, `CloseToTargetObjective`, the sigmoid family,
 `MovingMaximizeSigmoidObjective`, the Derringer desirability family

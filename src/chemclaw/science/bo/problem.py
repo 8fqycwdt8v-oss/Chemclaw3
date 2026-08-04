@@ -1,13 +1,20 @@
 """Framework-neutral specification of a Bayesian-optimization problem (Phase 1d).
 
-These types describe *what* to optimize — continuous and categorical parameters
-and a single objective — without any BoFire types. Agents, skills, and the
-campaign loop depend only on these; the BoFire mapping is isolated in `chemclaw.science.bo.engine`
-(G6). v1 supports continuous + categorical inputs and one scalar objective;
-multi-objective comes when a real problem needs it.
+These types describe *what* to optimize — continuous and categorical parameters and one or more
+objectives — without any BoFire types. Agents, skills, and the campaign loop depend only on these;
+the BoFire mapping is isolated in `chemclaw.science.bo.engine` (G6).
+
+**Multi-objective is inline only** (W3). `suggest_next_experiment` optimizes a trade-off and returns
+the Pareto front of the runs it was given; the *durable* campaign refuses one, because
+`bo.objectives`'s registry maps a name to a scalar-returning callable and a multi-output registry
+would be an abstraction with no real caller. Constraints remain unrepresentable until W4.
+
+This module is the campaign job's `params_model`, so it is imported into the agent process — which
+`tests/test_connector_isolation.py` keeps `torch` out of. Nothing here may import BoFire, even for
+something BoFire ships (`pareto_front` is hand-written for exactly that reason).
 """
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
@@ -119,10 +126,52 @@ class Objective(BaseModel):
 
 
 class OptimizationProblem(BaseModel):
-    """A full problem: the decision variables and the single objective."""
+    """A full problem: the decision variables and the objective(s) to optimize.
+
+    One field rather than a lead objective plus a sidecar list (W3). The sidecar shape guarantees
+    that a lone objective sometimes lands in the wrong one, and it bakes a "primary" fiction into a
+    Pareto front where every axis is symmetric.
+    """
 
     parameters: list[Parameter] = Field(min_length=1)
-    objective: Objective
+    objectives: list[Objective] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_the_singular_objective(cls, data: Any) -> Any:
+        """Accept `{"objective": {...}}` forever — it is the shape already on disk.
+
+        **Permanent compatibility, not a migration window.** Every `bo_campaigns.problem` row
+        written before this change spells the objective that way, and so does every in-flight
+        `CampaignSpec` sitting in Temporal history. A validator that rejected the old spelling would
+        fail a running campaign at *replay* — the exact hazard `require_rounds_within_ceiling`'s
+        comment documents one field over, which is why that rule lives outside this model at all.
+
+        Both spellings together is a caller error rather than a compatibility case: it means the
+        writer believed two different things about which objectives the problem has.
+        """
+        if not isinstance(data, dict) or "objective" not in data:
+            return data
+        if "objectives" in data:
+            raise ValueError("give `objectives`, not both `objective` and `objectives`")
+        legacy = dict(data)
+        legacy["objectives"] = [legacy.pop("objective")]
+        return legacy
+
+    @property
+    def objective(self) -> Objective:
+        """The lead objective: `objectives[0]`.
+
+        A property, deliberately, so it is **not** serialized — the wire shape is `objectives` and
+        nothing else. It exists because every reader of the old field wanted `.name` or `.direction`
+        (13 of them across six modules), and none of those readings changes when a second objective
+        appears.
+
+        The lead objective is privileged in exactly two places, and both are display or identity,
+        never optimization: the `bo_campaigns.objective`/`direction` columns, and the legacy half of
+        the campaign-id hash. Anything that *optimizes* reads `objectives`, or refuses.
+        """
+        return self.objectives[0]
 
     @model_validator(mode="after")
     def _unique_names(self) -> "OptimizationProblem":
@@ -130,6 +179,22 @@ class OptimizationProblem(BaseModel):
         names = [p.name for p in self.parameters]
         if len(names) != len(set(names)):
             raise ValueError("parameter names must be unique")
+        return self
+
+    @model_validator(mode="after")
+    def _objectives_are_well_formed(self) -> "OptimizationProblem":
+        """Objective names are distinct, and never collide with a parameter name.
+
+        Both are dataframe column keys in the frame BoFire is told and asked with, so a collision is
+        a silently overwritten column rather than an error — a decision variable and a response
+        sharing a name would make the surrogate fit against its own input.
+        """
+        names = [objective.name for objective in self.objectives]
+        if len(names) != len(set(names)):
+            raise ValueError("objective names must be unique")
+        clashes = sorted(set(names) & {p.name for p in self.parameters})
+        if clashes:
+            raise ValueError(f"{clashes} is both a parameter and an objective; names must differ")
         return self
 
 
@@ -144,7 +209,16 @@ class Observation(BaseModel):
     """
 
     params: dict[str, ParamValue]
+    # The **lead** objective's value. Unchanged and still required: it is the field every persisted
+    # row already carries (`bo_suggestions.observations` JSONB, Temporal history, the `bo-candidate`
+    # note), and `values` cannot be reconstructed from a legacy payload — an `Observation` does not
+    # know its problem, so `{"value": 0.83}` has no objective name to key on. Symmetry here would
+    # have cost four persistence surfaces to buy nothing.
     value: float = Field(allow_inf_nan=False)
+    # Objective name -> value, covering **every** objective of a multi-objective problem. Empty for
+    # a single-objective one, where `value` says it all. Self-describing on the wire, which is what
+    # `resume_campaign` reading a JSONB row back needs.
+    values: dict[str, float] = Field(default_factory=dict)
     provenance: str = "measured"
     # The surrogate's posterior sd at this point **when it was proposed** — carried over from the
     # `Candidate`, and deliberately not named `uncertainty`. It does not qualify `value`: `value`
@@ -176,6 +250,11 @@ class Candidate(BaseModel):
     params: dict[str, ParamValue]
     predicted_value: float | None = None
     predicted_sd: float | None = Field(default=None, ge=0.0)
+    # The same two quantities per objective, for a multi-objective ask. Empty on a single-objective
+    # problem, where the scalars above are the whole answer. Beside the scalars rather than
+    # replacing them, for `Observation.value`'s reason: the scalars are what is already persisted.
+    predicted_values: dict[str, float] = Field(default_factory=dict)
+    predicted_sds: dict[str, float] = Field(default_factory=dict)
 
 
 # What a design's resolution means for the reader, in the terms the reader cares about. Only III and
@@ -356,20 +435,37 @@ def require_rounds_within_ceiling(n_rounds: int) -> None:
         )
 
 
-def require_campaign_within_ceiling(spec: CampaignSpec) -> None:
-    """The same ceiling, in the shape a declared `precondition` is called with.
+def require_campaign_startable(spec: CampaignSpec) -> None:
+    """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
-    `JobSpec.precondition` is documented as taking *the validated params object*, and
-    `connectors/jobs.py` calls it that way. `connectors/bo/connector.yaml` named the function above
-    instead, which takes an `int`, so `start_optimization_campaign` raised
-    `TypeError: '>' not supported between instances of 'CampaignSpec' and 'int'` on every call —
-    the reference connector's flagship job could not be started at all, while CI stayed green
-    because the only tests call the ceiling rule with a bare int.
+    One function because `connector.yaml` names exactly one, and `cli/validate_connectors.py` checks
+    that the named function accepts the params model — a check that exists because an earlier
+    manifest named the round-count rule, which takes an `int`, and every
+    `start_optimization_campaign` call raised `TypeError` while CI stayed green.
 
-    Two entry points with two shapes, so this is an adapter rather than a widened signature: the
-    creation path in `bo.campaign` genuinely holds a round count and nothing else.
+    Two rules today. The round ceiling is enforced here rather than on `CampaignSpec` because that
+    model's validators re-run at workflow *replay*, where a lowered ceiling must not fail an
+    in-flight campaign's own input.
+
+    The second is new (W3): **the durable campaign is single-objective**, because
+    `bo.objectives`'s registry maps a name to `Callable[..., Awaitable[float]]` — one number per
+    evaluation. A multi-output registry would be an abstraction with zero real callers, so the spec
+    is refused at launch with a message naming the inline tool that *does* do multi-objective,
+    rather than silently optimizing the lead one and reporting a "best" nobody asked for.
+
+    Raises:
+        ValueError: When the round count exceeds `bo_max_rounds`, or the problem names more than one
+            objective.
     """
     require_rounds_within_ceiling(spec.n_rounds)
+    if len(spec.problem.objectives) > 1:
+        named = ", ".join(objective.name for objective in spec.problem.objectives)
+        raise ValueError(
+            f"the durable campaign evaluates one registered objective per round, so it cannot run "
+            f"this {len(spec.problem.objectives)}-objective problem ({named}). Use "
+            "`suggest_next_experiment`, which does multi-objective inline with a human evaluating "
+            "each round, or start a campaign over one of these objectives alone."
+        )
 
 
 class CampaignResult(BaseModel):
@@ -379,10 +475,85 @@ class CampaignResult(BaseModel):
     history: list[Observation]
 
 
+def observed_value(
+    problem: OptimizationProblem, observation: Observation, objective: str | None = None
+) -> float:
+    """One objective's value off an observation, whichever shape it was given in.
+
+    The single definition of "this observation's number for that objective", so the scalar/vector
+    split in `Observation` is read the same way everywhere. `objective=None` means the lead one,
+    which on a single-objective problem is the only one.
+    """
+    name = problem.objective.name if objective is None else objective
+    if name in observation.values:
+        return observation.values[name]
+    if name == problem.objective.name:
+        return observation.value
+    raise ValueError(
+        f"observation reports no value for objective {name!r}; it carries "
+        f"{sorted(observation.values) or [problem.objective.name]}"
+    )
+
+
+def require_observations_cover_objectives(
+    problem: OptimizationProblem, observations: list[Observation]
+) -> None:
+    """Every observation reports every objective, and agrees with itself.
+
+    Raised at the tool boundary in the shape `_require_observed_params_match` established, naming
+    the observation's index — "which one" is the only useful part of the message.
+
+    On a single-objective problem `values` may be empty (the scalar says it all) or may name exactly
+    the one objective. On a multi-objective problem it must cover them all, and `values[lead]` must
+    equal `value`, because both are persisted and a reader that trusted the wrong one would report a
+    different campaign than the one that ran.
+
+    Raises:
+        ValueError: Naming the offending observation's index and what it is missing.
+    """
+    declared = [objective.name for objective in problem.objectives]
+    lead = declared[0]
+    for index, observation in enumerate(observations):
+        if not observation.values:
+            if len(declared) > 1:
+                raise ValueError(
+                    f"observations[{index}] reports one value, but this problem has "
+                    f"{len(declared)} objectives {declared} — give `values` naming each one."
+                )
+            continue
+        missing = sorted(set(declared) - set(observation.values))
+        undeclared = sorted(set(observation.values) - set(declared))
+        if missing or undeclared:
+            raise ValueError(
+                f"observations[{index}] reports {sorted(observation.values)} but the problem "
+                f"declares {declared}; every observation must give a value for exactly the "
+                "objectives the problem declares."
+            )
+        tolerance = 1e-9 * max(1.0, abs(observation.value))
+        if abs(observation.values[lead] - observation.value) > tolerance:
+            raise ValueError(
+                f"observations[{index}] disagrees with itself: `value` is {observation.value!r} "
+                f"but `values[{lead!r}]` is {observation.values[lead]!r}. `value` is the lead "
+                "objective's number and both are stored, so they cannot differ."
+            )
+
+
 def best_of(problem: OptimizationProblem, observations: list[Observation]) -> Observation:
-    """Return the best observation for the problem's optimization direction."""
+    """Return the best observation for a **single-objective** problem's direction.
+
+    Raises on a multi-objective problem rather than returning the lead objective's winner. There is
+    no single best point on a trade-off, and silently picking one axis is exactly the overclaim the
+    tool's own instructions forbid: it would report "the best conditions" for a campaign whose whole
+    premise is that no such point exists. `pareto_front` is the honest answer.
+    """
     if not observations:
         raise ValueError("no observations")
+    if len(problem.objectives) > 1:
+        named = ", ".join(objective.name for objective in problem.objectives)
+        raise ValueError(
+            f"this problem has {len(problem.objectives)} objectives ({named}), so there is no "
+            "single best observation — call `pareto_front` for the non-dominated set"
+        )
     best = observations[0]
     for observation in observations[1:]:
         if problem.objective.direction == "minimize":
@@ -392,6 +563,46 @@ def best_of(problem: OptimizationProblem, observations: list[Observation]) -> Ob
         if improved:
             best = observation
     return best
+
+
+def _dominates(problem: OptimizationProblem, a: Observation, b: Observation) -> bool:
+    """Whether `a` is at least as good as `b` everywhere and strictly better somewhere."""
+    at_least_as_good = True
+    strictly_better = False
+    for objective in problem.objectives:
+        left = observed_value(problem, a, objective.name)
+        right = observed_value(problem, b, objective.name)
+        gain = left - right if objective.direction == "maximize" else right - left
+        if gain < 0:
+            at_least_as_good = False
+            break
+        if gain > 0:
+            strictly_better = True
+    return at_least_as_good and strictly_better
+
+
+def pareto_front(
+    problem: OptimizationProblem, observations: list[Observation]
+) -> list[Observation]:
+    """The non-dominated observations: the trade-off the runs actually show.
+
+    An observation is on the front when no other is at least as good on **every** objective and
+    strictly better on at least one. Order is preserved, so the front reads in the order the runs
+    were performed.
+
+    **Pure Python, deliberately not `bofire.utils.multiobjective`.** This module is the campaign
+    job's `params_model` and is therefore imported into the agent process, which
+    `tests/test_connector_isolation.py` exists to keep `torch` out of. Hypervolume would need
+    BoFire; a dominance test needs a comparison.
+
+    Duplicate points both stay: neither dominates the other, and dropping one would quietly discard
+    a replicate that is evidence about the assay.
+    """
+    return [
+        candidate
+        for candidate in observations
+        if not any(_dominates(problem, other, candidate) for other in observations)
+    ]
 
 
 def discrete_candidate_count(problem: OptimizationProblem) -> int | None:

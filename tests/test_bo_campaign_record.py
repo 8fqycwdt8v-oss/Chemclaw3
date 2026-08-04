@@ -51,7 +51,7 @@ def _problem(*, upper: float = 100.0, ligands: tuple[str, ...] = ("PPh3", "dppf"
                 structures=dict.fromkeys(ligands, "c1ccccc1"),
             ),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -351,3 +351,99 @@ def test_the_bo_connector_serves_and_declares_resuming(store: InMemoryCampaignSt
     assert endpoint is not None
     assert "resume_campaign" in endpoint.tools
     assert "resume_campaign" in endpoint.read_only
+
+
+# --- the campaign-id compatibility pins (W3) ---------------------------------------------------
+
+# Captured from `main` **before** the `objectives` migration, by re-running the M-2 script. These
+# are the ids every campaign already in a `bo_campaigns` table was written under. A change that
+# moves any of them does not break a test somewhere — it tells every chemist with a running
+# campaign that their campaign is new, silently, because `read_campaign_thread` cannot find a row
+# it never wrote.
+_BASELINE_IDS = {
+    "continuous-only": "campaign-6958b7edaa261c83",
+    "mixed": "campaign-55e5f929fe83a9a5",
+    "with-structures": "campaign-109f34eac28892ab",
+}
+
+
+def _baseline_problems() -> dict[str, OptimizationProblem]:
+    """The three shapes M-2 hashed, rebuilt exactly."""
+    return {
+        "continuous-only": OptimizationProblem(
+            parameters=[
+                ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+                ContinuousParameter(name="equiv", lower=1.0, upper=3.0),
+            ],
+            objectives=[Objective(name="yield", direction="maximize")],
+        ),
+        "mixed": OptimizationProblem(
+            parameters=[
+                ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+                CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
+            ],
+            objectives=[Objective(name="yield", direction="maximize")],
+        ),
+        "with-structures": OptimizationProblem(
+            parameters=[
+                CategoricalParameter(
+                    name="ligand",
+                    categories=["PPh3", "PCy3"],
+                    structures={"PPh3": "c1ccccc1P(c1ccccc1)c1ccccc1", "PCy3": "C1CCCCC1"},
+                )
+            ],
+            objectives=[Objective(name="impurity", direction="minimize")],
+        ),
+    }
+
+
+def test_a_single_objective_problem_keeps_the_id_it_had_before_the_migration() -> None:
+    """The hard-coded ids are the whole safety net for `objectives` and for the allowlist."""
+    for label, problem in _baseline_problems().items():
+        assert campaign_id_for(problem) == _BASELINE_IDS[label], label
+
+
+def test_the_legacy_spelling_hashes_to_the_same_id_as_the_new_one() -> None:
+    """A row on disk says `objective`; the problem in memory says `objectives`. One campaign."""
+    for label, problem in _baseline_problems().items():
+        legacy = problem.model_dump(mode="json")
+        legacy["objective"] = legacy.pop("objectives")[0]
+        assert campaign_id_for(OptimizationProblem.model_validate(legacy)) == _BASELINE_IDS[label]
+
+
+def test_a_legacy_payload_validates_and_round_trips() -> None:
+    """Permanent compatibility, not a migration window — this shape is in every existing row."""
+    legacy = {
+        "parameters": [{"kind": "continuous", "name": "t", "lower": 0.0, "upper": 1.0}],
+        "objective": {"name": "yield", "direction": "maximize"},
+    }
+    problem = OptimizationProblem.model_validate(legacy)
+    assert [objective.name for objective in problem.objectives] == ["yield"]
+    assert problem.objective.direction == "maximize"
+    # The wire shape going back out is the new one; the property is not serialized.
+    dumped = problem.model_dump(mode="json")
+    assert "objectives" in dumped
+    assert "objective" not in dumped
+
+
+def test_giving_both_spellings_is_refused() -> None:
+    """Two answers to "which objectives" is a caller error, not a compatibility case."""
+    with pytest.raises(ValueError, match="not both"):
+        OptimizationProblem.model_validate(
+            {
+                "parameters": [{"kind": "continuous", "name": "t", "lower": 0.0, "upper": 1.0}],
+                "objective": {"name": "yield"},
+                "objectives": [{"name": "yield"}],
+            }
+        )
+
+
+def test_a_second_objective_is_a_different_campaign() -> None:
+    """Adding an objective changes the question, so it must not join the old campaign's history."""
+    single = _baseline_problems()["mixed"]
+    both = single.model_copy(
+        update={
+            "objectives": [*single.objectives, Objective(name="impurity", direction="minimize")]
+        }
+    )
+    assert campaign_id_for(both) != campaign_id_for(single)
