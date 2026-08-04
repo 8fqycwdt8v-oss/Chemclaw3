@@ -23,9 +23,17 @@ M-7 measured it and the argument fell: `strategy.surrogate_specs.surrogates` exp
 **BoFire itself chose** from the domain (`MixedSingleTaskGPSurrogate` for a mixed domain,
 `SingleTaskGPSurrogate` for a featurized one), and `cross_validate` runs straight off them. No class
 is named in our code, and the score therefore describes *the* model. `shap` already ships with
-`bofire[optimization]`, so nothing here costs a dependency. Ten rows over five folds gave R² 0.948 /
-MAE 1.47 in the register, and R² 0.950 / MAE 1.36 driven through our own types — the small
-difference is the frame, not a disagreement.
+`bofire[optimization]`, so nothing here costs a dependency.
+
+**The register's exact pair does not reproduce, and the finding does.** The register recorded R²
+0.948 / MAE 1.47 over ten rows and five folds. Re-run at the end of this roadmap, the script that
+produced it *raises* — it passes `get_metric` the string `"R2"`, and `CvResults.get_metric` builds
+its Series with `name=metric.name`, which a `str` does not have. So that pair cannot be produced by
+anything now in the scratchpad and should not be cited as a measurement. What reproduces robustly is
+the claim the wave rests on: `cross_validate` runs off `strategy.surrogate_specs` with no class
+named, and returns a finite score — 0.935 / 1.695 from the corrected script, 0.950 / 1.36 through
+our own types, 0.813 / 3.45 on `op-13`'s twelve real runs. The register ADR is merged and is not
+edited; this is the correction of record.
 
 M-6 settled the other half: `predict()` exists after `tell`, accepts a **params-only** frame, works
 on a `CategoricalDescriptorInput` domain (the shape a featurized problem actually reaches the engine
@@ -58,10 +66,13 @@ a measure of accuracy. A cross-validated R² over a campaign's worth of runs is 
 over-readable number this module produces: it looks like a statement about the chemistry and is a
 statement about ten points.
 
-**Pooled across folds, not averaged over them.** `CvResults.get_metric` returns a `pd.Series`, and
-its default `combine_folds=True` computes the metric once over all held-out predictions together.
-That is the number reported. A mean of per-fold R² weights a fold of two points the same as a fold
-of ten, and at campaign sizes the folds are exactly that uneven.
+**Pooled across folds, not averaged over them**, and the measurement makes this stronger than the
+argument did. `CvResults.get_metric` returns a `pd.Series`, and its default `combine_folds=True`
+computes the metric once over all held-out predictions together. On the ten-row series: pooled R²
+**0.935**, while the mean of the five per-fold R² values is **0.420** — folds of 0.192, 0.978,
+0.828, 0.970 and **−0.87**. A two-point fold weighs the same as a ten-point one in that mean, and
+one unlucky split drags it below anything a reader would recognise as the same model. The pooled
+number is the one reported.
 
 **One tool, not two.** `predict_outcome` returns the predictions *and* the fit behind them, because
 the score is what licenses reading the predictions at all and a model that had to make two calls
@@ -104,3 +115,25 @@ outliving its refusal. It is rewritten to grade the split: the volume limit belo
 `constraints`, the conditional one does not, and treating both alike is the failure in either
 direction. Recorded here rather than silently, because an ADR that said a probe was fine was wrong
 about it.
+
+## What the whole-roadmap verification found
+
+The register (M-1…M-8) was re-run against the finished tree. Everything reproduces — `MoboStrategy`
+at n=2 with a moving reference, the three campaign ids under the allowlist, the constraint senses and
+zero violations, every factorial knob's inertness on an all-categorical domain, the reduced mixed
+design — with the two exceptions recorded above (the retracted CV pair) and one addition: measured
+against `FractionalFactorialStrategy`, *every* constraint class is rejected at construction, which
+W4's ADR already records.
+
+The three probes the roadmap exists for were then driven on their own data, without a live model run:
+
+- **`op-13`** — the plateau verdict computes (best 89 over 12 runs, 6 evaluations since a gain
+  beyond the ±2 noise), and the half W1 could not reach computes too: an untried corner carries
+  **9.4×** the posterior sd of a point among the runs. That ratio is the answer to "is there an
+  unexplored corner, or has the search been circling one region", and it is now a number rather
+  than a sentence.
+- **`op-16`** — the front is **4 of 6** supplied runs, computed by dominance, and the suggestion's
+  summary refuses a single best point in the same breath.
+- **`op-17`** — the volume constraint is honoured by construction (both candidates land exactly on
+  the 5 mL boundary); the conditional Pd/temperature limit remains unrepresentable, which is what
+  the rewritten probe grades.

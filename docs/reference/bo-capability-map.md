@@ -294,7 +294,10 @@ permanently coupling us to BoFire's model zoo and risking a number that describe
 than the one that made the recommendation. Measured, that is not so: `strategy.surrogate_specs`
 exposes the surrogate BoFire actually chose, `cross_validate` runs straight off it, and the number
 therefore describes *the* model. Ten rows and five folds gave R² 0.948 / MAE 1.47 on a synthetic
-series. `shap` is already installed via `bofire[optimization]`, so nothing here costs a dependency.
+series — a figure **since retracted**: the script that produced it passes `get_metric` a string
+where an enum is required and raises, so the exact pair is not reproducible. The finding it
+supported is, at 0.935 / 1.695 corrected and 0.950 / 1.36 through the shipped code
+(D-2026-08-04-the-model-can-be-asked-not-only-obeyed). `shap` is already installed via `bofire[optimization]`, so nothing here costs a dependency.
 
 Two capabilities, one fit:
 

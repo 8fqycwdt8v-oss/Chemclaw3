@@ -294,9 +294,11 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       **Closed by D-2026-08-04-the-model-can-be-asked-not-only-obeyed.** Both halves ship behind one
       `predict_outcome` tool over **one** fit, which is what makes the score mean anything: a
       quality measured off a separately configured strategy would describe a model nobody's
-      recommendation came from. Driven through our own types the register's numbers reproduce
-      (R² 0.950 / MAE 1.36 against 0.948 / 1.47) and the extrapolation signal is starker than
-      measured — sd 0.97 in range against 18.6 at T=400. One correction to the plan: `get_metric`
+      recommendation came from. The register's exact pair does **not** reproduce and is retracted — its
+      script passes `get_metric` a string where an enum is required and raises — but the finding
+      does, at R² 0.935 / MAE 1.695 corrected, 0.950 / 1.36 through the shipped code and 0.813 /
+      3.45 on `op-13`'s twelve real runs. The extrapolation signal is starker than measured: sd 0.97
+      in range against 18.6 at T=400. One correction to the plan: `get_metric`
       returns a `pd.Series`, and its `combine_folds=True` default pools the held-out predictions,
       which is the number to report — a mean of per-fold R² weights a two-point fold like a
       ten-point one. `op-13`'s posterior half closes with it.
