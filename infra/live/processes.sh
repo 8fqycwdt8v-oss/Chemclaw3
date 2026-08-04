@@ -151,6 +151,18 @@ up() {
   start_worker worker-bo 9002 "$python" -m chemclaw.connectors.bo.worker
   start_worker worker-qm 9003 "$python" -m chemclaw.connectors.qm.worker
 
+  # The mock model, when the lane is pointed at it. Started before the front door because the front
+  # door builds a chat client at startup and would come up pointed at nothing.
+  #
+  # It is an *HTTP* mock rather than an injected `BaseChatClient` deliberately: the streaming
+  # assembler, the middleware stack, budget admission, the audit sink and the session store all sit
+  # between the socket and the agent, and the in-process scripted client in `tests/` bypasses every
+  # one of them — its own docstring records passing green while production failed 100% of the time.
+  if [ "${CHEMCLAW_LLM_BASE_URL:-}" = "http://127.0.0.1:8820/v1" ]; then
+    start mock-llm "$python" -m chemclaw.cli.mock_llm
+    wait_for mock-llm "http://127.0.0.1:8820/__mock/stats"
+  fi
+
   # The front door builds the agent — and therefore a chat client — during startup, so with no
   # model credential it does not fail at the first turn, it fails to boot at all
   # (`agent/llm_provider.py::_anthropic_client` raises on a missing key). That is correct

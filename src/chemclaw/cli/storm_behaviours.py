@@ -1,0 +1,202 @@
+"""The storm's behaviour catalogue — what the mock model does, per scenario family.
+
+Kept beside the mock rather than inside it because these are the *test's* content and the mock is
+its mechanism: adding a scenario should not mean editing a server. Each behaviour is named, and the
+storm selects one by putting `[[name]]` in the turn's message, so a scenario and the behaviour it
+asserts against cannot drift apart.
+
+Eight families, and the split is the point — "it held up under load" and "it held up under a model
+behaving badly" are different claims, and only one of them was ever testable with a real model:
+
+* **A volume** — cheap, realistic turns, used to find where admission control bends.
+* **C shapes** — the same call delivered whole, fragmented, and in parallel.
+* **D durable** — real connector jobs, including deliberate idempotency collisions.
+* **F adversarial** — what a real model will not reliably do: malformed arguments, an unknown tool,
+  an empty function name (the STREAM-1 shape), a 100 KB argument document, forty parallel calls,
+  a turn with no prose, and an unbounded tool loop.
+* **H edges** — pathological chemistry and unicode driven through the real tools.
+
+Families B (tool-path truth), E (chaos) and G (limits) need no behaviour of their own: B is a
+cross-check over `audit_events` after the others, E perturbs the stack while A runs, and G attacks
+the front door's own limits rather than the model.
+"""
+
+from __future__ import annotations
+
+from chemclaw.cli.mock_llm import Behaviour, ToolCall
+
+# The reaction the durable family launches. Fixed on purpose: the workflow id is a hash of the
+# payload (`connectors.jobs.job_workflow_id`), so many sessions launching *this* simultaneously is
+# the idempotency collision the D-011 guarantee is about — and the only honest way to check it is
+# to count what the cache did, not to read a summary.
+_COLLISION_PAYLOAD = {
+    "kind": "reaction",
+    "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
+    "products": ["N", "N"],
+    "level": "quick",
+    "symmetry_numbers": {"N#N": 2, "[H][H]": 2, "N": 3},
+}
+
+BEHAVIOURS: list[Behaviour] = [
+    # ---------------------------------------------------------------- A · volume
+    Behaviour(
+        name="a-cheap",
+        calls=[ToolCall(tool="find_notes", arguments={"text": "suzuki coupling"})],
+        text="Two notes cover this coupling; both are cited above.",
+        think_seconds=0.4,
+    ),
+    Behaviour(
+        name="a-retrieval",
+        calls=[
+            ToolCall(tool="find_notes", arguments={"text": "amide coupling"}),
+            ToolCall(tool="gather_evidence", arguments={"query": "amide coupling additive"}),
+            ToolCall(
+                tool="expand_note",
+                arguments={"note_id": "failure-dcm-amide-coupling", "hops": 1},
+            ),
+        ],
+        text="The record covers the additive choice and the DCM failure mode.",
+        think_seconds=0.4,
+    ),
+    # ---------------------------------------------------------------- C · streaming shapes
+    Behaviour(
+        name="c-whole",
+        calls=[ToolCall(tool="find_notes", arguments={"text": "buchwald amination"}, fragments=1)],
+        text="One call, arguments delivered whole.",
+    ),
+    Behaviour(
+        name="c-fragmented",
+        # The hypothesis under test. `ToolCallTrace.feed` treats "name and arguments" as a complete
+        # call, and the Responses client puts the name on *every* fragment — so this should either
+        # reassemble into one event, or expose N events each carrying a partial document.
+        calls=[ToolCall(tool="find_notes", arguments={"text": "buchwald amination"}, fragments=8)],
+        text="One call, arguments delivered in eight fragments.",
+    ),
+    Behaviour(
+        name="c-parallel",
+        calls=[
+            ToolCall(tool="find_notes", arguments={"text": f"probe {i}"}, fragments=3)
+            for i in range(6)
+        ],
+        text="Six interleaved calls, each fragmented.",
+    ),
+    # ---------------------------------------------------------------- D · durable
+    Behaviour(
+        name="d-collide",
+        calls=[
+            ToolCall(
+                tool="compute_reaction_energy",
+                arguments={
+                    "params": _COLLISION_PAYLOAD,
+                    "rationale": "storm: many sessions asking the identical question at once",
+                },
+            )
+        ],
+        text="Launched the reaction-energy job.",
+        think_seconds=0.2,
+    ),
+    Behaviour(
+        name="d-status",
+        calls=[
+            ToolCall(tool="find_past_jobs", arguments={"text": "reaction", "connector": "calc"})
+        ],
+        text="Here is what has run.",
+    ),
+    # ---------------------------------------------------------------- F · adversarial
+    Behaviour(
+        name="f-malformed-json",
+        calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": "unterminated')],
+        text="",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-wrong-argument",
+        # LOAD-1 itself, reproduced deliberately: `find_notes` takes `text`, not `query`. Every
+        # measurement in the 2026-07 load test died here without anyone noticing, so the storm
+        # asserts it is *visible* now rather than trusting that it would be.
+        calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"query": "benzene"}')],
+        text="",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-unknown-tool",
+        calls=[ToolCall(tool="tool_that_does_not_exist", arguments={"x": 1})],
+        text="",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-empty-name",
+        # The STREAM-1 shape: `String should have at least 1 character` on a tool_use name, which
+        # failed 30 of 150 live turns in July and was closed by D-123's `AgentPool`. Nothing has
+        # re-exercised it since, because a real model does not emit it on request.
+        calls=[ToolCall(tool="", arguments={"text": "x"})],
+        text="",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-huge-arguments",
+        calls=[
+            ToolCall(
+                tool="find_notes",
+                arguments={},
+                raw_arguments='{"text": "' + ("x" * 100_000) + '"}',
+            )
+        ],
+        text="",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-call-flood",
+        calls=[ToolCall(tool="find_notes", arguments={"text": f"flood {i}"}) for i in range(40)],
+        text="Forty calls in one turn.",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-no-text",
+        # The `empty_answer` guard added earlier today: tools ran, nothing was written. Before that
+        # guard this turn produced an empty answer and no error at all.
+        calls=[ToolCall(tool="find_notes", arguments={"text": "silent"})],
+        text="",
+    ),
+    Behaviour(
+        name="f-http-500",
+        calls=[],
+        text="",
+        http_status=500,
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-slow",
+        calls=[ToolCall(tool="find_notes", arguments={"text": "slow turn"})],
+        text="A deliberately slow turn.",
+        think_seconds=8.0,
+    ),
+    # ---------------------------------------------------------------- H · data edges
+    Behaviour(
+        name="h-bad-smiles",
+        calls=[
+            ToolCall(
+                tool="gather_evidence",
+                arguments={"query": "C1CC", "reaction_smiles": "not>>a>>reaction"},
+            )
+        ],
+        text="",
+    ),
+    Behaviour(
+        name="h-unicode",
+        calls=[ToolCall(tool="find_notes", arguments={"text": "咖啡因 · Ω · 🧪 · ünïcødé"})],
+        text="Unicode survived the round trip.",
+    ),
+    Behaviour(
+        name="h-injection",
+        calls=[
+            ToolCall(
+                tool="find_notes",
+                arguments={
+                    "text": "'; DROP TABLE audit_events; -- <script>alert(1)</script> {{7*7}}"
+                },
+            )
+        ],
+        text="Treated as a search string, which is what it is.",
+    ),
+]

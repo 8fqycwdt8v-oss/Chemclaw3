@@ -17,7 +17,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes
+.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -162,3 +162,6 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+live-storm:  ## Stress, chaos and adversarial pass against the live stack — mock model, no LLM calls.
+	uv run python -m chemclaw.cli.live_storm $(ARGS)

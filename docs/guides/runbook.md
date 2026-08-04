@@ -123,6 +123,15 @@ it, because `note_repo_dir` defaults to the working checkout and every submissio
 `git reset --hard` + `git clean -fd`, so the gate refuses it (G4) and the whole
 knowledge-contribution half of a run silently disappears.
 
+**`make live-storm` is the third stage, and it needs no model at all.** Point the lane at the mock
+(`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
+`CHEMCLAW_LLM_MODEL=mock`) and `make live-up` starts `chemclaw.cli.mock_llm` alongside everything
+else. The storm then drives load, adversarial model behaviour and the front door's own limits with
+zero LLM calls — the mock reports how many requests it served, which is how the run *proves* that
+rather than asserting it. It is an HTTP mock of the **Responses** API, not chat-completions, and
+not an injected chat client: the streaming assembler, the middleware stack, budget admission, the
+audit sink and the session store all sit between the socket and the agent.
+
 **Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
 `data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
 probe launches is resolved against Temporal rather than taken from the turn's account of it — a job
