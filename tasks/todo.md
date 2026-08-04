@@ -123,7 +123,9 @@ property-based, mutation or concurrency testing existed at all.
       results. Families **E (chaos)** and **H (edges)** wired — the six dead behaviours now assert
       something, plus the missing negative (arguments that parse and cannot be true).
 - [x] **2. Close SCALE-3.** `family_a_admission` restarts the front door at each
-      `service_max_concurrent_turns` ∈ {2,4,8,16,32} with offered load held at 48.
+      `service_max_concurrent_turns` ∈ {2,4,8,16,32} with offered load held at 48, **three samples
+      per cap**, and reads the knee against the spread those samples show rather than a threshold
+      chosen in advance.
 - [x] **3. Property-based tests.** `tests/test_properties_core.py` — nine properties over
       `stable_hash`, `BoundedLru` and the two citation readers, the identity and bounding
       primitives whose contracts are universally quantified.
@@ -144,8 +146,9 @@ property-based, mutation or concurrency testing existed at all.
 events for one call** (`c-fragmented` 10/1, `c-parallel` 18/6 → 1/1 and 6/6 after the fix) — a
 defect on the seam the target deployment uses, which CI and 3,000 tests had no way to see. A
 SIGKILLed connector worker costs **583 s** before its job resumes, because one setting must both
-tolerate a CREST-sized heartbeat gap and detect a dead worker. And **SCALE-3's knee is cap 8** —
-the shipped default, now measured: above it p50 doubles to buy 13 % more goodput.
+tolerate a CREST-sized heartbeat gap and detect a dead worker. And **SCALE-3's knee is cap 16** — three
+samples per cap against a measured 9 % noise floor; the first, single-sample answer said cap 8 and
+was an artefact.
 
 **Four of the seven findings were in the measurement, not the product**, which is what happens the
 first time a signal is used:
@@ -159,6 +162,12 @@ first time a signal is used:
 4. Two checks were wrong about the system rather than the reverse (a 100 KB argument is legitimate
    input; a new workflow need not recompute cached species) — the opposite correction, and worth
    separating from the vacuous ones.
+5. **The knee was declared against a threshold nobody had measured**, one day after
+   D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with said not to. Three single-sample
+   runs straddled it, so the same stack answered "cap 8" twice and "no knee" once. Judged against
+   the sweep's own measured spread, the answer is **cap 16**. And the correction introduced its own
+   failure — a noise floor makes a knee fire *sooner*, so a sweep that could see nothing would have
+   named cap 2 — caught only by writing the test for the opposite behaviour and watching it fail.
 
 **One thing proven rather than asserted.** The audit-chain concurrency tests were shown to kill
 the mutant they exist for: with `pg_advisory_xact_lock` replaced by `pass`, both fail; restored,

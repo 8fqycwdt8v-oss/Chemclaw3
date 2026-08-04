@@ -938,7 +938,7 @@ async def family_h_edges() -> list[Finding]:
 
 
 async def family_a_admission(
-    *, sweep_turns: int, offered: int
+    *, sweep_turns: int, offered: int, repeats: int
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """A · what the admission cap actually buys, swept by restarting the front door at each value.
 
@@ -956,49 +956,81 @@ async def family_a_admission(
     the turns that answered inverts the finding: 0.83 → 1.08 → 1.43 → 1.65 → 1.63 accepted/s, which
     rises with the cap and then stops.
 
-    Three mechanical verdicts, because a table is a measurement and not a check: **no turn may
+    **Each cap is sampled `repeats` times and the knee is judged against the spread those samples
+    show, not against a threshold chosen in advance.** This is D-2026-08-04-a-plateau-needs-the-
+    noise-you-measured-it-with, applied to the harness that was written the day after it: the first
+    version declared a knee wherever a step bought less than a fixed 10 %, and its own docstring
+    asserted that "the measurement's own run-to-run spread is a few percent, which is why the
+    threshold is well outside it". Nothing had measured the spread. Three single-sample runs then
+    put the 8 → 16 step at **+6.3 %, +3.9 % and +13.5 %** — straddling the threshold — so the same
+    stack answered "the knee is at 8" twice and "no knee in range" once. A plateau test that
+    supplies its own noise reproduces exactly the error that ADR exists to prevent, with a
+    harness's authority behind it.
+
+    So the sweep now measures what it needs. Each cap's goodput is the **median** of its samples,
+    and the noise floor is the largest within-cap spread seen anywhere in the sweep — an honest
+    upper bound on what one sample can be wrong by, taken from this run rather than from memory.
+
+    Four mechanical verdicts, because a table is a measurement and not a check: **no turn may
     vanish**, the cap must be **load-bearing** (goodput at the top above goodput at the bottom —
-    otherwise the setting is decoration and an operator tuning it is wasting a restart), and the
-    sweep must have **found the knee** rather than run out of range, which is the only way its
-    answer to "how high should this go" means anything.
+    otherwise the setting is decoration and an operator tuning it is wasting a restart), the sweep
+    must **resolve** the knee against its own noise, and the noise itself must be **small enough for
+    the answer to mean anything** — which is the check that would have caught the first version.
     """
     rows: list[dict[str, Any]] = []
     try:
         for cap in _ADMISSION_CAPS:
-            await asyncio.to_thread(
-                _lane,
-                "processes.sh",
-                "restart",
-                "api",
-                env={"CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap)},
-            )
-            started = time.monotonic()
-            results = await storm("a-cheap", turns=sweep_turns, concurrency=offered)
-            elapsed = time.monotonic() - started
-            accepted = sum(1 for r in results if r.status == 200 and r.error_code is None)
-            p50, p95 = percentiles(results)
+            samples: list[float] = []
+            drains: list[float] = []
+            accepted = failed = turns = 0
+            p50 = p95 = 0.0
+            for _ in range(max(repeats, 1)):
+                await asyncio.to_thread(
+                    _lane,
+                    "processes.sh",
+                    "restart",
+                    "api",
+                    env={"CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap)},
+                )
+                started = time.monotonic()
+                results = await storm("a-cheap", turns=sweep_turns, concurrency=offered)
+                elapsed = time.monotonic() - started
+                accepted = sum(1 for r in results if r.status == 200 and r.error_code is None)
+                turns, failed = len(results), len(results) - accepted
+                p50, p95 = percentiles(results)
+                samples.append(accepted / max(elapsed, 0.001))
+                drains.append(turns / max(elapsed, 0.001))
+                # The restart is inside the loop on purpose: a repeat that reused the warm process
+                # would measure the same process twice and report its agreement with itself as
+                # reproducibility. Restarting is the thing being varied everywhere else in this
+                # sweep, so it has to be varied here too.
             rows.append(
                 {
                     "cap": cap,
                     "offered": offered,
-                    "turns": len(results),
+                    "turns": turns,
                     "accepted": accepted,
-                    "failed": len(results) - accepted,
+                    "failed": failed,
                     "p50": p50,
                     "p95": p95,
                     # Both, side by side, because they disagree and only one of them is throughput.
-                    "drain": len(results) / max(elapsed, 0.001),
-                    "goodput": accepted / max(elapsed, 0.001),
+                    "drain": statistics.median(drains),
+                    "goodput": statistics.median(samples),
+                    "samples": samples,
+                    # The width of this cap's own disagreement, as a fraction of its median. The
+                    # knee is only readable at improvements larger than this.
+                    "spread": (max(samples) - min(samples)) / max(statistics.median(samples), 1e-9),
                 }
             )
             logger.info(
-                "cap=%d accepted=%d/%d p50=%.1fs goodput=%.2f/s (drain %.2f/s)",
+                "cap=%d accepted=%d/%d p50=%.1fs goodput=%.2f/s (spread %.0f%% over %d sample(s))",
                 cap,
                 accepted,
-                len(results),
+                turns,
                 p50,
                 rows[-1]["goodput"],
-                rows[-1]["drain"],
+                rows[-1]["spread"] * 100,
+                len(samples),
             )
     finally:
         # Back to the configured default, whatever happened. Leaving the lane on cap=32 would
@@ -1027,13 +1059,30 @@ async def family_a_admission(
         ),
         Finding(
             family="A",
-            name="the sweep reached the knee rather than running out of range",
+            name="the sweep's own noise is small enough to read a knee against",
+            ok=bool(rows) and noise(rows) <= _MAX_READABLE_NOISE,
+            observed=(
+                f"largest within-cap spread {noise(rows) * 100:.0f}% "
+                f"over {len(rows[0]['samples'])} sample(s) per cap"
+                if rows
+                else "no rows"
+            ),
+            detail=(
+                "above this, no step in the sweep can be distinguished from a re-run of the same "
+                "cap, and any knee reported would be an artefact — raise --sweep-repeats"
+            ),
+        ),
+        Finding(
+            family="A",
+            name="the sweep resolves the knee rather than running out of range",
             ok=_knee(rows) is not None,
             observed=(
-                f"goodput stops improving at cap {_knee(rows)}"
+                f"goodput stops improving at cap {_knee(rows)} "
+                f"(steps must beat the {noise(rows) * 100:.0f}% noise floor)"
                 if _knee(rows) is not None
-                else f"still improving at cap {rows[-1]['cap'] if rows else '?'} — "
-                "the sweep's top is a limit of the sweep, not of the system"
+                else f"no cap in {_ADMISSION_CAPS} stops paying by more than the "
+                f"{noise(rows) * 100:.0f}% noise floor — the sweep's top is a limit of the "
+                "sweep, not of the system"
             ),
             detail="SCALE-3's actual question: how high is worth setting this",
         ),
@@ -1041,20 +1090,48 @@ async def family_a_admission(
     return findings, rows
 
 
-# What counts as "stopped improving". Ten percent because the measurement's own run-to-run spread
-# is a few percent, and a knee declared inside the noise is a number with no content.
-_KNEE_IMPROVEMENT = 0.10
+# The most within-cap disagreement a sweep may show and still be read for a knee. Above it, one
+# sample's error is bigger than the steps being compared, so any knee is a coin flip — the check
+# above says so rather than letting the knee check report an artefact as an answer.
+_MAX_READABLE_NOISE = 0.15
+
+
+def noise(rows: Sequence[dict[str, Any]]) -> float:
+    """The largest within-cap spread anywhere in the sweep, as a fraction of that cap's median.
+
+    An upper bound on how wrong one sample can be, taken from *this* run. That is the whole point:
+    a plateau test that supplies its own noise figure reproduces the error
+    D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with exists to prevent, and this harness
+    reproduced it — a fixed 10 % threshold, and a docstring asserting the spread was "a few
+    percent" with nothing having measured it.
+    """
+    return max((float(row["spread"]) for row in rows), default=0.0)
 
 
 def _knee(rows: Sequence[dict[str, Any]]) -> int | None:
-    """The first cap whose successor buys less than `_KNEE_IMPROVEMENT` more goodput.
+    """The first cap whose successor buys less improvement than the sweep's own noise floor.
 
-    None when every step still bought a real improvement — which is not a pass: it means the sweep
-    ended before the system did, and the honest report of that is "we do not know yet", not the
-    top of the range dressed up as an answer.
+    Judged against `noise(rows)` rather than a constant, because a step smaller than the spread
+    between two runs of the *same* cap is not a step anyone measured. Three single-sample runs of
+    this sweep put the 8 → 16 step at +6.3 %, +3.9 % and +13.5 %; against a fixed 10 % the same
+    stack answered "the knee is at 8" twice and "no knee in range" once.
+
+    **None also when the noise itself is too large to read a knee against, and that guard is not
+    optional.** A noise floor makes this function fire *sooner*, not later — "the step is smaller
+    than the spread" is a statement about the measurement, and at a large enough spread every step
+    satisfies it and the knee lands on the first pair. So without the ceiling, a sweep too noisy to
+    say anything would confidently report the smallest cap as the answer: the failure mode is not a
+    missing knee but a fabricated one. Found by writing the test for the opposite behaviour and
+    watching it fail.
+
+    None means "we do not know yet" in both cases — the sweep ended before the system did, or it
+    could not see well enough to tell. Neither is the top of the range dressed up as an answer.
     """
+    floor = noise(rows)
+    if floor > _MAX_READABLE_NOISE:
+        return None
     for lower, upper in zip(rows, rows[1:], strict=False):
-        if upper["goodput"] < lower["goodput"] * (1 + _KNEE_IMPROVEMENT):
+        if upper["goodput"] < lower["goodput"] * (1 + floor):
             return int(lower["cap"])
     return None
 
@@ -1131,7 +1208,7 @@ def report(
 
 
 async def run_storm(
-    *, sweep_turns: int, offered: int, collide: int, planned: Sequence[str]
+    *, sweep_turns: int, offered: int, collide: int, repeats: int, planned: Sequence[str]
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """Run each planned family in turn; return every finding and the admission sweep's rows.
 
@@ -1154,7 +1231,9 @@ async def run_storm(
     if "H" in selected:
         findings.extend(await family_h_edges())
     if "A" in selected:
-        admission, sweep = await family_a_admission(sweep_turns=sweep_turns, offered=offered)
+        admission, sweep = await family_a_admission(
+            sweep_turns=sweep_turns, offered=offered, repeats=repeats
+        )
         findings.extend(admission)
     if "E" in selected:
         findings.extend(await family_e_chaos())
@@ -1174,6 +1253,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sweep-turns", type=int, default=48, help="turns per admission-cap step")
     parser.add_argument("--offered", type=int, default=48, help="concurrent turns offered per step")
     parser.add_argument("--collide", type=int, default=12, help="simultaneous identical launches")
+    parser.add_argument(
+        "--sweep-repeats",
+        type=int,
+        default=3,
+        help="samples per admission cap; the knee is read against the spread they show",
+    )
     parser.add_argument(
         "--families",
         default="".join(FAMILIES),
@@ -1195,6 +1280,7 @@ def main(argv: list[str] | None = None) -> int:
             sweep_turns=args.sweep_turns,
             offered=args.offered,
             collide=args.collide,
+            repeats=args.sweep_repeats,
             planned=planned,
         )
     )

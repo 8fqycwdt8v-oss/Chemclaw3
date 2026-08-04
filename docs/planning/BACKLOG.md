@@ -56,7 +56,8 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 
 Closed by this pass: the storm's two missing families (E and H are wired, and `FAMILIES` plus the
 coverage table make an overstatement structurally impossible), and **SCALE-3** — see
-`docs/archive/storm-2026-08-04.md` for the per-cap table and the mutation results.
+`docs/archive/storm-2026-08-04.md` for the per-cap table (**the knee is cap 16**, measured
+over three samples per cap against the sweep's own 9 % noise floor) and the mutation results.
 
 ## Open — Left by the live full-stack pass (2026-08-04)
 

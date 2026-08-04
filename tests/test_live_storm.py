@@ -37,6 +37,7 @@ from chemclaw.cli.live_storm import (
     _bad_call_was_reported,
     _completed_without_dying,
     _knee,
+    noise,
     percentiles,
     report,
     storm,
@@ -45,23 +46,76 @@ from chemclaw.cli.mock_llm import Behaviour, ToolCall, _validate, already_has_to
 from chemclaw.cli.storm_behaviours import BEHAVIOURS
 
 
-def _row(cap: int, goodput: float) -> dict[str, object]:
-    """One admission-sweep row, with only the fields `_knee` reads."""
-    return {"cap": cap, "goodput": goodput}
+def _row(cap: int, goodput: float, spread: float = 0.0) -> dict[str, object]:
+    """One admission-sweep row, with only the fields `_knee` and `noise` read.
+
+    `spread` is the within-cap disagreement across that cap's repeated samples, as a fraction of
+    its median. It defaults to zero so a test that is not about noise can ignore it — but a sweep
+    that really measured zero spread would be one that took a single sample, which is the shape
+    this whole mechanism exists to stop being read as an answer.
+    """
+    return {"cap": cap, "goodput": goodput, "spread": spread, "samples": [goodput]}
 
 
 # --------------------------------------------------------------------------- the knee
 
 
 def test_the_knee_is_the_cap_whose_successor_stops_paying() -> None:
-    """The measured SCALE-3 shape: goodput climbs, then flattens.
+    """The measured SCALE-3 shape: goodput climbs, then flattens — against a *measured* floor.
 
-    These are the real numbers from `docs/archive/storm-2026-08-04.md` — 0.82, 1.01, 1.52, 1.58,
-    1.78 answered/s at caps 2 → 32 — so this pins the function against the data whose answer is
-    quoted in the record, rather than against a series invented to make it come out right.
+    Real numbers from run 2 in `docs/archive/storm-2026-08-04.md` — 0.82, 1.01, 1.52, 1.58, 1.78
+    answered/s at caps 2 → 32 — with a 5 % noise floor. The 8 → 16 step is +3.9 %, inside the
+    floor, so the knee is at 8.
     """
-    rows = [_row(2, 0.82), _row(4, 1.01), _row(8, 1.52), _row(16, 1.58), _row(32, 1.78)]
+    rows = [
+        _row(2, 0.82, 0.05),
+        _row(4, 1.01, 0.04),
+        _row(8, 1.52, 0.03),
+        _row(16, 1.58, 0.05),
+        _row(32, 1.78, 0.04),
+    ]
     assert _knee(rows) == 8
+
+
+def test_a_sweep_too_noisy_to_read_reports_no_knee_rather_than_the_first_step() -> None:
+    """The guard against a *fabricated* knee, which is the failure mode a noise floor introduces.
+
+    Identical goodput series, one number different: a 20 % measured spread instead of 5 %. The
+    naive reading — "a step smaller than the spread means it stopped paying" — fires *sooner* as
+    noise grows, so at a large enough spread every step qualifies and the knee lands on the first
+    pair. A sweep that could not see anything would confidently name the smallest cap.
+
+    This was found by writing the test expecting the opposite and watching it fail, which is worth
+    recording: the correction to a fixed threshold (D-2026-08-04-a-plateau-needs-the-noise-you-
+    measured-it-with) introduced its own way to be confidently wrong, and only running it said so.
+
+    So `_knee` refuses above `_MAX_READABLE_NOISE`, and None means "we do not know yet" for both
+    reasons a sweep can fail to answer: it ran out of range, or it could not see well enough.
+    """
+    readable = [
+        _row(2, 0.82, 0.05),
+        _row(4, 1.01, 0.04),
+        _row(8, 1.52, 0.03),
+        _row(16, 1.58, 0.05),
+        _row(32, 1.78, 0.04),
+    ]
+    assert _knee(readable) == 8
+
+    unreadable = [_row(2, 0.82, 0.20), *readable[1:]]
+    assert noise(unreadable) == pytest.approx(0.20)
+    assert _knee(unreadable) is None
+
+
+def test_the_noise_floor_is_the_worst_cap_not_the_average() -> None:
+    """An upper bound on how wrong one sample can be, which is the only safe reading of it.
+
+    Averaging would let four well-behaved caps hide the one that disagreed with itself, and it is
+    exactly that cap whose neighbours cannot be told apart.
+    """
+    assert noise([_row(2, 1.0, 0.02), _row(4, 2.0, 0.19), _row(8, 3.0, 0.03)]) == pytest.approx(
+        0.19
+    )
+    assert noise([]) == 0.0
 
 
 def test_a_sweep_that_never_flattens_reports_no_knee() -> None:
@@ -74,15 +128,15 @@ def test_a_sweep_that_never_flattens_reports_no_knee() -> None:
     assert _knee([_row(2, 1.0), _row(4, 2.0), _row(8, 4.0), _row(16, 8.0)]) is None
 
 
-def test_a_knee_inside_the_noise_is_still_a_knee_only_at_the_declared_threshold() -> None:
-    """Ten percent is the line, and it is drawn on purpose rather than by accident of rounding.
+def test_the_line_between_flat_and_still_climbing_is_the_measured_spread() -> None:
+    """The same two-row sweep answers differently depending on what its noise turned out to be.
 
-    Just under it counts as flat (the successor bought nothing worth a restart); comfortably over
-    it does not. The measurement's own run-to-run spread is a few percent, which is why the
-    threshold is well outside it — a knee declared inside the noise is a number with no content.
+    A 9 % step is flat against a 10 % floor and a real climb against a 5 % one. That the answer
+    moves with the measurement is the point: the alternative is a constant that is right for
+    whichever machine it was chosen on.
     """
-    assert _knee([_row(2, 1.00), _row(4, 1.09)]) == 2
-    assert _knee([_row(2, 1.00), _row(4, 1.20)]) is None
+    assert _knee([_row(2, 1.00, 0.10), _row(4, 1.09, 0.10)]) == 2
+    assert _knee([_row(2, 1.00, 0.05), _row(4, 1.09, 0.05)]) is None
 
 
 def test_a_single_step_sweep_has_no_successor_to_judge() -> None:
