@@ -265,5 +265,6 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-05-a-sweep-that-commits-once](D-2026-08-05-a-sweep-that-commits-once.md) | A sweep that commits once can lose everything it did |
 | [D-2026-08-05-a-trend-needs-a-tail](D-2026-08-05-a-trend-needs-a-tail.md) | A trend needs a tail, not just a slope |
 | [D-2026-08-05-a-worker-may-not-outrun-its-pool](D-2026-08-05-a-worker-may-not-outrun-its-pool.md) | A worker may not admit more activities than its pool can serve |
+| [D-2026-08-05-append-only-by-grant-not-by-contract](D-2026-08-05-append-only-by-grant-not-by-contract.md) | Append-only by grant, not by contract |
 | [D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without](D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without.md) | Readiness answers for the store it cannot serve without |
 | [D-2026-08-05-the-connection-budget-is-a-fleet-number](D-2026-08-05-the-connection-budget-is-a-fleet-number.md) | The connection budget is a fleet number, and the pool's witness belongs to the pool |

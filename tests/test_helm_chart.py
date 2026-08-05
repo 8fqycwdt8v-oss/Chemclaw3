@@ -231,6 +231,46 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     }
 
 
+def test_the_migration_credential_is_mounted_on_the_hook_job_and_nowhere_else() -> None:
+    """A credential that can rewrite the audit trail must not live on a pod for its whole life.
+
+    The migration DSN owns the schema: it issues DDL, and under a split principal it is the only
+    role that can `UPDATE` or `DELETE` `audit_events`
+    (D-2026-08-05-append-only-by-grant-not-by-contract). `chemclaw.env` is included by every
+    Deployment, so listing it in `secrets.keys` would mount it on the front door and every worker
+    permanently — which would leave the exposure exactly where it was while appearing to fix it.
+    Hence a second map and a second helper, used only by the hook Job.
+    """
+    assert set(_VALUES["secrets"]["migrationKeys"].values()) == {"CHEMCLAW_POSTGRES_MIGRATION_DSN"}
+    assert not (
+        set(_VALUES["secrets"]["migrationKeys"].values()) & set(_VALUES["secrets"]["keys"].values())
+    ), "the migration credential is also in the map every Deployment mounts"
+
+    helpers = (_CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, migration_env = helpers.partition('define "chemclaw.migrationEnv"')
+    assert migration_env, "no chemclaw.migrationEnv helper"
+    # Optional, or a single-principal deployment (every dev database, CI, `make up`) cannot start.
+    assert "optional: true" in migration_env.split("{{- end -}}")[0]
+
+    for template in sorted((_CHART / "templates").glob("*.yaml")):
+        if template.name == "migrate-job.yaml":
+            assert 'include "chemclaw.migrationEnv"' in template.read_text()
+        else:
+            assert 'include "chemclaw.migrationEnv"' not in template.read_text(), (
+                f"{template.name} mounts the migration credential; only the hook Job may"
+            )
+
+
+def test_the_hook_job_reconciles_grants_after_it_migrates() -> None:
+    """The grants name tables the migrations create, so the order is not optional.
+
+    One container rather than a second hook Job, so the ordering is the shell's `&&` rather than a
+    weight in a different file — and so a failed migration is never followed by a grant run.
+    """
+    job = (_CHART / "templates" / "migrate-job.yaml").read_text()
+    assert "chemclaw.core.migrate && python -m chemclaw.core.grants" in job
+
+
 def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:
     """`Settings` as the pods build them, from the chart's own values.
 

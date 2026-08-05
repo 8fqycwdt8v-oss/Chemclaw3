@@ -401,6 +401,19 @@ secrets:
     # modification, reordering, interior deletion and prefix truncation — and a point-in-time
     # restore stays what it was: an undetectable trailing deletion of the compliance trail.
     auditAnchorSecret: "CHEMCLAW_AUDIT_ANCHOR_SECRET"
+  # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
+  # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
+  # migration credential listed there would be present on the front door and every worker for the
+  # life of the deployment — which is precisely the exposure this exists to remove
+  # (D-2026-08-05-append-only-by-grant-not-by-contract).
+  #
+  # Leave the Secret key unset (or absent from the Secret) to run one principal, which is what
+  # `make up`, CI and every dev database do: `postgres_migration_dsn` falls back to
+  # `postgres_dsn` and nothing changes. Set it, create a `chemclaw_app` role, and the credential
+  # that can issue DDL — or rewrite `audit_events` — exists only inside a Job that runs for the
+  # seconds a release takes.
+  migrationKeys:
+    postgresMigrationDsn: "CHEMCLAW_POSTGRES_MIGRATION_DSN"
   # Temporal mTLS is mounted as files; the env points at the mount paths. Unlike the keys above,
   # this Secret is *not* optional when it is switched on — see the toggle.
   temporalTls:

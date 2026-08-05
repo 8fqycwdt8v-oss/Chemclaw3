@@ -39,6 +39,16 @@ that — the front door's lifespan does not call `migrate`, and neither does any
 mattered here: it made concurrent migration sound routine, when the real concurrency is two deploys
 overlapping or an operator running `make db-migrate` during one. The chart runs this as a
 `pre-install,pre-upgrade` hook Job that completes before any app container starts (D-034).
+
+**It runs as the migrator, not as the application.** `postgres_migration_dsn` is the credential
+that owns the schema; `postgres_dsn` is the runtime one, which under a split deployment cannot
+issue DDL at all (D-2026-08-05-append-only-by-grant-not-by-contract). Unset, it falls back to
+`postgres_dsn` and everything behaves exactly as it did — a single-principal database is still a
+supported deployment, and it is what `make up`, CI and every test use.
+
+**Lives in `core/`** because the schema belongs to the whole application. It sat in
+`science/calc/`, which is neither of the two homes `ARCHITECTURE.md` allows for capability code —
+an artefact of the QM cache having been the first thing to need a table.
 """
 
 import asyncio
@@ -88,6 +98,17 @@ def _ms(seconds: float) -> str:
     return f"{int(seconds * 1000)}ms"
 
 
+def migration_dsn() -> str:
+    """The credential that owns the schema: `postgres_migration_dsn`, else the runtime one.
+
+    One resolver so the migration runner and the grant reconciliation cannot end up pointing at
+    different databases — a grant applied to one server and DDL to another is the failure mode a
+    second `or` expression invites. Falling back keeps every single-principal deployment (dev, CI,
+    `make up`, the whole test suite) working with nothing configured.
+    """
+    return settings.postgres_migration_dsn or settings.postgres_dsn
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -96,7 +117,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
     checksum no longer matches — an edited migration must become a new file, never a
     silent in-place change.
     """
-    target = dsn if dsn is not None else settings.postgres_dsn
+    target = dsn if dsn is not None else migration_dsn()
     applied: list[str] = []
     # Every file read up front, in one worker thread rather than ~30 hops. `connect`, not
     # `connection`: a migration wants its own connection with no statement timeout (an index build

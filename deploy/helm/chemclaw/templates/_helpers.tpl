@@ -47,6 +47,27 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end -}}
 
+{{- /* The migration hook Job's own secrets, deliberately a second helper rather than more keys in
+       `chemclaw.env`. That helper is included by every Deployment, so anything added to
+       `secrets.keys` is mounted on the front door and every worker for the life of the pod — and
+       the credential this carries is the one that owns the schema and can rewrite `audit_events`
+       (D-2026-08-05-append-only-by-grant-not-by-contract). It belongs on a Job that exists for the
+       seconds a release takes, and nowhere else.
+
+       `optional: true` because a single-principal deployment is fully supported: absent, the key
+       is simply unset and `postgres_migration_dsn` falls back to `postgres_dsn`. A required key
+       would make splitting the principal mandatory for every dev database and CI run. */ -}}
+{{- define "chemclaw.migrationEnv" -}}
+{{- range $configKey, $secretEnv := .Values.secrets.migrationKeys }}
+- name: {{ $secretEnv }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $.Values.secrets.name }}
+      key: {{ $secretEnv }}
+      optional: true
+{{- end }}
+{{- end -}}
+
 {{- /* The image reference every pod uses, in one place so a digest cannot be honoured in some
        templates and not others.
 

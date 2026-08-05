@@ -27,7 +27,7 @@ _(The previous occupant of this file was the live-test lane for Temporal + durab
       probe in `/readyz`, gated on `session_store="postgres"`; `/healthz` untouched.
 - [x] **4. A sweep that commits once can lose everything it did.** Per-session commit in
       `_prune_session_messages`; a bounded batch per pass, with the remainder reported.
-- [ ] **5. Append-only by grant, not by contract.** `postgres_migration_dsn`; the runner moves to
+- [x] **5. Append-only by grant, not by contract.** `postgres_migration_dsn`; the runner moves to
       `core/`; `infra/sql/036_privileges.sql`; a test deriving the grant matrix from `src/`; the
       migration credential mounted only on the hook Job.
 - [ ] **6. The record.** `infra/sql/README.md` inventory checked by a test; BACKLOG rows for the

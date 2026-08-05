@@ -18,13 +18,26 @@ class StoreSettings(BaseSettings):
     """
 
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
-    # The ordered `.sql` migrations `chemclaw.science.calc.migrate` applies. A setting rather than
+    # The credential that owns the schema, as distinct from the one that serves requests
+    # (D-2026-08-05-append-only-by-grant-not-by-contract). Empty falls back to `postgres_dsn`, so a
+    # single-principal database — dev, CI, `make up`, every test — needs no configuration and
+    # behaves exactly as before; splitting is a deployment's opt-in.
+    #
+    # Why it is worth splitting: `infra/sql/006` calls `audit_events` "append-only by contract",
+    # and one DSN with full DDL and DML was mounted on every pod, so the credential running a chat
+    # turn could rewrite the GxP trail recording that turn. The chain and the anchors detect that;
+    # only a privilege boundary prevents it. This DSN belongs on the migration hook Job and
+    # nowhere else — it is mounted for the seconds a release takes, not for the life of a pod.
+    postgres_migration_dsn: str = ""
+    # The ordered `.sql` migrations `chemclaw.core.migrate` applies. A setting rather than
     # a path derived from `__file__`, which is what it was until D-148: `parent.parent` happened to
-    # be the repository root only while the module sat at `science/calc/migrate.py`, and moving
-    # it two levels deeper silently pointed it inside the package — `make db-migrate` failed in CI
-    # with no SQL found. The directory is repository/workdir-relative like `knowledge_dir` and
-    # `skills_dir` (the image COPYs it to `/app/infra` beside `/app/src`), so it follows the same
-    # rule as every other data directory rather than a depth count nothing checks.
+    # be the repository root only while the module sat two levels deeper, inside the calc package,
+    # and moving it there silently pointed the path inside the package — `make db-migrate` failed
+    # in CI with no SQL found. (The module has since moved again, to `core/`, which is the reason
+    # this setting is not a depth count: it survived that move without an edit.) The directory is
+    # repository/workdir-relative like `knowledge_dir` and `skills_dir` (the image COPYs it to
+    # `/app/infra` beside `/app/src`), so it follows the same rule as every other data directory
+    # rather than a depth count nothing checks.
     sql_migrations_dir: str = "infra/sql"
     # Fail fast when the database is unreachable instead of hanging until the enclosing
     # activity's start-to-close timeout expires (libpq connect_timeout).

@@ -1,11 +1,15 @@
 """The migration reader finds the SQL files, offline and with no database (D-148).
 
 `_read_sql_files` located `infra/sql/` as `Path(__file__).parent.parent` — correct only while the
-module sat at the repository root, where that expression happened to resolve there. D-148 moved
-it to `science/calc/migrate.py`, two levels deeper, and the path silently became a
-directory *inside* the package. `glob` on a non-existent directory raises nothing and yields
-nothing, so `make db-migrate` did not fail on a bad path — it applied zero migrations, and CI only
-caught it because the integration tests that follow found no schema.
+module sat at the repository root, where that expression happened to resolve there. D-148 moved it
+two levels deeper, into the calc package, and the path silently became a directory *inside* the
+package. `glob` on a non-existent directory raises nothing and yields nothing, so `make db-migrate`
+did not fail on a bad path — it applied zero migrations, and CI only caught it because the
+integration tests that follow found no schema.
+
+The module has since moved again, to `chemclaw.core.migrate`, where the schema's runner belongs
+(D-2026-08-05-append-only-by-grant-not-by-contract). That move needed no change to
+`sql_migrations_dir`, which is the property these tests exist to keep.
 
 That is the failure mode worth a test: not "the migrations are wrong" but "there are no migrations
 and nobody said so". These run offline and touch no database, so they fail on the commit that
@@ -17,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.science.calc.migrate import _LEDGER_FILE, MigrationError, _read_sql_files
+from chemclaw.core.migrate import _LEDGER_FILE, MigrationError, _read_sql_files
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -106,7 +110,7 @@ def _run_against_recorder(monkeypatch: pytest.MonkeyPatch) -> _RecordingConnecti
     """Drive `migrate` against a recording connection and return what it issued."""
     import asyncio
 
-    from chemclaw.science.calc import migrate as module
+    from chemclaw.core import migrate as module
 
     conn = _RecordingConnection()
 
@@ -127,7 +131,7 @@ def test_migrators_are_serialized_by_an_advisory_lock(monkeypatch: pytest.Monkey
     *inserts* and the migrator did not serialize its *DDL*. Transaction-scoped, so the single commit
     at the end of the run releases it and there is no path that leaks it.
     """
-    from chemclaw.science.calc.migrate import _MIGRATION_LOCK_KEY
+    from chemclaw.core.migrate import _MIGRATION_LOCK_KEY
 
     conn = _run_against_recorder(monkeypatch)
     locks = [params for sql, params in conn.statements if "pg_advisory_xact_lock" in sql]
@@ -179,7 +183,7 @@ def test_the_run_still_takes_no_statement_timeout(monkeypatch: pytest.MonkeyPatc
     """
     import inspect
 
-    from chemclaw.science.calc import migrate as module
+    from chemclaw.core import migrate as module
 
     source = inspect.getsource(module.migrate)
     assert "statement_timeout" not in source, (
