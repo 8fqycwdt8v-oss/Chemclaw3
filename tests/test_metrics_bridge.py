@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 from chemclaw.core.metrics import METRICS
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import NoteSubmission, propose_note
+from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.submission import NoteSubmission
 
 
 class _Submitter:

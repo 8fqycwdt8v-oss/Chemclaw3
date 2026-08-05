@@ -40,7 +40,7 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import invalidate_cache
-from chemclaw.kg.pr_gate import NoteSubmission, NoteSubmitter
+from chemclaw.kg.submission import NoteSubmission, NoteSubmitter
 
 log = logging.getLogger(__name__)
 

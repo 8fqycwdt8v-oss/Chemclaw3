@@ -17,6 +17,7 @@ from typing import Any
 
 from chemclaw.kg.proposal import NoteProposal, ProposalState
 from chemclaw.kg.proposal_store import PostgresProposalStore
+from chemclaw.kg.submission import NoteFile
 from tests.pg import migrated_db_or_skip
 
 
@@ -132,5 +133,53 @@ def test_a_changed_note_is_a_new_version_beside_the_decided_one() -> None:
         assert rejected is not None and rejected.state is ProposalState.REJECTED
         fresh = await store.read(second_id)
         assert fresh is not None and fresh.state is ProposalState.OPEN
+
+    asyncio.run(_run())
+
+
+def test_every_file_of_a_multi_file_submission_round_trips_through_the_column() -> None:
+    """The `dependencies` JSONB, against the database rather than against the mirror.
+
+    The in-memory backend holds `tuple[NoteFile, ...]` in a dict and cannot be wrong about it. The
+    durable one serializes to JSONB, reads back through `dict_row`, and rebuilds the models — three
+    steps the Python backend does not have, on the column that decides whether a `FAILED`
+    multi-file submission is replayable at all.
+
+    Also pins the refresh rule: an unchanged re-proposal collapses onto the same row (the hash
+    still covers the subject note alone) and its `dependencies` are the ones the replay would
+    write, not the ones the first attempt happened to carry.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        first = _proposal(
+            "pg-reaction-deps",
+            state=ProposalState.FAILED,
+            reason="no route to host",
+            dependencies=(
+                NoteFile(path="knowledge/compound/pg-compound.md", content="the compound"),
+            ),
+        )
+        row_id = await store.upsert(first)
+
+        stored = await store.read(row_id)
+        assert stored is not None
+        assert [file.path for file in stored.dependencies] == ["knowledge/compound/pg-compound.md"]
+        assert stored.dependencies[0].content == "the compound"
+
+        # Same subject note, a re-derived dependency set: one row, the newer files.
+        again = first.model_copy(
+            update={
+                "state": ProposalState.OPEN,
+                "reason": "",
+                "dependencies": (
+                    NoteFile(path="knowledge/compound/pg-compound.md", content="the compound v2"),
+                ),
+            }
+        )
+        assert await store.upsert(again) == row_id
+        refreshed = await store.read(row_id)
+        assert refreshed is not None
+        assert refreshed.dependencies[0].content == "the compound v2"
 
     asyncio.run(_run())

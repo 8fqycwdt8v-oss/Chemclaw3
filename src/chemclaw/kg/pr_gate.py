@@ -6,11 +6,11 @@ validated, rendered, and submitted on a feature branch as a pull request; a huma
 merges. The git/GitHub mechanics sit behind the `NoteSubmitter` protocol so the
 gate logic — which notes qualify, where they land, what the PR says — is one
 tested function independent of how submission happens.
+
+The types a submission is *made of* — `NoteFile`, `NoteSubmission`, `NoteSubmitter` — live in
+`chemclaw.kg.submission`, because the durable proposal record needs them too and this module
+already imports that one.
 """
-
-from typing import Protocol
-
-from pydantic import BaseModel, Field
 
 from chemclaw.core.config import settings
 from chemclaw.core.logging import redact_secrets
@@ -23,57 +23,7 @@ from chemclaw.kg.proposal import (
     record_proposal_submitted,
 )
 from chemclaw.kg.render import render_note
-
-
-class NoteFile(BaseModel):
-    """One file a submission writes: where it goes and what it contains."""
-
-    path: str
-    content: str
-
-
-class NoteSubmission(BaseModel):
-    """Everything needed to open a PR that adds one note — and whatever it depends on.
-
-    **Why this carries a list rather than a single file.** It used to be exactly one `path` plus
-    one `content`, and that single field was a structural constraint on the whole knowledge graph:
-    a note could never link to another note that did not already exist on the base branch, because
-    a dangling `[[wikilink]]` fails `kg-validate` on the very PR being opened.
-    `connectors/qm/knowledge.py` documented that as the reason it emitted no link at all, which is
-    why computed results and the knowledge graph were disjoint stores (STO-7).
-
-    A submission is properly a *reviewable unit*, and the unit is "this note and the notes it needs
-    to make sense" — a `job-result` and the `compound` it is about. Both land in one PR, one human
-    signs off on both, and the link resolves.
-
-    `files` is ordered with the subject note first, so `files[0]` is the note the submission is
-    about. Deliberately *not* also exposed as `path`/`content` convenience properties: a read-only
-    property shadows anything `model_copy(update=...)` writes, so the old field names would keep
-    resolving and silently ignore the update. One shape, no aliases.
-    """
-
-    branch: str
-    files: list[NoteFile] = Field(min_length=1)
-    title: str
-    body: str
-
-
-class NoteSubmitter(Protocol):
-    """Submits a note as a reviewable PR and returns a reference (e.g. the PR URL).
-
-    Contract nuance: when the note is byte-identical to what the base branch
-    already contains, an implementation may return the reference *without*
-    creating anything new — there is nothing to review, so re-proposing an
-    unchanged note is an idempotent no-op, not an error.
-    """
-
-    async def submit(self, submission: NoteSubmission) -> str:
-        """Create the branch + PR for `submission`; return a human-visible reference.
-
-        For an unchanged note this may be the branch name without a fresh push
-        (see the class docstring).
-        """
-        ...
+from chemclaw.kg.submission import NoteFile, NoteSubmission, NoteSubmitter
 
 
 def _note_file(note: Note, directory: str) -> NoteFile:
@@ -164,6 +114,10 @@ async def propose_note(
         note_id=note.id,
         note_type=note.type,
         content=submission.files[0].content,
+        # Everything else the submission would write. Kept because a submission is one reviewable
+        # unit (D-133) and a record of one file of it can neither be replayed — the replayed note's
+        # link to its compound would dangle — nor honestly shown to a reviewer.
+        dependencies=tuple(submission.files[1:]),
         branch=submission.branch,
         actor=actor,
         session_id=session_id,
@@ -174,9 +128,11 @@ async def propose_note(
     except Exception as exc:
         # A submission that never reached git is the case `chemclaw_notes_publish_failures_total`
         # made countable and still left unrecoverable: the note itself was gone, with nothing to
-        # replay. The row keeps the rendered bytes, so the knowledge survives the outage that lost
-        # the branch. Recorded on every retry, which is harmless — the record keys on the content,
-        # so N attempts at one note collapse onto one row.
+        # replay. The row keeps every file's rendered bytes, so the knowledge survives the outage
+        # that lost the branch — and the *unit* survives it, which storing only the subject note
+        # did not: a replayed `job-result` whose `compound` was dropped links to a note that does
+        # not exist and fails `kg-validate` on the PR it reopens. Recorded on every retry, which is
+        # harmless — the record keys on the content, so N attempts collapse onto one row.
         # Redacted *before* it is truncated. The cut is a length bound and was described as if it
         # were also a privacy one; a realistic credential-bearing git failure — git quoting a push
         # URL with its token in the userinfo — measures 118 characters against a 300-character

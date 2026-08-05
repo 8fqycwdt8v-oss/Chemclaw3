@@ -32,6 +32,7 @@ from chemclaw.core.identity_context import get_current_actor, get_current_correl
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
+from chemclaw.kg.submission import NoteFile
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,24 @@ DECIDED_STATES = frozenset({ProposalState.MERGED, ProposalState.REJECTED})
 class NoteProposal(BaseModel):
     """One submission of one note version, with its provenance and its outcome.
 
-    `content` is the rendered note, kept verbatim. That is what separates this from a counter: a
-    `FAILED` row can be replayed because the bytes it would have written are still here, and a
-    reviewer opening one proposal sees the note as it would land rather than a summary of it.
+    `content` is the rendered subject note and `dependencies` the supporting files that would land
+    beside it, both kept verbatim. That is what separates this from a counter: a `FAILED` row can
+    be replayed because the bytes it would have written are still here, and a reviewer opening one
+    proposal sees what would land rather than a summary of it.
+
+    **`dependencies` exists because `content` alone made both of those sentences false for a
+    multi-file submission.** The row kept `files[0]` and dropped the rest, so replaying a
+    `job-result` proposal would have written a note whose `[[wikilink]]` to its `compound` dangled
+    — the exact failure the multi-file `NoteSubmission` was introduced to prevent (D-133) — and a
+    reviewer was shown one file of a unit that is defined as indivisible. Four of the nine
+    `propose_note` call sites pass dependencies.
+
+    **The identity stays the subject note's bytes.** `content_hash` covers `content` and not the
+    dependencies, deliberately: the row is a record of *this version of this note*, and folding the
+    supporting files into the hash would make every pre-existing row look like changed content and
+    append a second "the note changed" row to a compliance table where that is a claim about
+    history. `dependencies` is refreshed on an unchanged re-proposal exactly as `reference` and the
+    provenance columns already are.
 
     `submitted_at` is unset on the way in and filled by the store, for the reason
     `JobRecord.completed_at` is: a caller may be a Temporal activity, and the row's timestamp
@@ -70,6 +86,7 @@ class NoteProposal(BaseModel):
     note_id: str = Field(min_length=1)
     note_type: str = Field(min_length=1)
     content: str
+    dependencies: tuple[NoteFile, ...] = ()
     branch: str = Field(min_length=1)
     reference: str = ""
     actor: str = ""
@@ -155,11 +172,16 @@ class InMemoryProposalStore:
         existing_id = self._by_version.get(version)
         if existing_id is not None:
             existing = self._by_id[existing_id]
-            update = {
+            update: dict[str, object] = {
                 "reference": proposal.reference,
                 "actor": proposal.actor,
                 "session_id": proposal.session_id,
                 "correlation_id": proposal.correlation_id,
+                # Refreshed like the provenance above rather than keyed on: the dependency set is
+                # derived from the subject note, so an unchanged note re-proposed with a different
+                # set means the derivation changed, and the row should describe the submission that
+                # will actually be replayed.
+                "dependencies": proposal.dependencies,
                 "submitted_at": now,
             }
             if existing.state is ProposalState.FAILED:

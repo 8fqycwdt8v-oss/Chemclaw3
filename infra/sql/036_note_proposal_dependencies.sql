@@ -1,0 +1,26 @@
+-- The supporting files a proposal would write beside its subject note.
+--
+-- `note_proposals.content` holds the rendered subject note, and migration 027 justifies keeping it
+-- verbatim: "a submission that never reached git is only replayable if the bytes it would have
+-- written are still here." That was true of a one-file submission and false of every other one.
+-- `chemclaw.kg.pr_gate` stored `files[0]` and dropped the rest, so replaying a `FAILED`
+-- `job-result` proposal would have written a note whose `[[wikilink]]` to its `compound` dangled —
+-- the exact failure the multi-file `NoteSubmission` exists to prevent (D-133) — and
+-- `GET /proposals/{id}` showed a reviewer one file of a unit defined as indivisible while claiming
+-- to show "the note exactly as it would land in the tree". Four of the nine `propose_note` call
+-- sites pass dependencies.
+--
+-- **JSONB rather than a child table.** These are opaque file bodies replayed as a set, never
+-- queried, joined or filtered; a `note_proposal_files` table would add a foreign key, a cascade
+-- and a second insert per submission to model an ordering that the column already has.
+--
+-- **The identity does not move.** `content_hash` still covers `content` alone, so an existing row
+-- keeps its identity and an unchanged re-proposal still collapses onto it. Hashing the whole file
+-- set instead would make every pre-existing row look like changed content and append a second row
+-- asserting "the note changed" — a claim about history, in a table whose whole purpose is to be
+-- one. `dependencies` is refreshed on re-proposal like `reference` and the provenance columns.
+--
+-- Applied by `make db-migrate`. Existing rows default to the empty array, which is exactly what
+-- they were: single-file submissions, or multi-file ones whose extra files were never stored.
+ALTER TABLE note_proposals
+    ADD COLUMN IF NOT EXISTS dependencies JSONB NOT NULL DEFAULT '[]'::jsonb;

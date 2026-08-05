@@ -15,7 +15,8 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import NoteSubmitter, propose_note
+from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.submission import NoteSubmitter
 from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id

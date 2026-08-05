@@ -23,7 +23,7 @@ from chemclaw.durable.connector_job import ConnectorJobResult
 from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import NoteFile, NoteSubmission
+from chemclaw.kg.submission import NoteFile, NoteSubmission
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 
 _RESULT = QMJobResult(

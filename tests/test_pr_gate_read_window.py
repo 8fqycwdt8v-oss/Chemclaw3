@@ -32,7 +32,7 @@ import pytest
 
 from chemclaw.kg.git_submitter import GitNoteSubmitter, _checkout_lock
 from chemclaw.kg.graph import invalidate_cache, load_notes
-from chemclaw.kg.pr_gate import NoteFile, NoteSubmission
+from chemclaw.kg.submission import NoteFile, NoteSubmission
 
 _UNREVIEWED = "---\nid: agent-proposal\ntype: reaction\ncreated_by: agent\n---\n\nUnreviewed.\n"
 

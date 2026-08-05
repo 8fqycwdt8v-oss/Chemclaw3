@@ -22,7 +22,7 @@ from chemclaw.ingest.eln.adapter import ElnAdapter
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.kg.graph import load_notes
-from chemclaw.kg.pr_gate import NoteSubmitter
+from chemclaw.kg.submission import NoteSubmitter
 from chemclaw.science.fingerprints.store import FingerprintStore
 
 logger = logging.getLogger(__name__)

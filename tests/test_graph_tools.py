@@ -18,7 +18,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.kg.conflicts import find_conflicts
 from chemclaw.kg.note import Note, parse_note
-from chemclaw.kg.pr_gate import NoteSubmission
+from chemclaw.kg.submission import NoteSubmission
 from tests.conftest import FakeSubmitter
 
 
