@@ -30,9 +30,14 @@ core owns the obligations that must never vary per capability:
   three are: it must hold for every capability, and "each connector remembers" is the discipline
   that fails silently.
 
-The child is addressed by **workflow type name + task queue**, both strings from the manifest, so
-this module imports nothing from any connector — and moving a workflow between workers is a one-line
-manifest change rather than a code change (`docs/archive/plans/connector-plan.md` §5.3).
+The child is addressed by **workflow type name + task queue**, two plain strings, so this module
+imports nothing from any connector. The type name comes from the manifest (`JobSpec.workflow`); the
+queue is *derived* from the connector's name at dispatch (`connectors/queues.py::bundle_queue`) and
+is deliberately no longer declarable — D-150 deleted the field, because a queue a bundle could name
+was a queue a bundle could name wrongly, and the failure was silent. This sentence used to advertise
+both as manifest strings and to offer "moving a workflow between workers is a one-line manifest
+change"; the 2026-08-05 review measured `task_queue` at zero occurrences in
+`connectors/manifest.py`, so the offer had been false since D-150 landed.
 """
 
 from datetime import datetime, timedelta
@@ -241,10 +246,14 @@ class ConnectorJobWorkflow:
         started_at = workflow.now()
         try:
             result = await self._run_child(job)
-        except ActivityError as exc:
-            await self._notify_failure(job, exc)
-            raise
-        except ChildWorkflowError as exc:
+        except (ChildWorkflowError, ActivityError) as exc:
+            # One clause rather than two identical ones. `_run_child` awaits only
+            # `execute_child_workflow`, and the parent-side failure converter decodes a child
+            # failure exclusively as `ChildWorkflowError` (`temporalio/converter`, case
+            # `child_workflow_execution_failure_info`).
+            # `ActivityError` is produced only from `activity_failure_info`, which this frame never
+            # sees. It stays in the tuple because the day this workflow awaits an activity directly
+            # is the day the notification would silently stop happening, and a tuple costs nothing.
             await self._notify_failure(job, exc)
             raise
         return await self._finish(job, result, started_at)

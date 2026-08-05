@@ -48,7 +48,7 @@ import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any
 
 import psycopg
 from agent_framework import HistoryProvider, Message
@@ -131,14 +131,19 @@ def _crossed_new_compaction_bucket(count_before: int, count_after: int, floor: i
     return count_after >= floor and max(count_before, 0) // floor != count_after // floor
 
 
-def _session_dsn(dsn: str | None) -> str:
-    """Resolve a session-layer DSN: the caller's, else `session_store_dsn`, else `postgres_dsn`.
+def _session_dsn() -> str:
+    """Resolve the session layer's DSN: `session_store_dsn`, else the shared `postgres_dsn`.
 
     One resolver for all three stores in this module, so they can never end up pointing at
     different databases — the ownership row, the turn claim and the message history are one
     session's state and must live together (D-002).
+
+    It took a `dsn` override until the 2026-08-05 review counted the call sites: all twenty, in
+    `src/` and in `tests/`, construct these classes with no arguments, so the first branch of
+    `dsn or …` was unreachable in the whole tree. A parameter nothing passes is a parameter that
+    documents a capability the deployment does not have.
     """
-    return dsn or settings.session_store_dsn or settings.postgres_dsn
+    return settings.session_store_dsn or settings.postgres_dsn
 
 
 @asynccontextmanager
@@ -162,19 +167,12 @@ async def _session_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection
 class PostgresHistoryProvider(HistoryProvider):
     """A `HistoryProvider` that persists a session's messages to Postgres (durable, resumable)."""
 
-    DEFAULT_SOURCE_ID: ClassVar[str] = "postgres_history"
+    _SOURCE_ID = "postgres_history"
 
-    def __init__(self, source_id: str | None = None, *, dsn: str | None = None) -> None:
-        """Configure the provider.
-
-        Args:
-            source_id: This provider's id (used by compaction to find its stored history). Defaults
-                to `DEFAULT_SOURCE_ID`.
-            dsn: Database to persist to. Defaults to `session_store_dsn`, falling back to the shared
-                `postgres_dsn` when that is empty (one database in the simple deployment).
-        """
-        super().__init__(source_id=source_id or self.DEFAULT_SOURCE_ID)
-        self._dsn = _session_dsn(dsn)
+    def __init__(self) -> None:
+        """Configure the provider against the session-store database."""
+        super().__init__(source_id=self._SOURCE_ID)
+        self._dsn = _session_dsn()
 
     def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection on this provider's database (see `_session_connection`)."""
@@ -413,9 +411,9 @@ class SessionOwnerStore:
     exactly as the history provider's, so both durable-session tables live in one database (D-002).
     """
 
-    def __init__(self, *, dsn: str | None = None) -> None:
+    def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
-        self._dsn = _session_dsn(dsn)
+        self._dsn = _session_dsn()
 
     def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection on this store's database (see `_session_connection`)."""
@@ -475,13 +473,16 @@ class SessionTurnClaims:
     The claim is taken under `expires_at`, refreshed while the turn runs, and deleted when it
     ends. A worker that is SIGKILLed mid-turn therefore stops blocking its session after one
     lease, where a lock held by a dead connection waits for the server to notice and an in-memory
-    set needed a process restart. The cost is the standard lease property, stated plainly in
-    `chemclaw.api.app`: exclusion holds as long as the holder is scheduled often enough to refresh.
+    set needed a process restart. The cost is the standard lease property, stated in
+    `core/config/service.py` beside the lease setting itself: exclusion holds as long as the holder
+    is scheduled often enough to refresh. (This sentence used to cite `chemclaw.api.app`, which
+    never said it — the 2026-08-05 review grepped for the claim and found it in the config and in
+    D-121, not there.)
     """
 
-    def __init__(self, *, dsn: str | None = None) -> None:
+    def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
-        self._dsn = _session_dsn(dsn)
+        self._dsn = _session_dsn()
 
     def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection on this store's database (see `_session_connection`)."""

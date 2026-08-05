@@ -1045,3 +1045,29 @@ a diagnostic as a place where a number can quietly stop existing.
 **Rule: when a measurement is retracted, retract it where it was cited** — the maintained document
 and the open backlog row, not only the new ADR. A merged ADR is never edited, so the correction has
 to be findable from the places a reader would actually reach for the number.
+
+## R5.6 — `git add -A` is a claim about a tree you no longer control
+
+**What happened.** Three review subagents were reading and *mutating* the working tree — the whole
+point of the technique is to delete a guard, run its tests and see whether they notice. One of them
+did not restore what it deleted. Fifteen minutes later I committed the soak work with `git add -A`,
+and the commit removed two lines of production code from `run_turn`: the durable-subsystem
+reachability probe that announces a dead Temporal broker before the first token.
+
+Nothing about the soak touches the front door, so the diff was visibly wrong and I did not look at
+it. `git status --short` had shown `M src/chemclaw/api/runner.py` in an earlier turn and I read it
+as an agent's scratch state rather than as something my next commit would adopt. The four tests
+that pin the announcement fail on the deleted version, so CI would have caught it — which is a
+reason it was cheap, not a reason it was acceptable.
+
+**Rule: never `git add -A` while an agent that can write is running.** Stage the paths the commit is
+about, by name. The convenience is worth one file; it is not worth adopting another process's
+uncommitted state.
+
+**Rule: read `git diff --cached --stat` before every commit and ask whether each file belongs to the
+message.** A file the commit message never mentions is the signal — here, `api/runner.py` in a
+commit about a soak script.
+
+**Rule: an agent told it may mutate the tree must be told how to prove it restored it**, and the
+proof is `git diff --exit-code <paths>` at the end, not a sentence saying it cleaned up. Two of the
+three said the tree was clean; one of those two was reporting on files it had not touched.

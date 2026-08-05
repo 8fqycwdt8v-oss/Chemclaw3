@@ -500,14 +500,14 @@ def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
     from chemclaw.science.safety.ich import impurity_limit
 
     result = impurity_limit("palladium").model_dump_json(indent=2)
-    assert len(result) > runner_trace._ARG_PREVIEW_CHARS
+    assert len(result) > settings.agent_audit_max_arg_chars
 
     trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="ich_impurity_limit", call_id="i1", arguments={})))
     trace.feed(_update(_CallContent(call_id="i1", arguments='{"substance": "palladium"}')))
     event = _one_result(trace.feed(_update(_CallContent(call_id="i1", result=result))))
 
-    assert event.preview == result[: runner_trace._ARG_PREVIEW_CHARS]
+    assert event.preview == result[: settings.agent_audit_max_arg_chars]
     assert {100.0, 10.0, 1.0} <= set(event.numbers)
     assert not {"100.0", "10.0"} & set(event.preview.split())
 
@@ -521,14 +521,14 @@ def test_a_result_with_more_values_than_the_wire_allows_is_capped_and_says_so(
     electronic-properties calculation), so this drives it deliberately. What matters is that the
     drop is announced: a consumer told to trust the list would otherwise be trusting a short one.
     """
-    flood = ", ".join(str(n + 0.5) for n in range(runner_trace._MAX_RESULT_NUMBERS + 50))
+    flood = ", ".join(str(n + 0.5) for n in range(settings.stream_max_result_numbers + 50))
     trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="dump_table", call_id="f1", arguments={})))
     trace.feed(_update(_CallContent(call_id="f1", arguments="{}")))
     with caplog.at_level(logging.WARNING, logger=runner_trace.__name__):
         event = _one_result(trace.feed(_update(_CallContent(call_id="f1", result=flood))))
 
-    assert len(event.numbers) == runner_trace._MAX_RESULT_NUMBERS
+    assert len(event.numbers) == settings.stream_max_result_numbers
     assert "dump_table" in caplog.text
 
 
@@ -643,7 +643,7 @@ def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
     assert not list(settings.knowledge_path.rglob(f"{note_id}.md")), "the note must not exist"
     _offline_verification(monkeypatch)
     buried = "filler chunk. " * 40 + f"[[{note_id}]]"
-    assert len(buried) > runner_trace._ARG_PREVIEW_CHARS
+    assert len(buried) > settings.agent_audit_max_arg_chars
     answer = _verified_answer(
         _CitingAgent(f"The solvent was screened [[{note_id}]].", tool_result=buried)
     )

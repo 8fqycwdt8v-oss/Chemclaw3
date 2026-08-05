@@ -1,8 +1,8 @@
 """One generated agent tool per declared job — the four bespoke adapters, written once.
 
 `agents/qm_tools.py::submit_qm_job` and the three launchers in `agent/durable_tools.py` were the
-same handful of lines four times: authorize the trigger, refuse under dry-run, demand an actor,
-derive a deterministic workflow id, start the workflow, announce the launch, return the id. Only
+same handful of lines four times: authorize the trigger, demand an actor, derive a deterministic
+workflow id, start the workflow, announce the launch, return the id. Only
 the workflow class and the id derivation differed — and both are now manifest data
 (`JobSpec.workflow`, plus the job name and the arguments the id hashes). So the adapter becomes
 a factory: one function built per declared job, with the shared body written in exactly one
@@ -67,12 +67,6 @@ _PARAM_ANNOTATIONS: dict[JobParamType, Any] = {
     "number[]": list[float],
     "object": dict[str, Any],
 }
-
-
-# How much of a job's arguments a dry-run notice shows — the same budget as the audit trail's
-# and the turn event's tool-argument preview, so one convention covers every "show what was
-# called".
-_DETAIL_MAX_CHARS = 200
 
 
 class ConnectorJobError(ChemclawError):
@@ -399,6 +393,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 existing = await _await_briefly(
                     client.get_workflow_handle(workflow_id, result_type=ConnectorJobResult),
                     job.inline_wait_seconds,
+                    job.name,
                 )
                 if existing is not None:
                     return existing
@@ -421,51 +416,30 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 f"Check `get_durable_job_status({workflow_id!r})` before relaunching, and if it "
                 "truly did not start, the same call will work once the fault clears."
             ) from exc
+        # Counted here rather than after the inline wait, and that placement is the 2026-08-05
+        # review's finding: `start_workflow` has returned, so a workflow *did* start, and the
+        # branch below returns without reaching any later statement whenever the job answers
+        # inside the turn. Five of the seven declared jobs carry `inline_wait_seconds` (every
+        # `calc` job), so counting after the wait meant the common case was never counted at all
+        # while `chemclaw_job_runtime_seconds_total` — booked from the job record, which is
+        # written either way — kept counting its runtime. Starts and runtime were being read off
+        # the same dashboard and only one of them was true. The re-joined path above still counts
+        # nothing, correctly: it returns an existing id without starting anything.
+        record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
         if job.inline_wait_seconds is not None:
-            try:
-                finished = await _await_briefly(handle, job.inline_wait_seconds)
-            except WorkflowFailureError as exc:
-                # A job that fails *inside* the turn must say why, in words the model can relay.
-                # `_await_briefly` deliberately lets a genuine failure raise rather than degrading
-                # to a job id — correct, and until 2026-08-04 incomplete: `WorkflowFailureError` is
-                # neither a `ChemclawError` nor a `SubsystemUnavailableError`, so
-                # `agent.tool_authz.surface_domain_errors` passed it through untouched and MAF
-                # rendered it as "Error: Function failed."
-                #
-                # That is the third appearance of one defect. The first made a model fabricate a
-                # whole development report when the broker was unreachable; the second was the
-                # launch that could not be confirmed, framed a few lines above. The pattern is
-                # always the same — a failure that reaches the model wordless is not read as "this
-                # failed", it is read as "proceed" — so a real failure gets a real sentence, and
-                # `failure_reason` gives it the same one the session push-back carries.
-                #
-                # `exc.__cause__` and not `exc`: the client wraps every workflow failure in
-                # `WorkflowFailureError("Workflow execution failed")`, and `failure_reason` only
-                # skips the two workflow-side frames (see its docstring — the client type is
-                # deliberately not named inside the workflow sandbox). Measured chain for the live
-                # failure: WorkflowFailureError → ChildWorkflowError → ActivityError → "unknown
-                # ALPB solvent '2-methyltetrahydrofuran'; common valid names are …" → the tblite
-                # internals. Passing `exc` straight in stops at the first frame and reports
-                # "Workflow execution failed", which is the generic sentence this exists to replace.
-                raise ConnectorJobError(
-                    f"the {job.name!r} job ran and failed: {failure_reason(exc.__cause__ or exc)}"
-                ) from exc
+            finished = await _await_briefly(handle, job.inline_wait_seconds, job.name)
             if finished is not None:
                 # It answered inside the turn, so there is no background work to announce and
                 # nothing for the chemist to poll — the result *is* the tool's return value.
                 return finished
-        # Two announcements, both only on a *genuine* start. The turn's event stream shows the
-        # launch while the turn is still streaming (D-042); the harness's todo list records that
-        # the plan is blocked on this id, so `todos_remaining` sees "waiting" rather than
-        # re-invoking the model with nothing new (D-040). A re-joined run is deliberately silent:
-        # it may already be finished, and neither surface would ever get the matching
+        # Two announcements, both only on a *genuine* start that is still running. The turn's event
+        # stream shows the launch while the turn is still streaming (D-042); the harness's todo list
+        # records that the plan is blocked on this id, so `todos_remaining` sees "waiting" rather
+        # than re-invoking the model with nothing new (D-040). A re-joined run is deliberately
+        # silent: it may already be finished, and neither surface would ever get the matching
         # `job_completed` event to clear the row it drew.
         await _mark_awaiting_if_harness(handle.id, job.name)
         record_job_started(handle.id, job.name)
-        # Counted here rather than at the tool boundary: this is the branch that actually
-        # started a workflow. The re-joined path above returns an existing id without
-        # starting anything, and counting it would report launches that never happened.
-        record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
         return handle.id
 
     launch.__name__ = job.name
@@ -494,12 +468,21 @@ async def _mark_awaiting_if_harness(job_id: str, job_name: str) -> None:
     await mark_awaiting_job(session, job_id, title=f"Await the {job_name} job {job_id}")
 
 
-async def _await_briefly(handle: Any, budget: float) -> ConnectorJobResult | None:
+async def _await_briefly(handle: Any, budget: float, job_name: str) -> ConnectorJobResult | None:
     """Wait up to `budget` seconds for a started job, or `None` if it is still running.
 
-    `None` means "not finished yet", never "failed": a genuine workflow failure raises, so the
-    tool reports the error rather than silently degrading to a job id the chemist would poll
-    forever waiting for a run that is already dead.
+    `None` means "not finished yet", never "failed": a genuine workflow failure is framed here as a
+    `ConnectorJobError` carrying the run's own reason, so the tool reports the error rather than
+    silently degrading to a job id the chemist would poll forever waiting for a run already dead.
+
+    **The framing lives here rather than at the call site, and that placement is the 2026-08-05
+    review's finding.** It was written at one of the two sites that await: the freshly-started
+    branch had it, the *re-joined* branch — a job already running when a second chemist asks for it
+    — did not, so a rejoined run that failed handed MAF a raw `WorkflowFailureError`, which is
+    neither a `ChemclawError` nor a `SubsystemUnavailableError` and so reaches the model as
+    "Error: Function failed.". That is the fourth appearance of one defect, and copying the guard to
+    a second call site would only have set up the fifth. A guard on the *only* function that awaits
+    cannot be forgotten by a third caller.
 
     The wait is cancel-safe by construction — `asyncio.wait_for` cancels only the *waiter*, and
     the workflow it is waiting on keeps running on its worker. So a turn that times out or is
@@ -515,20 +498,20 @@ async def _await_briefly(handle: Any, budget: float) -> ConnectorJobResult | Non
         finished = await asyncio.wait_for(handle.result(), budget)
     except TimeoutError:
         return None
+    except WorkflowFailureError as exc:
+        # A job that fails *inside* the turn must say why, in words the model can relay. The
+        # pattern is always the same — a failure that reaches the model wordless is not read as
+        # "this failed", it is read as "proceed" — so a real failure gets a real sentence, and
+        # `failure_reason` gives it the same one the session push-back carries.
+        #
+        # `exc.__cause__` and not `exc`: the client wraps every workflow failure in
+        # `WorkflowFailureError("Workflow execution failed")`, and `failure_reason` only skips the
+        # two workflow-side frames (see its docstring — the client type is deliberately not named
+        # inside the workflow sandbox). Measured chain for the live failure: WorkflowFailureError →
+        # ChildWorkflowError → ActivityError → "unknown ALPB solvent '2-methyltetrahydrofuran';
+        # common valid names are …" → the tblite internals. Passing `exc` straight in stops at the
+        # first frame and reports "Workflow execution failed", the generic sentence this replaces.
+        raise ConnectorJobError(
+            f"the {job_name!r} job ran and failed: {failure_reason(exc.__cause__ or exc)}"
+        ) from exc
     return ConnectorJobResult.model_validate(finished)
-
-
-def _detail(connector: str, payload: dict[str, Any]) -> str:
-    """The argument summary a dry-run notice reports (sorted for stability, bounded in length).
-
-    Bounded because a structured job's payload can be a whole optimization problem, and a
-    dry-run notice is a sentence a chemist reads — not a dump. The same reasoning (and the same
-    200-char budget) as the tool-argument preview in the audit trail and the turn's
-    `ToolCallEvent`.
-    """
-    if not payload:
-        return f"connector {connector}"
-    rendered = ", ".join(f"{key}={value!r}" for key, value in sorted(payload.items()))
-    if len(rendered) > _DETAIL_MAX_CHARS:
-        rendered = rendered[:_DETAIL_MAX_CHARS] + "…"
-    return f"connector {connector} with {rendered}"

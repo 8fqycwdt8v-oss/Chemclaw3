@@ -116,6 +116,14 @@ run() {
         >"$LIVE_DIR/soak-round.log" 2>&1
     local rc=$?
     local checks; checks="$(grep -oE '[0-9]+/[0-9]+ checks passed' "$storm_out" 2>/dev/null | head -1)"
+    # A failing round's report is the only place its *reason* exists, and the next round overwrites
+    # it. Rounds 16 and 28 of the first real run each lost a check and neither could be diagnosed
+    # afterwards, which is the same defect the record itself had: evidence that does not outlive
+    # the thing it describes.
+    if [ "$rc" -ne 0 ]; then
+      cp "$storm_out" "$LIVE_DIR/soak-round-$round.md" 2>/dev/null || true
+      cp "$LIVE_DIR/soak-round.log" "$LIVE_DIR/soak-round-$round.log" 2>/dev/null || true
+    fi
 
     SOAK_ROUND="$round" \
     SOAK_SECS="$(( $(date +%s) - start ))" \
@@ -150,16 +158,23 @@ def blob(name):
         return None
 
 
-# The pool gauges come out of the Prometheus text the front door already serves, so the soak reads
-# the same numbers an operator would rather than a second, private accounting of them.
+# Every unlabelled `chemclaw_*` sample the front door serves, so the soak reads the same numbers an
+# operator would rather than a second, private accounting of them. Widened from the pool gauges
+# alone after round 30 of the first run: RSS was climbing and the question "is the session LRU still
+# filling, or is it full and RSS growing anyway" could not be answered from the record — it needed a
+# live scrape, which by definition the record had not kept. The distinction is the whole diagnosis.
+gauges = {}
 pool = {}
 for line in os.environ.get("SOAK_METRICS", "").splitlines():
-    if line.startswith("chemclaw_pg_pool_"):
-        name, _, value = line.partition(" ")
-        try:
-            pool[name[len("chemclaw_pg_pool_") :]] = float(value)
-        except ValueError:
-            pass
+    if not line.startswith("chemclaw_") or "{" in line:
+        continue
+    name, _, value = line.partition(" ")
+    try:
+        gauges[name] = float(value)
+    except ValueError:
+        continue
+    if name.startswith("chemclaw_pg_pool_"):
+        pool[name[len("chemclaw_pg_pool_") :]] = gauges[name]
 
 print(
     json.dumps(
@@ -170,6 +185,7 @@ print(
             "checks": os.environ.get("SOAK_CHECKS") or None,
             "api_rss_kb": number("SOAK_RSS_KB"),
             "pool": pool or None,
+            "gauges": gauges or None,
             "rows": blob("SOAK_ROWS"),
             "disk_gb": number("SOAK_DISK_GB"),
             "mock": blob("SOAK_MOCK"),

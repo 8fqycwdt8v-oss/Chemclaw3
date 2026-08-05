@@ -242,3 +242,73 @@ Left open in `docs/planning/BACKLOG.md`: the `method` note type, which is what a
 development is actually waiting on and is a schema row rather than a BO one. `DEFERRED.md` carries
 nonlinear and `NChooseK` constraints, interpoint/blocking, model-based optimal design (cyipopt +
 SCIP), and feature importance, each with the trigger that would reopen it.
+
+---
+
+# Task: the CHECKMATE deep review of the live/durable spine (2026-08-05)
+
+Branch `claude/temporal-workflows-llm-testing-5nziyp`, after #121 merged. Record:
+`docs/archive/review-2026-08-05.md`. Decision:
+`docs/decisions/D-2026-08-05-a-trend-needs-a-tail.md`.
+
+- [x] **1. Land #121.** `main` had moved (the BO waves); one conflict, in this file, both records
+      kept in their own order. Merged, and the branch restarted from the new `main`.
+- [x] **2. A soak that survives the container.** `infra/live/soak.sh` + `make live-soak` +
+      `chemclaw.cli.soak_report`. Checkpointed per round, resumes from the record — proven by
+      killing it twice mid-run (resumed at rounds 31 and 45).
+- [x] **3. The CHECKMATE G1–G7 pass** over `durable/connector_job.py`, `connectors/jobs.py`,
+      `api/runner*.py`, `api/routes/*`, `agent/session_store.py`, `kg/pr_gate.py`,
+      `kg/git_submitter.py` — 4,286 lines, never reviewed whole before.
+- [x] **4. The `make ci` question, answered with the number** rather than argued: no.
+
+---
+
+## Review — what was actually measured
+
+**Nine findings, and the method that found most of them was mutation** — delete the guard, run the
+tests it is named after, see whether anything notices. **Eight guards over this spine could be
+deleted with the suite green.**
+
+The three that are defects rather than test gaps: the mid-turn resume drove a second `agent.run`
+whose tokens **never reached the budget guard** (1,000 booked on a turn that spent 6,000 — 83 %
+unmetered, on the one feature that adds an unbounded second model call); a **re-joined** job that
+fails handed MAF a raw `WorkflowFailureError`, the fourth appearance of "a failure that says nothing
+is read as proceed", because the framing had been written at one of the two call sites that await;
+and `chemclaw_jobs_started_total` was booked *after* the inline wait, which every `calc` job skips —
+five of the seven declared jobs — while their runtime kept being counted, so two numbers on one
+dashboard disagreed and only one was true.
+
+**The fix for the second is the one worth keeping.** Copying the guard to the second call site would
+have been correct and would have set up the fifth appearance. It moved into `_await_briefly` — the
+only function that awaits — and a test now asks the module's AST whether anything awaits a result
+outside it.
+
+**Six false prose claims**, four corrected in the same commit as the code. The pattern is always the
+same: a sentence that was true when written and that a later commit falsified silently — a task
+queue that stopped coming from the manifest (D-150), a dry-run check that moved to the tool boundary,
+a literal that stopped mirroring the setting it claimed to mirror.
+
+**One of the nine was mine, from last week.** `test_readers_are_not_synchronised_with_the_submitter`
+asserted `count >= 1` and `graph_cache_ttl_seconds >= 0` — both true under every implementation
+including the fixed one — in a file written to stop exactly that. It now takes a read *while* the
+submitter's checkout lock is held, which is the assertion that inverts when the fix lands.
+
+**The soak found no leak, and the way it did not is the finding.** At 29 rounds the fit said
+`+4,690 KB/round (± 764), still +6,896 over the tail` — resolved, accelerating, one step from a filed
+memory leak. At 43 rounds the same series, same process, nothing changed, said `rises then settles,
+flat within its noise over the last 22 rounds`; round 40 had *returned* 134 MB, which is what
+allocator arenas do and what a leak never does. `chemclaw_live_sessions` sat pinned at its bound of
+1000 throughout, so it was never the LRU filling. The ADR that came out of it: a trend claim needs
+two fits, and "the tail is flat" must never be reported in the same words as "we did not look at the
+tail".
+
+**And one mistake was mine and cost a commit.** Three review subagents were mutating the tree by
+design; one did not restore what it deleted, and my `git add -A` committed the removal of two lines
+of `run_turn`. Four tests fail on that version, so CI would have caught it — which is why it was
+cheap, not why it was acceptable. `tasks/lessons.md` R5.6.
+
+**Left open deliberately**, each in `docs/planning/BACKLOG.md` with its measurement: a crash
+mid-submission leaving the shared checkout on the note branch (same `git worktree` fix as the read
+window, so it should be taken once as a GxP decision), a multi-file `FAILED` proposal that cannot be
+replayed, `_REASON_CHARS` truncating where it should redact, `refresh` discarding its `rowcount`, the
+duplicated plan-emission predicate, the webhook contract, and the layering policy's granularity.

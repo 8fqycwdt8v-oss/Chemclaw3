@@ -151,12 +151,12 @@ def report(rounds: Sequence[dict[str, Any]]) -> str:
         "| --- | ---: | ---: | --- |",
     ]
     tables = sorted({key for row in rounds for key in row.get("rows", {})})
+    gauges = sorted({key for row in rounds for key in (row.get("gauges") or {})})
     watched: list[tuple[str, tuple[str, ...], str]] = [
         ("api RSS", ("api_rss_kb",), "KB"),
         ("round seconds", ("secs",), "s"),
-        ("pool size", ("pool", "size"), "conns"),
-        ("pool waiting", ("pool", "requests_waiting"), "waiters"),
         ("disk free", ("disk_gb",), "GB"),
+        *[(name, ("gauges", name), "") for name in gauges],
         *[(f"rows {name}", ("rows", name), "rows") for name in tables],
     ]
     for label, path, unit in watched:

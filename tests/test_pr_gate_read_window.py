@@ -36,13 +36,12 @@ targets and their assertions invert.
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from chemclaw.core.config import settings
+from chemclaw.kg.git_submitter import _checkout_lock
 from chemclaw.kg.graph import invalidate_cache, load_notes
 
 
@@ -180,18 +179,27 @@ def test_the_note_type_records_who_authored_it(knowledge_clone: Path) -> None:
     assert by_id["merged-note"].created_by == "human"
 
 
-def test_readers_are_not_synchronised_with_the_submitter(knowledge_clone: Path) -> None:
-    """`load_notes` takes no checkout lock — stated here so the exposure has a named cause.
+def test_a_reader_is_not_excluded_while_the_submitter_holds_the_checkout(
+    knowledge_clone: Path,
+) -> None:
+    """`load_notes` takes no lock, so the exposure above has a named cause rather than a mystery.
 
-    The submitter holds two locks (a process-wide `asyncio.Lock` and an OS `flock` on the
-    checkout). Neither is a *reader* lock, so nothing makes a reader wait for the tree to settle.
-    That asymmetry is the mechanism behind whatever the tests above measure.
+    The submitter holds two locks — a process-wide `asyncio.Lock` and an OS `flock` on the checkout
+    (`git_submitter._checkout_lock`). Neither is a *reader* lock, and that asymmetry is the whole
+    mechanism: nothing makes a reader wait for the tree to settle.
+
+    Written as "a read completes while the writer's lock is held", because that is the assertion
+    that inverts the day a reader lock is added. The version this replaces asserted
+    `count >= 1` and `graph_cache_ttl_seconds >= 0` — both true under every possible
+    implementation, including the fixed one, so it named a real mechanism and proved nothing about
+    it. Caught by the 2026-08-05 review, in a file written to stop exactly this.
     """
     notes_dir = knowledge_clone / "knowledge"
     invalidate_cache(notes_dir)
 
-    async def read_many() -> list[int]:
-        return [len(load_notes(notes_dir)) for _ in range(4)]
+    with _checkout_lock(str(knowledge_clone)):
+        # The submitter's exclusion is held for the whole of this block. A reader that were
+        # synchronised with it could not get an answer here at all.
+        during = load_notes(notes_dir)
 
-    assert all(count >= 1 for count in asyncio.run(read_many()))
-    assert settings.graph_cache_ttl_seconds >= 0
+    assert during, "a reader served notes while the submitter's checkout lock was held"
