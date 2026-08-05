@@ -373,7 +373,7 @@ async def run_turn(
                     # teardown landing inside it must roll the turn back after all.
                     run_complete = False
                     async for event in _resume(
-                        agent, session, results, turn_connectors, tool_trace
+                        agent, session, results, turn_connectors, tool_trace, turn_usage
                     ):
                         if isinstance(event, TokenEvent):
                             answer_parts.append(event.text)
@@ -714,6 +714,7 @@ async def _resume(
     results: dict[str, dict[str, Any]],
     connectors: Sequence[Any],
     tool_trace: ToolCallTrace,
+    turn_usage: TurnUsage,
 ) -> AsyncIterator[Event]:
     """Continue the turn with completed job results, streaming the continuation's events.
 
@@ -732,6 +733,13 @@ async def _resume(
     The turn's `tool_trace` is passed through for the same reason and one more: a tool the resume
     calls is part of this turn's evidence, so its result has to reach the answer verifier along
     with the rest. A trace of its own would have collected them into an object nobody reads.
+
+    `turn_usage` is passed for the reason that matters most and was missed until the 2026-08-05
+    review: this is a *second* `agent.run`, so it spends real tokens, and until now not one of them
+    reached the budget guard, `chemclaw_tokens_total` or the `TurnCost` row. Measured on a turn
+    that spent 1,000 tokens before the wait and 5,000 after it, the ledger booked 1,000 — 83 % of
+    the turn unmetered. The one feature that adds an unbounded second model call was the one
+    feature the runaway-cost refusal (D-144) could not see.
     """
     summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
     message = (
@@ -739,6 +747,7 @@ async def _resume(
         "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
     )
     async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
+        turn_usage.add(usage_tokens(update))
         for signal in drain():
             yield _signal_event(signal)
         text = getattr(update, "text", "") or ""

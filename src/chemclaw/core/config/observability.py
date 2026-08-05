@@ -33,6 +33,14 @@ class ObservabilitySettings(BaseSettings):
     # characters so a large payload (a full optimization problem, an observation list) cannot
     # flood the log; raise it when a fuller argument record is needed for an audit.
     agent_audit_max_arg_chars: int = Field(default=200, ge=0)
+    # How many distinct numeric values one tool result may put on a `ToolResultEvent`. A ceiling
+    # rather than a budget: the largest real result measured holds 49 (a full electronic-properties
+    # calculation — every atom charge and bond order), so the default is an order of magnitude
+    # clear of normal traffic and exists only so a pathological result (a thousand-row table dump)
+    # cannot put megabytes on a browser's event stream. Here rather than a literal in
+    # `api/runner_trace.py` because it is a threshold on the wire, and an operator whose UI is
+    # choking on a chatty connector must be able to lower it without a release (2026-08-05 review).
+    stream_max_result_numbers: int = Field(default=512, ge=0)
     # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
     # Git SHA the running pod was built from, so a past agent result ties to the exact version that
     # produced it (GxP reproducibility). The image build sets it — `deploy/Containerfile` takes a

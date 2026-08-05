@@ -1,7 +1,10 @@
 """Reading a turn's streamed updates: tool-call reassembly and the approval prompt.
 
 Everything here is a pure function of the provider-shaped objects `chemclaw.api.runner` receives
-from `agent.run` — no ambient state, no session, no config. That is why it lives beside the runner
+from `agent.run` — no ambient state, no session, no contextvars. The two wire budgets it applies are
+read from `settings` rather than written as literals, which is the repo's rule for a threshold and
+does not make the functions impure: an ENV value is a constant of the process, not state a turn
+carries. That is why it lives beside the runner
 rather than inside it: the runner's own module is a lifecycle (contextvars, an `AsyncExitStack`, a
 rollback), and this is the one part of the per-turn path that can be exercised by handing it a
 content object and comparing the events that come back.
@@ -17,22 +20,18 @@ from collections.abc import Mapping
 from typing import Any
 
 from chemclaw.api.events import Event, ToolCallEvent, ToolResultEvent
+from chemclaw.core.config import settings
 from chemclaw.core.quantities import returned_values
 from chemclaw.kg.note import mentioned_ids
 
 logger = logging.getLogger(__name__)
 
 # How many characters of a tool call's arguments the trace event carries — enough to see *what*
-# was called without streaming a whole evidence payload to the UI (mirrors the audit trail
-# truncation).
-_ARG_PREVIEW_CHARS = 200
-
-# How many distinct numeric values one result may put on `ToolResultEvent.numbers`. A ceiling
-# rather than a budget: the largest real result measured holds 49 (a full electronic-properties
-# calculation, every atom charge and bond order), so this is an order of magnitude clear of normal
-# traffic and exists only so a pathological result — a thousand-row table dump — cannot put
-# megabytes on a browser's event stream.
-_MAX_RESULT_NUMBERS = 512
+# was called without streaming a whole evidence payload to the UI. This is the *same* budget the
+# audit trail applies (`agent/audit.py`), which is why it now reads the same setting rather than
+# repeating its default: the comment here used to say "mirrors the audit trail truncation" beside a
+# literal 200, so raising the audit budget for a fuller trail moved one of the two and the claim
+# quietly stopped being true (2026-08-05 review).
 
 
 class ToolCallTrace:
@@ -139,7 +138,7 @@ class ToolCallTrace:
                     results.append(
                         ToolResultEvent(
                             tool=tool,
-                            preview=text[:_ARG_PREVIEW_CHARS],
+                            preview=text[: settings.agent_audit_max_arg_chars],
                             note_ids=mentioned_ids(text),
                             numbers=_capped_numbers(tool, text),
                         )
@@ -167,11 +166,13 @@ class ToolCallTrace:
                 self._fragments[key] = [json.dumps(arguments)]
                 done.add(key)
             else:
+                # Only the streamed shape reaches here: the whole-object case returned above, so a
+                # non-empty `Mapping` is impossible in this branch. It used to be tested for again
+                # anyway, and the 2026-08-05 review enumerated the input space to show that no value
+                # takes it.
                 fragments = self._fragments.setdefault(key, [])
                 if isinstance(arguments, str) and arguments:
                     fragments.append(arguments)
-                elif isinstance(arguments, Mapping) and arguments:
-                    fragments[:] = [json.dumps(arguments)]
             growing.add(key)
             if _arguments_complete(self._fragments.get(key)):
                 # The provider has finished sending this call's arguments, so the tool is about
@@ -188,7 +189,7 @@ class ToolCallTrace:
     def _take(self, keys: set[str]) -> list[Event]:
         events: list[Event] = []
         for key in [k for k in self._fragments if k in keys]:
-            arguments = "".join(self._fragments.pop(key))[:_ARG_PREVIEW_CHARS]
+            arguments = "".join(self._fragments.pop(key))[: settings.agent_audit_max_arg_chars]
             name = self._names.pop(key, key)
             # Remembered rather than discarded: the result content carries no name, so this is
             # what lets `ToolResultEvent` report which tool answered.
@@ -200,22 +201,22 @@ class ToolCallTrace:
 def _capped_numbers(tool: str, text: str) -> list[float]:
     """The distinct values a result returned, bounded for the wire, saying so when it bounds them.
 
-    The cap is unreachable in normal traffic (see `_MAX_RESULT_NUMBERS`), which is exactly why the
-    log line matters: the one time it fires, a consumer told to trust this list would be trusting
-    an incomplete one, and nothing else in the event would say so. This repository's rule is that a
-    silent truncation reads as completeness — it is the whole reason the preview needed a companion
-    field in the first place.
+    The cap is unreachable in normal traffic (`stream_max_result_numbers`), which is exactly
+    why the log line matters: the one time it fires, a consumer told to trust this list would be
+    trusting an incomplete one, and nothing else in the event would say so. This repository's rule
+    is that a silent truncation reads as completeness — it is the whole reason the preview needed a
+    companion field in the first place.
     """
     values = returned_values(text)
-    if len(values) <= _MAX_RESULT_NUMBERS:
+    if len(values) <= settings.stream_max_result_numbers:
         return values
     logger.warning(
         "tool %s returned %d distinct numeric values; the trace event carries the first %d",
         tool,
         len(values),
-        _MAX_RESULT_NUMBERS,
+        settings.stream_max_result_numbers,
     )
-    return values[:_MAX_RESULT_NUMBERS]
+    return values[: settings.stream_max_result_numbers]
 
 
 def _arguments_complete(fragments: list[str] | None) -> bool:
@@ -248,7 +249,7 @@ def _result_text(content: Any, /) -> str | None:
     unreadable yields None rather than a value the trace does not have — the trace should not claim
     one, and the verifier must not treat "nothing came back" as evidence.
 
-    Untruncated on purpose. The caller truncates for the wire (`_ARG_PREVIEW_CHARS`, the UI's
+    Untruncated on purpose. The caller truncates for the wire (`agent_audit_max_arg_chars`, the UI's
     budget) and keeps the whole text for grounding, which are different jobs with different right
     answers; returning the preview here would silently make the second one impossible.
 

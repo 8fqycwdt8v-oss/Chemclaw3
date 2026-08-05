@@ -3,6 +3,84 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the CHECKMATE deep review of the live/durable spine (2026-08-05)
+
+Record with every number and its reproduction: `docs/archive/review-2026-08-05.md`. Nine findings
+were fixed in the same pass and are not listed here; these are the ones that need a *decision*
+rather than a diff.
+
+- [ ] **api RSS grows without bound under sustained load: 549 MB → 998 MB in ~2 h 15 m** — [H], the
+      highest-priority row this review produced, because on OpenShift it is a pod that OOMs on a
+      timer. Measured over 138 soak rounds (the storm's `BCDFGH` at 24 turns/round): **~3,200 KB per
+      round of ~82 turns ≈ 39 KB retained per turn**, first half `+3,166`, second half `+3,177`,
+      last quarter `+5,138` — no plateau at any window examined, and the most recent quarter steeper
+      than the run. `chemclaw_live_sessions` sat pinned at its `service_max_live_sessions` bound of
+      1000 throughout, so it is not the LRU filling; row counts grow exactly linearly, the pool never
+      waits, and round wall-clock is flat or falling. Reproduce: `make live-soak`, then
+      `make live-soak-report`. Finding *what* is retained needs an allocator-level look
+      (`tracemalloc`, `malloc_stats`) that a soak cannot give — but it is no longer a question of
+      whether there is something to find. **Note the history before quoting an early reading:** the
+      same series read *accelerating* at 29 rounds, *plateau* at 43 and *decelerating* at 104, every
+      fit resolved with a tight error bar, because the comparison was tail-versus-whole and the whole
+      contains the tail (`D-2026-08-05-a-trend-needs-a-tail`).
+
+- [ ] **A crash mid-submission leaves the shared checkout on `note/<id>`, with the unreviewed note
+      in the tree** — [M], and the same GxP decision as the read window directly below it. Measured
+      with a real git remote and a SIGKILLed child: `branch after SIGKILL: note/job-crash`, the
+      unreviewed note present, and `load_notes` returning it as knowledge. `_return_to_base` runs
+      from a `finally`, which process death does not; nothing else in the application resets the
+      tree — `grep -rn "reset.*--hard" src/` finds only `_submit_locked`/`_return_to_base`. Bounded
+      in the shipped topology only by the deployment sidecar's `rsync -a --delete`
+      (`deploy/knowledge-sync.sh`, 300 s default) and **unbounded** in the `infra/live/` one.
+      `git_submitter.py:212` says the checkout is returned to base "on every exit"; it enumerates
+      exceptions. **One fix closes this and the read window** — a `git worktree` for the submission,
+      so the shared tree is never switched — which is the reason to take it once and deliberately.
+
+- [ ] **A `FAILED` proposal for a multi-file submission cannot be replayed** — [M].
+      `kg/pr_gate.py:155` stores `content=files[0].content`, so a submission with dependencies keeps
+      only the subject note and the replayed note's `[[wikilink]]` would dangle — the exact failure
+      `NoteSubmission`'s multi-file design exists to prevent (STO-7/D-133). Measured on a two-file
+      submission through a failing submitter: stored row = 131 chars, dependency body absent. 4 of
+      the 9 `propose_note` call sites pass `dependencies=`. `kg/proposal.py:59` claims the row can
+      be replayed "because the bytes it would have written are still here"; `routes/proposals.py:92`
+      claims the reviewer sees "the note exactly as it would land in the tree". Both are false for a
+      multi-file unit. Either store every file or say the row is subject-only — silence is the bug.
+
+- [ ] **`pr_gate._REASON_CHARS = 300` does not do what its comment says** — [M], security-adjacent.
+      The bound is justified as keeping "a token-bearing remote URL" out of the compliance table; a
+      realistic credential-bearing git failure (`fatal: Authentication failed for
+      'https://svc-chemclaw:ghp_…@ghe.corp.example.com/kg/knowledge.git/'`) measures **235 chars**,
+      so `msg[:300]` stores it verbatim in `note_proposals.reason`, and the path never reaches the
+      `core/logging` redaction inventory. Truncation is not redaction; the fix is to route the reason
+      through the existing redactor, and the threshold belongs in config either way (G3).
+
+- [ ] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — [S]. A holder whose lease was taken
+      over cannot detect it: `session_store.py:504` returns `None`, and `api/state.py:220` reacts
+      only to *exceptions*, which a silent takeover does not raise — so its own warning ("another
+      worker may start a turn on this session") is unreachable in exactly the scenario it describes.
+      The no-op itself is pinned (`test_concurrency_claims.py:80`); the missing signal is not.
+
+- [ ] **Two `PlanEvent` emit sites with different predicates** — [S]. `runner.py:340` guards with
+      `if plan and plan != last_plan`; `runner.py:390` with `if current_plan is not None and …`, so
+      the post-resume site can emit the empty checklist that `_current_plan`'s docstring
+      (`runner.py:697`) says must never be produced. Measured: `plan events: [['step one'], []]`.
+
+- [ ] **The proposal webhook cannot be wired to any named git host without a translator** — [S],
+      documentation rather than code. `routes/proposals.py:38` claims `sha256=<hex>` "is the shape
+      GitHub, GitLab and Azure DevOps webhooks all produce, so an operator wires this without a
+      translation step"; the route reads `X-Chemclaw-Signature` (`:157`) and requires a
+      `{"note_ids": [...]}` body (`schemas.py:175`), while GitHub sends `X-Hub-Signature-256` with a
+      PR payload and GitLab sends `X-Gitlab-Token`, a raw secret rather than an HMAC.
+      `docs/guides/runbook.md:532` repeats the claim. Either ship the translator or say it is needed.
+
+- [ ] **`tests/test_layering.py`'s policy is package-granular, so `durable → connectors` is
+      blanket-allowed** — [S]. `connector_job.py:33`'s central claim — "this module imports nothing
+      from any connector" — is therefore machine-unguarded: importing a bundle's workflow class
+      straight into the wrapper would pass every test. It is true today (0 such imports; the edge
+      comes entirely from `durable/template_activities.py:25`), and the edge's declared reason names
+      the wrong module. A per-module exception list would express it; whether that granularity is
+      worth its maintenance is the decision.
+
 ## Open — Found by the deeper testing pass (2026-08-04)
 
 - [ ] **The PR-gate has a read window: an unreviewed note is readable as knowledge while the

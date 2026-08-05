@@ -104,9 +104,9 @@ class ApprovalStore(Protocol):
 class PlanApprovalStore:
     """Reads and writes the human decision on one session's plan."""
 
-    def __init__(self, *, dsn: str | None = None) -> None:
+    def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
-        self._dsn = _session_dsn(dsn)
+        self._dsn = _session_dsn()
 
     def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection on this store's database (see `chemclaw.agent.session_store`)."""

@@ -54,7 +54,16 @@ from chemclaw.cli.mock_llm import Behaviour, ToolCall
 # a question a chemist could ask, and the answer genuinely changes with it. Constant within the
 # process, so all twelve simultaneous launches still derive the identical id — which is the whole
 # point of the family.
-_COLLISION_TEMPERATURE_K = 298.15 + (int(time.time()) % 719) / 100.0
+#
+# **The period must outlast the longest run that will use it, and the first version's did not.**
+# `% 719` gives 719 distinct temperatures on a one-second grid, so a value recurs every ~12 minutes
+# — invisible in a single storm and unmissable in a soak: 6 of 81 rounds failed this family with
+# "0 job_records row(s) written", spaced 12 rounds apart at a ~58 s round. Nothing was broken. The
+# payload had been computed in an earlier round, `ALLOW_DUPLICATE_FAILED_ONLY` correctly rejoined
+# the completed run rather than recomputing it, and no new record was written — D-011 working, read
+# as a failure. 100,000 values on a millikelvin grid puts the period at 27 hours, past any soak
+# that fits in this container, and keeps every value a temperature a chemist could ask about.
+_COLLISION_TEMPERATURE_K = 298.15 + (int(time.time()) % 100_000) / 100_000.0
 _COLLISION_PAYLOAD: dict[str, object] = {
     "kind": "reaction",
     "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
