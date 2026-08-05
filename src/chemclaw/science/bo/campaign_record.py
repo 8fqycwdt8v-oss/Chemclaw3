@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from functools import cache
 from typing import Any, Protocol, runtime_checkable
 
+import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
@@ -191,12 +192,13 @@ class Suggestion(BaseModel):
 class CampaignStore(Protocol):
     """Reads and writes campaigns and their suggestions, whichever backend holds them."""
 
-    async def upsert_campaign(self, campaign: Campaign) -> None:
-        """Record the campaign, or touch `last_asked_at` when it is already known."""
-        ...
+    async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+        """Upsert the campaign and append its suggestion **atomically**; return the suggestion id.
 
-    async def add_suggestion(self, suggestion: Suggestion) -> int:
-        """Append one proposal; return its id."""
+        One method rather than two, because the two writes are not independent: the upsert replaces
+        the stored `problem`, so a failure between them joins the new decision space to the old
+        evidence.
+        """
         ...
 
     async def read_campaign(self, campaign_id: str) -> Campaign | None:
@@ -223,7 +225,16 @@ class InMemoryCampaignStore:
         self._suggestions: list[Suggestion] = []
         self._next_id = 1
 
-    async def upsert_campaign(self, campaign: Campaign) -> None:
+    async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+        """Both writes or neither, as the Postgres sibling does.
+
+        Atomic here for free — nothing between the two statements can fail — but written as one
+        method so the two backends cannot drift into different contracts.
+        """
+        await self._upsert_campaign(campaign)
+        return await self._add_suggestion(suggestion)
+
+    async def _upsert_campaign(self, campaign: Campaign) -> None:
         """Record the campaign, keeping the original opener and refreshing `last_asked_at`."""
         now = datetime.now(UTC)
         existing = self._campaigns.get(campaign.campaign_id)
@@ -238,7 +249,7 @@ class InMemoryCampaignStore:
             update={"problem": campaign.problem, "last_asked_at": now}
         )
 
-    async def add_suggestion(self, suggestion: Suggestion) -> int:
+    async def _add_suggestion(self, suggestion: Suggestion) -> int:
         """Append one proposal; return its id."""
         new_id = self._next_id
         self._next_id += 1
@@ -272,6 +283,11 @@ def campaign_store() -> CampaignStore:
     return InMemoryCampaignStore()
 
 
+# The failures that are the *database's*, not ours: a blip here must not fail a computed
+# suggestion. A programming error must, which is why this is a tuple and not `Exception`.
+_TRANSIENT_WRITE_FAILURES = (ConnectionError, OSError, TimeoutError, psycopg.Error)
+
+
 async def record_suggestion(
     problem: OptimizationProblem,
     candidates: list[Candidate],
@@ -281,8 +297,9 @@ async def record_suggestion(
 ) -> str:
     """Persist one suggestion against the campaign its problem defines; return the campaign id.
 
-    **Never raises.** The candidates are already computed and are what the chemist asked for, so a
-    database blip must not turn a successful suggestion into a failed tool call — the trade
+    **Never raises on a database failure**, and always raises on ours. The candidates are already
+    computed and are what the chemist asked for, so a blip must not turn a successful suggestion
+    into a failed tool call — the trade
     `chemclaw.agent.audit` and `chemclaw.kg.proposal` both make, for the same reason: the record is
     about the thing, and losing it must not cost the thing.
 
@@ -293,16 +310,14 @@ async def record_suggestion(
     campaign_id = campaign_id_for(problem)
     try:
         store = campaign_store()
-        await store.upsert_campaign(
+        await store.record(
             Campaign(
                 campaign_id=campaign_id,
                 objective=problem.objective.name,
                 direction=problem.objective.direction,
                 problem=problem.model_dump(mode="json"),
                 opened_by=actor,
-            )
-        )
-        await store.add_suggestion(
+            ),
             Suggestion(
                 campaign_id=campaign_id,
                 candidates=candidates,
@@ -311,9 +326,14 @@ async def record_suggestion(
                 actor=actor,
                 session_id=session_id,
                 correlation_id=correlation_id,
-            )
+            ),
         )
-    except Exception:
+    except _TRANSIENT_WRITE_FAILURES:
+        # Narrow, and at WARNING because the chemist still has their candidates: a database blip
+        # must not turn a computed suggestion into an error. Everything else — a `ValidationError`
+        # from the models above, a `TypeError`, a non-finite float refused by the store — is a
+        # defect in this code, and swallowing it made a deployment where 100% of BO writes fail
+        # indistinguishable from one where none do.
         logger.warning("could not record BO suggestion for %s", campaign_id, exc_info=True)
     return campaign_id
 

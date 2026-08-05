@@ -11,7 +11,9 @@ author. Suggestions are a plain insert — the sequence is the campaign's histor
 would destroy the record of what was proposed before the latest data arrived.
 """
 
+import json
 from contextlib import AbstractAsyncContextManager
+from functools import partial
 from typing import Any
 
 import psycopg
@@ -52,6 +54,11 @@ _SELECT_SUGGESTIONS = """
 """
 
 
+# Non-finite floats are not JSON and `jsonb` rejects them; `partial` rather than a lambda so
+# psycopg's dumper cache keys on a stable object.
+_STRICT_JSON = partial(json.dumps, allow_nan=False)
+
+
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
     """The configured connection, with the shared statement timeout (one place, DRY)."""
     return db.connection(
@@ -60,16 +67,40 @@ def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]
 
 
 def _json(value: Any) -> Jsonb:
-    """Wrap a value for a `jsonb` column (psycopg needs the explicit adapter)."""
-    return Jsonb(value)
+    """Wrap a value for a `jsonb` column, refusing non-finite floats here rather than at the wall.
+
+    `json.dumps` emits bare `NaN`/`Infinity` by default. Those are not JSON, and Postgres `jsonb`
+    rejects them — but only after the statement reaches the server, as an
+    `InvalidTextRepresentation` that `record_suggestion` used to swallow at WARNING. A campaign
+    would then read back with no observations at all, which is a silent data loss from a degenerate
+    GP posterior nobody saw.
+
+    `allow_nan=False` turns that into a `ValueError` raised at the column that holds the value, in
+    this process, with a stack that names the caller. This is the store owning its own boundary: the
+    models are permissive by necessity (tightening a persisted field would strand an in-flight
+    campaign at replay — see `require_names_do_not_clash`), so the check belongs where the bytes
+    are written.
+    """
+    return Jsonb(value, dumps=_STRICT_JSON)
 
 
 class PostgresCampaignStore:
     """The durable `CampaignStore`: one short-lived connection per call (the house choice)."""
 
-    async def upsert_campaign(self, campaign: Campaign) -> None:
-        """Record the campaign, refreshing its problem and `last_asked_at` but never its opener."""
-        async with _connect() as conn:
+    async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+        """Upsert the campaign and append its suggestion **atomically**; return the suggestion id.
+
+        One method, one connection, one transaction — because the two writes were never
+        independent. The upsert sets `problem = EXCLUDED.problem`, so a failure between them left
+        the campaign row holding the **new** decision space while the surviving suggestions held
+        the **old** space's observations, and `read_campaign_thread` would hand a later session
+        that mismatched pair. That is exactly the "seeded with observations from a different
+        campaign" failure its own docstring says the design prevents.
+
+        This is atomicity, not an abstraction, so the Rule of Three does not gate it: two
+        statements that must both land or neither belong in one transaction.
+        """
+        async with _connect() as conn, conn.transaction():
             await conn.execute(
                 _UPSERT_CAMPAIGN,
                 (
@@ -80,11 +111,6 @@ class PostgresCampaignStore:
                     campaign.opened_by,
                 ),
             )
-            await conn.commit()
-
-    async def add_suggestion(self, suggestion: Suggestion) -> int:
-        """Append one proposal; return its id."""
-        async with _connect() as conn:
             cursor = await conn.execute(
                 _INSERT_SUGGESTION,
                 (
@@ -104,9 +130,10 @@ class PostgresCampaignStore:
                     suggestion.correlation_id,
                 ),
             )
-            row = await cursor.fetchone()
-            await conn.commit()
-        return int(row[0]) if row is not None else 0
+            # `BIGSERIAL` + `RETURNING id` cannot yield no row on a successful insert, so an
+            # `if row is None` fallback could only mask an anomaly behind a valid-looking id 0.
+            (suggestion_id,) = await cursor.fetchone()  # type: ignore[misc]
+        return int(suggestion_id)
 
     async def read_campaign(self, campaign_id: str) -> Campaign | None:
         """One campaign, or None when it has never been asked about."""

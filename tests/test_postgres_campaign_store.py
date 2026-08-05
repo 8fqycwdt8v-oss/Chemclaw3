@@ -53,7 +53,7 @@ def test_upsert_then_read_round_trips_every_field() -> None:
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-roundtrip-1"
-        await store.upsert_campaign(_campaign(campaign_id))
+        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
 
         got = await store.read_campaign(campaign_id)
         assert got is not None
@@ -75,10 +75,14 @@ def test_a_second_upsert_keeps_the_original_opener() -> None:
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-opener-1"
-        await store.upsert_campaign(_campaign(campaign_id, opened_by="chemist-a"))
+        await store.record(
+            _campaign(campaign_id, opened_by="chemist-a"), Suggestion(campaign_id=campaign_id)
+        )
         first = await store.read_campaign(campaign_id)
 
-        await store.upsert_campaign(_campaign(campaign_id, opened_by="chemist-b"))
+        await store.record(
+            _campaign(campaign_id, opened_by="chemist-b"), Suggestion(campaign_id=campaign_id)
+        )
         second = await store.read_campaign(campaign_id)
 
         assert first is not None and second is not None
@@ -90,16 +94,16 @@ def test_a_second_upsert_keeps_the_original_opener() -> None:
     asyncio.run(_run())
 
 
-def test_add_suggestion_is_append_only_and_returns_increasing_ids() -> None:
+def test_record_is_append_only_and_returns_increasing_ids() -> None:
     """A second suggestion is a new row, never an edit of the first (031's design)."""
 
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-append-1"
-        await store.upsert_campaign(_campaign(campaign_id))
+        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
 
-        first_id = await store.add_suggestion(Suggestion(campaign_id=campaign_id))
-        second_id = await store.add_suggestion(Suggestion(campaign_id=campaign_id))
+        first_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
+        second_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
 
         assert first_id != second_id
         assert len(await store.suggestions_for(campaign_id, 10)) == 2
@@ -113,9 +117,10 @@ def test_a_suggestion_round_trips_its_candidates_observations_and_provenance() -
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-fields-1"
-        await store.upsert_campaign(_campaign(campaign_id))
+        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
 
-        await store.add_suggestion(
+        await store.record(
+            _campaign(campaign_id),
             Suggestion(
                 campaign_id=campaign_id,
                 candidates=[Candidate(params={"temperature": 95.0, "ligand": "dppf"})],
@@ -126,7 +131,7 @@ def test_a_suggestion_round_trips_its_candidates_observations_and_provenance() -
                 actor="chemist-a",
                 session_id="session-7",
                 correlation_id="corr-9",
-            )
+            ),
         )
 
         [suggestion] = await store.suggestions_for(campaign_id, 10)
@@ -149,16 +154,17 @@ def test_suggestions_for_orders_newest_first_and_honours_the_limit() -> None:
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-order-1"
-        await store.upsert_campaign(_campaign(campaign_id))
+        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
 
         for round_index in range(5):
-            await store.add_suggestion(
+            await store.record(
+                _campaign(campaign_id),
                 Suggestion(
                     campaign_id=campaign_id,
                     observations=[
                         Observation(params={"temperature": float(round_index)}, value=1.0)
                     ],
-                )
+                ),
             )
 
         newest_two = await store.suggestions_for(campaign_id, 2)
@@ -182,12 +188,10 @@ def test_distinct_campaigns_keep_independent_suggestion_histories() -> None:
     async def _run() -> None:
         store = await _store_or_skip()
         a, b = "pgcamp-distinct-a", "pgcamp-distinct-b"
-        await store.upsert_campaign(_campaign(a))
-        await store.upsert_campaign(_campaign(b))
 
-        await store.add_suggestion(Suggestion(campaign_id=a, calc_refs=["from-a"]))
-        await store.add_suggestion(Suggestion(campaign_id=b, calc_refs=["from-b"]))
-        await store.add_suggestion(Suggestion(campaign_id=b, calc_refs=["from-b-again"]))
+        await store.record(_campaign(a), Suggestion(campaign_id=a, calc_refs=["from-a"]))
+        await store.record(_campaign(b), Suggestion(campaign_id=b, calc_refs=["from-b"]))
+        await store.record(_campaign(b), Suggestion(campaign_id=b, calc_refs=["from-b-again"]))
 
         [only_a] = await store.suggestions_for(a, 10)
         both_b = await store.suggestions_for(b, 10)

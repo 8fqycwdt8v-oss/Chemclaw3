@@ -172,9 +172,10 @@ def test_a_later_asker_does_not_become_the_campaign_s_author(
 ) -> None:
     """Whoever framed the campaign framed it; `last_asked_at` is what tracks activity."""
     problem = _problem()
-    _run(store.upsert_campaign(_campaign(problem, "chemist-a")))
+    blank = Suggestion(campaign_id=campaign_id_for(problem), candidates=[], observations=[])
+    _run(store.record(_campaign(problem, "chemist-a"), blank))
     first = _run(store.read_campaign(campaign_id_for(problem)))
-    _run(store.upsert_campaign(_campaign(problem, "chemist-b")))
+    _run(store.record(_campaign(problem, "chemist-b"), blank))
     second = _run(store.read_campaign(campaign_id_for(problem)))
 
     assert first is not None and second is not None
@@ -192,7 +193,7 @@ def test_recording_never_costs_the_suggestion(monkeypatch: pytest.MonkeyPatch) -
     """
 
     class BrokenStore(InMemoryCampaignStore):
-        async def upsert_campaign(self, campaign: Campaign) -> None:
+        async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
             raise ConnectionError("database down")
 
     monkeypatch.setattr("chemclaw.science.bo.campaign_record.campaign_store", BrokenStore)
@@ -227,11 +228,10 @@ def test_suggestions_are_append_only(store: InMemoryCampaignStore) -> None:
     arrived, which is exactly the comparison a campaign's history is for.
     """
     problem = _problem()
-    _run(store.upsert_campaign(_campaign(problem, "chemist-a")))
     identical = Suggestion(campaign_id=campaign_id_for(problem), candidates=[], observations=[])
 
-    first = _run(store.add_suggestion(identical))
-    second = _run(store.add_suggestion(identical))
+    first = _run(store.record(_campaign(problem, "chemist-a"), identical))
+    second = _run(store.record(_campaign(problem, "chemist-a"), identical))
 
     assert first != second
     assert len(_run(store.suggestions_for(campaign_id_for(problem), 10))) == 2
@@ -575,3 +575,33 @@ def test_the_identity_allowlist_still_covers_every_parameter_field() -> None:
     """
     declared = set(ContinuousParameter.model_fields) | set(CategoricalParameter.model_fields)
     assert declared == _SPACE_FIELDS | _IDENTIFYING_EXCLUSIONS
+
+
+def test_a_programming_error_in_the_write_is_not_swallowed_as_a_database_blip() -> None:
+    """`except Exception` made a deployment where every write fails look like one where none do.
+
+    The models are constructed inside the same `try`, so a `ValidationError`, a `TypeError` or a
+    non-finite float refused by the store all produced the one WARNING line a dropped connection
+    produces — and the tool still answered successfully. Only the database's own failures are the
+    database's fault; ours must surface.
+    """
+
+    class BrokenStore(InMemoryCampaignStore):
+        async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+            raise TypeError("a defect in this code, not a blip")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("chemclaw.science.bo.campaign_record.campaign_store", BrokenStore)
+    try:
+        with pytest.raises(TypeError, match="a defect in this code"):
+            _run(
+                record_suggestion(
+                    problem=_problem(),
+                    candidates=[],
+                    observations=[],
+                    calc_refs=[],
+                    provenance=("a", "s", "c"),
+                )
+            )
+    finally:
+        monkeypatch.undo()
