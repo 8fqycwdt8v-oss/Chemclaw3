@@ -465,3 +465,27 @@ def test_every_tool_that_spends_is_declared_state_changing() -> None:
     assert should_be_gated <= declared, (
         f"{sorted(should_be_gated - declared)} spend or write but are not declared state_changing"
     )
+
+
+def test_a_cold_multi_objective_start_does_not_announce_an_empty_front() -> None:
+    """With nothing measured, "front holds the 0 runs that nothing else beats" is a contradiction.
+
+    The trade-off sentence told the model to quote a front, and named its length as zero, about a
+    campaign that supplied no runs at all — leaving the model to reconcile "quote the trade-off"
+    with "there is no trade-off". A model asked to resolve a contradiction resolves it by inventing.
+    Now the cold case says what an empty front means: nothing measured, not nothing survived.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+            CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
+        ],
+        objectives=[
+            Objective(name="yield", direction="maximize"),
+            Objective(name="impurity", direction="minimize"),
+        ],
+    )
+    summary = asyncio.run(suggest_next_experiment(problem, None, count=2)).summary
+    assert "no runs were supplied" in summary
+    assert "nothing has been measured, not because nothing survived" in summary
+    assert "quote those as the trade-off" not in summary

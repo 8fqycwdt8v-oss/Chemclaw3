@@ -100,8 +100,8 @@ def test_record_is_append_only_and_returns_increasing_ids() -> None:
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-append-1"
-        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
-
+        # No separate campaign-creation call: `record` upserts the campaign as part of the same
+        # transaction, so a setup line here would be a third suggestion row, not a fixture.
         first_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
         second_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
 
@@ -117,8 +117,6 @@ def test_a_suggestion_round_trips_its_candidates_observations_and_provenance() -
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-fields-1"
-        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
-
         await store.record(
             _campaign(campaign_id),
             Suggestion(
@@ -154,8 +152,6 @@ def test_suggestions_for_orders_newest_first_and_honours_the_limit() -> None:
     async def _run() -> None:
         store = await _store_or_skip()
         campaign_id = "pgcamp-order-1"
-        await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
-
         for round_index in range(5):
             await store.record(
                 _campaign(campaign_id),

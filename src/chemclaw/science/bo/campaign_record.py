@@ -156,6 +156,11 @@ class Campaign(BaseModel):
 
     campaign_id: str = Field(min_length=1)
     objective: str = Field(min_length=1)
+    # `str`, not `Objective`'s `Literal["minimize", "maximize"]`, and deliberately so: this model is
+    # built from a `bo_campaigns` row on every `resume_campaign`, so a narrower type would make a
+    # row carrying an unexpected value permanently unreadable rather than odd — the same hazard
+    # that keeps `require_names_do_not_clash` out of `OptimizationProblem`'s validators. What is
+    # *written* is always one of the two, because it comes from `problem.objective.direction`.
     direction: str = Field(min_length=1)
     problem: dict[str, Any] = Field(default_factory=dict)
     opened_by: str = ""

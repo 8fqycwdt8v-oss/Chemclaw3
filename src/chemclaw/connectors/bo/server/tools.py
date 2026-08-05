@@ -167,12 +167,24 @@ class ExperimentSuggestion(BaseModel):
                 else f"Runs differing by {self.front_tolerance:.3g} or less were treated as "
                 "indistinguishable, so neither knocked the other off."
             )
-            readings.append(
-                f"This is a trade-off over {len(self.scales)} objectives ({named}), so there is no "
-                f"single best point. `front` holds the {len(self.front)} run(s) of those supplied "
-                "that nothing else beats on every objective at once — quote those as the "
-                f"trade-off, and read the sd below against the lead objective only. {drawn}"
-            )
+            if not self.scales[0].n:
+                # Cold start. The trade-off sentence below would announce an empty `front` and tell
+                # the model to quote it, about a campaign with nothing supplied to draw one from —
+                # a contradiction the model has to resolve, and it resolves it by inventing.
+                readings.append(
+                    f"This is a trade-off over {len(self.scales)} objectives ({named}), and no "
+                    "runs were supplied, so there is no front yet: `front` is empty because "
+                    "nothing has been measured, not because nothing survived. The points below are "
+                    "space-filling seeds covering the space; measure every objective on each and "
+                    "pass them back to get the first trade-off."
+                )
+            else:
+                readings.append(
+                    f"This is a trade-off over {len(self.scales)} objectives ({named}), so there "
+                    f"is no single best point. `front` holds the {len(self.front)} run(s) of those "
+                    "supplied that nothing else beats on every objective at once — quote those as "
+                    f"the trade-off, and read the sd below against the lead objective only. {drawn}"
+                )
         for index, candidate in enumerate(self.candidates, start=1):
             if candidate.predicted_sd is None:
                 readings.append(

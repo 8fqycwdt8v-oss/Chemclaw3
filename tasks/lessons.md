@@ -1210,3 +1210,35 @@ reviewer would have to re-derive.
 `require_rounds_within_ceiling`'s docstring, *and* in a test's docstring — three copies of one
 wrong claim, all agreeing, none measured. Agreement across copies is not corroboration; they are
 one statement, written once and pasted.
+
+## R5.10 — "It skips here" is not a reason to migrate its call sites blind
+
+Changing `upsert_campaign` + `add_suggestion` into one atomic `record()` meant rewriting every call
+site in `tests/test_postgres_campaign_store.py` — a file whose every test **skips offline**, because
+the sandbox has no Postgres. I rewrote them mechanically, saw 3242 local tests pass, and pushed. CI
+failed three of them.
+
+The mechanical substitution was wrong in a way only running it shows: several tests opened with
+`await store.upsert_campaign(...)` as *setup* — create the campaign row, no suggestion. Replacing
+that with `record(campaign, Suggestion(...))` inserted an extra suggestion row each time, so a test
+asserting two suggestions found three, and a test unpacking `[suggestion] = suggestions_for(...)`
+got two and raised `too many values to unpack`. The old API had two verbs because the two writes
+were separable; collapsing them collapsed a distinction the tests were using.
+
+**What I should have done, and did second:** get the dependency running. `postgresql-16` was already
+installed in this sandbox — `initdb` + `pg_ctl` as the `postgres` user, `apt-get install
+postgresql-16-pgvector`, and a real database existed in about two minutes. The full migration still
+would not apply (pgvector 0.6.0 has no `bit_jaccard_ops`; 002/003 need >= 0.7), but
+`031_bo_campaigns.sql` depends on nothing else, so applying that one file alone and driving the
+store from a script measured all three failures — and two claims I had written but never run: that a
+non-finite float is refused, and that the rolled-back transaction leaves no campaign row.
+
+**Rule: before editing tests that skip in this environment, spend five minutes trying to unskip
+them.** A skipped test is not a passing test, and a green local suite that skipped the file you just
+rewrote is evidence about the other files. Where the dependency genuinely cannot run, say so in the
+PR *and* reproduce the changed test bodies in a script against whatever partial substrate does run —
+"CI will tell me" is a slower, more public version of running it.
+
+**The narrower trap:** when an API change merges two calls into one, the call sites that used only
+*half* of the old pair are the ones that break. Grep for the callers of each old name separately
+before replacing either.
