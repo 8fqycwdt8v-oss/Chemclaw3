@@ -22,20 +22,28 @@ endpoint:
     - generate_screening_design
     - campaign_progress
     - predict_outcome
-  # The two design tools propose experiments and return them; neither runs one. `resume_campaign`
-  # only reads the campaign record back — it is what makes the `campaign_id` that
-  # `suggest_next_experiment` hands out worth quoting, since without it a later session could
-  # recover an optimization's history only from the chat transcript. `campaign_progress` is pure
-  # arithmetic over the runs it is handed and asks no surrogate at all. `predict_outcome` fits a
-  # surrogate and queries it, and records nothing: the points are the caller's questions, not
-  # proposals, so no campaign row is written for them. The job below *does* persist state, and is
-  # gated by being a job.
-  read_only:
+  # `suggest_next_experiment` and `predict_outcome` both **featurize** a problem whose categoricals
+  # carry structures, and `featurize_problem` runs xTB per option and upserts the results into
+  # `calculation_results`. That is "spends resources or writes data" by this field's own definition,
+  # and by the precedent the gate was built on: `compute_xtb_energy` is a `calc` endpoint tool
+  # classified state_changing for spending exactly this, and `agent/authz.py` names it as the live
+  # repro a narrower set would have missed. `suggest_next_experiment` additionally writes
+  # `bo_campaigns` and `bo_suggestions` via `record_suggestion`.
+  #
+  # Both were listed read_only until a review traced the call chain. The comment here used to say
+  # `predict_outcome` "records nothing", which was true only of the campaign tables and false of
+  # the calculation cache — and the partition fails *open*, so a wrong "read" ships an ungated
+  # spend that looks exactly like a gated one.
+  state_changing:
     - suggest_next_experiment
+    - predict_outcome
+  # These three touch nothing: `resume_campaign` reads the campaign record back, and
+  # `generate_screening_design` and `campaign_progress` never featurize — the first enumerates
+  # corners, the second is pure arithmetic over the runs it is handed and asks no surrogate at all.
+  read_only:
     - resume_campaign
     - generate_screening_design
     - campaign_progress
-    - predict_outcome
 
 jobs:
   - name: start_optimization_campaign

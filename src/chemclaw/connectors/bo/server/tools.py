@@ -56,6 +56,7 @@ from chemclaw.science.bo.problem import (
     ScreeningDesign,
     observed_value,
     pareto_front,
+    require_names_do_not_clash,
     require_observations_cover_objectives,
 )
 from chemclaw.science.bo.progress import CampaignProgress
@@ -151,12 +152,14 @@ class ExperimentSuggestion(BaseModel):
         readings = []
         if len(self.scales) > 1:
             named = ", ".join(f"{scale.direction} {scale.name}" for scale in self.scales)
+            # `is None`, not truthiness: an explicit `assay_noise=0.0` means "compare exactly",
+            # which is a stated choice, and reporting it as "none given" would be false.
             drawn = (
-                f"Runs differing by {self.front_tolerance:.3g} or less were treated as "
-                "indistinguishable, so neither knocked the other off."
-                if self.front_tolerance
-                else "No assay reproducibility was given, so every numeric difference counted as "
+                "No assay reproducibility was given, so every numeric difference counted as "
                 "real — pass `assay_noise` and the front will usually be longer and truer."
+                if self.front_tolerance is None
+                else f"Runs differing by {self.front_tolerance:.3g} or less were treated as "
+                "indistinguishable, so neither knocked the other off."
             )
             readings.append(
                 f"This is a trade-off over {len(self.scales)} objectives ({named}), so there is no "
@@ -371,6 +374,7 @@ async def suggest_next_experiment(
     history = [Observation.model_validate(item) for item in observations] if observations else []
     # The tool owns its contract, so the declared/observed parameter agreement is checked here —
     # after the models exist and before anything downstream indexes by parameter name.
+    require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
     # Featurize before the engine sees the problem: descriptors change how the surrogate
@@ -467,6 +471,7 @@ async def campaign_progress(
     if isinstance(observations, str):
         observations = json.loads(observations)
     history = [Observation.model_validate(item) for item in observations]
+    require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
     return read_progress(problem, history, assay_noise, window, objective)
@@ -568,9 +573,11 @@ async def generate_screening_design(
         The runs to perform, plus `resolution`, `two_level_continuous`, and a `summary` stating
         whether the design is exhaustive, what was collapsed, and what is confounded.
     """
+    problem = OptimizationProblem.model_validate(problem)
+    require_names_do_not_clash(problem)
     return await asyncio.to_thread(
         factorial_design,
-        OptimizationProblem.model_validate(problem),
+        problem,
         n_generators,
         n_center,
         n_repetitions,
@@ -660,6 +667,7 @@ async def predict_outcome(
     named = json.loads(points) if isinstance(points, str) else points
     asked: list[dict[str, ParamValue]] = [dict(point) for point in named]
     history = [Observation.model_validate(item) for item in observations]
+    require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
     _require_points_match(problem, asked)

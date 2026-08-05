@@ -26,6 +26,7 @@ the same split `chemclaw.kg.proposal` uses, so a process without Postgres never 
 a store it will not use.
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from functools import cache
@@ -35,7 +36,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
-from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem
+from chemclaw.science.bo.problem import (
+    Candidate,
+    CategoricalParameter,
+    Constraint,
+    ExcludeConstraint,
+    Observation,
+    OptimizationProblem,
+    Parameter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +52,66 @@ logger = logging.getLogger(__name__)
 # The fields that *are* the decision space. An **allowlist**, not `exclude={"descriptors"}`: with a
 # denylist, any future field on a parameter silently forks every campaign id in the database, and
 # the failure is invisible — a new id, an empty history, a chemist told their campaign is new.
-# `descriptors` is absent because it is computed *from* `structures`, so a cache miss recomputing
-# the same values, or a calculator upgrade shifting the sixth decimal, is not a new problem.
+# `descriptors` is handled per parameter by `_space_of`, not here, because whether it identifies the
+# space depends on where it came from.
 _SPACE_FIELDS = {"kind", "name", "lower", "upper", "categories", "structures"}
+
+# An allowlist inverts the denylist's failure rather than removing it: a field added to a parameter
+# later is silently *not* hashed, so two different spaces would share one id and one history.
+# `tests/test_bo_campaign_record.py` asserts this set stays exhaustive, so a new field forces an
+# explicit decision instead of a silent one.
+_IDENTIFYING_EXCLUSIONS = {"descriptors"}
+
+
+def _space_of(parameter: Parameter) -> dict[str, Any]:
+    """One parameter as the identity sees it.
+
+    **Descriptors identify the space unless they were computed from the structures.** When
+    `structures` is set, `featurize_problem` derives the descriptors from it, so a cache miss
+    recomputing the same values — or a calculator upgrade shifting the sixth decimal — must not fork
+    the campaign, and the structures already identify the chemistry. When `structures` is `None` the
+    caller supplied the descriptors directly and they are the **only** statement of what the
+    surrogate sees: excluding them collapsed a bare categorical, one featurized on `{A: 1, B: 2}`
+    and one on `{A: 99, B: -99}` onto a single id, three genuinely different feature spaces sharing
+    one row that `record_suggestion` then overwrites — the "seeded with observations from a
+    different campaign" failure `read_campaign_thread` exists to prevent.
+    """
+    dumped = parameter.model_dump(mode="json", include=_SPACE_FIELDS)
+    if (
+        isinstance(parameter, CategoricalParameter)
+        and parameter.structures is None
+        and parameter.descriptors is not None
+    ):
+        # Added only when it carries information, by the rule the objectives and constraints keys
+        # already follow: a bare categorical must hash to the payload it hashed to before this
+        # existed, or every recorded campaign over one becomes unreachable.
+        dumped["descriptors"] = parameter.model_dump(mode="json", include={"descriptors"})[
+            "descriptors"
+        ]
+    return dumped
+
+
+def _canonical(constraint: Constraint) -> dict[str, Any]:
+    """One constraint as the identity sees it, in a form the caller's ordering cannot change.
+
+    `base + acid <= 3` and `acid + base <= 3` are the same polytope and must be the same campaign.
+    Hashing the dump directly made them two, each with an empty history — the same silent fork the
+    allowlist above exists to prevent, on the field that comment did not cover.
+    """
+    dumped = constraint.model_dump(mode="json")
+    if isinstance(constraint, ExcludeConstraint):
+        dumped["pairs"] = sorted(
+            [name, sorted(options)]
+            for name, options in zip(constraint.parameters, constraint.options, strict=True)
+        )
+        del dumped["parameters"], dumped["options"]
+        return dumped
+    dumped["terms"] = sorted(
+        [name, coefficient]
+        for name, coefficient in zip(constraint.parameters, constraint.coefficients, strict=True)
+    )
+    del dumped["parameters"], dumped["coefficients"]
+    return dumped
 
 
 def campaign_id_for(problem: OptimizationProblem) -> str:
@@ -55,15 +121,11 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     whole difference between a campaign and a turn: asking twice about one optimization must reach
     one campaign, or the history a campaign exists to accumulate never accumulates.
 
-    **Descriptors are excluded from the identity.** They are computed *from* the structures, so a
-    cache miss recomputing them to the same values must not fork the campaign, and a calculator
-    upgrade that shifts a descriptor in the sixth decimal is not a new optimization problem. The
-    structures themselves *are* included: swapping a ligand for a different molecule is a different
-    space, and should be a different campaign.
+    **Descriptors are excluded when they were computed from the structures, and included when the
+    caller stated them** — see `_space_of`. Constraints are canonicalized so the order the caller
+    happened to write a sum in cannot fork a campaign — see `_canonical`.
     """
-    space = [
-        parameter.model_dump(mode="json", include=_SPACE_FIELDS) for parameter in problem.parameters
-    ]
+    space = [_space_of(parameter) for parameter in problem.parameters]
     # The legacy key, always, spelled exactly as it was. A single-objective problem must hash to the
     # byte-identical payload it hashed to before `objectives` existed, or every recorded campaign
     # becomes unreachable — `read_campaign_thread` would tell each chemist their campaign is new.
@@ -79,9 +141,10 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     # A constraint narrows the space, so a constrained problem is a different campaign from the
     # unconstrained one over the same bounds — the runs mean different things.
     if problem.constraints:
-        identity["constraints"] = [
-            constraint.model_dump(mode="json") for constraint in problem.constraints
-        ]
+        identity["constraints"] = sorted(
+            (_canonical(constraint) for constraint in problem.constraints),
+            key=lambda dumped: json.dumps(dumped, sort_keys=True),
+        )
     return f"campaign-{stable_hash(identity)}"
 
 

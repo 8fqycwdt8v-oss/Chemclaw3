@@ -19,6 +19,7 @@ from chemclaw.science.bo.problem import (
     ParamValue,
     best_of,
     discrete_candidate_count,
+    require_names_do_not_clash,
     require_rounds_within_ceiling,
     space_exhausted,
 )
@@ -77,6 +78,18 @@ async def optimize(
             f"n_initial must be >= {MIN_SEED_OBSERVATIONS}: the surrogate cannot fit on fewer"
         )
     require_rounds_within_ceiling(n_rounds)
+    # Checked here, not at the `best_of` call below: this loop returns a single best observation, so
+    # a trade-off has no answer for it — and discovering that *after* n_initial + n_rounds*batch
+    # evaluations would spend the whole budget to raise. Same reason the two rules above are here.
+    require_names_do_not_clash(problem)
+    if len(problem.objectives) > 1:
+        named = ", ".join(objective.name for objective in problem.objectives)
+        raise ValueError(
+            f"this loop returns one best observation and this problem has "
+            f"{len(problem.objectives)} objectives ({named}), which have no single best point. "
+            "Optimize one of them, or use the inline `suggest_next_experiment`, which returns the "
+            "Pareto front of the runs it is given."
+        )
     history = await _evaluate(initial_candidates(problem, n_initial, seed), evaluate, provenance)
     space = discrete_candidate_count(problem)
     for _ in range(n_rounds):

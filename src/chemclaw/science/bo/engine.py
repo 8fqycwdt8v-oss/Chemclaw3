@@ -543,12 +543,21 @@ def _fit_quality_from(
     problem: OptimizationProblem, strategy: Any, frame: pd.DataFrame, folds: int, n: int
 ) -> list[FitQuality]:
     """Cross-validate the surrogates an already-fitted strategy chose, one score per objective."""
+    # Matched on the surrogate's own output key rather than on position. `strict=True` catches a
+    # count mismatch but not an ordering one, and a mislabelled score is worse than a missing score:
+    # it would attach one objective's R² to another in the number the summary says "licenses reading
+    # the predictions at all".
+    by_output = {spec.outputs[0].key: spec for spec in strategy.surrogate_specs.surrogates}
+    missing = sorted({o.name for o in problem.objectives} - set(by_output))
+    if missing:
+        raise SurrogateFitError(
+            f"BoFire returned no surrogate for objective(s) {missing}; it fitted "
+            f"{sorted(by_output)}. The fit cannot be attributed, so no score is reported."
+        )
     scores = []
     with _translating_surrogate_errors(f"cross-validating over {folds} folds"):
-        for objective, specification in zip(
-            problem.objectives, strategy.surrogate_specs.surrogates, strict=True
-        ):
-            surrogate = surrogate_api.map(specification)
+        for objective in problem.objectives:
+            surrogate = surrogate_api.map(by_output[objective.name])
             _, test, _ = surrogate.cross_validate(frame, folds=folds)
             scores.append(
                 FitQuality(
