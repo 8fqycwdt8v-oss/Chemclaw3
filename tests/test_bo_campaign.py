@@ -442,3 +442,29 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
             n_rounds=2,
         )
     )
+
+
+def test_optimize_refuses_a_trade_off_before_spending_any_budget() -> None:
+    """It returns one best observation, so a trade-off has no answer for it.
+
+    The refusal used to come from `best_of` *after* the loop, i.e. after every evaluation had been
+    paid for. The docstring already promised the round ceiling was "rejected here, before any
+    budget is spent"; this holds the same promise for the objective count.
+    """
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="temperature", lower=20.0, upper=120.0)],
+        objectives=[
+            Objective(name="yield", direction="maximize"),
+            Objective(name="impurity", direction="minimize"),
+        ],
+    )
+    calls = 0
+
+    async def _evaluate(params: dict[str, ParamValue]) -> float:
+        nonlocal calls
+        calls += 1
+        return 1.0
+
+    with pytest.raises(ValueError, match="no single best point"):
+        asyncio.run(optimize(problem, _evaluate, n_initial=2, n_rounds=1))
+    assert calls == 0

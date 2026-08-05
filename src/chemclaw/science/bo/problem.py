@@ -298,19 +298,17 @@ class OptimizationProblem(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _objectives_are_well_formed(self) -> "OptimizationProblem":
-        """Objective names are distinct, and never collide with a parameter name.
+    def _objective_names_are_distinct(self) -> "OptimizationProblem":
+        """Objective names are distinct — they are dataframe column keys and would overwrite.
 
-        Both are dataframe column keys in the frame BoFire is told and asked with, so a collision is
-        a silently overwritten column rather than an error — a decision variable and a response
-        sharing a name would make the surrogate fit against its own input.
+        Safe to enforce in the model: every payload written before `objectives` became a list
+        carries exactly one objective, so this cannot reject anything already on disk or in a
+        Temporal history. The parameter/objective clash check is **not** safe that way and lives
+        outside the model — see `require_names_do_not_clash`.
         """
         names = [objective.name for objective in self.objectives]
         if len(names) != len(set(names)):
             raise ValueError("objective names must be unique")
-        clashes = sorted(set(names) & {p.name for p in self.parameters})
-        if clashes:
-            raise ValueError(f"{clashes} is both a parameter and an objective; names must differ")
         return self
 
     @model_validator(mode="after")
@@ -721,6 +719,33 @@ def require_rounds_within_ceiling(n_rounds: int) -> None:
         )
 
 
+def require_names_do_not_clash(problem: OptimizationProblem) -> None:
+    """No parameter and objective share a name — checked *outside* the model, deliberately.
+
+    Both are dataframe column keys in the frame BoFire is told and asked with, so a collision is a
+    silently overwritten column rather than an error: a decision variable and a response sharing a
+    name would make the surrogate fit against its own input. Worth refusing.
+
+    **But not from a validator.** Nothing forbade this before `objectives` became a list, so a
+    campaign launched earlier may carry such a problem, and `OptimizationProblem`'s validators
+    re-run wherever that data is read back — `BoCampaignWorkflow` revalidates its `CampaignSpec` on
+    **every replay**, and `read_campaign_thread` revalidates the stored problem on every resume. A
+    model-level rule would therefore strand an in-flight campaign at replay and make a stored one
+    permanently unreadable, which is the exact hazard `require_rounds_within_ceiling` was moved out
+    of the model to avoid. It is enforced where data *enters* instead: the tool boundary and the
+    campaign launch.
+
+    Raises:
+        ValueError: Naming the clashing name(s).
+    """
+    clashes = sorted({o.name for o in problem.objectives} & {p.name for p in problem.parameters})
+    if clashes:
+        raise ValueError(
+            f"{clashes} is both a parameter and an objective; names must differ. They are the same "
+            "dataframe column to the surrogate, so one would silently overwrite the other."
+        )
+
+
 def require_campaign_startable(spec: CampaignSpec) -> None:
     """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
@@ -740,10 +765,11 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
     rather than silently optimizing the lead one and reporting a "best" nobody asked for.
 
     Raises:
-        ValueError: When the round count exceeds `bo_max_rounds`, or the problem names more than one
-            objective.
+        ValueError: When the round count exceeds `bo_max_rounds`, the problem names more than one
+            objective, or a parameter and an objective share a name.
     """
     require_rounds_within_ceiling(spec.n_rounds)
+    require_names_do_not_clash(spec.problem)
     if len(spec.problem.objectives) > 1:
         named = ", ".join(objective.name for objective in spec.problem.objectives)
         raise ValueError(

@@ -431,3 +431,81 @@ def test_an_unknown_objective_lists_the_ones_the_problem_declares() -> None:
     )
     with pytest.raises(ValueError, match=r"unknown objective 'yeild'.*\['yield'\]"):
         read_progress(problem, _series([50.0] * 8), assay_noise=1.0, objective="yeild")
+
+
+# --- replay safety: what a validator may and may not refuse (review follow-up) -------------------
+
+
+def test_a_legacy_problem_whose_objective_shares_a_parameter_name_still_validates() -> None:
+    """The rule that must NOT live in a validator, because stored data can violate it.
+
+    Nothing forbade an objective sharing a parameter's name before `objectives` became a list, so a
+    campaign launched earlier may carry one — and `OptimizationProblem`'s validators re-run wherever
+    that data is read back: `BoCampaignWorkflow` revalidates its `CampaignSpec` on **every replay**,
+    and `read_campaign_thread` revalidates the stored problem on every resume. A model-level rule
+    would strand an in-flight campaign and make a stored one permanently unreadable, which is the
+    hazard `require_rounds_within_ceiling` was moved out of the model to avoid.
+    """
+    legacy = {
+        "parameters": [
+            {"kind": "continuous", "name": "yield", "lower": 0.0, "upper": 100.0},
+            {"kind": "continuous", "name": "temperature", "lower": 20.0, "upper": 120.0},
+        ],
+        "objective": {"name": "yield", "direction": "maximize"},
+    }
+    problem = OptimizationProblem.model_validate(legacy)
+    assert problem.objective.name == "yield"
+
+
+def test_a_legacy_campaign_spec_carrying_that_problem_replays() -> None:
+    """The shape actually sitting in an in-flight Temporal history — spec around legacy problem."""
+    from chemclaw.science.bo.problem import CampaignSpec
+
+    spec = CampaignSpec.model_validate(
+        {
+            "problem": {
+                "parameters": [
+                    {"kind": "continuous", "name": "yield", "lower": 0.0, "upper": 100.0},
+                    {"kind": "continuous", "name": "temperature", "lower": 20.0, "upper": 120.0},
+                ],
+                "objective": {"name": "yield", "direction": "maximize"},
+            },
+            "objective_name": "demo",
+            "n_initial": 2,
+            "n_rounds": 1,
+        }
+    )
+    assert spec.problem.objective.name == "yield"
+
+
+def test_the_clash_is_refused_where_data_enters_instead() -> None:
+    """Refused at the boundary, so a new campaign cannot be created with the collision."""
+    from chemclaw.science.bo.problem import require_names_do_not_clash
+
+    problem = OptimizationProblem.model_validate(
+        {
+            "parameters": [{"kind": "continuous", "name": "yield", "lower": 0.0, "upper": 100.0}],
+            "objective": {"name": "yield", "direction": "maximize"},
+        }
+    )
+    with pytest.raises(ValueError, match="both a parameter and an objective"):
+        require_names_do_not_clash(problem)
+
+
+def test_the_tool_refuses_a_clashing_problem() -> None:
+    """And the boundary is wired: the tool raises rather than fitting against its own input."""
+    with pytest.raises(ValueError, match="both a parameter and an objective"):
+        asyncio.run(
+            campaign_progress(
+                OptimizationProblem.model_validate(
+                    {
+                        "parameters": [
+                            {"kind": "continuous", "name": "yield", "lower": 0.0, "upper": 100.0}
+                        ],
+                        "objective": {"name": "yield", "direction": "maximize"},
+                    }
+                ),
+                [{"params": {"yield": 50.0}, "value": 50.0}],
+                assay_noise=2.0,
+            )
+        )

@@ -461,3 +461,16 @@ def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats() -> N
     assert matched is not None, summary
     assert len(matched.group(1).split(".")[1]) == 2
     assert len(matched.group(2).replace(".", "").lstrip("0")) <= 2
+
+
+def test_an_explicit_zero_tolerance_is_reported_as_a_choice_not_as_silence() -> None:
+    """`if self.front_tolerance` read 0.0 as "none given", which is a different statement.
+
+    A caller passing `assay_noise=0.0` has said "compare exactly". Telling them no reproducibility
+    was given, and inviting them to pass one, describes a call they did not make.
+    """
+    problem, runs = _trade_off()
+    exact = asyncio.run(suggest_next_experiment(problem, runs, count=1, assay_noise=0.0))
+    assert exact.front_tolerance == 0.0
+    assert "No assay reproducibility was given" not in exact.summary
+    assert "0 or less were treated as indistinguishable" in exact.summary

@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 
 from chemclaw.science.bo.campaign_record import (
+    _IDENTIFYING_EXCLUSIONS,
+    _SPACE_FIELDS,
     Campaign,
     InMemoryCampaignStore,
     Suggestion,
@@ -34,9 +36,12 @@ from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
     ContinuousParameter,
+    ExcludeConstraint,
+    LinearConstraint,
     Objective,
     Observation,
     OptimizationProblem,
+    Parameter,
 )
 
 
@@ -447,3 +452,126 @@ def test_a_second_objective_is_a_different_campaign() -> None:
         }
     )
     assert campaign_id_for(both) != campaign_id_for(single)
+
+
+# --- what identifies a decision space (review follow-up) ----------------------------------------
+
+
+def test_caller_supplied_descriptors_identify_the_space() -> None:
+    """Three different feature spaces used to collide on one campaign id.
+
+    `descriptors` was excluded outright, on the reasoning that they are computed *from*
+    `structures`. That holds only when structures are set. With none, the caller stated the
+    descriptors directly and they are the **only** statement of what the surrogate sees — so a bare
+    categorical, one featurized on `{A: 1, B: 2}` and one on `{A: 99, B: -99}` all hashed alike,
+    and `record_suggestion`'s upsert let one overwrite another's decision space on the shared row.
+    """
+    objectives = [Objective(name="yield", direction="maximize")]
+    ids = {
+        campaign_id_for(
+            OptimizationProblem(
+                parameters=[
+                    CategoricalParameter(name="lig", categories=["A", "B"], descriptors=values)
+                ],
+                objectives=objectives,
+            )
+        )
+        for values in (
+            None,
+            {"A": {"x": 1.0}, "B": {"x": 2.0}},
+            {"A": {"x": 99.0}, "B": {"x": -99.0}},
+        )
+    }
+    assert len(ids) == 3
+
+
+def test_descriptors_computed_from_structures_still_do_not_fork_the_campaign() -> None:
+    """The other half, which the original exclusion got right and must keep getting right.
+
+    With `structures` set the descriptors are derived, so a cache miss recomputing them, or a
+    calculator upgrade shifting the sixth decimal, is the same optimization problem.
+    """
+    objectives = [Objective(name="yield", direction="maximize")]
+    structures = {"A": "CC", "B": "CCC"}
+    ids = {
+        campaign_id_for(
+            OptimizationProblem(
+                parameters=[
+                    CategoricalParameter(
+                        name="lig",
+                        categories=["A", "B"],
+                        structures=structures,
+                        descriptors=values,
+                    )
+                ],
+                objectives=objectives,
+            )
+        )
+        for values in (None, {"A": {"x": 1.0}, "B": {"x": 2.0}}, {"A": {"x": 7.0}, "B": {"x": 8.0}})
+    }
+    assert len(ids) == 1
+
+
+def test_the_order_a_constraint_was_written_in_does_not_fork_the_campaign() -> None:
+    """`base + acid <= 3` and `acid + base <= 3` are one polytope and must be one campaign.
+
+    Hashing the dump directly made them two, each with an empty history — the silent fork the
+    identity's allowlist exists to prevent, on the field that reasoning did not cover.
+    """
+    parameters: list[Parameter] = [
+        ContinuousParameter(name="acid", lower=0.0, upper=3.0),
+        ContinuousParameter(name="base", lower=0.0, upper=3.0),
+    ]
+    objectives = [Objective(name="yield", direction="maximize")]
+    written: list[tuple[list[str], list[float]]] = [
+        (["acid", "base"], [1.0, 2.0]),
+        (["base", "acid"], [2.0, 1.0]),
+    ]
+    ids = {
+        campaign_id_for(
+            OptimizationProblem(
+                parameters=parameters,
+                objectives=objectives,
+                constraints=[
+                    LinearConstraint(parameters=names, coefficients=coefficients, rhs=3.0)
+                ],
+            )
+        )
+        for names, coefficients in written
+    }
+    assert len(ids) == 1
+
+
+def test_an_exclusion_written_either_way_round_is_one_campaign() -> None:
+    """`forbids()` is symmetric in the two parameters, so the identity must be too."""
+    parameters: list[Parameter] = [
+        CategoricalParameter(name="catalyst", categories=["Pd(OAc)2", "Pd2dba3"]),
+        CategoricalParameter(name="solvent", categories=["DMSO", "toluene"]),
+    ]
+    objectives = [Objective(name="yield", direction="maximize")]
+    written: list[tuple[list[str], list[list[str]]]] = [
+        (["catalyst", "solvent"], [["Pd(OAc)2"], ["DMSO"]]),
+        (["solvent", "catalyst"], [["DMSO"], ["Pd(OAc)2"]]),
+    ]
+    ids = {
+        campaign_id_for(
+            OptimizationProblem(
+                parameters=parameters,
+                objectives=objectives,
+                constraints=[ExcludeConstraint(parameters=names, options=options)],
+            )
+        )
+        for names, options in written
+    }
+    assert len(ids) == 1
+
+
+def test_the_identity_allowlist_still_covers_every_parameter_field() -> None:
+    """An allowlist inverts the denylist's failure; this is what stops it inverting silently.
+
+    A field added to a parameter later would not be hashed, so two different decision spaces would
+    share one id and one history — the same invisible fork, one direction over. Failing here forces
+    an explicit decision about whether the new field identifies the space.
+    """
+    declared = set(ContinuousParameter.model_fields) | set(CategoricalParameter.model_fields)
+    assert declared == _SPACE_FIELDS | _IDENTIFYING_EXCLUSIONS
