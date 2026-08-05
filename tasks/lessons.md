@@ -1130,3 +1130,37 @@ over a collection the code under test produced — they are all vacuously true o
 number is only measured if its script runs green; R5.6 said a green suite proves the code matches
 the test, not that the test is right. This is the third face of it — **a guard that never executed
 is not a guard**, whether it is a plugin flag, a loop body, or an assertion the data never reaches.
+
+## 2026-08-05 — Database integration review
+
+**"Apply exactly once" is the wrong semantics for a reconciliation.** The plan put the privilege
+grants in `infra/sql/` as migration `036`. That set is applied once per file and tracked by
+checksum, which is right for a schema change and silently wrong for a grant: a deployment creating
+its runtime role *after* the first `db-migrate` would never have grants applied at all, and every
+table added by a later migration would ship ungranted and break the application on first use of it.
+Neither failure is visible at deploy time — the ledger reports success both times. Caught only by
+applying it to a live database, creating the role, and noticing the second run did nothing.
+
+**Rule: before putting something in a run-once mechanism, ask what happens when its *inputs* change
+after it has run.** Schema DDL has no such inputs; a grant depends on a role and on a table set that
+both keep moving. Migration-shaped and reconciliation-shaped work look identical in a directory
+listing and are opposite in their cadence.
+
+**A derived check with a blind spot is worse than no derived check.** `test_database_privileges.py`
+derives the grant matrix from the SQL literals in `src/` — and its first version walked `ast.Constant`
+only, so a statement containing one f-string interpolation arrived as *fragments*: `INSERT INTO x`
+separated from its own `ON CONFLICT ... DO UPDATE`. The upsert's UPDATE therefore vanished, and the
+test confidently reported two correct grants as over-grants. It failed in the safe direction by
+luck; the same gap in the other direction would have removed a privilege the application needs and
+called it tightening. A second version fell to the same class — the grant *parser* read the file
+line-wise while Postgres reads adjacent string literals concatenated, so it saw only the
+single-line grants and reported every other table as ungranted.
+
+**Rule: when a test derives a fact from source, first check it can see the shapes that source
+actually uses.** Print the derivation's raw output and read it against the code before trusting
+either direction of the assertion. Both failures above were found by looking at the list, not by
+the test going red — a derivation that under-reports produces *green* on the missing half.
+
+**What this shares with R5.5/R5.6 and the vacuous-loop entry above:** each was a mechanism that ran,
+reported, and did not check what it claimed. The new face here is that a *derivation* has two
+failure directions, and only one of them is loud.
