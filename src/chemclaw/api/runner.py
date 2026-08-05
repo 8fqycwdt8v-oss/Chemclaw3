@@ -311,6 +311,8 @@ async def run_turn(
             # read the launch failure as bad input from the chemist and re-asked for parameters it
             # already had. Before the first token, so the model plans against the surface it will
             # actually get rather than discovering the outage by calling into it.
+            if not await _durable_subsystem_reachable():
+                unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
             if unreachable:
                 yield CapabilityDegradedEvent(connectors=unreachable)
             stream = agent.run(
