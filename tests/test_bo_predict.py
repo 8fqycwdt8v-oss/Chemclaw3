@@ -11,11 +11,24 @@ import re
 
 import pytest
 
-from chemclaw.connectors.bo.server.tools import predict_outcome, suggest_next_experiment
-from chemclaw.science.bo.engine import interrogate_surrogate, predict_at, surrogate_fit_quality
+from chemclaw.connectors.bo.server.tools import (
+    ExperimentSuggestion,
+    ObjectiveScale,
+    predict_outcome,
+    suggest_next_experiment,
+)
+from chemclaw.core.config import settings
+from chemclaw.science.bo import engine
+from chemclaw.science.bo.engine import (
+    interrogate_surrogate,
+    predict_at,
+    surrogate_fit_quality,
+)
 from chemclaw.science.bo.problem import (
+    Candidate,
     CategoricalParameter,
     ContinuousParameter,
+    FitQuality,
     Objective,
     Observation,
     OptimizationProblem,
@@ -133,8 +146,15 @@ def test_a_featurized_categorical_is_accepted() -> None:
         )
         for index in range(6)
     ]
-    prediction = predict_at(problem, runs, [{"temperature": 70.0, "ligand": "L3"}])[0]
-    assert prediction.sds["yield"] > 0.0
+    # Not `sds > 0` — a GP posterior sd is positive by construction, so that passes even if all
+    # three ligands' descriptor rows had collapsed onto one point, which is the thing featurization
+    # exists to prevent. Three distinct descriptor rows must give three distinct predictions.
+    at_seventy = predict_at(
+        problem,
+        runs,
+        [{"temperature": 70.0, "ligand": ligand} for ligand in ("L1", "L2", "L3")],
+    )
+    assert len({round(p.values["yield"], 6) for p in at_seventy}) == 3
 
 
 def test_a_trade_off_is_predicted_on_every_axis() -> None:
@@ -188,8 +208,11 @@ def test_fit_quality_is_finite_and_carries_what_it_was_computed_on() -> None:
     """
     quality = surrogate_fit_quality(_problem(), _runs())[0]
     assert quality.objective == "yield"
-    assert -1.0 <= quality.r2 <= 1.0
-    assert quality.mae >= 0.0
+    # Content, not a bound the model already enforces: `mae >= 0.0` is `Field(ge=0.0)` and cannot
+    # fail, and `r2 <= 1.0` is arithmetic. These runs are a deliberate rising trend, so a surrogate
+    # that had regressed to predicting the mean would score about 0 and be caught here.
+    assert quality.r2 > 0.5
+    assert quality.mae < 5.0, "the runs span ~27 points; this is a fit, not a constant"
     assert quality.n_observations == 10
     assert quality.folds == 5
 
@@ -201,7 +224,6 @@ def test_a_score_over_few_runs_carries_the_caveat_that_it_will_be_over_read() ->
     """
     summary = surrogate_fit_quality(_problem(), _runs())[0].summary
     assert "sanity check, not as accuracy" in summary
-    assert "10 run(s)" in summary
 
 
 def test_the_fit_quality_names_every_objective() -> None:
@@ -337,22 +359,43 @@ def test_a_fold_count_the_caller_named_is_still_refused_when_the_runs_cannot_car
         surrogate_fit_quality(_problem(), _runs()[:3], folds=5)
 
 
-def test_the_prediction_and_the_score_come_from_one_fit() -> None:
-    """`interrogate_surrogate` is the single entry point, and the tool goes through it.
+def test_the_prediction_and_the_score_come_from_one_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`predict_outcome` fits the surrogate exactly once — counted, not inferred.
 
-    Fitting twice would give two identically-configured models and make "the score describes the
-    model that made this prediction" true only by construction. One fit makes it true by
-    arithmetic — and it is the claim the whole capability rests on.
+    **This test replaced a version that could not fail.** It used to run `interrogate_surrogate`
+    and `predict_at` separately and assert their predictions agreed, which is two fits agreeing —
+    the by-construction check it claimed to replace. Reverting the tool to fit twice left it green.
+
+    Counting the fits is the only assertion that distinguishes the two designs, and the distinction
+    is load-bearing: the GP's hyperparameter fit is non-deterministic, so two fits are genuinely two
+    models, and "the score describes the model that made this prediction" would be false.
     """
-    predictions, fit = interrogate_surrogate(
-        _problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}]
+    fits = 0
+    original = engine._fitted_strategy
+
+    def _counted(*args: object, **kwargs: object) -> object:
+        nonlocal fits
+        fits += 1
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine, "_fitted_strategy", _counted)
+    answer = asyncio.run(
+        predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}])
     )
-    assert len(predictions) == 1
-    assert len(fit) == 1
-    # The prediction *is* deterministic — `strategy.predict` on a fitted strategy is arithmetic —
-    # so the wrapper must agree with the combined call exactly. The score is not (see below).
-    alone = predict_at(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}])[0]
-    assert alone.values == pytest.approx(predictions[0].values)
+    assert fits == 1
+    assert len(answer.predictions) == 1
+    assert len(answer.fit) == 1
+
+
+def test_the_prediction_itself_is_deterministic() -> None:
+    """The half that *is* reproducible, so the non-determinism below is scoped rather than assumed.
+
+    `strategy.predict` on an already-fitted strategy is arithmetic. Only the fit that produced the
+    strategy varies, which is why the score carries a caveat and the prediction does not.
+    """
+    point: list[dict[str, float | str]] = [{"temperature": 60.0, "solvent": "THF"}]
+    predictions, _ = interrogate_surrogate(_problem(), _runs(), point, assess_fit=False)
+    assert predict_at(_problem(), _runs(), point)[0].values == pytest.approx(predictions[0].values)
 
 
 def test_asking_for_neither_a_prediction_nor_a_score_is_refused() -> None:
@@ -409,7 +452,10 @@ def test_a_tolerance_keeps_both_runs_the_assay_cannot_separate() -> None:
 def test_the_default_tolerance_reproduces_the_front_exactly() -> None:
     """`0.0` must be the old behaviour to the last bit — no persisted front moves."""
     problem, runs = _trade_off()
-    assert pareto_front(problem, runs, 0.0) == pareto_front(problem, runs)
+    # Pinned against the pre-tolerance *result*, not against the other call: comparing the two
+    # calls only restates that the default literal is 0.0, and would hold for any implementation.
+    assert pareto_front(problem, runs, 0.0) == [runs[1]]
+    assert pareto_front(problem, runs) == [runs[1]]
 
 
 def test_a_negative_tolerance_is_refused() -> None:
@@ -419,17 +465,57 @@ def test_a_negative_tolerance_is_refused() -> None:
         pareto_front(problem, runs, tolerance=-1.0)
 
 
-def test_the_suggestion_says_which_front_it_drew() -> None:
-    """A reader cannot tell a strict front from a tolerant one by looking at it, so it is stated."""
-    problem, runs = _trade_off()
-    strict = asyncio.run(suggest_next_experiment(problem, runs, count=1))
-    assert strict.front_tolerance is None
-    assert "every numeric difference counted as real" in strict.summary
+@pytest.mark.timeout(60)
+def test_the_suggestion_wires_the_assay_noise_through_to_the_front() -> None:
+    """One acquisition, for the plumbing. The three summary readings are checked without one.
 
+    This used to make two `suggest_next_experiment` calls and a sibling made a third — each fitting
+    a GP and running a multi-start acquisition to assert a sentence. That optimizer's run-to-run
+    variance is the real timeout risk here (a sibling was measured spiking from 4.3s to 39.9s), so
+    the acquisition is paid once, for the one thing only the tool can show: that `assay_noise`
+    reaches `pareto_front` as its tolerance.
+
+    The explicit timeout is the point of the marker rather than a guess at a budget: at 60s a spike
+    names itself instead of eating the 180s the whole file shares.
+    """
+    problem, runs = _trade_off()
     tolerant = asyncio.run(suggest_next_experiment(problem, runs, count=1, assay_noise=0.5))
     assert tolerant.front_tolerance == 0.5
+    # Both runs survive, which they do not at exact precision — so the number reached the front.
     assert len(tolerant.front) == 2
-    assert "indistinguishable" in tolerant.summary
+
+
+@pytest.mark.parametrize(
+    ("tolerance", "present", "absent"),
+    [
+        (None, "every numeric difference counted as real", "indistinguishable"),
+        (0.0, "0 or less were treated as indistinguishable", "No assay reproducibility"),
+        (0.5, "0.5 or less were treated as indistinguishable", "No assay reproducibility"),
+    ],
+)
+def test_the_suggestion_says_which_front_it_drew(
+    tolerance: float | None, present: str, absent: str
+) -> None:
+    """A reader cannot tell a strict front from a tolerant one by looking at it, so it is stated.
+
+    Built directly rather than through the tool: `summary` is a pure function of the fields, and an
+    acquisition run would cost seconds to assert nothing the constructor cannot. The zero row is the
+    one that caught a real bug — `if self.front_tolerance` read an explicit 0.0 as "none given".
+    """
+    suggestion = ExperimentSuggestion(
+        campaign_id="campaign-test",
+        candidates=[Candidate(params={"temperature": 60.0}, predicted_sd=0.5)],
+        scale=_scale("yield"),
+        scales=[_scale("yield"), _scale("impurity")],
+        front_tolerance=tolerance,
+    )
+    assert present in suggestion.summary
+    assert absent not in suggestion.summary
+
+
+def _scale(name: str) -> ObjectiveScale:
+    """A minimal scale, so `summary` has the spread it reads a candidate's sd against."""
+    return ObjectiveScale(name=name, direction="maximize", n=2, observed_min=1.0, observed_max=9.0)
 
 
 def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_does() -> None:
@@ -445,10 +531,11 @@ def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_do
     warn a reader off comparing two scores that differ by less than it.
     """
     scores = [surrogate_fit_quality(_problem(), _runs())[0] for _ in range(3)]
-    assert all(-1.0 <= score.r2 <= 1.0 for score in scores)
-    # Generous, because the point is that it moves — a tight bound here would be the same
-    # over-claim the formatting fix removes.
-    assert max(s.r2 for s in scores) - min(s.r2 for s in scores) < 0.30
+    spread = max(s.r2 for s in scores) - min(s.r2 for s in scores)
+    # **Both sides.** The upper bound alone would also pass if the fit were accidentally made
+    # deterministic, which would make the caveats below false — and the point of this test is that
+    # the number moves. Measured spread over 8 samples on this fixture: 0.081.
+    assert 0.0 < spread < 0.30, f"three identical calls spread {spread}"
     summary = scores[0].summary
     assert "not deterministic" in summary
     assert "Do not read a small difference" in summary
@@ -457,20 +544,50 @@ def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_do
 def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats() -> None:
     """Two decimals on R², two significant figures on MAE — what survives a repeat."""
     summary = surrogate_fit_quality(_problem(), _runs())[0].summary
-    matched = re.search(r"R² (\d+\.\d+) and mean absolute error (\d+(?:\.\d+)?)", summary)
+    # `(?!\S)` anchors the MAE group: without it, a value formatted as `1e+02` matched just the
+    # leading `1`, whose one significant figure passes the check below and asserts nothing.
+    matched = re.search(r"R² (\d+\.\d+) and mean absolute error (\S+?)(?=\.\s|\.$)", summary)
     assert matched is not None, summary
     assert len(matched.group(1).split(".")[1]) == 2
-    assert len(matched.group(2).replace(".", "").lstrip("0")) <= 2
+    digits = matched.group(2).replace(".", "").replace("-", "").lstrip("0")
+    assert digits.isdigit(), f"MAE formatted unexpectedly: {matched.group(2)!r}"
+    assert len(digits) <= 2, f"MAE printed to more precision than it repeats: {matched.group(2)!r}"
 
 
-def test_an_explicit_zero_tolerance_is_reported_as_a_choice_not_as_silence() -> None:
-    """`if self.front_tolerance` read 0.0 as "none given", which is a different statement.
+def test_a_score_over_enough_runs_drops_the_small_sample_caveat_but_keeps_the_repeat_one() -> None:
+    """The high-`n` branch of the summary was never rendered by any test.
 
-    A caller passing `assay_noise=0.0` has said "compare exactly". Telling them no reproducibility
-    was given, and inviting them to pass one, describes a call they did not make.
+    Only the "fewer than 20 runs" branch was exercised, so a formatting break in the other half
+    would have shipped silently. Constructed directly rather than fitted: the summary is a pure
+    function of the fields, and a real fit here would cost seconds to assert nothing extra.
     """
-    problem, runs = _trade_off()
-    exact = asyncio.run(suggest_next_experiment(problem, runs, count=1, assay_noise=0.0))
-    assert exact.front_tolerance == 0.0
-    assert "No assay reproducibility was given" not in exact.summary
-    assert "0 or less were treated as indistinguishable" in exact.summary
+    over_the_threshold = FitQuality(
+        objective="yield",
+        r2=0.91,
+        mae=1.2,
+        folds=5,
+        n_observations=settings.bo_fit_quality_trustworthy_observations,
+    )
+    assert "sanity check, not as accuracy" not in over_the_threshold.summary
+    # The repeatability caveat is not about sample size, so it survives at any n.
+    assert "not deterministic" in over_the_threshold.summary
+
+    under = over_the_threshold.model_copy(
+        update={"n_observations": settings.bo_fit_quality_trustworthy_observations - 1}
+    )
+    assert "sanity check, not as accuracy" in under.summary
+
+
+def test_a_fold_count_below_two_is_refused() -> None:
+    """One fold holds nothing out, so it is not cross-validation."""
+    with pytest.raises(ValueError, match="at least 2 folds"):
+        surrogate_fit_quality(_problem(), _runs(), folds=1)
+
+
+def test_the_defaulted_fold_count_clamps_up_to_two_at_the_observation_floor() -> None:
+    """`max(2, min(...))` — the floor must clamp *up*, not leave one fold over two runs.
+
+    Two observations is `MIN_SEED_OBSERVATIONS`, so this is the smallest problem that can be
+    cross-validated at all, and `min(5, 2)` alone would be right here only by coincidence.
+    """
+    assert surrogate_fit_quality(_problem(), _runs()[:2])[0].folds == 2

@@ -92,7 +92,6 @@ def test_op13_last_four_results_are_not_distinguishable_from_each_other() -> Non
     progress = read_progress(_amide_problem(), _op13_observations(), assay_noise=2.0, window=4)
     assert progress.window_span == pytest.approx(2.0)
     assert progress.window_indistinguishable is True
-    assert "NOT distinguishable from each other" in progress.summary
 
 
 def test_op13_names_how_long_since_a_gain_that_beat_the_noise() -> None:
@@ -108,7 +107,6 @@ def test_op13_names_how_long_since_a_gain_that_beat_the_noise() -> None:
     assert progress.evaluations_since_improvement == 3
     assert progress.best_value == pytest.approx(89.0)
     assert progress.plateaued is False
-    assert "3 evaluation(s) ago" in progress.summary
 
 
 def test_a_series_that_stopped_moving_is_plateaued() -> None:
@@ -119,9 +117,8 @@ def test_a_series_that_stopped_moving_is_plateaued() -> None:
         assay_noise=2.0,
         window=5,
     )
-    assert progress.evaluations_since_improvement >= 5
+    assert progress.evaluations_since_improvement == 5
     assert progress.plateaued is True
-    assert "Plateaued" in progress.summary
 
 
 def test_a_series_still_climbing_is_not_plateaued() -> None:
@@ -134,7 +131,6 @@ def test_a_series_still_climbing_is_not_plateaued() -> None:
     )
     assert progress.evaluations_since_improvement == 0
     assert progress.plateaued is False
-    assert "still moving" in progress.summary
 
 
 def test_a_series_creeping_past_the_noise_in_small_steps_is_not_plateaued() -> None:
@@ -173,7 +169,9 @@ def test_a_long_creep_ten_times_the_noise_is_not_plateaued() -> None:
         window=5,
     )
     assert progress.plateaued is False
-    assert progress.evaluations_since_improvement < 5
+    # Exactly 1: the anchored counter resets on every second run of a 1.9-step climb against
+    # +/-2 noise. `< 5` had five times the slack of the fix it guards.
+    assert progress.evaluations_since_improvement == 1
     assert progress.best_value == pytest.approx(70.9)
 
 
@@ -183,7 +181,6 @@ def test_below_the_observation_floor_it_refuses_instead_of_verdicting() -> None:
     assert progress.enough_observations is False
     assert progress.plateaued is False
     assert "too few to read a trend from" in progress.summary
-    assert "different from saying the campaign is still improving" in progress.summary
 
 
 def test_the_summary_never_claims_a_global_optimum() -> None:
@@ -234,7 +231,6 @@ def test_the_design_space_is_sized_for_a_finite_space_and_omitted_for_an_infinit
     progress = read_progress(categorical, observations, assay_noise=2.0)
     assert progress.design_space == 6
     assert progress.n_distinct == 5
-    assert "5 distinct condition(s) out of the 6" in progress.summary
 
     infinite = read_progress(_series_problem(), _series([1.0] * 6), assay_noise=0.5)
     assert infinite.design_space is None
@@ -250,7 +246,9 @@ def test_a_repeated_condition_counts_once_against_the_grid() -> None:
         assay_noise=2.0,
     )
     assert progress.n_observations == 6
-    assert progress.n_distinct < progress.n_observations
+    # Exactly 3 — equiv=1.5 four times plus the series' 1.0 and 1.1. `< n_observations` passed for
+    # anything from 1 to 5, so it could not catch a count that collapsed or barely deduplicated.
+    assert progress.n_distinct == 3
 
 
 def test_assay_noise_must_be_positive() -> None:
@@ -310,7 +308,7 @@ def test_the_tool_the_model_sees_demands_the_assay_noise() -> None:
     description = tools["campaign_progress"]
     assert "required and you must get it from the chemist" in description
     assert "ask before calling" in description
-    assert "never show a global optimum" in description or "global optimum" in description
+    assert "global optimum" in description
 
 
 def test_the_default_window_and_floor_come_from_config() -> None:

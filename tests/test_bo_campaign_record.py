@@ -181,7 +181,7 @@ def test_a_later_asker_does_not_become_the_campaign_s_author(
     assert second.opened_by == "chemist-a"
     assert second.created_at == first.created_at
     assert second.last_asked_at is not None and first.last_asked_at is not None
-    assert second.last_asked_at >= first.last_asked_at
+    assert second.last_asked_at > first.last_asked_at
 
 
 def test_recording_never_costs_the_suggestion(monkeypatch: pytest.MonkeyPatch) -> None:

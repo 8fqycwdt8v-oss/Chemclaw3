@@ -67,11 +67,16 @@ def test_the_seeding_path_honours_the_constraint() -> None:
     would let the schema claim a limit was honoured while every first point violated it — and a
     chemist would only find out in the lab.
     """
-    for candidate in initial_candidates(_capped_problem(), 20):
+    candidates = initial_candidates(_capped_problem(), 20)
+    # Bound and counted first: `for x in []: assert ...` passes, so a strategy that returned
+    # nothing would satisfy every assertion below while proving none of them.
+    assert len(candidates) == 20
+    for candidate in candidates:
         total = float(candidate.params["base"]) + float(candidate.params["acid"])
         assert total <= 3.0 + TOLERANCE, candidate.params
 
 
+@pytest.mark.timeout(90)
 def test_the_proposing_path_honours_the_constraint() -> None:
     """And so does the model-guided ask, on a mixed domain.
 
@@ -81,7 +86,9 @@ def test_the_proposing_path_honours_the_constraint() -> None:
     coverage. The property under test is that every returned point satisfies the relation, which two
     points prove as well as five.
     """
-    for candidate in propose_candidates(_capped_problem(), _feasible_runs(), n=2):
+    candidates = propose_candidates(_capped_problem(), _feasible_runs(), n=2)
+    assert len(candidates) == 2
+    for candidate in candidates:
         total = float(candidate.params["base"]) + float(candidate.params["acid"])
         assert total <= 3.0 + TOLERANCE, candidate.params
 
@@ -93,7 +100,9 @@ def test_a_greater_than_constraint_is_honoured_in_the_direction_the_caller_wrote
     negation backwards would silently invert a limit the chemist stated — the optimizer would
     happily return points *below* a floor they asked to stay above, with no error anywhere.
     """
-    for candidate in initial_candidates(_capped_problem(relation=">=", rhs=2.0), 20):
+    candidates = initial_candidates(_capped_problem(relation=">=", rhs=2.0), 20)
+    assert len(candidates) == 20
+    for candidate in candidates:
         total = float(candidate.params["base"]) + float(candidate.params["acid"])
         assert total >= 2.0 - TOLERANCE, candidate.params
 
@@ -109,7 +118,9 @@ def test_an_equality_puts_every_point_on_the_simplex() -> None:
             )
         ],
     )
-    for candidate in initial_candidates(problem, 10):
+    candidates = initial_candidates(problem, 10)
+    assert len(candidates) == 10
+    for candidate in candidates:
         total = sum(float(candidate.params[name]) for name in "xyz")
         assert total == pytest.approx(1.0, abs=1e-6)
 
@@ -178,9 +189,11 @@ def test_a_screen_refuses_a_constrained_problem_rather_than_violating_it() -> No
         asyncio.run(generate_screening_design(_capped_problem()))
 
 
+@pytest.mark.timeout(90)
 def test_the_tool_honours_a_constraint_end_to_end() -> None:
     """The agent-facing path, not just the engine."""
     suggestion = asyncio.run(suggest_next_experiment(_capped_problem(), _feasible_runs(), count=2))
+    assert len(suggestion.candidates) == 2
     for candidate in suggestion.candidates:
         total = float(candidate.params["base"]) + float(candidate.params["acid"])
         assert total <= 3.0 + TOLERANCE, candidate.params
@@ -239,7 +252,18 @@ def test_the_seeding_path_honours_an_exclusion() -> None:
     Six is the whole feasible space, so this also asks for every point in it — a seeding path that
     ignored the exclusion had eight cells to draw from and would be caught here.
     """
-    assert _forbidden(initial_candidates(_excluding_problem(), 6)) == 0
+    candidates = initial_candidates(_excluding_problem(), 6)
+    assert _forbidden(candidates) == 0
+    # The docstring's claim, asserted rather than described: six is the whole feasible space, so
+    # these must be exactly the six cells the exclusion leaves. A `_forbidden(...) == 0` over a
+    # short list would pass while proving much less.
+    assert {tuple(sorted(candidate.params.items())) for candidate in candidates} == {
+        tuple(sorted({"catalyst": catalyst, "solvent": solvent, "base": base}.items()))
+        for catalyst in ("Pd(OAc)2", "Pd2dba3")
+        for solvent in ("DMSO", "toluene")
+        for base in ("K2CO3", "Cs2CO3")
+        if not (catalyst == "Pd(OAc)2" and solvent == "DMSO")
+    }
 
 
 def test_the_proposing_path_honours_an_exclusion() -> None:
@@ -254,7 +278,13 @@ def test_the_proposing_path_honours_an_exclusion() -> None:
             (("Pd(OAc)2", "toluene", "Cs2CO3"), 70.0),
         ]
     ]
-    assert _forbidden(propose_candidates(problem, runs, n=3)) == 0
+    candidates = propose_candidates(problem, runs, n=3)
+    # **Fewer than asked for, and that is measured, not assumed.** Four runs are already told, so
+    # only two feasible cells remain and BoFire warns "Expected 3 candidates, got 2". Asserting
+    # `_forbidden(...) == 0` alone would pass on an empty list; the count is what makes the zero
+    # mean something, and pinning the shortfall is what stops it changing unnoticed.
+    assert len(candidates) == 2
+    assert _forbidden(candidates) == 0
 
 
 def test_an_exclusion_beside_a_continuous_parameter_is_refused_with_the_reason() -> None:
