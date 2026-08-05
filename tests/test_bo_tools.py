@@ -34,7 +34,7 @@ def _problem() -> OptimizationProblem:
             ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
             CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -122,7 +122,7 @@ def _three_factor_problem() -> OptimizationProblem:
             CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
             CategoricalParameter(name="base", categories=["NEt3", "pyridine"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -196,7 +196,7 @@ def test_the_descriptor_bearing_path_is_unaffected(monkeypatch: pytest.MonkeyPat
                 structures={"NEt3": "CCN(CC)CC", "pyridine": "c1ccncc1"},
             ),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     observations = [
         Observation(params={"temperature": 40.0, "base": "NEt3"}, value=55.0),
@@ -214,13 +214,22 @@ def test_the_seeding_path_with_no_observations_is_unaffected() -> None:
     assert len(suggestion.candidates) == 2
 
 
-def test_the_tool_the_model_sees_states_that_one_objective_is_all_there_is() -> None:
-    """`OptimizationProblem` holds one `Objective` and has no constraint field at all.
+def test_the_tool_the_model_sees_states_what_is_and_is_not_supported() -> None:
+    """The description has to keep pace with the capability, and it has twice failed to.
 
-    Neither is partially supported: both are unrepresentable. The module docstring and the
-    `experiment-design` skill said so; the *tool description* — the text the model receives with
-    every call, whether or not the skill is loaded — did not, and a live probe was graded
-    `fabricated` for answering that it had optimized "both objectives".
+    Four states so far, and each transition broke this test on purpose — which is the point of
+    having it. Originally it asserted "One objective, no constraints … they are unrepresentable",
+    because both were, and probe `op-16` was graded `fabricated` for answering that it had optimized
+    "both objectives" anyway. W3 shipped multi-objective, so half that sentence became wrong and was
+    replaced while the constraint half survived verbatim. W4 shipped constraints, so the other half
+    went — and then, within the same wave, the exclusion turned out to be buildable after all, so
+    "a forbidden combination of categories cannot be expressed" had to go too, one commit after it
+    was written.
+
+    A refusal that outlives its refusal is worse than no refusal: it teaches the model to decline a
+    capability that exists. What is still *not* supported is stated in its own right rather than
+    inherited from an older sentence — an exclusion needs an all-categorical problem, and a screen
+    carries no constraint at all.
 
     Asserted against the served MCP description rather than the Python docstring, because that is
     what actually travels to the model.
@@ -229,5 +238,127 @@ def test_the_tool_the_model_sees_states_that_one_objective_is_all_there_is() -> 
 
     tools = {tool.name: (tool.description or "") for tool in asyncio.run(server.list_tools())}
     description = tools["suggest_next_experiment"]
-    assert "One objective, no constraints" in description
-    assert "Pareto" in description
+    # Supported, and said so.
+    assert "Several objectives are supported" in description
+    assert "front" in description
+    assert "problem.constraints" in description
+    assert "forbidden pairing of options" in description
+    # Scoped, and said so in its own words rather than as a blanket refusal.
+    assert "all-categorical" in description
+    # Every stale refusal is gone.
+    assert "One objective, no constraints" not in description
+    assert "pick the one they led with" not in description
+    assert "Constraints are still unrepresentable" not in description
+    assert "cannot be expressed here" not in description
+
+
+# --- multi-objective (W3) ---------------------------------------------------------------------
+
+
+def _trade_off_problem() -> OptimizationProblem:
+    """Maximize yield while minimizing an impurity — the shape every ELN run already records."""
+    return OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+            CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
+        ],
+        objectives=[
+            Objective(name="yield", direction="maximize"),
+            Objective(name="impurity", direction="minimize"),
+        ],
+    )
+
+
+def _trade_off_runs() -> list[Observation]:
+    """Four runs where no single one wins on both axes, plus one that loses on both."""
+    return [
+        Observation(
+            params={"temperature": 40.0, "solvent": "THF"},
+            value=55.0,
+            values={"yield": 55.0, "impurity": 1.0},
+        ),
+        Observation(
+            params={"temperature": 80.0, "solvent": "THF"},
+            value=78.0,
+            values={"yield": 78.0, "impurity": 4.0},
+        ),
+        Observation(
+            params={"temperature": 100.0, "solvent": "toluene"},
+            value=64.0,
+            values={"yield": 64.0, "impurity": 2.0},
+        ),
+        # Dominated: worse yield and worse impurity than the 40C/THF run.
+        Observation(
+            params={"temperature": 30.0, "solvent": "toluene"},
+            value=50.0,
+            values={"yield": 50.0, "impurity": 3.0},
+        ),
+    ]
+
+
+def test_a_two_objective_ask_returns_a_front_of_the_runs_supplied() -> None:
+    """The front is what turns "here is the trade-off" from a sentence into a computation."""
+    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
+    on_front = {(o.values["yield"], o.values["impurity"]) for o in suggestion.front}
+    assert on_front == {(55.0, 1.0), (78.0, 4.0), (64.0, 2.0)}
+    assert (50.0, 3.0) not in on_front, "a run beaten on both axes is not on the front"
+
+
+def test_a_single_objective_ask_draws_no_front() -> None:
+    """One objective has one best point, and a "front" there would invite reading a trade-off."""
+    suggestion = asyncio.run(
+        suggest_next_experiment(
+            _problem(),
+            [
+                Observation(params={"temperature": 40.0, "solvent": "THF"}, value=55.0),
+                Observation(params={"temperature": 80.0, "solvent": "THF"}, value=78.0),
+            ],
+        )
+    )
+    assert suggestion.front == []
+    assert len(suggestion.scales) == 1
+
+
+def test_the_summary_says_there_is_no_single_best_point() -> None:
+    """The caveat has to reach the model composing the answer, not just this file."""
+    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
+    assert "trade-off over 2 objectives" in suggestion.summary
+    assert "no single best point" in suggestion.summary
+    assert "summary" in suggestion.model_dump(mode="json")
+
+
+def test_each_objective_gets_its_own_scale() -> None:
+    """An sd is read against its own objective's spread; yield's spread says nothing about ppm."""
+    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
+    by_name = {scale.name: scale for scale in suggestion.scales}
+    assert by_name["yield"].spread == pytest.approx(28.0)
+    assert by_name["impurity"].spread == pytest.approx(3.0)
+    assert by_name["impurity"].direction == "minimize"
+
+
+def test_candidates_carry_a_prediction_per_objective() -> None:
+    """M-1 measured `<objective>_pred`/`_sd` per objective; this is that reaching the caller."""
+    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
+    candidate = suggestion.candidates[0]
+    assert set(candidate.predicted_values) == {"yield", "impurity"}
+    assert set(candidate.predicted_sds) == {"yield", "impurity"}
+    # The scalars keep the lead objective, which is what every persisted row already holds.
+    assert candidate.predicted_value == pytest.approx(candidate.predicted_values["yield"])
+
+
+def test_an_observation_missing_an_objective_is_refused_by_index() -> None:
+    """A run that reports yield but not the impurity cannot seed a trade-off, and says so."""
+    runs = _trade_off_runs()
+    runs[1] = Observation(params=runs[1].params, value=78.0, values={"yield": 78.0})
+    with pytest.raises(ValueError, match=r"observations\[1\]"):
+        asyncio.run(suggest_next_experiment(_trade_off_problem(), runs))
+
+
+def test_an_observation_that_disagrees_with_itself_is_refused() -> None:
+    """`value` is the lead objective's number and both are persisted, so they cannot differ."""
+    runs = _trade_off_runs()
+    runs[0] = Observation(
+        params=runs[0].params, value=55.0, values={"yield": 61.0, "impurity": 1.0}
+    )
+    with pytest.raises(ValueError, match="disagrees with itself"):
+        asyncio.run(suggest_next_experiment(_trade_off_problem(), runs))

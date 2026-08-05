@@ -281,7 +281,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       identically under one `bo_seed`. `block_feature_key` stays unbuilt — it needs a block factor
       (a day, a plate, an operator) and none exists in `src/`.
 
-- [ ] **W3 — multi-objective is unrepresentable, on a corpus that records a trade-off** — [M].
+- [x] **W3 — multi-objective is unrepresentable, on a corpus that records a trade-off** — [M].
       Every ELN run carries `yield_percent`, `purity_percent` *and* `impurities[].area_percent`;
       `OptimizationProblem` has one `objective` field, and `op-16` was graded *fabricated* for
       promising "both objectives" anyway. Measured (M-1): `MoboStrategy` validates with no reference
@@ -300,8 +300,17 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       same commit, or the model is taught to refuse a capability that exists. Inline only: the
       durable registry is `Callable[..., Awaitable[float]]` with two demo entries. Closes 3.3's
       objective half; unblocks 4.5's "objectives" plural.
+      **Closed by D-2026-08-04-a-trade-off-has-no-single-best-point.** Two artefacts had to change
+      with the code rather than after it: the tool description, whose "One objective, no constraints"
+      sentence covered two halves that now differ (the objective half is replaced, the constraint
+      half survives verbatim until W4), and `data/evals/probes/optimization.yaml`'s `op-16`, which
+      graded the model on *refusing* multi-objective and would have marked the correct new behaviour
+      as a failure. Its `forbids_claims` now name the overclaims actually available: a single best
+      point, a front presented as a prediction, and a proof that no better trade-off exists.
+      `campaign_progress` gained the same refusal `best_of` has — a plateau is per axis, so a
+      trade-off must name which objective to read.
 
-- [ ] **W4 — a limit the chemist states cannot be expressed** — [M]. `Domain(constraints=…)` is
+- [x] **W4 — a limit the chemist states cannot be expressed** — [M]. `Domain(constraints=…)` is
       never passed, so "keep base plus acid under 3 equivalents" has to be smuggled into a bound or
       silently ignored. Measured (M-3), and the question that mattered was not SOBO but
       `RandomStrategy`, which seeds every cold start: **0 violations of 20** random points, **0 of
@@ -318,8 +327,18 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       "Searched over:" block becomes untrue the moment constraints reach the durable path — it would
       describe a box when the campaign searched a polytope — so it gains a "Subject to:" block in
       the same diff. Closes 3.3's constraint half.
+      **Closed by D-2026-08-04-a-limit-across-parameters-is-not-a-bound.** Two claims above did not
+      survive the build. The exclusion is **not** expressible for a screen: M-4 had measured it
+      against `SoboStrategy` and `RandomStrategy` only, and measured against
+      `FractionalFactorialStrategy` (M-4c/M-4d) that strategy rejects *every* constraint class at
+      construction — linear included. So `factorial_design`'s refusal is the message, not the
+      safety: it raises where the caller can act instead of surfacing a pydantic error naming a
+      BoFire class. The two constraint shapes are a two-member discriminated union on `kind`, which
+      is what `kind` was put there for; an exclusion additionally needs an all-categorical problem,
+      and the validator names the caller's own continuous parameters rather than repeating BoFire's
+      "pure categorical/discrete search spaces".
 
-- [ ] **W5 — nothing reads the surrogate back** — [S]. (i) `predict_outcome`: "what would the model
+- [x] **W5 — nothing reads the surrogate back** — [S]. (i) `predict_outcome`: "what would the model
       predict for 90 °C in toluene with L3", the question a chemist asks *instead of* trusting a
       recommendation. Measured (M-6): `predict()` accepts a params-only frame, works on a featurized
       domain, and does **not** clamp an out-of-bounds point — it extrapolates with the sd rising
@@ -332,6 +351,17 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       is already installed via `bofire[optimization]`, so nothing here costs a dependency. Needs the
       "a CV score over ten observations will be over-read" caveat as a `computed_field`, not a
       docstring.
+      **Closed by D-2026-08-04-the-model-can-be-asked-not-only-obeyed.** Both halves ship behind one
+      `predict_outcome` tool over **one** fit, which is what makes the score mean anything: a
+      quality measured off a separately configured strategy would describe a model nobody's
+      recommendation came from. The register's exact pair does **not** reproduce and is retracted — its
+      script passes `get_metric` a string where an enum is required and raises — but the finding
+      does, at R² 0.935 / MAE 1.695 corrected, 0.950 / 1.36 through the shipped code and 0.813 /
+      3.45 on `op-13`'s twelve real runs. The extrapolation signal is starker than measured: sd 0.97
+      in range against 18.6 at T=400. One correction to the plan: `get_metric`
+      returns a `pd.Series`, and its `combine_folds=True` default pools the held-out predictions,
+      which is the number to report — a mean of per-fold R² weights a two-point fold like a
+      ten-point one. `op-13`'s posterior half closes with it.
 
 - [ ] **The `method` note type is what analytical method development is actually waiting on** —
       [M], and it is a schema row rather than a BO one. 24 stories sit in §7/§8 and a

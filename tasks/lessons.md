@@ -1022,3 +1022,26 @@ which is what it is for.
 
 **Rule: a wait condition gets read twice before it is run.** `>= now + 1` and `> now` differ by a
 character and by whether the machine stays usable.
+
+## R5.5 — A measurement script is code, and an unrun one is a claim
+
+**What happened.** The BO roadmap's measurement register recorded "10 rows, 5 folds → R² 0.948,
+MAE 1.47" for `cross_validate`, and that number travelled into an ADR, a maintained capability map
+and a BACKLOG row. Re-running the register at the end of the roadmap, the script that produced it
+**raises**: it passes `get_metric` the string `"R2"`, and BoFire builds the result Series with
+`name=metric.name`, which a `str` does not have. The pair cannot be produced by anything in the
+scratchpad. The *finding* it supported is solid — `cross_validate` runs off
+`strategy.surrogate_specs` with no class named — and reproduces at 0.935, 0.950 and 0.813 across
+three routes. Only the number was fiction, and it was the most quotable part.
+
+The whole point of the register was that "prose is evidence about what its author believed, never
+about what the code does". A number transcribed from a script whose failure branch printed a message
+is prose wearing a number's clothes.
+
+**Rule: a measured number is only measured if the script that produced it runs green today.** Keep
+the scripts, re-run them at the end of the work they justified, and treat a `try/except` that prints
+a diagnostic as a place where a number can quietly stop existing.
+
+**Rule: when a measurement is retracted, retract it where it was cited** — the maintained document
+and the open backlog row, not only the new ADR. A merged ADR is never edited, so the correction has
+to be findable from the places a reader would actually reach for the number.

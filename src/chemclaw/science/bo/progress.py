@@ -23,11 +23,22 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from chemclaw.core.config import settings
 from chemclaw.science.bo.problem import (
+    Objective,
     Observation,
     OptimizationProblem,
     discrete_candidate_count,
     distinct_candidate_count,
+    observed_value,
 )
+
+
+def _named(problem: OptimizationProblem, objective: str) -> Objective:
+    """The named objective, or a message listing the ones this problem actually declares."""
+    for candidate in problem.objectives:
+        if candidate.name == objective:
+            return candidate
+    declared = [item.name for item in problem.objectives]
+    raise ValueError(f"unknown objective {objective!r}; this problem declares {declared}")
 
 
 def _improved_by(direction: str, new: float, best: float) -> float:
@@ -145,6 +156,7 @@ def campaign_progress(
     observations: list[Observation],
     assay_noise: float,
     window: int | None = None,
+    objective: str | None = None,
 ) -> CampaignProgress:
     """Read a campaign's observations for a plateau, against the noise the chemist stated.
 
@@ -156,6 +168,9 @@ def campaign_progress(
         assay_noise: The assay's reproducibility, in the objective's own units. Required.
         window: How many recent evaluations the span statement covers, defaulting to
             `bo_plateau_window`.
+        objective: Which objective to read. Optional on a single-objective problem, where there is
+            only one; **required** on a multi-objective one, where a plateau is per axis and
+            picking the lead silently would answer a question nobody asked.
 
     Returns:
         The reading, with a `summary` stating what it does and does not establish.
@@ -169,8 +184,16 @@ def campaign_progress(
     if span_window < 1:
         raise ValueError(f"window must be at least 1; got {span_window}")
 
-    direction = problem.objective.direction
-    values = [observation.value for observation in observations]
+    if objective is None and len(problem.objectives) > 1:
+        named = ", ".join(item.name for item in problem.objectives)
+        raise ValueError(
+            f"this problem has {len(problem.objectives)} objectives ({named}); name which one to "
+            "read a plateau for. A trade-off plateaus per axis, and answering for the first one "
+            "without being asked would report a different question than the one put."
+        )
+    chosen = problem.objective if objective is None else _named(problem, objective)
+    direction = chosen.direction
+    values = [observed_value(problem, observation, chosen.name) for observation in observations]
     best_so_far: list[float] = []
     since = 0
     best: float | None = None
@@ -189,7 +212,7 @@ def campaign_progress(
     span = max(tail) - min(tail) if len(tail) >= 2 else None
     enough = len(values) >= settings.bo_plateau_min_observations
     return CampaignProgress(
-        objective=problem.objective.name,
+        objective=chosen.name,
         direction=direction,
         assay_noise=assay_noise,
         window=span_window,

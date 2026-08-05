@@ -54,7 +54,7 @@ def _amide_problem() -> OptimizationProblem:
             ContinuousParameter(name="equiv", lower=1.0, upper=3.0),
             ContinuousParameter(name="temperature", lower=0.0, upper=40.0),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -78,7 +78,7 @@ def _series_problem() -> OptimizationProblem:
     """A single continuous factor, maximizing — the shape `_series` builds points in."""
     return OptimizationProblem(
         parameters=[ContinuousParameter(name="equiv", lower=1.0, upper=3.0)],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -176,7 +176,7 @@ def test_a_minimize_campaign_reads_gains_in_its_own_direction() -> None:
     """Falling values are improvements when the objective is minimized."""
     problem = OptimizationProblem(
         parameters=[ContinuousParameter(name="equiv", lower=1.0, upper=3.0)],
-        objective=Objective(name="impurity", direction="minimize"),
+        objectives=[Objective(name="impurity", direction="minimize")],
     )
     progress = read_progress(
         problem, _series([9.0, 7.0, 5.0, 3.0, 1.5, 0.5]), assay_noise=0.5, window=3
@@ -193,7 +193,7 @@ def test_the_design_space_is_sized_for_a_finite_space_and_omitted_for_an_infinit
             CategoricalParameter(name="solvent", categories=["THF", "toluene", "dioxane"]),
             CategoricalParameter(name="base", categories=["K2CO3", "Cs2CO3"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     observations = [
         Observation(params={"solvent": solvent, "base": base}, value=value)
@@ -366,3 +366,43 @@ def test_the_scale_survives_serialization_because_summary_is_a_computed_field() 
     assert "summary" in dumped
     progress = read_progress(_series_problem(), _series([50.0] * 8), assay_noise=1.0)
     assert "summary" in progress.model_dump(mode="json")
+
+
+def test_a_plateau_on_a_trade_off_must_name_which_objective() -> None:
+    """A trade-off plateaus per axis: yield can stop moving while the impurity is still falling.
+
+    Silently reading the lead objective would answer a different question from the one put, which
+    is the same failure `best_of` refuses one module over.
+    """
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="equiv", lower=1.0, upper=3.0)],
+        objectives=[
+            Objective(name="yield", direction="maximize"),
+            Objective(name="impurity", direction="minimize"),
+        ],
+    )
+    runs = [
+        Observation(
+            params={"equiv": 1.0 + 0.1 * index},
+            value=50.0 + index,
+            values={"yield": 50.0 + index, "impurity": 10.0 - index},
+        )
+        for index in range(8)
+    ]
+    with pytest.raises(ValueError, match="name which one"):
+        read_progress(problem, runs, assay_noise=2.0)
+    # Named, it reads that axis and says so.
+    impurity = read_progress(problem, runs, assay_noise=0.5, objective="impurity")
+    assert impurity.objective == "impurity"
+    assert impurity.direction == "minimize"
+    assert impurity.best_value == pytest.approx(3.0)
+
+
+def test_an_unknown_objective_lists_the_ones_the_problem_declares() -> None:
+    """A typo gets the names back rather than a KeyError from inside the arithmetic."""
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="equiv", lower=1.0, upper=3.0)],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match=r"unknown objective 'yeild'.*\['yield'\]"):
+        read_progress(problem, _series([50.0] * 8), assay_noise=1.0, objective="yeild")

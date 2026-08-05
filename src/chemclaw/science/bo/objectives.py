@@ -51,7 +51,7 @@ def molecule_library_problem(smiles: list[str]) -> OptimizationProblem:
     library = list(dict.fromkeys(require_canonical_smiles(entry) for entry in smiles))
     return OptimizationProblem(
         parameters=[CategoricalParameter(name=MOLECULE_KEY, categories=library)],
-        objective=ObjectiveSpec(name="log_s", direction="maximize"),
+        objectives=[ObjectiveSpec(name="log_s", direction="maximize")],
     )
 
 

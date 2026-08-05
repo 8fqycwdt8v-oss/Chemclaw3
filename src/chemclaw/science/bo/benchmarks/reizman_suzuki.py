@@ -58,7 +58,7 @@ def build_problem(frame: pd.DataFrame) -> OptimizationProblem:
             )
         )
     return OptimizationProblem(
-        parameters=parameters, objective=Objective(name=_OBJECTIVE, direction="maximize")
+        parameters=parameters, objectives=[Objective(name=_OBJECTIVE, direction="maximize")]
     )
 
 

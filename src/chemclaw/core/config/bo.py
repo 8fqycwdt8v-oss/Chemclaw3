@@ -46,3 +46,13 @@ class BoSettings(BaseSettings):
     # one. A trend read off three points is the failure the whole tool exists to prevent, so the
     # floor is stated rather than left to the caller's judgement.
     bo_plateau_min_observations: int = Field(default=6, ge=2)
+    # Folds for the cross-validated fit quality behind a recommendation (W5). Five is BoFire's own
+    # working default and costs five refits of a model that fits in well under a second at campaign
+    # sizes; the caller overrides it per question.
+    bo_cv_folds: int = Field(default=5, ge=2)
+    # Below this many observations a cross-validated score is reported *with* the caveat that it
+    # will be over-read. Twenty is a judgement, not a threshold anyone derived: it is roughly where
+    # a five-fold split stops holding out two or three points per fold. The number is here rather
+    # than in the summary string because the sentence a chemist reads should not be a magic number
+    # in a docstring.
+    bo_fit_quality_trustworthy_observations: int = Field(default=20, ge=2)

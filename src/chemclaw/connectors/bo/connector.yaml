@@ -21,17 +21,21 @@ endpoint:
     - resume_campaign
     - generate_screening_design
     - campaign_progress
+    - predict_outcome
   # The two design tools propose experiments and return them; neither runs one. `resume_campaign`
   # only reads the campaign record back — it is what makes the `campaign_id` that
   # `suggest_next_experiment` hands out worth quoting, since without it a later session could
   # recover an optimization's history only from the chat transcript. `campaign_progress` is pure
-  # arithmetic over the runs it is handed and asks no surrogate at all. The job below *does*
-  # persist state, and is gated by being a job.
+  # arithmetic over the runs it is handed and asks no surrogate at all. `predict_outcome` fits a
+  # surrogate and queries it, and records nothing: the points are the caller's questions, not
+  # proposals, so no campaign row is written for them. The job below *does* persist state, and is
+  # gated by being a job.
   read_only:
     - suggest_next_experiment
     - resume_campaign
     - generate_screening_design
     - campaign_progress
+    - predict_outcome
 
 jobs:
   - name: start_optimization_campaign
@@ -47,11 +51,13 @@ jobs:
     # express without losing exactly the structure the model needs — so the existing validated model
     # is referenced instead of re-declared.
     params_model: chemclaw.science.bo.problem:CampaignSpec
-    # Temporal event history is finite and a campaign re-sends its whole observation history each
-    # round, so history grows quadratically with rounds: past the ceiling the server terminates the
-    # run mid-flight and every already-paid evaluation is lost. Checked at launch because that is the
-    # only replay-safe place (see `JobSpec.precondition`).
-    precondition: chemclaw.science.bo.problem:require_campaign_within_ceiling
+    # Two launch rules, in one function because a manifest names one. The round ceiling: Temporal
+    # event history is finite and a campaign re-sends its whole observation history each round, so
+    # history grows quadratically and past the ceiling the server terminates the run mid-flight,
+    # losing every already-paid evaluation. And single-objective: the objective registry maps a name
+    # to one scalar-returning callable, so a trade-off belongs on the inline tool. Both checked at
+    # launch because that is the only replay-safe place (see `JobSpec.precondition`).
+    precondition: chemclaw.science.bo.problem:require_campaign_startable
     expensive: true
     publish_to_graph: true
 

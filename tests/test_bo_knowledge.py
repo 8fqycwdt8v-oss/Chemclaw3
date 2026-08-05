@@ -35,7 +35,7 @@ _PROBLEM = OptimizationProblem(
         CategoricalParameter(name="catalyst", categories=["P1", "P2"]),
         ContinuousParameter(name="temperature", lower=30.0, upper=110.0),
     ],
-    objective=Objective(name="yield", direction="maximize"),
+    objectives=[Objective(name="yield", direction="maximize")],
 )
 
 _RESULT = CampaignResult(
@@ -62,7 +62,7 @@ _MOLECULE_PROBLEM = OptimizationProblem(
         ),
         ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
     ],
-    objective=Objective(name="yield", direction="maximize"),
+    objectives=[Objective(name="yield", direction="maximize")],
 )
 
 _MOLECULE_BEST = Observation(
@@ -347,7 +347,7 @@ def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> 
             ContinuousParameter(name=f"reagent_equivalents_{i}", lower=0.5, upper=5.0)
             for i in range(8)
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     best = Observation(
         params={f"reagent_equivalents_{i}": 1.0 + i for i in range(8)},

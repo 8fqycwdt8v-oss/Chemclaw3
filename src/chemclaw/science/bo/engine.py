@@ -27,7 +27,14 @@ from typing import Any
 import numpy.linalg
 import pandas as pd
 import torch
-from bofire.data_models.domain.api import Domain, Inputs, Outputs
+from bofire.data_models.constraints.api import (
+    CategoricalExcludeConstraint,
+    LinearEqualityConstraint,
+    LinearInequalityConstraint,
+    SelectionCondition,
+)
+from bofire.data_models.domain.api import Constraints, Domain, Inputs, Outputs
+from bofire.data_models.enum import RegressionMetricsEnum
 from bofire.data_models.features.api import (
     CategoricalDescriptorInput,
     CategoricalInput,
@@ -37,10 +44,12 @@ from bofire.data_models.features.api import (
 from bofire.data_models.objectives.api import MaximizeObjective, MinimizeObjective
 from bofire.data_models.strategies.api import (
     FractionalFactorialStrategy,
+    MoboStrategy,
     RandomStrategy,
     SoboStrategy,
 )
 from bofire.strategies import api as strategies
+from bofire.surrogates import api as surrogate_api
 from bofire.utils.doe import get_generator
 from botorch.exceptions.errors import BotorchError, ModelFittingError
 from linear_operator.utils.errors import NanError, NotPSDError
@@ -51,13 +60,19 @@ from chemclaw.science.bo.problem import (
     MIN_SEED_OBSERVATIONS,
     Candidate,
     CategoricalParameter,
+    Constraint,
     ContinuousParameter,
+    ExcludeConstraint,
+    FitQuality,
     Observation,
     OptimizationProblem,
     ParamValue,
+    Prediction,
     ScreeningDesign,
     discrete_candidate_count,
+    observed_value,
     params_key,
+    point_in_domain,
 )
 
 
@@ -147,17 +162,75 @@ def _categorical_input(
 
 
 def _objective_output(problem: OptimizationProblem) -> ContinuousOutput:
-    """The problem's single objective as a BoFire output, whichever domain shape needs it."""
-    objective = (
-        MinimizeObjective(w=1.0)
-        if problem.objective.direction == "minimize"
-        else MaximizeObjective(w=1.0)
+    """The problem's **lead** objective as a BoFire output.
+
+    Kept for the classical design paths, which have no objective at all: `factorial_design` builds a
+    domain only because BoFire requires outputs, and its direction is never read. A screen over a
+    multi-objective problem is still one screen.
+    """
+    return _outputs(problem)[0]
+
+
+def _outputs(problem: OptimizationProblem) -> list[ContinuousOutput]:
+    """Every objective as a BoFire output, in declaration order (W3)."""
+    return [
+        ContinuousOutput(
+            key=objective.name,
+            objective=(
+                MinimizeObjective(w=1.0)
+                if objective.direction == "minimize"
+                else MaximizeObjective(w=1.0)
+            ),
+        )
+        for objective in problem.objectives
+    ]
+
+
+def _exclusion(constraint: ExcludeConstraint) -> CategoricalExcludeConstraint:
+    """Map a forbidden pairing of categorical options.
+
+    BoFire's conditions are positional — one per feature, combined by `logical_op` — so an `AND` of
+    two selections excludes exactly the cross product of the two option lists, which is what our
+    `parameters`/`options` pairing means.
+    """
+    return CategoricalExcludeConstraint(
+        features=list(constraint.parameters),
+        conditions=[SelectionCondition(selection=list(options)) for options in constraint.options],
+        logical_op="AND",
     )
-    return ContinuousOutput(key=problem.objective.name, objective=objective)
+
+
+def _constraint(
+    constraint: Constraint,
+) -> LinearEqualityConstraint | LinearInequalityConstraint | CategoricalExcludeConstraint:
+    """Map one neutral constraint, normalizing `>=` by negation.
+
+    BoFire's inequality is `coefficients · x <= rhs` (measured, M-3a: 20 of 20 random points
+    satisfied `a + b <= 3`, none satisfied the reverse). That sense is *asserted by a test* rather
+    than assumed, because getting it backwards silently inverts a limit the chemist stated — the one
+    bug in this wave that produces a confidently wrong experiment rather than an error.
+
+    `>=` has no BoFire class, so it is the same inequality with every sign flipped: `a + b >= 3`
+    is `-a - b <= -3`.
+    """
+    if isinstance(constraint, ExcludeConstraint):
+        return _exclusion(constraint)
+    if constraint.relation == "==":
+        return LinearEqualityConstraint(
+            features=list(constraint.parameters),
+            coefficients=list(constraint.coefficients),
+            rhs=constraint.rhs,
+        )
+    sign = -1.0 if constraint.relation == ">=" else 1.0
+    return LinearInequalityConstraint(
+        features=list(constraint.parameters),
+        coefficients=[sign * coefficient for coefficient in constraint.coefficients],
+        rhs=sign * constraint.rhs,
+    )
 
 
 def _to_domain(problem: OptimizationProblem) -> Domain:
-    """Translate our problem into a BoFire `Domain` (inputs + one objective output)."""
+    """Translate our problem into a BoFire `Domain` (inputs, one output per objective, limits)."""
     inputs = []
     for parameter in problem.parameters:
         if isinstance(parameter, ContinuousParameter):
@@ -167,7 +240,16 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
         else:
             inputs.append(_categorical_input(parameter))
     return Domain(
-        inputs=Inputs(features=inputs), outputs=Outputs(features=[_objective_output(problem)])
+        inputs=Inputs(features=inputs),
+        outputs=Outputs(features=_outputs(problem)),
+        # Honoured by **both** strategies that see this domain, which is the measurement that
+        # decided this wave: `RandomStrategy` seeds every cold-start campaign, and had it ignored
+        # constraints the schema would have claimed a limit was honoured while every seed point
+        # violated it. Measured 0 violations of 20 random points and 0 of 5 SOBO proposals, so no
+        # rejection-sampling path is needed here.
+        constraints=Constraints(
+            constraints=[_constraint(constraint) for constraint in problem.constraints]
+        ),
     )
 
 
@@ -179,13 +261,13 @@ def _cast(parameter: ContinuousParameter | CategoricalParameter, raw: Any) -> Pa
 def _observations_to_frame(
     problem: OptimizationProblem, observations: list[Observation]
 ) -> pd.DataFrame:
-    """Build the experiments dataframe BoFire's `tell` expects."""
-    objective_key = problem.objective.name
+    """Build the experiments dataframe BoFire's `tell` expects, one column pair per objective."""
     rows = []
     for obs in observations:
         row: dict[str, object] = dict(obs.params)
-        row[objective_key] = obs.value
-        row[f"valid_{objective_key}"] = 1
+        for objective in problem.objectives:
+            row[objective.name] = observed_value(problem, obs, objective.name)
+            row[f"valid_{objective.name}"] = 1
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -202,15 +284,42 @@ def _frame_to_candidates(problem: OptimizationProblem, frame: pd.DataFrame) -> l
     `_des` is deliberately left behind. It is the acquisition/desirability score — a ranking
     quantity in the strategy's own units, not a statement about the chemistry — and carrying it
     would invite reading it as a confidence.
+
+    **A multi-objective ask returns the same columns per objective** (measured, M-1:
+    `yield_pred, impurity_pred, yield_sd, impurity_sd, …`), so the per-objective vectors are filled
+    from the same reader. The scalars keep the lead objective, which is what every persisted row and
+    every existing consumer already holds.
     """
-    predicted, sd = f"{problem.objective.name}_pred", f"{problem.objective.name}_sd"
+    predicted_values, predicted_sds = {}, {}
+    for objective in problem.objectives:
+        name = objective.name
+        if f"{name}_pred" in frame.columns:
+            predicted_values[name] = f"{name}_pred"
+        if f"{name}_sd" in frame.columns:
+            predicted_sds[name] = f"{name}_sd"
+    lead = problem.objective.name
+    multi = len(problem.objectives) > 1
     return [
         Candidate(
             params={p.name: _cast(p, row[p.name]) for p in problem.parameters},
-            predicted_value=float(row[predicted]) if predicted in frame.columns else None,
+            predicted_value=(
+                float(row[predicted_values[lead]]) if lead in predicted_values else None
+            ),
             # abs(): a posterior sd is non-negative by definition, and the field enforces it, but
             # a float round-trip through the surrogate can land a hair below zero.
-            predicted_sd=abs(float(row[sd])) if sd in frame.columns else None,
+            predicted_sd=abs(float(row[predicted_sds[lead]])) if lead in predicted_sds else None,
+            # Empty on a single-objective problem: the scalars above are the whole answer there, and
+            # a duplicate of them would be a second place for the same number to drift.
+            predicted_values=(
+                {name: float(row[column]) for name, column in predicted_values.items()}
+                if multi
+                else {}
+            ),
+            predicted_sds=(
+                {name: abs(float(row[column])) for name, column in predicted_sds.items()}
+                if multi
+                else {}
+            ),
         )
         for _, row in frame.iterrows()
     ]
@@ -255,22 +364,167 @@ def propose_candidates(
     n: int = 1,
     seed: int | None = None,
 ) -> list[Candidate]:
-    """Propose the next `n` candidates from past observations via SOBO.
+    """Propose the next `n` candidates from past observations — SOBO, or MOBO for a trade-off.
 
     Requires at least `MIN_SEED_OBSERVATIONS` observations to fit the surrogate
     (BoFire's floor); call `initial_candidates` first to seed. Raises `ValueError`
     below that floor rather than surfacing an opaque BoFire error (gate G4).
+
+    **The strategy follows the problem, not a setting** (W3). One objective gets `SoboStrategy`;
+    more than one gets `MoboStrategy`, whose default acquisition is `qLogNEHVI`. Measured (M-1):
+    `MoboStrategy` validates with `ref_point` unset — it derives a *moving* reference per objective
+    (`AbsoluteMovingReferenceValue`) from the data rather than hiding a fixed one — and it fits at
+    two observations, the same floor SOBO has, so `MIN_SEED_OBSERVATIONS` is unchanged.
     """
     if len(observations) < MIN_SEED_OBSERVATIONS:
         raise ValueError(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
-    strategy = strategies.map(SoboStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
-    context = f"fitting the surrogate to {len(observations)} observation(s)"
-    with _translating_surrogate_errors(context):
-        strategy.tell(_observations_to_frame(problem, observations))
+    strategy, _ = _fitted_strategy(problem, observations, seed)
+    with _translating_surrogate_errors(f"asking for {n} candidate(s)"):
         candidates = strategy.ask(n)
     return _frame_to_candidates(problem, candidates)
+
+
+def _fitted_strategy(
+    problem: OptimizationProblem, observations: list[Observation], seed: int | None
+) -> tuple[Any, pd.DataFrame]:
+    """Build the strategy the problem calls for and fit it to the observations.
+
+    Shared by the three things that need a fitted model — propose, predict, cross-validate — so all
+    three speak about *the same* surrogate rather than three independently configured ones. That is
+    the whole reason `surrogate_fit_quality` is trustworthy: BoFire picks the surrogate class from
+    the domain, so a fit quality measured off this strategy describes the model that made the
+    recommendation, and no surrogate class is named in our code (measured, M-7).
+
+    The fitted frame is returned beside the strategy because cross-validation needs the same rows,
+    and rebuilding them would be a second definition of "the experiments".
+    """
+    if len(observations) < MIN_SEED_OBSERVATIONS:
+        raise ValueError(
+            f"a surrogate needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
+        )
+    domain = _to_domain(problem)
+    resolved = _resolve_seed(seed)
+    specification = (
+        MoboStrategy(domain=domain, seed=resolved)
+        if len(problem.objectives) > 1
+        else SoboStrategy(domain=domain, seed=resolved)
+    )
+    strategy = strategies.map(specification)
+    frame = _observations_to_frame(problem, observations)
+    context = f"fitting the surrogate to {len(observations)} observation(s)"
+    with _translating_surrogate_errors(context):
+        strategy.tell(frame)
+    return strategy, frame
+
+
+def predict_at(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    points: list[dict[str, ParamValue]],
+    seed: int | None = None,
+) -> list[Prediction]:
+    """Answer "what would the model predict at these conditions?" (W5).
+
+    The question a chemist asks *instead of* trusting a recommendation — "what does it expect at
+    90 °C in toluene with L3?" — answered from the same fit `propose_candidates` uses, so the two
+    cannot disagree.
+
+    Measured (M-6): `predict()` exists after `tell`, accepts a frame of parameters with no objective
+    columns, and works on a `CategoricalDescriptorInput` domain, which is the shape a featurized
+    problem actually reaches the engine as. An out-of-domain point is **not** clamped — it
+    extrapolates, with the sd rising about sixfold — so the point is answered and labelled rather
+    than refused; `Prediction.in_domain` carries the label and its summary states it.
+
+    Raises:
+        ValueError: Below the surrogate's observation floor, or with no point to predict.
+    """
+    if not points:
+        raise ValueError("predict_at needs at least one point to predict")
+    strategy, _ = _fitted_strategy(problem, observations, seed)
+    frame = pd.DataFrame(
+        [{p.name: point.get(p.name) for p in problem.parameters} for point in points]
+    )
+    with _translating_surrogate_errors(f"predicting at {len(points)} point(s)"):
+        predicted = strategy.predict(frame)
+    return [
+        Prediction(
+            params={p.name: _cast(p, frame.iloc[index][p.name]) for p in problem.parameters},
+            values={
+                objective.name: float(predicted.iloc[index][f"{objective.name}_pred"])
+                for objective in problem.objectives
+            },
+            sds={
+                objective.name: float(predicted.iloc[index][f"{objective.name}_sd"])
+                for objective in problem.objectives
+            },
+            in_domain=point_in_domain(problem, points[index]),
+        )
+        for index in range(len(points))
+    ]
+
+
+def _metric(results: Any, metric: RegressionMetricsEnum) -> float:
+    """One number from a `CvResults`, pooled across folds rather than averaged over them.
+
+    `get_metric` returns a `pd.Series`, and its default `combine_folds=True` computes the metric
+    once over *all* held-out predictions together. That is the number to report: a mean of
+    per-fold R² weights a fold of two points the same as a fold of ten, and at campaign sizes the
+    folds are exactly that uneven.
+    """
+    return float(results.get_metric(metric).iloc[0])
+
+
+def surrogate_fit_quality(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    folds: int | None = None,
+    seed: int | None = None,
+) -> list[FitQuality]:
+    """Cross-validate the surrogate behind the recommendation, one score per objective (W5).
+
+    **This capability was refused, and a measurement reversed the refusal.** The objection was that
+    reaching `cross_validate` means naming a surrogate class here, permanently coupling us to
+    BoFire's model zoo and risking a number that describes a *different* model than the one that
+    made the recommendation. Measured (M-7), `strategy.surrogate_specs.surrogates` exposes the
+    surrogates BoFire itself chose from the domain — `MixedSingleTaskGPSurrogate` for a mixed
+    domain, `SingleTaskGPSurrogate` for a featurized one — and `cross_validate` runs straight off
+    them. So no class is named below, and the score describes *the* model.
+
+    `folds` defaults to `bo_cv_folds`. Metrics come back keyed by `RegressionMetricsEnum`, not by
+    string, so the enum is what is read.
+
+    Raises:
+        ValueError: Below the observation floor, or with fewer observations than folds.
+    """
+    resolved_folds = settings.bo_cv_folds if folds is None else folds
+    if resolved_folds < 2:
+        raise ValueError(f"cross-validation needs at least 2 folds; got {resolved_folds}")
+    strategy, frame = _fitted_strategy(problem, observations, seed)
+    if len(observations) < resolved_folds:
+        raise ValueError(
+            f"cannot cross-validate {len(observations)} observation(s) over {resolved_folds} "
+            "folds: each fold would hold out less than one run. Supply more runs, or ask for "
+            "fewer folds."
+        )
+    scores = []
+    with _translating_surrogate_errors(f"cross-validating over {resolved_folds} folds"):
+        for objective, specification in zip(
+            problem.objectives, strategy.surrogate_specs.surrogates, strict=True
+        ):
+            surrogate = surrogate_api.map(specification)
+            _, test, _ = surrogate.cross_validate(frame, folds=resolved_folds)
+            scores.append(
+                FitQuality(
+                    objective=objective.name,
+                    r2=_metric(test, RegressionMetricsEnum.R2),
+                    mae=_metric(test, RegressionMetricsEnum.MAE),
+                    folds=resolved_folds,
+                    n_observations=len(observations),
+                )
+            )
+    return scores
 
 
 def _resolution(generator: str) -> int:
@@ -496,6 +750,19 @@ def factorial_design(
     The returned `ScreeningDesign` carries the design's `resolution` and a `summary` naming it, so
     a reduced design cannot be presented as an exhaustive one.
     """
+    if problem.constraints:
+        # Measured: `FractionalFactorialStrategy` rejects *every* constraint class at construction
+        # ("is not implemented for strategy FractionalFactorialStrategy"), linear and exclusion
+        # alike — a screen enumerates corners and there is no feasible-region step in it. So this
+        # refusal is not the safety; it is the message, raised where the caller can act on it
+        # instead of arriving as a pydantic error naming a BoFire class.
+        stated = "; ".join(constraint.describe() for constraint in problem.constraints)
+        raise ValueError(
+            f"a factorial screen cannot honour a constraint ({stated}): it enumerates the corners "
+            "of the space, and BoFire refuses a constrained design outright. Drop the constraint "
+            "and filter the returned runs yourself — saying that you did — or use "
+            "`suggest_next_experiment`, which does honour it."
+        )
     if n_generators < 0:
         # Not left to BoFire: a negative count reaches `fracfact` as a malformed generator string
         # and comes back as a pydantic ValidationError about a generator the caller never wrote.

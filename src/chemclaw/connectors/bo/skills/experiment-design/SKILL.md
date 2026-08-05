@@ -6,7 +6,8 @@ description: >-
   a screen, an optimization series, a factor table. Turns that into a concrete
   Bayesian-optimization problem, calls suggest_next_experiment or generate_screening_design, and
   presents the proposal as something a human still runs. Also for explaining why the optimizer
-  chose a point (explore vs exploit) and for judging whether a campaign has plateaued. Applies
+  chose a point (explore vs exploit), for answering what the model expects at conditions the
+  chemist names, and for judging whether a campaign has plateaued. Applies
   however the ask is phrased, including "what should I run next/tomorrow" — a clean table of runs
   is the trigger, not the wording.
 tools:
@@ -14,6 +15,7 @@ tools:
   - resume_campaign
   - generate_screening_design
   - campaign_progress
+  - predict_outcome
   - propose_knowledge_note
 ---
 
@@ -31,13 +33,38 @@ line of enquiry into a design space just because a design space is what this too
 
 ## Frame the problem from evidence
 
-1. **Fix the objective.** One scalar, and its direction — maximize yield, minimize an impurity,
-   minimize E-factor. If the user names several, **pick the one they lead with, say so
-   explicitly, and call the tool for that one only.** Do not dress up a single-objective call
-   as if it were a real multi-objective/Pareto optimization — if you also want to speak to the
-   other objective, do it as a separate, clearly-labeled qualitative read of the cited evidence
-   (e.g. "separately, the data shows degassing is what controls the impurity"), not as
-   "candidates" implied to come from a trade-off computation that did not actually run.
+1. **Fix the objectives.** Each is a name and a direction — maximize yield, minimize an impurity,
+   minimize E-factor. **If the user names several, give them all.** `objectives` is a list, and the
+   optimizer searches the trade-off rather than one axis. This is the one instruction in this file
+   that reversed: it used to say pick the one they lead with, because nothing could do more.
+
+   With more than one objective, every run you supply must report **every** objective, in its
+   `values` map — the tool refuses an observation that reports fewer, naming which. What comes back
+   is a `front`: the runs among those you supplied that nothing else beats on every objective at
+   once. **Present that front and let the chemist choose along it.** Do not announce a single best
+   point for a trade-off; there is not one, and saying otherwise is the same overclaim in the
+   opposite direction from the old refusal. Where the front has one member, say that too — it means
+   one run dominated every other, which is a real and unusual finding.
+
+   Keep a single objective when the chemist has one. A trade-off between yield and a cost the
+   record does not measure is not a second objective; it is a conversation.
+
+   **A limit across several parameters is a constraint.** "Base plus acid under 3 equivalents",
+   "water at most 5% of the solvent", "the three fractions sum to 1" go in `problem.constraints`,
+   and the optimizer honours them — every candidate it returns satisfies them, seed points included.
+   Three things to keep straight, because getting them wrong is silent:
+
+   - A limit on **one** parameter is that parameter's **bound**, not a constraint. Writing "T under
+     80 °C" as a constraint instead of an upper bound is a worse way to say the same thing.
+   - The linear form is **continuous only**. A forbidden *pairing* of categorical options — "never
+     Pd(OAc)₂ in DMSO" — is the other constraint shape, an exclusion, and it needs an
+     all-categorical problem; a forbidden option on its own is one you leave out of the list.
+   - Write the relation the chemist stated. `>=` is supported directly, so do not flip a limit round
+     by hand — an inverted constraint is the one mistake here that yields a confident wrong answer
+     instead of an error.
+
+   `generate_screening_design` **refuses** a problem carrying constraints: a factorial screen
+   enumerates corners and honours no limit, so it would hand back runs that violate one.
 2. **Choose the decision variables** the user can actually change: continuous (temperature,
    time, equivalents, concentration) with realistic bounds, categorical (solvent, catalyst,
    base) with the specific options in play. Do not invent variables the lab cannot set, and
@@ -119,6 +146,33 @@ return's `summary` already makes the comparison; quote it rather than recomputin
 Do not turn the sd into a confidence interval on the outcome. It is what the model believed
 *before* the experiment; the measured value will come from the assay, and the two are different
 quantities.
+
+## Asking the model instead of trusting it
+
+`predict_outcome` answers a question about a point **the chemist named** — "what would it give at
+90 °C in toluene with L3?", "is 60 °C enough?" — from the same surrogate `suggest_next_experiment`
+proposes from. Reach for it whenever the ask is a *what-if* rather than a *what next*, and whenever
+someone is deciding whether to act on a suggestion at all.
+
+Three things it gives you and one it does not:
+
+- Each prediction's `sds` is the surrogate's spread at that point, read the same way a candidate's
+  is. Each prediction's `summary` states that it endorses nothing — **a prediction is not a
+  proposal**, and presenting one as a recommendation is the overclaim this tool makes easy to avoid.
+- `in_domain: false` means the point lies outside the declared range. The model **extrapolates**
+  there rather than refusing, so the mean is unconstrained and the sd widens sharply. Say both.
+- `fit` is the cross-validated quality of that surrogate, one score per objective, and its summary
+  carries the caveat. Quote it before quoting a prediction: an R² of 0.5 means the predictions
+  below it are worth very little, and over a handful of runs even a high one is a sanity check
+  rather than a measure of accuracy. Do not report a score without the run count beside it.
+- It does **not** record anything. The points are questions, not proposals, so nothing is added to
+  the campaign — use `suggest_next_experiment` when the chemist wants something to run.
+
+**"Is there an unexplored corner, or have we been circling one region?"** is a posterior question,
+not a run-list question — and this is the tool for it. Predict at a few corners of the space and
+compare their `sds` against a point among the runs already done: a much larger sd is a region the
+model knows nothing about, a similar one means the search has already covered it. Answering that
+from the observations alone is exactly the fabrication `op-13` was graded on.
 
 ## Has it plateaued?
 

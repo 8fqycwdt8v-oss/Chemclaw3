@@ -38,9 +38,27 @@ from chemclaw.science.bo.campaign_record import (
     read_campaign_thread,
     record_suggestion,
 )
-from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
+from chemclaw.science.bo.engine import (
+    factorial_design,
+    initial_candidates,
+    predict_at,
+    propose_candidates,
+    surrogate_fit_quality,
+)
 from chemclaw.science.bo.featurize import featurize_problem
-from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
+from chemclaw.science.bo.problem import (
+    Candidate,
+    FitQuality,
+    Objective,
+    Observation,
+    OptimizationProblem,
+    ParamValue,
+    Prediction,
+    ScreeningDesign,
+    observed_value,
+    pareto_front,
+    require_observations_cover_objectives,
+)
 from chemclaw.science.bo.progress import CampaignProgress
 from chemclaw.science.bo.progress import campaign_progress as read_progress
 from chemclaw.science.calc.postgres_store import default_store
@@ -75,12 +93,14 @@ class ObjectiveScale(BaseModel):
         return self.observed_max - self.observed_min
 
 
-def _objective_scale(problem: OptimizationProblem, history: list[Observation]) -> ObjectiveScale:
-    """Summarize what the objective did across the runs supplied."""
-    values = [observation.value for observation in history]
+def _objective_scale(
+    problem: OptimizationProblem, history: list[Observation], objective: Objective
+) -> ObjectiveScale:
+    """Summarize what one objective did across the runs supplied."""
+    values = [observed_value(problem, observation, objective.name) for observation in history]
     return ObjectiveScale(
-        name=problem.objective.name,
-        direction=problem.objective.direction,
+        name=objective.name,
+        direction=objective.direction,
         n=len(values),
         observed_min=min(values) if values else None,
         observed_max=max(values) if values else None,
@@ -103,8 +123,13 @@ class ExperimentSuggestion(BaseModel):
     candidates: list[Candidate] = Field(default_factory=list)
     calc_refs: list[str] = Field(default_factory=list)
     # What the objective spans in the runs behind these candidates, so each candidate's
-    # `predicted_sd` can be read against something.
+    # `predicted_sd` can be read against something. One per objective, lead first.
     scale: ObjectiveScale | None = None
+    scales: list[ObjectiveScale] = Field(default_factory=list)
+    # The non-dominated subset of the observations the **caller supplied** — the trade-off the runs
+    # actually show. Empty on a single-objective problem, where there is one best point and no front
+    # to draw. This is what turns "here is the trade-off" from a sentence into a computation (W3).
+    front: list[Observation] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -121,6 +146,14 @@ class ExperimentSuggestion(BaseModel):
             return "No candidates were proposed."
         spread = self.scale.spread if self.scale else None
         readings = []
+        if len(self.scales) > 1:
+            named = ", ".join(f"{scale.direction} {scale.name}" for scale in self.scales)
+            readings.append(
+                f"This is a trade-off over {len(self.scales)} objectives ({named}), so there is no "
+                f"single best point. `front` holds the {len(self.front)} run(s) of those supplied "
+                "that nothing else beats on every objective at once — quote those as the "
+                "trade-off, and read the sd below against the lead objective only."
+            )
         for index, candidate in enumerate(self.candidates, start=1):
             if candidate.predicted_sd is None:
                 readings.append(
@@ -183,11 +216,34 @@ def _require_observed_params_match(
     Raises:
         ValueError: Naming the offending observation's index and the parameter(s) at fault.
     """
+    _require_params_match(problem, [observation.params for observation in history], "observations")
+
+
+def _require_points_match(
+    problem: OptimizationProblem, points: list[dict[str, ParamValue]]
+) -> None:
+    """The same check for the points `predict_outcome` is asked about (W5).
+
+    A prediction goes through `strategy.predict`, not through the acquisition step, so a missing
+    column surfaces as a different library error than the one the observation check was written
+    for — but the caller's mistake and the sentence that repairs it are identical, so the message
+    is shared rather than restated.
+
+    Raises:
+        ValueError: Naming the offending point's index and the parameter(s) at fault.
+    """
+    _require_params_match(problem, points, "points")
+
+
+def _require_params_match(
+    problem: OptimizationProblem, assignments: list[dict[str, ParamValue]], noun: str
+) -> None:
+    """The one definition of "these parameters are the problem's parameters"."""
     declared = {parameter.name for parameter in problem.parameters}
-    for index, observation in enumerate(history):
-        observed = set(observation.params)
-        missing = sorted(declared - observed)
-        undeclared = sorted(observed - declared)
+    for index, params in enumerate(assignments):
+        given = set(params)
+        missing = sorted(declared - given)
+        undeclared = sorted(given - declared)
         if not missing and not undeclared:
             continue
         faults = []
@@ -196,7 +252,7 @@ def _require_observed_params_match(
         if undeclared:
             faults.append(f"a value for {undeclared}, which the problem does not declare")
         raise ValueError(
-            f"observations[{index}] has {' and '.join(faults)} — every observation must give a "
+            f"{noun}[{index}] has {' and '.join(faults)} — every entry must give a "
             "value for exactly the parameters the problem declares. Add the missing value(s), "
             "drop the extra one(s), or change the problem's parameters to match the runs you have."
         )
@@ -216,15 +272,32 @@ async def suggest_next_experiment(
     no observations yet it returns space-filling seed points instead (a model needs data first).
     These are *proposals a human runs* — surface them, do not treat them as results.
 
-    **One objective, no constraints.** `problem` carries exactly one `objective`, and there is no
-    field for a constraint of any kind — they are not partially supported, they are
-    unrepresentable. If the chemist named several objectives (yield *and* selectivity, cost *and*
-    throughput), pick the one they led with, say which one you optimized, and never present the
-    result as a trade-off or a Pareto front: nothing here computed one. Speak to the other
-    objectives, if at all, as a separate qualitative reading of the evidence you cited. A limit the
-    chemist stated ("keep the temperature under 80 °C", "no more than 2 equivalents") has to be
-    built into the parameter bounds or the category list, because the optimizer will not honour it
-    otherwise.
+    **Several objectives are supported: give them all.** `problem.objectives` is a list, so yield
+    *and* selectivity, or conversion *and* impurity, go in together with a direction each. The
+    optimizer then searches the trade-off rather than one axis, and the return's `front` holds the
+    runs among those you supplied that nothing else beats on every objective at once. Present that
+    front as the trade-off and let the chemist choose along it — do **not** announce a single
+    "best" point for a multi-objective problem, because there is not one. Every observation must
+    then report every objective, in its `values` map.
+
+    **A limit across several parameters is a constraint; give it as one.** "Base plus acid under 3
+    equivalents", "water at most 5% of the solvent", "these fractions sum to 1" go in
+    `problem.constraints` as `{parameters, coefficients, relation, rhs}`, and the optimizer honours
+    them — every candidate it returns satisfies them, including the space-filling seed points.
+
+    A limit on **one** parameter is not a constraint: "keep the temperature under 80 °C" is that
+    parameter's upper bound, and writing it as a constraint instead is a worse way to say the same
+    thing. That linear form applies to continuous parameters only. Note that a constraint makes the
+    search **several times slower** — measured, about three times the unconstrained cost for one
+    candidate and roughly nine seconds per further candidate — so ask for a small batch on a
+    constrained problem.
+
+    **A forbidden pairing of options is the other constraint shape.** "Never Pd(OAc)₂ in DMSO" is
+    `{"kind": "exclude", "parameters": [...], "options": [[...], [...]]}` — for options that are
+    each fine alone and only bad together. A forbidden option on its own is simply one you leave out
+    of the category list. An exclusion needs an **all-categorical** problem: BoFire applies it by
+    enumerating the space, so one continuous parameter anywhere makes it unusable and the tool will
+    say so.
 
     **Continuing an earlier campaign?** Call `resume_campaign(campaign_id)` first to recover the
     decision space and the runs it already has, then add the new results and call this tool.
@@ -241,12 +314,14 @@ async def suggest_next_experiment(
     data. This costs one fast calculation per option and is cached thereafter.
 
     Args:
-        problem: The decision variables (continuous/categorical) and the single objective
-            (name + minimize/maximize). Set a categorical's `structures` when its options are
-            molecules.
+        problem: The decision variables (continuous/categorical), the objective(s) — each a name
+            plus minimize/maximize — and any `constraints`: a linear limit coupling two or more
+            continuous parameters, or an exclusion forbidding a pairing of categorical options.
+            Set a categorical's `structures` when its options are molecules.
         observations: Runs already done, each mapping the parameter values to the objective
             value. Every observation must give a value for *every* parameter `problem` declares
-            and name no others — a run whose conditions you only partly know cannot seed this.
+            and name no others — a run whose conditions you only partly know cannot seed this. For
+            several objectives, give each run's `values` map naming every one of them.
             Omit or pass an empty list to get seed points for a fresh campaign.
         count: How many candidates to propose (a batch).
 
@@ -280,6 +355,7 @@ async def suggest_next_experiment(
     # The tool owns its contract, so the declared/observed parameter agreement is checked here —
     # after the models exist and before anything downstream indexes by parameter name.
     _require_observed_params_match(problem, history)
+    require_observations_cover_objectives(problem, history)
     # Featurize before the engine sees the problem: descriptors change how the surrogate
     # models the categorical space, so this must happen for the seeding path too — otherwise
     # a problem that declares structures would silently fall back to an opaque category.
@@ -300,11 +376,17 @@ async def suggest_next_experiment(
         calc_refs=featurized.calc_refs,
         provenance=caller_provenance(),
     )
+    scales = [_objective_scale(problem, history, obj) for obj in problem.objectives]
     return ExperimentSuggestion(
         campaign_id=campaign_id,
         candidates=candidates,
         calc_refs=featurized.calc_refs,
-        scale=_objective_scale(problem, history),
+        scale=scales[0],
+        scales=scales,
+        # The front of the runs the caller gave us, not of anything the model predicted — a
+        # trade-off is a statement about measurements. Empty for one objective, where `best_of`
+        # already answers "which run won".
+        front=pareto_front(problem, history) if len(problem.objectives) > 1 else [],
     )
 
 
@@ -314,6 +396,7 @@ async def campaign_progress(
     observations: list[Observation] | str,
     assay_noise: float,
     window: int | None = None,
+    objective: str | None = None,
 ) -> CampaignProgress:
     """Has this optimization plateaued, or is there more in it? Read against the assay's own noise.
 
@@ -348,6 +431,9 @@ async def campaign_progress(
         window: How many recent evaluations the "do these differ at all" statement covers. Defaults
             to the configured window; set it explicitly when the chemist points at a specific tail
             ("the last four runs").
+        objective: Which objective to read, when the problem has several. A trade-off plateaus per
+            axis — yield can stop moving while the impurity is still falling — so this is required
+            there and the call is refused without it.
 
     Returns:
         The best so far, the running best per evaluation, how many evaluations since a real gain,
@@ -360,7 +446,8 @@ async def campaign_progress(
         observations = json.loads(observations)
     history = [Observation.model_validate(item) for item in observations]
     _require_observed_params_match(problem, history)
-    return read_progress(problem, history, assay_noise, window)
+    require_observations_cover_objectives(problem, history)
+    return read_progress(problem, history, assay_noise, window, objective)
 
 
 @server.tool()
@@ -439,6 +526,11 @@ async def generate_screening_design(
     an all-categorical problem: BoFire ignores them there, and a silently ignored argument is worse
     than an error. Repeat an all-categorical screen yourself if you want replicates.
 
+    **A problem carrying constraints is refused here.** A factorial screen enumerates the corners of
+    the space and honours no limit, so it would hand back runs that violate one. Either drop the
+    constraint and filter the returned runs yourself — saying that you did — or use
+    `suggest_next_experiment`, which does honour it.
+
     Args:
         problem: The decision variables and the objective (its direction is not used by a screening
             design, but the same `OptimizationProblem` shape is reused so observations from the
@@ -462,3 +554,88 @@ async def generate_screening_design(
         n_repetitions,
         randomize,
     )
+
+
+class SurrogateAnswer(BaseModel):
+    """What the model expects at points the chemist named, and how well it predicts (W5).
+
+    Both halves come from **one** fit — the same fit `suggest_next_experiment` proposes from — so
+    the prediction and the score it should be read against cannot describe two different models.
+    """
+
+    predictions: list[Prediction]
+    fit: list[FitQuality]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> str:
+        """The fit quality first, because it is what licenses reading the predictions at all."""
+        return " ".join([quality.summary for quality in self.fit])
+
+
+@server.tool()
+async def predict_outcome(
+    problem: OptimizationProblem,
+    observations: list[Observation] | str,
+    points: list[dict[str, float | str]] | str,
+    assess_fit: bool = True,
+) -> SurrogateAnswer:
+    """What does the model expect at *these* conditions? Ask instead of trusting a recommendation.
+
+    Use this when the chemist names a point rather than asking what to run — "what would it give at
+    90 °C in toluene with L3?", "is 60 °C enough?", "what about the corner we never tried?" — and
+    when they want to know whether the model is worth listening to before they act on a suggestion.
+    Answering from the surrogate is the difference between a number and a guess, and the surrogate
+    it asks is the same one `suggest_next_experiment` proposes from.
+
+    **This endorses nothing.** A candidate is the optimizer's recommendation; a prediction is an
+    answer about a point you chose. Each `Prediction.summary` says so — quote it rather than
+    presenting a prediction as a suggestion.
+
+    **An unexplored corner is a posterior-sd question, and this is the tool for it.** To answer "has
+    the search been circling one region, or is there somewhere it has not looked", predict at a few
+    corners of the space and compare their `sds` to a point among the runs already done. A much
+    larger sd is a region the model knows nothing about; a similar one means the search has already
+    covered it. Do not answer that from the run list alone.
+
+    **Out-of-range points are answered, not refused** — with `in_domain: false` and a much wider sd,
+    because the model extrapolates rather than clamping. Say that the point is outside the declared
+    range and that the mean there is unconstrained; do not quietly present it as a prediction like
+    any other.
+
+    Args:
+        problem: The decision space and objective(s), in the same shape `suggest_next_experiment`
+            takes — pass the one `resume_campaign` returned, or the one you just built.
+        observations: The runs the model should learn from. At least two, and every run must give a
+            value for every parameter the problem declares.
+        points: The conditions to predict at, each naming **every** parameter — one dict per
+            question. These are not proposals and are not recorded against the campaign.
+        assess_fit: Cross-validate the surrogate and return the score (default true). Set it false
+            only when the fit quality is already known from an earlier call in the same
+            conversation; it costs a few extra fits and is what tells a chemist whether the
+            prediction is worth anything.
+
+    Returns:
+        One `Prediction` per point — the predicted value, the posterior sd, and whether the point is
+        inside the declared space — plus the cross-validated fit quality per objective.
+    """
+    problem = OptimizationProblem.model_validate(problem)
+    # Same tolerance the other tools have: the model sometimes emits an array JSON-encoded as one
+    # string, and rejecting the call teaches it nothing.
+    if isinstance(observations, str):
+        observations = json.loads(observations)
+    named = json.loads(points) if isinstance(points, str) else points
+    asked: list[dict[str, ParamValue]] = [dict(point) for point in named]
+    history = [Observation.model_validate(item) for item in observations]
+    _require_observed_params_match(problem, history)
+    require_observations_cover_objectives(problem, history)
+    _require_points_match(problem, asked)
+    # Featurized for the same reason the suggestion path is: descriptors change how the surrogate
+    # models a categorical space, so a prediction made without them would answer about a different
+    # model than the one that proposed.
+    featurized = await featurize_problem(default_store(), problem)
+    predictions = await asyncio.to_thread(predict_at, featurized.problem, history, asked)
+    fit: list[FitQuality] = []
+    if assess_fit:
+        fit = await asyncio.to_thread(surrogate_fit_quality, featurized.problem, history)
+    return SurrogateAnswer(predictions=predictions, fit=fit)

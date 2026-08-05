@@ -105,7 +105,7 @@ async def _investigate() -> str:
             ContinuousParameter(name="temperature", lower=40.0, upper=110.0),
             CategoricalParameter(name="solvent", categories=list(_SOLVENTS)),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     observations = [
         Observation(params={"temperature": 40.0, "solvent": "THF"}, value=55.0),

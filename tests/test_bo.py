@@ -42,7 +42,7 @@ _PARAMS: list[Parameter] = [
 def test_minimize_converges_toward_known_optimum() -> None:
     """A smooth bowl with minimum at (1, -0.5) is found to near-zero value."""
     problem = OptimizationProblem(
-        parameters=_PARAMS, objective=Objective(name="y", direction="minimize")
+        parameters=_PARAMS, objectives=[Objective(name="y", direction="minimize")]
     )
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
@@ -57,7 +57,7 @@ def test_minimize_converges_toward_known_optimum() -> None:
 def test_maximize_direction_is_honored() -> None:
     """Maximizing a concave function finds a high value near its peak of 0."""
     problem = OptimizationProblem(
-        parameters=_PARAMS, objective=Objective(name="y", direction="maximize")
+        parameters=_PARAMS, objectives=[Objective(name="y", direction="maximize")]
     )
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
@@ -70,7 +70,7 @@ def test_maximize_direction_is_honored() -> None:
 @pytest.mark.parametrize("count", [0, 1])
 def test_propose_requires_enough_observations(count: int) -> None:
     """SOBO needs >= 2 observations to fit; fewer is a clear error, not BoFire's opaque one (G4)."""
-    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     observations = [Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0)][:count]
     with pytest.raises(ValueError, match="at least 2 observations"):
         propose_candidates(problem, observations, n=1)
@@ -78,7 +78,7 @@ def test_propose_requires_enough_observations(count: int) -> None:
 
 def test_best_of_empty_raises() -> None:
     """No observations is a clear error, not a bare IndexError (G4)."""
-    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     with pytest.raises(ValueError, match="no observations"):
         best_of(problem, [])
 
@@ -106,7 +106,7 @@ def _library_problem(categories: list[str]) -> OptimizationProblem:
     """A purely discrete (all-categorical) problem over the given labels."""
     return OptimizationProblem(
         parameters=[CategoricalParameter(name="c", categories=categories)],
-        objective=Objective(name="y"),
+        objectives=[Objective(name="y")],
     )
 
 
@@ -128,7 +128,7 @@ def test_initial_candidates_reject_overdrawn_discrete_space() -> None:
 
 def test_initial_candidates_seed_is_a_per_call_seam() -> None:
     """Different seeds give different seed designs; the default stays reproducible."""
-    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     default = initial_candidates(problem, 3)
     assert initial_candidates(problem, 3) == default  # config default is stable
     assert initial_candidates(problem, 3, seed=7) != default  # replicates can vary
@@ -147,7 +147,7 @@ def test_problem_validation() -> None:
                 ContinuousParameter(name="x", lower=0.0, upper=1.0),
                 ContinuousParameter(name="x", lower=0.0, upper=1.0),
             ],
-            objective=Objective(name="y"),
+            objectives=[Objective(name="y")],
         )
 
 
@@ -161,7 +161,7 @@ def test_a_model_guided_proposal_carries_the_surrogate_belief_a_seed_cannot() ->
     must carry a real, positive spread.
     """
     problem = OptimizationProblem(
-        parameters=_PARAMS, objective=Objective(name="y", direction="minimize")
+        parameters=_PARAMS, objectives=[Objective(name="y", direction="minimize")]
     )
     seeds = initial_candidates(problem, 4, seed=3)
     assert [c.predicted_sd for c in seeds] == [None] * 4
@@ -187,7 +187,7 @@ def test_the_surrogate_belief_survives_evaluation_into_the_history() -> None:
     a lucky first guess.
     """
     problem = OptimizationProblem(
-        parameters=_PARAMS, objective=Objective(name="y", direction="minimize")
+        parameters=_PARAMS, objectives=[Objective(name="y", direction="minimize")]
     )
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
@@ -246,7 +246,7 @@ def test_propose_candidates_translates_every_known_surrogate_failure(
     never see BoFire's/botorch's own exception type, so a chemist's or a Temporal retry policy's
     `except` clause has one name to match regardless of which numerical failure occurred inside.
     """
-    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     observations = [
         Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
         Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
@@ -266,7 +266,7 @@ def test_initial_candidates_also_translates_surrogate_failures(
     raised them, so a future caller of this path (or a config that changes what seeds a campaign)
     is covered without a second boundary to remember.
     """
-    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     monkeypatch.setattr(
         bofire_strategies, "map", lambda data_model: _RaisingStrategy(ModelFittingError("boom"))
     )
@@ -283,7 +283,7 @@ def test_propose_candidates_does_not_swallow_unrelated_errors(
     swallowing it into `SurrogateFitError` would misdiagnose a code defect as bad chemistry data
     and make it non-retryable for the wrong reason.
     """
-    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     observations = [
         Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
         Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
