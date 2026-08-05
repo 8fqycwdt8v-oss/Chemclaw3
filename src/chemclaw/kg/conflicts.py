@@ -21,12 +21,15 @@ A conflict is a **flag on the evidence**, never a filter. Dropping one side woul
 deciding which of two curated notes is right, and it has no basis for that.
 """
 
+import threading
 from collections import defaultdict
 from datetime import date
+from pathlib import Path
 
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
+from chemclaw.kg.graph import NotesFingerprint, cached_notes
 from chemclaw.kg.note import Note
 
 # Relations that assert an incompatibility outright. `superseded-by` is not here: it points from
@@ -166,3 +169,78 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
         index[conflict.note_id].append(conflict)
         index[conflict.other_id].append(conflict)
     return dict(index)
+
+
+# The derived conflict map, one entry per directory, validated against the notes' stat fingerprint
+# *and* the date it was computed for — `find_conflicts(as_of=…)` scans only the notes current on
+# that day, so yesterday's map is a different answer, not a stale one. One entry per directory,
+# overwritten on a miss, so it cannot grow.
+#
+# The lock is held across the *computation*, not merely around the dict access, which is the one
+# place this differs from `chemclaw.kg.graph`'s caches. Retrieval reaches this from three worker
+# threads at once (the sources of one sweep run under `asyncio.gather`), so a lock that only
+# guarded the lookup would let all three miss together and compute the same answer three times in
+# parallel — measured at 4,238 ms for the first sweep of a 2,000-note corpus against 1,525 ms for
+# one computation. A second caller waiting is strictly better than a second caller duplicating: it
+# waits exactly as long as the work it would otherwise have redone. Nothing here awaits, and
+# `chemclaw.kg.graph`'s lock is only ever taken *inside* this one, so there is no cycle to deadlock
+# on.
+_INDEX_LOCK = threading.Lock()
+_INDEX_CACHE: dict[str, tuple[NotesFingerprint, date, dict[str, list[str]]]] = {}
+
+
+def conflict_index(notes_dir: Path, as_of: date) -> dict[str, list[str]]:
+    """Map each current note id to the ids it disagrees with — cached behind the notes fingerprint.
+
+    The shape retrieval wants: bare ids, so a chunk can carry `conflicts_with` without dragging the
+    `Conflict` models (and their prose `detail`) into the model's context. Computed over the *whole*
+    current corpus rather than over the notes a query matched, because a chunk must be flagged even
+    when the note it conflicts with was not itself retrieved — which is precisely the case where a
+    reader would otherwise see one side and assume it settled.
+
+    **Why it is cached, measured rather than assumed.** This was recomputed from scratch inside
+    every `SourceRetriever.retrieve` call: once per `gather_evidence` sweep under the default
+    single-source config, three times with `vector` and `lexical` also enabled, and once per section
+    of a development report. On a 2,000-note corpus shaped like a real programme (many runs on a few
+    substrates) one computation measured **1,525 ms** — so a three-source sweep spent 4.6 s, of
+    which 3.0 s was the same answer computed twice more, and the next sweep over an unchanged corpus
+    paid all of it again. Every other artifact derived from the corpus (the parsed notes, the
+    assembled graph) was already cached behind the same fingerprint; this one was the exception, not
+    a deliberate omission.
+
+    It ran on the event loop, too. `load_notes` was offloaded to a thread and the scan that follows
+    it was not, so seconds of CPU sat between every other concurrent turn on that worker and its
+    next token. Callers now offload the whole function; nothing here awaits, so a caller may.
+
+    The cached map is handed back shared rather than copied, for the reason `build_graph` freezes
+    its graph instead of copying it: a per-call copy of a whole-corpus artifact gives most of the
+    saving back. Treat it as read-only. The one path that could leak it is a chunk's
+    `conflicts_with`, and pydantic validation builds that list afresh.
+
+    Returns an empty map when conflict detection is off or the directory is absent — the caller
+    treats "no conflicts" and "not looking for conflicts" identically, because a flag that is not
+    computed is one no reader should be shown.
+    """
+    if not settings.conflict_detection_enabled or not notes_dir.exists():
+        return {}
+    key = str(notes_dir)
+    with _INDEX_LOCK:
+        fingerprint, notes = cached_notes(notes_dir)
+        cached = _INDEX_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint and cached[1] == as_of:
+            return cached[2]
+        index = {
+            note_id: sorted(
+                {
+                    conflict.other_id if conflict.note_id == note_id else conflict.note_id
+                    for conflict in conflicts
+                }
+            )
+            for note_id, conflicts in conflicts_by_note(find_conflicts(notes, as_of=as_of)).items()
+        }
+        # Not stored when caching is off (`graph_cache_enabled=false` yields no fingerprint): there
+        # would be no key to invalidate it against, so every read would serve the first corpus this
+        # process ever saw.
+        if fingerprint is not None:
+            _INDEX_CACHE[key] = (fingerprint, as_of, index)
+    return index

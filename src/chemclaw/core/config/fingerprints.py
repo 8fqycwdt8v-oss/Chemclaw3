@@ -32,7 +32,7 @@ class FingerprintSettings(BaseSettings):
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     # Upper bound on an agent-supplied `top_k` for the similarity tools (SEC-4). `top_k` reaches
-    # `find_matches` from the model (agents.search_tools) and lands directly in a SQL `LIMIT`,
+    # `find_matches` from the model (the `molfp`/`rxnfp` bundles' MCP tools) and lands in a `LIMIT`,
     # so an arbitrarily large value would be an unbounded query. Clamp it to this — the
     # fingerprint-search analog of the `graph_max_hops` clamp on `expand_note`. Generous for a
     # real neighbor list.

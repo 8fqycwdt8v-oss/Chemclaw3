@@ -27,20 +27,24 @@ log = logging.getLogger(__name__)
 # no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
 # parse when nothing changed (KM-14). It is still O(notes) in total, which is why
 # `graph_cache_ttl_seconds` bounds how often it runs (DA-5).
-_Fingerprint = frozenset[tuple[str, int, int]]
+#
+# Public, like `cached_notes` that hands it out: it is the key type of every cache derived from the
+# corpus, here and in `chemclaw.kg.conflicts`, and a derived cache cannot annotate its own key
+# without naming it.
+NotesFingerprint = frozenset[tuple[str, int, int]]
 
 # Parsed-notes cache, keyed by directory. Guarded by a lock because retrieval offloads `load_notes`
 # to worker threads (`asyncio.to_thread`). One entry per directory; production reads one
 # `knowledge_dir`, so this does not grow unbounded.
 _CACHE_LOCK = threading.Lock()
-_NOTES_CACHE: dict[str, tuple[_Fingerprint, list[Note]]] = {}
+_NOTES_CACHE: dict[str, tuple[NotesFingerprint, list[Note]]] = {}
 
 # Assembled-graph cache, same key and same fingerprint as `_NOTES_CACHE`. The notes cache spares the
 # parse, but every `find_notes`/`expand_note` call still re-added every node and edge — measured at
 # ~86 ms per call for 10k notes, and the agent's documented flow (`find_notes` then `expand_note`)
 # pays it twice per turn. Caching the assembled graph makes a warm interactive query O(1) work plus
 # the stat scan, instead of O(N) node/edge insertion.
-_GRAPH_CACHE: dict[str, tuple[_Fingerprint, nx.DiGraph]] = {}
+_GRAPH_CACHE: dict[str, tuple[NotesFingerprint, nx.DiGraph]] = {}
 
 # When each directory was last stat-scanned (`time.monotonic`), so `graph_cache_ttl_seconds` can
 # skip the scan itself on a warm query — the scan is O(notes) and is paid even on a cache hit, so
@@ -91,7 +95,7 @@ def scan_notes_dir(notes_dir: Path) -> Iterator[tuple[Path, os.stat_result]]:
         yield path, stat
 
 
-def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
+def _dir_fingerprint(notes_dir: Path) -> NotesFingerprint:
     """Stat every note file under `notes_dir`; return the (path, mtime_ns, size) fingerprint."""
     return frozenset(
         (str(path), stat.st_mtime_ns, stat.st_size) for path, stat in scan_notes_dir(notes_dir)
@@ -157,12 +161,19 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
     return notes
 
 
-def _cached_notes(notes_dir: Path) -> tuple[_Fingerprint | None, list[Note]]:
+def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
     """The parsed notes plus the fingerprint they were parsed at (`None` when caching is off).
 
     Handing the fingerprint back is what lets `build_graph` reuse it to key its own cache: the
     stat scan is the dominant cost of a warm read (~76 ms for 10k notes), so computing it once
     per call rather than once per cache layer matters.
+
+    **Public because it is the seam every derived-from-notes cache keys on.** The fingerprint is
+    the answer to "may I reuse what I computed last time", and any artifact derived from the whole
+    corpus — the assembled graph here, the conflict index in `chemclaw.kg.conflicts` — needs
+    exactly that token and nothing else. A second derivation that computed its own fingerprint
+    would pay the stat scan twice and, worse, could disagree with this one about whether the corpus
+    had changed.
     """
     if not settings.graph_cache_enabled:
         return None, _parse_notes(notes_dir)
@@ -205,7 +216,7 @@ def load_notes(notes_dir: Path) -> list[Note]:
     restores always-scan. A shallow copy is returned so a caller cannot mutate the cached list, and
     `Note` is frozen, so the shared note instances cannot be mutated either.
     """
-    return list(_cached_notes(notes_dir)[1])
+    return list(cached_notes(notes_dir)[1])
 
 
 def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
@@ -251,7 +262,7 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
     query. Readers (`find_notes`, `expand_note`, `neighborhood`) only traverse; a caller that
     genuinely needs a mutable graph should take `graph.copy()`.
     """
-    fingerprint, notes = _cached_notes(notes_dir)
+    fingerprint, notes = cached_notes(notes_dir)
     if fingerprint is None:
         return _assemble_graph(notes)
     key = str(notes_dir)

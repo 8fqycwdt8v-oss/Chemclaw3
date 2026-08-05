@@ -15,7 +15,7 @@ from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
-from chemclaw.kg.conflicts import conflicts_by_note, find_conflicts
+from chemclaw.kg.conflicts import conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import WIKILINK, Note, note_id_for_reaction, split_link
 from chemclaw.kg.search import query_terms, term_coverage
@@ -99,24 +99,14 @@ def _in_window(note: Note, since: date | None, until: date | None) -> bool:
 async def _conflict_index(directory: Path) -> dict[str, list[str]]:
     """Map each note id to the ids it is known or suspected to disagree with (KM-8).
 
-    Computed over the *whole* current corpus rather than over the notes a query happened to match:
-    a chunk must be flagged even when the note it conflicts with was not itself retrieved, which is
-    exactly the case where a reader would otherwise see one side and assume it settled. Reads
-    through the shared parsed-note cache, so this costs a stat scan on a warm query, not a parse.
+    The whole computation goes to a worker thread, not only the note load: the scan over the corpus
+    is the expensive half (measured at 1,525 ms on a 2,000-note programme-shaped corpus), and it
+    used to run on the event loop, where it stalled every other concurrent turn on the worker.
+    `chemclaw.kg.conflicts.conflict_index` caches the result behind the same stat fingerprint the
+    parsed notes and the assembled graph are cached behind, so the three note-backed retrievers of
+    one sweep now compute it once between them instead of once each.
     """
-    if not directory.exists() or not settings.conflict_detection_enabled:
-        return {}
-    notes = await asyncio.to_thread(load_notes, directory)
-    index = conflicts_by_note(find_conflicts(notes, as_of=date.today()))
-    return {
-        note_id: sorted(
-            {
-                conflict.other_id if conflict.note_id == note_id else conflict.note_id
-                for conflict in conflicts
-            }
-        )
-        for note_id, conflicts in index.items()
-    }
+    return await asyncio.to_thread(conflict_index, directory, date.today())
 
 
 class GraphRetriever:

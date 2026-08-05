@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
+from agent_framework import AgentSession, TodoSessionStore
 
 import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
@@ -247,6 +247,65 @@ def test_plan_is_emitted_and_only_when_it_changes(monkeypatch: pytest.MonkeyPatc
         ["[ ] Await QM job qm-1"],
         ["[x] Await QM job qm-1"],
     ]
+
+
+class _PlanClearingAgent:
+    """Plans, launches a job, and clears its todo list in the resume — the topic-change shape.
+
+    MAF's own todo instructions tell the model to clear the list when the chemist changes their
+    mind, so an emptied plan is ordinary behaviour rather than a corrupted state. What made it
+    interesting is *where* the emptying lands: after the mid-turn resume, at the runner's second
+    `PlanEvent` site.
+    """
+
+    mcp_tools: list[object] = []
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
+    ) -> Any:
+        self.calls += 1
+        first = self.calls == 1
+
+        async def _gen() -> Any:
+            if first:
+                await mark_awaiting_job(session, "qm-9", title="Await QM job qm-9")
+                record_job_started("qm-9", "qm")
+                yield _Update(text="running it. ")
+            else:
+                await TodoSessionStore().save_state(session, [], next_id=1, source_id="todo")
+                yield _Update(text="never mind, here is the answer.")
+
+        return _gen()
+
+
+def test_an_emptied_plan_is_not_streamed_as_an_empty_checklist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-resume emit site used to admit `[]`, which renders as "the agent has no plan".
+
+    Two sites emitted the plan with two different predicates: the streaming loop guarded on
+    truthiness, the post-resume one on `is not None`. So a turn whose plan was cleared during the
+    resume produced `plan events: [['step one'], []]` — the empty checklist `_current_plan`'s own
+    docstring says must never be produced, and the rendering reserved for an agent that does not
+    plan at all. One emitter now answers for both sites.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "mid_turn_resume_enabled", True)
+    monkeypatch.setattr(settings, "mid_turn_resume_timeout_seconds", 5.0)
+
+    async def _results(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
+        return {job_ids[0]: {"energy_hartree": -154.1}}
+
+    monkeypatch.setattr(runner, "await_job_results", _results)
+    agent = _PlanClearingAgent()
+    events = _events(agent)
+    assert agent.calls == 2, "the resume must have run for this to test the second emit site"
+    plans = [e.todos for e in events if isinstance(e, PlanEvent)]
+    assert plans == [["[ ] Await QM job qm-9"]]
+    assert [] not in plans
 
 
 class _CappedLoopAgent:

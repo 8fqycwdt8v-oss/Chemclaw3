@@ -1,8 +1,9 @@
 """The Chemclaw MAF agent (plan step 1.5).
 
-`build_agent` wires the conversation agent: the tools, a `SkillsProvider` that discovers
-`SKILL.md` files under the configured skills directory (progressive disclosure — the model sees
-skill names/descriptions and loads a skill body only when it needs the judgment), an in-memory
+`build_agent` wires the conversation agent: the tools, a `SkillsProvider` over the `SKILL.md` files
+found under the configured skills directories (progressive disclosure — the model sees skill
+names/descriptions and loads a skill body only when it needs the judgment), narrowed to the ones
+this agent can actually act on (`skills_source`), an in-memory
 session history so a chat accumulates a thread, and a `CompactionProvider` that keeps that
 thread within a token budget (see `_build_compaction`). The chat client is injectable so the
 wiring can be built and tested without live credentials; the default is the config-selected
@@ -24,6 +25,7 @@ from agent_framework import (
     HistoryProvider,
     InMemoryHistoryProvider,
     SkillsProvider,
+    SkillsSource,
     SlidingWindowStrategy,
     TokenBudgetComposedStrategy,
     ToolResultCompactionStrategy,
@@ -49,7 +51,14 @@ from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.framing import ENVELOPE_TAG
-from chemclaw.agent.harness_mode import PlanApprovalModeProvider
+from chemclaw.agent.harness_mode import (
+    EXECUTE_MODE,
+    PLAN_MODE,
+    PLAN_ONLY,
+    PlanApprovalModeProvider,
+    autonomy_for,
+    harness_enabled_for,
+)
 from chemclaw.agent.llm_provider import build_chat_client
 from chemclaw.agent.loop_cap import observe_loop_cap
 from chemclaw.agent.plan_gate import (
@@ -58,7 +67,12 @@ from chemclaw.agent.plan_gate import (
     gate_applies,
 )
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
+from chemclaw.agent.skill_access import (
+    EnabledSkillsSource,
+    RoleScopedSkillsSource,
+    ToolScopedSkillsSource,
+)
+from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -66,7 +80,13 @@ from chemclaw.agent.tool_authz import (
     surface_authorization_denials,
     surface_domain_errors,
 )
-from chemclaw.connectors.registry import connector_tool_names, job_tools, mcp_tools, skills_dirs
+from chemclaw.connectors.registry import (
+    connector_tool_names,
+    endpoint_tool_names,
+    job_tools,
+    mcp_tools,
+    skills_dirs,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.templates.registry import template_tool_names, template_tools
@@ -262,37 +282,16 @@ def build_agent(
     """
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolve each profile dimension against the global default (an unset override means "default").
+    # The two harness dimensions resolve through `harness_mode`, which is where the plan gate reads
+    # them too — one fallback rule, so "is the harness on" cannot be answered differently by the
+    # builder and by the gate that governs what it may do.
     instructions = prof.instructions if prof.instructions is not None else _INSTRUCTIONS
-    harness_enabled = (
-        settings.harness_enabled if prof.harness_enabled is None else prof.harness_enabled
-    )
     client = chat_client if chat_client is not None else build_chat_client()
-    # Skills are discovered from the configured skills dirs *plus* every enabled connector's own
-    # `skills/` dir — a capability's judgment ships with the capability (`connectors.registry`).
-    # They are then narrowed twice, both only ever removing: `settings.skills_enabled` picks
-    # which discovered skills this deployment turns on (empty = all, today's behavior), then
-    # `settings.skill_role_gates` hides gated ones from callers lacking the roles, against the
-    # turn's ambient identity (`core.identity_context`; an empty gate map shows every skill).
-    skills = SkillsProvider(
-        RoleScopedSkillsSource(
-            EnabledSkillsSource(
-                FileSkillsSource([*settings.skills_dirs, *skills_dirs()]),
-                settings.skills_enabled_list,
-            ),
-            settings.skill_role_gates,
-        ),
-        # MAF registers `load_skill`/`read_skill_resource` with `approval_mode="always_require"`
-        # by default, and nothing here answers an approval (no `ToolApprovalMiddleware`, no
-        # front-door decision endpoint) — so every turn that reaches for a skill would otherwise
-        # stall on an unanswerable `user_input_requests` entry. `settings.skills_dirs` is always a
-        # deployer-configured, first-party path (the shipped `skills/` tree, never tenant/user-
-        # uploaded content), the same trust boundary the in-process tool registry already assumes
-        # — so these two read-only tools are the "trusted source" case the flags exist for.
-        # `run_skill_script` is left at its default (still gated): no `script_runner` is wired to
-        # `FileSkillsSource`, so a call fails fast with a clear error instead of running anything.
-        disable_load_skill_approval=True,
-        disable_read_skill_resource_approval=True,
-    )
+    # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
+    # *about* tools, so which tools this profile advertises decides which judgment is worth
+    # offering (`_build_skills`).
+    tools = _capability_tools(prof)
+    skills = _build_skills(prof, tools)
     history = history_provider()
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
@@ -345,9 +344,10 @@ def build_agent(
     options = ChatOptions(max_tokens=settings.llm_max_tokens)
     if settings.llm_temperature is not None:
         options["temperature"] = settings.llm_temperature
-    tools = _capability_tools(prof)
-    if harness_enabled:
-        return _build_harness_agent(client, skills, history, middleware, options, prof, tools)
+    if harness_enabled_for(prof):
+        return _build_harness_agent(
+            client, skills, history, middleware, options, prof, tools, instructions
+        )
     compaction = _build_compaction(history.source_id)
     return Agent(
         client=client,
@@ -372,6 +372,7 @@ def _build_harness_agent(
     options: ChatOptions,
     profile: AgentProfile,
     tools: list[Any],
+    instructions: str,
 ) -> Agent:
     """Wire MAF's Agent Harness over the *same* Chemclaw tools/skills/audit/compaction (F1).
 
@@ -399,12 +400,13 @@ def _build_harness_agent(
     unconditionally — it bounds both modes, not only `execute`. Compaction reuses the classic
     strategy so context is kept within budget on both paths. `instructions` and `tools` are
     pre-resolved by `build_agent` from the profile, so this path advertises exactly the
-    profile's (possibly narrowed) surface.
+    profile's (possibly narrowed) surface. That sentence used to be half true: `tools` was passed
+    and `instructions` was re-derived here from the same fallback rule, so the prompt was resolved
+    twice and `build_agent`'s copy was dead on this branch.
     """
     strategy, tokenizer = compaction_strategy()
-    instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
-    autonomy = _resolved_autonomy(profile)
-    start_mode = "plan" if autonomy == "plan_only" else "execute"
+    autonomy = autonomy_for(profile)
+    start_mode = PLAN_MODE if autonomy == PLAN_ONLY else EXECUTE_MODE
     agent = create_harness_agent(
         client,
         name="chemclaw",
@@ -433,9 +435,9 @@ def _build_harness_agent(
         # normally — which left a runaway indistinguishable from a finished turn both in production
         # and in the eval layer (`chemclaw.agent.loop_cap`).
         loop_should_continue=observe_loop_cap(
-            approved_todos_remaining(todos_remaining(looping_modes=["execute"]))
-            if autonomy == "plan_only"
-            else todos_remaining(looping_modes=["execute"])
+            approved_todos_remaining(todos_remaining(looping_modes=[EXECUTE_MODE]))
+            if autonomy == PLAN_ONLY
+            else todos_remaining(looping_modes=[EXECUTE_MODE])
         ),
         loop_max_iterations=settings.harness_max_loop_iterations,
         middleware=middleware,
@@ -465,17 +467,98 @@ def _build_harness_agent(
     return agent
 
 
-def _resolved_autonomy(profile: AgentProfile) -> str:
-    """This agent's harness autonomy: the profile's override, or the deployment's default.
+def skills_source(profile: AgentProfile, tools: list[Any]) -> SkillsSource:
+    """The agent's skill surface: discovered, then narrowed three ways, none of them widening.
 
-    Extracted because two decisions now read it and they must agree. `_build_harness_agent` picks
-    the starting mode from it, and `build_agent` decides from it whether to attach the plan gate —
-    a profile that starts in execute mode while the gate refuses every write would be a deployment
-    that cannot do anything and cannot be made to.
+    Skills are discovered from the configured skills dirs *plus* every enabled connector's own
+    `skills/` dir — a capability's judgment ships with the capability (`connectors.registry`).
+    They are then narrowed in the order the request reads, each only ever removing:
+
+    1. `settings.skills_enabled` — which discovered skills this deployment turns on (empty = all,
+       today's behavior).
+    2. The **capability scope**: a skill whose every declared tool is absent from this profile's
+       advertised surface is dropped, because judgment about a tool the agent cannot call reads to
+       the model as an available path (`chemclaw.agent.skill_access.ToolScopedSkillsSource`,
+       D-2026-08-05). This is the narrowing a profile could not previously express: `tool_names`
+       cut the tools and left every skill about them advertised.
+    3. `settings.skill_role_gates` — hides gated skills from callers lacking the roles, against the
+       turn's ambient identity (`core.identity_context`; an empty gate map shows every skill).
+
+    Only (3) is per-turn; the first two are fixed for the process, which is why the declaration map
+    and the advertised set are read once here rather than on every turn.
+
+    Public, and separate from the `SkillsProvider` that wraps it, because the chain is the part
+    with behaviour and the provider is MAF plumbing around it — `SkillsProvider` exposes no reader
+    for its source, so a test of what an agent advertises would otherwise have to reach into a
+    private attribute of somebody else's object to ask.
+
+    Args:
+        profile: The resolved profile, whose `tool_names`/`mcp_server_names` decide the scope.
+        tools: This profile's in-process tools, already resolved by `_capability_tools` — passed in
+            rather than recomputed so the surface the skills are scoped by is byte-for-byte the one
+            the agent advertises.
     """
-    if profile.harness_autonomy is not None:
-        return str(profile.harness_autonomy)
-    return str(settings.harness_autonomy)
+    dirs = [*settings.skills_dirs, *skills_dirs()]
+    return RoleScopedSkillsSource(
+        ToolScopedSkillsSource(
+            EnabledSkillsSource(FileSkillsSource(dirs), settings.skills_enabled_list),
+            declared_tools(dirs),
+            _advertised_names(profile, tools),
+        ),
+        settings.skill_role_gates,
+    )
+
+
+def _build_skills(profile: AgentProfile, tools: list[Any]) -> SkillsProvider:
+    """Wrap `skills_source` in the MAF provider, with the approval flags this deployment sets."""
+    return SkillsProvider(
+        skills_source(profile, tools),
+        # MAF registers `load_skill`/`read_skill_resource` with `approval_mode="always_require"`
+        # by default, and nothing here answers an approval (no `ToolApprovalMiddleware`, no
+        # front-door decision endpoint) — so every turn that reaches for a skill would otherwise
+        # stall on an unanswerable `user_input_requests` entry. `settings.skills_dirs` is always a
+        # deployer-configured, first-party path (the shipped `skills/` tree, never tenant/user-
+        # uploaded content), the same trust boundary the in-process tool registry already assumes
+        # — so these two read-only tools are the "trusted source" case the flags exist for.
+        # `run_skill_script` is left at its default (still gated): no `script_runner` is wired to
+        # `FileSkillsSource`, so a call fails fast with a clear error instead of running anything.
+        disable_load_skill_approval=True,
+        disable_read_skill_resource_approval=True,
+    )
+
+
+def advertised_tool_names(profile: str | AgentProfile | None = None) -> frozenset[str]:
+    """Every tool name one profile's agent can actually call — both halves of the surface.
+
+    The per-profile counterpart to `available_tool_names`, which answers the same question for the
+    *whole* deployment and is what the validators check declarations against. This one answers it
+    for one agent, which is the question a skill's capability scope turns on.
+
+    Computed from the manifests rather than by calling `connector_tools`, deliberately: building a
+    connector's MCP tool opens an `httpx.AsyncClient` that only a turn's exit stack ever closes, so
+    asking "what would this profile advertise" must not go through the constructor that reserves
+    resources to answer. `tests/test_profile_discovery.py` pins this against what
+    `_capability_tools` and `connector_tools` really produce, so the two narrowings cannot drift.
+
+    Args:
+        profile: The profile to resolve (a name, an `AgentProfile`, or `None` for the default,
+            which advertises the full surface).
+    """
+    prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    return _advertised_names(prof, _capability_tools(prof))
+
+
+def _advertised_names(profile: AgentProfile, inprocess: list[Any]) -> frozenset[str]:
+    """The advertised names, given this profile's already-resolved in-process tools.
+
+    The MCP half mirrors `connector_tools` exactly — `mcp_server_names` selects whole bundles, then
+    `tool_names` narrows each surviving bundle's allow-list — because it is answering what that
+    function will build, and the two disagreeing is the only way this can be wrong.
+    """
+    mcp = set(endpoint_tool_names(profile.mcp_server_names))
+    if profile.tool_names is not None:
+        mcp &= profile.tool_names
+    return frozenset({tool.__name__ for tool in inprocess} | mcp)
 
 
 def history_provider() -> HistoryProvider:

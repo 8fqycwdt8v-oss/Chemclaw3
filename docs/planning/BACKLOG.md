@@ -3,6 +3,28 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the agentic-engine / harness / deep-research review (2026-08-05)
+
+Record: `docs/decisions/D-2026-08-05-one-rule-in-three-places-is-three-rules.md`. Three findings
+were fixed in that pass (the two-predicate `PlanEvent`, the harness dimensions resolved in three
+places, the uncached conflict index). This is what it measured and did **not** fix, because the fix
+is a decision about what a chemist is shown rather than a diff.
+
+- [ ] **`conflicts._suspected` is O(k²) in the notes sharing a `(type, compound_smiles)`, and its
+      output stops being readable long before it stops being computable** — [M]. Measured over a
+      synthetic 2,000-note corpus spread across 7 substrates — the shape a real programme has, since
+      an optimization campaign is many runs on one substrate: **141,156** conflicts, 637 ms of pure
+      pair enumeration, and a `conflicts_with` list of ~141 ids on every evidence chunk that reaches
+      the model's context. At 200 substrates it is 4,891 conflicts and 27 ms; at 2,000 (one note per
+      compound) it is 0 and 11 ms — so the cost and the noise are both entirely in the
+      many-runs-per-substrate case, which is the case this system exists for.
+      The caching added in that ADR bounds *how often* this is paid (once per corpus state, not once
+      per retriever call) and nothing else. The open question is the heuristic's own productivity:
+      a pairwise scan that flags a note against every other note on the same substrate is telling a
+      reader nothing they can act on. Options are a per-note cap, a "widest gap only" rule, or
+      pairing on something narrower than `(type, compound)` — each changes what KM-8 shows a
+      chemist, which is why it is a decision and not a patch.
+
 ## Open — Left by the CHECKMATE deep review of the live/durable spine (2026-08-05)
 
 Record with every number and its reproduction: `docs/archive/review-2026-08-05.md`. Nine findings
@@ -29,11 +51,6 @@ rather than a diff.
       only to *exceptions*, which a silent takeover does not raise — so its own warning ("another
       worker may start a turn on this session") is unreachable in exactly the scenario it describes.
       The no-op itself is pinned (`test_concurrency_claims.py:80`); the missing signal is not.
-
-- [ ] **Two `PlanEvent` emit sites with different predicates** — [S]. `runner.py:340` guards with
-      `if plan and plan != last_plan`; `runner.py:390` with `if current_plan is not None and …`, so
-      the post-resume site can emit the empty checklist that `_current_plan`'s docstring
-      (`runner.py:697`) says must never be produced. Measured: `plan events: [['step one'], []]`.
 
 - [ ] **The proposal webhook cannot be wired to any named git host without a translator** — [S],
       documentation rather than code. `routes/proposals.py:38` claims `sha256=<hex>` "is the shape

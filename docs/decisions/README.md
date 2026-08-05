@@ -262,5 +262,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-05-a-declaration-outliving-what-it-describes](D-2026-08-05-a-declaration-outliving-what-it-describes.md) | A declaration outliving what it describes |
 | [D-2026-08-05-a-gain-is-measured-from-the-last-gain](D-2026-08-05-a-gain-is-measured-from-the-last-gain.md) | A gain is measured from the last gain, not from the last run |
 | [D-2026-08-05-a-score-reported-more-precisely-than-it-repeats](D-2026-08-05-a-score-reported-more-precisely-than-it-repeats.md) | A score reported more precisely than it repeats |
+| [D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches](D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md) | A skill that outlives the tools it teaches |
 | [D-2026-08-05-a-trend-needs-a-tail](D-2026-08-05-a-trend-needs-a-tail.md) | A trend needs a tail, not just a slope |
+| [D-2026-08-05-one-rule-in-three-places-is-three-rules](D-2026-08-05-one-rule-in-three-places-is-three-rules.md) | One rule written in three places is three rules |
 | [D-2026-08-05-three-searches-that-disagreed-about-one-note](D-2026-08-05-three-searches-that-disagreed-about-one-note.md) | Three searches that disagreed about one note, and a gate that borrowed the tree it guards |

@@ -9,8 +9,10 @@ shape: a rule written in two places, with a docstring in one of them asserting t
 agreed. Two were behavioural defects nobody had reported; three were open [M] findings in
 `docs/planning/BACKLOG.md`; the rest was the duplication that produced all of them.
 
-_(The previous occupant of this file was the live-test lane for Temporal + durable workflows
-(`D-2026-08-04-a-lane-that-only-runs-where-docker-runs`); it is in `git log`.)_
+_(The previous occupant of this file was the agentic-engine review (#128,
+`D-2026-08-05-one-rule-in-three-places-is-three-rules`), which landed on `main` while this branch
+was in flight; before that, the tool/skill seam (#129) and the live-test lane (#124/#127). All are
+in `git log`.)_
 
 ---
 
