@@ -158,6 +158,12 @@ connectors:
     server: false
     replicas: 2
     worker: true
+    # The one bundle whose activities are long *waits* rather than work, so the fleet-wide
+    # CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES — sized to the connection pool — is the wrong bound
+    # here: a QM activity touches Postgres twice (a cache lookup, a result write) across as much as
+    # 24 hours of Nextflow polling, so what limits it is the memory below, not connections.
+    # 32 against `limits.memory: 4Gi`, i.e. how many concurrent HPC waits one pod can hold.
+    maxConcurrentActivities: 32
     # HPC-sized, and "heavy" here means *long-lived*, not CPU-hungry: the DFT run is on the
     # cluster, while this pod holds one activity slot per in-flight job with an open Nextflow poll
     # for up to `hpc_run_timeout_seconds` (24h). So it needs memory headroom for many concurrent
@@ -262,6 +268,12 @@ config:
   # already has headroom. `postgres.maxConnections` above is this times the pooled-process count,
   # and `Settings` refuses the pair if they stop agreeing.
   CHEMCLAW_PG_POOL_MAX_SIZE: "8"
+  # Matched to the pool above, because a worker admitting more activities than it can borrow
+  # connections converts a shortage into retry churn rather than backpressure
+  # (D-2026-08-05-a-worker-may-not-outrun-its-pool). Stated here rather than left implicit for the
+  # same reason the pool is: the two numbers only mean anything together, and a reader changing one
+  # has to see the other. The `qm` bundle overrides it in its own entry.
+  CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES: "8"
   # Stated rather than left to the code default, because the chart *derives* the publish target from
   # it: the knowledge-sync containers write to `knowledge.noteRepoPath` + this, which is exactly how
   # `Settings.knowledge_path` resolves. Left implicit, the chart would have to name the notes

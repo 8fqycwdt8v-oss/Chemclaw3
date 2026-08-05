@@ -20,7 +20,7 @@ _(The previous occupant of this file was the live-test lane for Temporal + durab
       `pooling()` binds the pool gauges so every pooled process reports on its pool;
       `ChemclawPgPoolSaturated` and `ChemclawFleetAboveItsConnectionCeiling`.
       ADR `D-2026-08-05-the-connection-budget-is-a-fleet-number`.
-- [ ] **2. A worker may not outrun its pool.** `worker_max_concurrent_activities` on both
+- [x] **2. A worker may not outrun its pool.** `worker_max_concurrent_activities` on both
       `Worker(...)` constructors; temporalio's default of 100 against a pool of 8 turns saturation
       into retry churn instead of backpressure.
 - [ ] **3. Readiness answers for the store it cannot serve without.** A bounded, cached database
