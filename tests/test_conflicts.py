@@ -9,9 +9,12 @@ be this layer deciding which of two curated notes is right, and it has no basis 
 """
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
+import chemclaw.kg.conflicts as conflicts_module
+import chemclaw.kg.graph as graph
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
@@ -224,3 +227,96 @@ def test_a_backwards_retirement_window_is_refused_with_both_dates() -> None:
     claim = _note("playbook-x", type="playbook", valid_from=date(2026, 5, 1))
     with pytest.raises(ChemclawError, match="only became valid on 2026-05-01"):
         close_refuted_note(claim, "failure-abc", date(2026, 3, 1))
+
+
+def _write(directory: Path, note_id: str, *, smiles: str, confidence: float) -> None:
+    """Write a minimal reaction note that the suspected-conflict heuristic can pair up."""
+    (directory / f"{note_id}.md").write_text(
+        f"---\nid: {note_id}\ntype: reaction\ncompound_smiles: {smiles}\n"
+        f"confidence: {confidence}\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_conflict_index_is_computed_once_per_corpus_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The derived map is cached behind the notes fingerprint, like the notes and the graph.
+
+    It was the one whole-corpus artifact that was not, and it is the expensive one: every
+    `SourceRetriever.retrieve` recomputed it, so a `gather_evidence` sweep paid it once per enabled
+    note-backed source and the next sweep over an unchanged corpus paid the lot again. Measured on
+    a 2,000-note corpus shaped like a real programme (many runs on a few substrates), a three-source
+    sweep went from 2,458 ms to 22 ms once the answer was reused.
+
+    A changed corpus must still bust it, which is the half that makes the cache safe: a conflict
+    nobody is shown because the flag is stale is exactly the failure KM-8 exists to prevent.
+    """
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
+    monkeypatch.setattr(settings, "conflict_detection_enabled", True)
+    conflicts_module._INDEX_CACHE.clear()
+    graph._NOTES_CACHE.clear()
+    graph._LAST_SCAN.clear()
+    scans = {"count": 0}
+    real_find = conflicts_module.find_conflicts
+
+    def _counting(notes: list[Note], as_of: date | None = None) -> list[Conflict]:
+        scans["count"] += 1
+        return real_find(notes, as_of=as_of)
+
+    monkeypatch.setattr(conflicts_module, "find_conflicts", _counting)
+    _write(tmp_path, "a", smiles="CCO", confidence=0.95)
+    _write(tmp_path, "b", smiles="CCO", confidence=0.2)
+    today = date.today()
+
+    first = conflicts_module.conflict_index(tmp_path, today)
+    second = conflicts_module.conflict_index(tmp_path, today)
+    assert scans["count"] == 1, "a second sweep over an unchanged corpus must reuse the answer"
+    assert first == second == {"a": ["b"], "b": ["a"]}
+
+    _write(tmp_path, "c", smiles="CCO", confidence=0.9)
+    third = conflicts_module.conflict_index(tmp_path, today)
+    assert scans["count"] == 2, "a changed corpus must bust it — a stale flag is worse than none"
+    assert third["b"] == ["a", "c"]
+
+
+def test_the_conflict_index_is_recomputed_for_a_different_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`as_of` is part of the key: yesterday's map is a different answer, not a stale one.
+
+    `find_conflicts` scans only the notes current on the day it is asked about, so a cache keyed on
+    the corpus alone would serve a long-running process the verdict it computed the first time it
+    was asked — and a note whose validity window closed overnight would keep being flagged.
+    """
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
+    monkeypatch.setattr(settings, "conflict_detection_enabled", True)
+    conflicts_module._INDEX_CACHE.clear()
+    (tmp_path / "a.md").write_text(
+        "---\nid: a\ntype: reaction\ncompound_smiles: CCO\nconfidence: 0.95\n"
+        "valid_to: 2026-01-31\n---\nbody\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path, "b", smiles="CCO", confidence=0.2)
+
+    while_valid = conflicts_module.conflict_index(tmp_path, date(2026, 1, 15))
+    after_expiry = conflicts_module.conflict_index(tmp_path, date(2026, 2, 15))
+    assert while_valid == {"a": ["b"], "b": ["a"]}
+    assert after_expiry == {}, "a retired note is out of current evidence, so it flags nothing"
+
+
+def test_the_conflict_index_is_empty_when_detection_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off means no flags at all — the caller cannot tell "no conflicts" from "not looking"."""
+    monkeypatch.setattr(settings, "conflict_detection_enabled", False)
+    _write(tmp_path, "a", smiles="CCO", confidence=0.95)
+    _write(tmp_path, "b", smiles="CCO", confidence=0.2)
+    assert conflicts_module.conflict_index(tmp_path, date.today()) == {}
+
+
+def test_the_conflict_index_of_an_absent_directory_is_empty() -> None:
+    """A deployment with no note tree yet asks the same question and gets a usable answer."""
+    assert conflicts_module.conflict_index(Path("/nonexistent-knowledge-dir"), date.today()) == {}

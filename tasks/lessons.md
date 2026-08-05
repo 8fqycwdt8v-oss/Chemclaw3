@@ -1130,3 +1130,39 @@ over a collection the code under test produced — they are all vacuously true o
 number is only measured if its script runs green; R5.6 said a green suite proves the code matches
 the test, not that the test is right. This is the third face of it — **a guard that never executed
 is not a guard**, whether it is a plugin flag, a loop body, or an assertion the data never reaches.
+
+## Measure the hot spot before refactoring it (2026-08-05, agentic-engine review)
+
+Three things looked like obvious waste on the turn hot path. I wrote a benchmark for all three
+before touching any of them, and **two were noise**: the harness todo re-read per streamed update
+is 14 µs (21 ms across a whole turn), and `GraphRetriever` building 2,000 evidence chunks for the 40
+`gather_evidence` keeps costs 5.8 ms against a 3 ms scan that has to happen anyway. Bounding the
+per-source list would have changed how `hybrid` mode fuses ranks — a real semantic risk — to buy
+nothing measurable. The third was 2,458 ms per sweep.
+
+**Rule:** "this runs per token / builds N and keeps 40" is a *hypothesis about* a cost, never the
+cost. Benchmark all the candidates in one script before editing any of them, and let the numbers
+pick which one to fix. The two changes I did not make are the review's best outcome, not its
+leftovers.
+
+Corollary, from the same benchmark: the first number was misleading too. `_conflict_index` measured
+892 ms on a corpus I built with 7 substrates, and 11 ms on the same 2,000 notes spread over 2,000
+substrates. The cost lived entirely in the corpus *shape*, so I re-ran across three shapes before
+quoting anything — and the shape that is slow (many runs on one substrate) turned out to be the
+shape this system exists for, which is the argument the finding needed.
+
+## A rule written in three places is three rules (2026-08-05)
+
+`X if profile.X is None else profile.X` for the harness dimensions appeared in `build_agent`, in
+`_resolved_autonomy` and in `gate_applies` — and the repo's own history records what that already
+cost: a fourth site (`api/runner.py`) read `settings` directly, so a `plan_only` profile under a
+global `execute` never spent its approval. Two `PlanEvent` emit sites had drifted the same way, one
+guarding on truthiness and one on `is not None`.
+
+**Rule:** when a review finds the same conditional in two places, do not fix the divergence — remove
+the ability to diverge. A helper that holds the state *and* the predicate (`_PlanEmitter`) makes two
+call sites identical by construction; two call sites that both remember to call the same predicate
+are still two rules. And check the docstrings while you are there: `_build_harness_agent` claimed its
+instructions were "pre-resolved by `build_agent`" while resolving them itself — the prose described
+the code that should have existed, which is exactly the drift CLAUDE.md's "measure it, don't argue
+it" is about.

@@ -215,9 +215,9 @@ async def run_turn(
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
     dry_run_token = set_dry_run(dry_run)
-    # The harness's todo list as last rendered, so a plan is emitted when it first appears and
-    # again whenever it changes — not once per update (which would spam an unchanged plan).
-    last_plan: list[str] = []
+    # Emits a plan when the harness's todo list first appears and again whenever it changes — not
+    # once per update (which would spam an unchanged plan), and never as an empty checklist.
+    plan = _PlanEmitter()
     # Apply job completions the push-back stream recorded while no turn could safely take the
     # write (`chemclaw.agent.harness_todo.defer_job_completion`). Turn start is the one moment
     # nothing else writes `session.state`, and it must happen *before* the snapshot below: the
@@ -336,10 +336,9 @@ async def run_turn(
                     yield call
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=approval_prompt(request))
-                plan = await _current_plan(session)
-                if plan and plan != last_plan:
-                    last_plan = plan
-                    yield PlanEvent(todos=plan)
+                plan_event = await plan.changed(session)
+                if plan_event is not None:
+                    yield plan_event
             # The stream is exhausted, so `agent.run` has returned and the history provider has
             # committed this turn's rows as a complete, paired exchange. From here on a teardown
             # has nothing half-written to discard — set the fact the rollback gate reads at the
@@ -386,10 +385,9 @@ async def run_turn(
                     yield _signal_event(signal)
                 # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
                 # launch and then the plan that reflects it.
-                current_plan = await _current_plan(session)
-                if current_plan is not None and current_plan != last_plan:
-                    last_plan = current_plan
-                    yield PlanEvent(todos=last_plan)
+                plan_event = await plan.changed(session)
+                if plan_event is not None:
+                    yield plan_event
         # The runaway guard fired: the harness loop still had work it wanted to do and its
         # iteration cap stopped it (`chemclaw.agent.loop_cap`). Said out loud, before the answer,
         # for the same reason `CapabilityDegradedEvent` precedes the tokens — the answer that
@@ -682,6 +680,39 @@ async def _durable_subsystem_reachable() -> bool:
         # attention level once per turn would bury the connector sweep's own signal under it.
         logger.debug("the durable subsystem did not answer its health probe", exc_info=True)
         return False
+
+
+class _PlanEmitter:
+    """Turns the harness's todo list into `PlanEvent`s — one per distinct plan, never an empty one.
+
+    **Two emit sites used to ask two different questions**, and the second one was wrong. The
+    streaming loop guarded with `if plan and plan != last_plan`; the post-resume site guarded with
+    `if current_plan is not None and current_plan != last_plan`, which admits `[]` — so a turn whose
+    plan was emptied (the model clearing its todo list, which MAF's own instructions tell it to do
+    when the chemist changes topic) emitted the empty checklist `_current_plan`'s docstring says
+    must never be produced. Measured: `plan events: [['step one'], []]`. A surface renders that as
+    "the agent has no plan", which is the reading reserved for an agent that does not plan at all.
+
+    Holding both the last-emitted plan and the predicate in one object is what makes the two sites
+    identical by construction rather than by two people remembering the same rule. It is the same
+    move `ToolCallTrace` makes for streamed tool calls: state the loop must carry across iterations
+    belongs with the decision that reads it.
+    """
+
+    def __init__(self) -> None:
+        self._last: list[str] = []
+
+    async def changed(self, session: AgentSession) -> PlanEvent | None:
+        """The event to emit now, or None when there is no plan or it has not changed.
+
+        Falsy covers both cases a plan must not be sent for — no harness (`None`) and an empty
+        checklist (`[]`) — which is why one predicate can serve both sites.
+        """
+        plan = await _current_plan(session)
+        if not plan or plan == self._last:
+            return None
+        self._last = plan
+        return PlanEvent(todos=plan)
 
 
 async def _current_plan(session: AgentSession) -> list[str] | None:
