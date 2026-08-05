@@ -1046,7 +1046,38 @@ a diagnostic as a place where a number can quietly stop existing.
 and the open backlog row, not only the new ADR. A merged ADR is never edited, so the correction has
 to be findable from the places a reader would actually reach for the number.
 
-## R5.6 — `git add -A` is a claim about a tree you no longer control
+## R5.6 — A green suite proves the code does what the test says, not that the test is right
+
+**What happened.** W1's `campaign_progress` reported a campaign that climbed **50.0 → 70.9 against a
+stated ±2 assay noise** — ten times the noise — as `plateaued`. The counter compared each run to a
+continuously updated running best, so a climb in sub-noise steps never reset it. The tool exists to
+stop a lab leader being misled about noise, and it misled in the opposite direction: stop a campaign
+that is working.
+
+It shipped green. There was a test asserting exactly this behaviour, and its docstring argued for
+it — *"what makes a gain real is the assay, not the slope"* — with a deliberately-built pair of
+tests around the claim. The sentence is true of one step and false of a series, and nothing in the
+suite could tell the difference, because I had written both the code and the argument for it.
+
+R5.5 says a measured number is only measured if its script runs green today. This is the same defect
+one level up: **a test is evidence about what its author believed the code should do.** A green
+suite says the code matches the belief. It says nothing about the belief.
+
+**Rule: for any threshold, ask what happens just under it, repeatedly.** One sub-threshold step is
+inside the noise; twelve of them are not. Single-step comparisons hide accumulation, and every
+"is this difference real" test has a series version that behaves differently.
+
+**Rule: when a test docstring argues for its assertion, that is where to look hardest.** A test that
+merely records behaviour is cheap to re-derive. A test that comes with a paragraph defending a
+counter-intuitive result is the one carrying a decision, and a decision is the thing that can be
+wrong. Both defects this review found were under such a paragraph.
+
+**Rule: for a tool that advises stopping or continuing, write down which error is worse.** Here they
+are not symmetric — a false "keep going" costs a fortnight, a false "you have plateaued" costs the
+rest of the campaign and is invisible afterwards, because nobody measures what a stopped campaign
+would have found. Naming that asymmetry up front would have made the defect obvious at design time.
+
+## R5.7 — `git add -A` is a claim about a tree you no longer control
 
 **What happened.** Three review subagents were reading and *mutating* the working tree — the whole
 point of the technique is to delete a guard, run its tests and see whether they notice. One of them

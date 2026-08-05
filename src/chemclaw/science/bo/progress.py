@@ -11,6 +11,13 @@ reproducibility the chemist had stated in the same question. A plateau test that
 default noise would reproduce that error with a tool's authority behind it; one that demands the
 number cannot be answered without it.
 
+**A gain is measured from the last real gain, not from the last run** (D-2026-08-05). The first
+version compared each result to a continuously updated running best, which meant a campaign
+climbing in steps each smaller than the noise never reset the counter no matter how far it climbed:
+50.0 -> 70.9 over twelve runs, **+20.9 against a stated +/-2**, reported `plateaued`. That is the
+same harm this module exists to prevent, pointing the other way — telling a lab leader to stop a
+campaign that is working. The comparison is anchored instead, so cumulative drift counts.
+
 **No BoFire import, deliberately.** Hypervolume would be the textbook multi-objective convergence
 metric and `bofire.utils.multiobjective` ships one, but the arithmetic here needs none of it, and
 `science.bo.problem` — which this imports — is the campaign job's `params_model` and is loaded in
@@ -76,8 +83,11 @@ class CampaignProgress(BaseModel):
     best_value: float | None = None
     # The running best after each evaluation, in the order supplied.
     best_so_far: list[float] = Field(default_factory=list)
-    # Evaluations since the running best last improved by **more than `assay_noise`**. This is the
-    # headline number: it needs no window and it is what "the last real gain was N runs ago" means.
+    # Evaluations since a result beat the value at the **last real gain** by more than
+    # `assay_noise`. This is the headline number: it needs no window and it is what "the last real
+    # gain was N runs ago" means. Measured against the last real gain rather than against the
+    # running best, so a series climbing in sub-noise steps is not called a plateau once the
+    # accumulated climb exceeds the noise a chemist would measure between run 1 and run N.
     evaluations_since_improvement: int = Field(default=0, ge=0)
 
     # Spread of the raw values over the last `window` evaluations — the statement the op-13 grader
@@ -197,15 +207,21 @@ def campaign_progress(
     best_so_far: list[float] = []
     since = 0
     best: float | None = None
+    # The value at the last *real* gain. The counter measures distance from this anchor rather than
+    # from the running best, so a campaign creeping upward in sub-noise steps still registers as
+    # improving once the accumulated climb beats the noise. Comparing each run to a continuously
+    # updated best made the bar rise underneath the counter, and a monotone climb never reset it:
+    # 50.0 -> 70.9 over twelve runs, +20.9 against a stated +/-2, reported "plateaued".
+    anchor: float | None = None
     for value in values:
-        if best is None or _improved_by(direction, value, best) > assay_noise:
-            best, since = value, 0
+        # The running best is what the campaign has actually reached, and it moves on any gain —
+        # reporting a stale best would misstate where the campaign is.
+        if best is None or _improved_by(direction, value, best) > 0:
+            best = value
+        if anchor is None or _improved_by(direction, value, anchor) > assay_noise:
+            anchor, since = value, 0
         else:
             since += 1
-            # A gain too small to beat the noise still moves the running best; it just does not
-            # reset the counter. Reporting a stale best would misstate where the campaign is.
-            if _improved_by(direction, value, best) > 0:
-                best = value
         best_so_far.append(best)
 
     tail = values[-span_window:]
