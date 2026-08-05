@@ -136,6 +136,37 @@ def test_the_same_edge_written_both_ways_is_not_doubled(tmp_path: Path) -> None:
     assert len(graph["a"]["b"]["relations"]) == 1
 
 
+def test_the_richer_declaration_wins_when_an_edge_is_written_both_ways(tmp_path: Path) -> None:
+    """The measured defect (D-2026-08-05): the body form used to win, and it carries no metadata.
+
+    A `[[rel:target]]` can express a relation and nothing else. A frontmatter entry can express
+    the same relation *plus* a confidence and a validity window. Deduplicating in favour of the
+    body therefore threw away the only information one of the two forms had — silently, at parse
+    time, so the confidence a chemist wrote reached no query and no reader.
+
+    It was not a corner case. All three notes in the shipped corpus that declare a typed relation
+    also write the link in the body, so before this every declared edge confidence in the corpus
+    read as `None` and the one edge with a validity window had no window at all.
+    """
+    source = Note(
+        id="a",
+        type="report",
+        body="[[contradicts:b]]",
+        relations=[
+            Relation(rel="contradicts", to="b", confidence=0.8, valid_from=date(2026, 1, 1))
+        ],
+    )
+    graph = build_graph(_write(tmp_path, source, Note(id="b", type="report")))
+
+    relations = graph["a"]["b"]["relations"]
+    assert len(relations) == 1
+    assert relations[0].confidence == 0.8
+    assert relations[0].valid_from == date(2026, 1, 1)
+    # And the edge is therefore time-scopeable, which is the whole point of STO-9.
+    assert related(graph, "a", "contradicts", as_of=date(2025, 12, 31)) == []
+    assert related(graph, "a", "contradicts", as_of=date(2026, 6, 1)) == ["b"]
+
+
 def test_related_answers_the_query_typed_edges_exist_for(tmp_path: Path) -> None:
     """What are this reaction's precursors? Impossible to ask before typed edges."""
     source = Note(id="rxn", type="reaction", body="[[precursor-of:c1]] [[product-of:c2]]")

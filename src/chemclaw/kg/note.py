@@ -10,7 +10,7 @@ context, never a crash (G4).
 import re
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import frontmatter
 import yaml
@@ -69,6 +69,18 @@ def note_id_for_reaction(record_id: str) -> str:
     prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
     """
     return f"reaction-{record_id}"
+
+
+def note_relative_path(note_type: str, note_id: str) -> str:
+    """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
+
+    The one filename shape the whole system depends on, and until this it was an f-string in the
+    PR-gate (`chemclaw.kg.pr_gate`) that three other places re-derived by hand — including
+    `chemclaw.kg.graph.note_file_fingerprints`, which reads a note's id back out of `path.stem`,
+    and the warehouse retriever, which spelled the layout *and* the literal type `"reaction"` into
+    a `stat` call. A layout that lives in four places is a layout one of them will get wrong.
+    """
+    return f"{note_type}/{note_id}.md"
 
 
 def cited_ids(text: str) -> list[str]:
@@ -187,7 +199,65 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
 )
 
 
-class Relation(BaseModel):
+class TemporalWindow(BaseModel):
+    """A validity window — `valid_from`/`valid_to`, inclusive at both bounds, either optional.
+
+    Two things in this graph are time-scoped: a note (a *fact* stopped being true) and a relation
+    (an *edge* stopped holding, while both notes remain current). They are different statements
+    and both are needed, but the window itself is one rule and was written twice — the same
+    interval validator and the same `is_current` in `Relation` and in `Note`, arguing the same
+    inclusivity semantics in two docstrings. A change to what "current" means had to be made in
+    both places or it was made in neither.
+
+    Frozen here rather than in each subclass: every carrier of a window in this package is an
+    immutable value object shared out of the note cache (KM-14).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    valid_from: date | None = None
+    valid_to: date | None = None
+
+    def _window_owner(self) -> str:
+        """How this carrier names itself in an invalid-interval error. Overridden where it helps."""
+        return type(self).__name__.lower()
+
+    @model_validator(mode="after")
+    def _valid_interval(self) -> Self:
+        """A validity window must not end before it starts.
+
+        `valid_from`/`valid_to` answer "what did we know at time T"; a `valid_to` earlier than
+        `valid_from` describes no interval at all, so every query over it silently returns
+        nothing. Refused at the schema boundary, where the message can name the file, rather than
+        read back later as an absence.
+        """
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_to < self.valid_from
+        ):
+            raise ValueError(
+                f"{self._window_owner()}: valid_to {self.valid_to} is before "
+                f"valid_from {self.valid_from}"
+            )
+        return self
+
+    def is_current(self, as_of: date) -> bool:
+        """Whether this is inside its validity window on `as_of` (bounds inclusive).
+
+        Either bound may be absent (open-ended). Discovery retrieval excludes non-current notes so
+        a not-yet-valid or superseded entry is not served as *current* evidence (GxP freshness —
+        audit KM-7); the note is never deleted, it stays in Git and is still reachable by explicit
+        id, it is only dropped from current-evidence sweeps.
+        """
+        if self.valid_from is not None and as_of < self.valid_from:
+            return False
+        if self.valid_to is not None and as_of > self.valid_to:
+            return False
+        return True
+
+
+class Relation(TemporalWindow):
     """One typed edge to another note, optionally scoped in time and confidence (STO-8/STO-9).
 
     Two ways to write an edge exist because they serve different authors. A `[[rel:target]]` in
@@ -201,38 +271,16 @@ class Relation(BaseModel):
     exactly this, and the node half was already here.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     rel: str = Field(min_length=1)
     to: str = Field(min_length=1)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    valid_from: date | None = None
-    valid_to: date | None = None
 
-    @model_validator(mode="after")
-    def _valid_interval(self) -> "Relation":
-        """An edge's validity window must not end before it starts — as a note's must not."""
-        if (
-            self.valid_from is not None
-            and self.valid_to is not None
-            and self.valid_to < self.valid_from
-        ):
-            raise ValueError(
-                f"relation {self.rel} -> {self.to}: valid_to {self.valid_to} is before "
-                f"valid_from {self.valid_from}"
-            )
-        return self
-
-    def is_current(self, as_of: date) -> bool:
-        """Whether this edge is inside its validity window on `as_of` (bounds inclusive)."""
-        if self.valid_from is not None and as_of < self.valid_from:
-            return False
-        if self.valid_to is not None and as_of > self.valid_to:
-            return False
-        return True
+    def _window_owner(self) -> str:
+        """Name the edge, not the class: an error about one of a note's ten edges must say which."""
+        return f"relation {self.rel} -> {self.to}"
 
 
-class Note(BaseModel):
+class Note(TemporalWindow):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 
     `created_by` is the GxP provenance line: `agent`-authored notes must pass the
@@ -243,8 +291,6 @@ class Note(BaseModel):
     hands the same instances to every reader (KM-14); immutability makes that sharing safe —
     no caller can mutate a cached note and corrupt it for the next query.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     id: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -277,8 +323,6 @@ class Note(BaseModel):
     created_by: Literal["human", "agent"] = "human"
     source: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    valid_from: date | None = None
-    valid_to: date | None = None
     # Calculations and stored by-products this note's claims rest on (STO-7). These are
     # `CalculationKey.as_str()` and `ArtifactRef.as_str()` values — they point *out* of the graph
     # into the calculation store, which is exactly why they are frontmatter fields and not
@@ -317,23 +361,6 @@ class Note(BaseModel):
                 )
         return values
 
-    @model_validator(mode="after")
-    def _valid_interval(self) -> "Note":
-        """A bi-temporal note's validity window must not end before it starts (plan F10-G2).
-
-        `valid_from`/`valid_to` answer "what did we know at time T"; a `valid_to` earlier than
-        `valid_from` is a nonsensical window that would silently break any time-scoped query, so
-        it is rejected here at the schema boundary (surfaced by the parser and `kg-validate`).
-        Either bound may be absent (open-ended); the check applies only when both are set.
-        """
-        if (
-            self.valid_from is not None
-            and self.valid_to is not None
-            and self.valid_to < self.valid_from
-        ):
-            raise ValueError(f"valid_to {self.valid_to} is before valid_from {self.valid_from}")
-        return self
-
     def outgoing_links(self) -> list[str]:
         """The ids this note links to, from its body `[[wikilinks]]` and its `relations:`.
 
@@ -350,37 +377,31 @@ class Note(BaseModel):
         return list(ordered)
 
     def outgoing_relations(self) -> list[Relation]:
-        """Every typed edge this note asserts, from both forms, body links first.
+        """Every typed edge this note asserts, from both forms, in body-link order.
 
         A body `[[rel:target]]` becomes a `Relation` with no confidence or validity — that is all
         the syntax can express, and inventing values for the rest would be a lie about what the
         author wrote. A frontmatter entry is taken as given.
 
-        Deduplicated by `(rel, to)` with the body form winning, so writing an edge both ways is
-        harmless rather than a doubled edge; a frontmatter entry that adds metadata to a link also
-        written in the body should therefore be the *only* place that pair appears.
+        Deduplicated by `(rel, to)`, so writing an edge both ways is harmless rather than a doubled
+        edge — **and the frontmatter entry wins**, because the body form can express nothing the
+        frontmatter cannot and the frontmatter form can express three things it cannot. The body
+        form used to win, which meant an author who wrote the edge in both places silently lost the
+        confidence and the validity window they had gone out of their way to declare. Every note in
+        the shipped corpus that declares a typed relation also writes the link in its body, so the
+        measured effect was that D-134's edge metadata existed in the schema, in the parser and in
+        the corpus, and reached no query: `graph.related(..., as_of=)` had no dated edge to filter
+        and `Relation.confidence` was `None` everywhere it was read.
+
+        Order still follows the body, so a note's edges read in the order the prose introduces
+        them; only the *value* at a duplicated pair changes.
         """
         seen: dict[tuple[str, str], Relation] = {}
         for rel, target in cited_links(self.body):
             seen.setdefault((rel, target), Relation(rel=rel, to=target))
         for relation in self.relations:
-            seen.setdefault((relation.rel, relation.to), relation)
+            seen[(relation.rel, relation.to)] = relation
         return list(seen.values())
-
-    def is_current(self, as_of: date) -> bool:
-        """Whether the note is inside its validity window on `as_of` (bounds inclusive).
-
-        `valid_from`/`valid_to` time-scope a note; either may be absent (open-ended). Discovery
-        retrieval excludes non-current notes so a not-yet-valid or superseded/expired entry is not
-        served as *current* evidence (GxP freshness — audit KM-7). The note is never deleted: it
-        stays in Git and is still reachable by explicit id, it is only dropped from current-evidence
-        sweeps.
-        """
-        if self.valid_from is not None and as_of < self.valid_from:
-            return False
-        if self.valid_to is not None and as_of > self.valid_to:
-            return False
-        return True
 
 
 class NoteError(ChemclawError):

@@ -451,6 +451,22 @@ until you **re-index** them (re-run the ELN sync / re-add molecules). If search 
 empty after a config change, that is the tell: the index predates the new definition and needs
 rebuilding.
 
+## (vi-b) After an upgrade that changes what a note's indexed text is
+
+`note_index` rows are keyed on a **stat** fingerprint (mtime + size), which detects a changed
+*note* and by construction cannot detect a changed *definition of the text* — the file is
+untouched, so an incremental `make reindex` finds nothing to do and the stored embeddings go on
+describing the old text forever.
+
+One upgrade has done this so far: D-2026-08-05 made a note's searchable text include its `type`
+and its `compound_smiles`, which the dense and lexical indexes had never seen. **Run `make
+reindex-full` once after upgrading past it.** The symptom of skipping it is not an error — dense
+and lexical search simply keep answering as if the change had not happened, while the substring
+leg answers as if it had.
+
+The same applies to `CHEMCLAW_EMBEDDING_MODEL`: changing it serves mixed-generation vectors until
+a full reindex, and nothing detects that either (it is a known open item, not a solved one).
+
 ## (vii) Read eval-drift alerts
 
 The scheduled `EvalDriftWorkflow` re-scores the committed eval case-set and raises one alert per

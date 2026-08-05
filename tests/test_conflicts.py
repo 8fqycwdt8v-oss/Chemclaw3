@@ -14,8 +14,10 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.kg import conflicts
 from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
 from chemclaw.kg.note import Note, Relation
+from chemclaw.kg.relations import KNOWN_RELATIONS
 from chemclaw.memory.failure import close_refuted_note, failure_note
 
 
@@ -224,3 +226,14 @@ def test_a_backwards_retirement_window_is_refused_with_both_dates() -> None:
     claim = _note("playbook-x", type="playbook", valid_from=date(2026, 5, 1))
     with pytest.raises(ChemclawError, match="only became valid on 2026-05-01"):
         close_refuted_note(claim, "failure-abc", date(2026, 3, 1))
+
+
+def test_the_conflicting_relations_are_all_real_relations() -> None:
+    """A relation named here but absent from the vocabulary detects nothing, and says nothing.
+
+    `_CONFLICTING_RELATIONS` is matched against edges whose relation `kg-validate` has already
+    forced into `KNOWN_RELATIONS`; a name outside it can therefore never match, so the detector
+    would quietly stop finding declared conflicts while every test using the other member kept
+    passing.
+    """
+    assert conflicts._CONFLICTING_RELATIONS <= KNOWN_RELATIONS

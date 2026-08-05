@@ -19,6 +19,7 @@ import pytest
 from pydantic import ValidationError
 
 from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
+from chemclaw.kg import analytics
 from chemclaw.kg.analytics import analyze
 from chemclaw.kg.graph import build_graph, load_notes
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note
@@ -219,3 +220,14 @@ def test_an_unlisted_retriever_keeps_neutral_weight() -> None:
     lists = [[_chunk("a", "graph")], [_chunk("b", "brand-new")]]
     ordered = reciprocal_rank_fusion(lists, k=60, weights={"graph": 1.0})
     assert {c.source_note_id for c in ordered} == {"a", "b"}
+
+
+def test_the_distilled_types_are_all_real_note_types() -> None:
+    """A typo in `_DISTILLED_TYPES` disables the gap query silently, in the direction of "clean".
+
+    `_undistilled_tags` is a set difference: a misspelt distilling type moves its notes to the
+    *evidence* side, so a tag that has a playbook starts being reported as needing one. Nothing
+    else would notice — the query still runs, still returns a list, and is simply wrong. Same
+    class of defect as an unregistered note type (KNW-6), one level in.
+    """
+    assert analytics._DISTILLED_TYPES <= KNOWN_NOTE_TYPES

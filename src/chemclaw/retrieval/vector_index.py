@@ -31,7 +31,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.graph import load_notes, note_file_fingerprints
-from chemclaw.kg.note import Note
+from chemclaw.kg.search import search_text
 
 # Lexical tokenizer for the in-memory backend (lowercase alphanumeric runs) — the offline proxy of
 # Postgres `to_tsvector`; the durable backend uses real FTS, this only needs the same ordering.
@@ -59,15 +59,6 @@ class IndexHit(BaseModel):
 
     note_id: str
     score: float
-
-
-def note_text(note: Note) -> str:
-    """The text indexed for a note: its id, tags, and body (the graph retriever's haystack).
-
-    One definition so the dense embedding, the lexical tsvector, and the substring graph search all
-    see the same text and cannot drift in what "the note's content" means.
-    """
-    return f"{note.id} {' '.join(note.tags)} {note.body}".strip()
 
 
 @runtime_checkable
@@ -334,7 +325,7 @@ async def reindex_notes(
     ]
     if not changed:
         return 0
-    texts = [note_text(note) for note in changed]
+    texts = [search_text(note) for note in changed]
     # embed_texts may call the endpoint (openai_compatible) — offload so the event loop is free.
     embeddings = await asyncio.to_thread(embed_texts, texts)
     records = [

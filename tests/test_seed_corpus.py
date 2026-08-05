@@ -86,6 +86,27 @@ def test_a_superseded_note_is_excluded_from_current_evidence() -> None:
     assert related(build_graph(_KNOWLEDGE), retired.id, "superseded-by") == ["playbook-degassing"]
 
 
+def test_the_corpus_carries_edge_metadata_that_actually_reaches_a_reader() -> None:
+    """The exemplars for STO-9 must be live, not merely written down.
+
+    Every note here that declares a frontmatter relation also writes the same link in its body,
+    which used to mean the body form won the deduplication and the confidence and validity window
+    were dropped at parse time. The corpus therefore *documented* edge metadata and contained none
+    a query could see: `related(..., as_of=)` had no dated edge to filter, and every
+    `Relation.confidence` in the graph read as `None`.
+
+    Asserted over `outgoing_relations` — what the graph is built from — rather than over
+    `note.relations`, because the frontmatter was never the thing that was lost.
+    """
+    edges = [relation for note in _notes() for relation in note.outgoing_relations()]
+    assert any(relation.confidence is not None for relation in edges), (
+        "no edge in the corpus carries a confidence a reader can see"
+    )
+    assert any(
+        relation.valid_from is not None or relation.valid_to is not None for relation in edges
+    ), "no edge in the corpus carries a validity window, so STO-9 is exercised by nothing"
+
+
 def test_the_corpus_contains_a_declared_conflict() -> None:
     """`kg.conflicts` needs a real disagreement to find, or it is only tested on fixtures."""
     conflicts = find_conflicts(_notes(), as_of=date.today())

@@ -9,9 +9,11 @@ so it gates the PR that adds or edits notes (D-005).
 """
 
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from chemclaw.core.config import settings
+from chemclaw.kg.graph import dangling_links, scan_notes_dir
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note, NoteError, read_note
 from chemclaw.kg.relations import KNOWN_RELATIONS
 from chemclaw.science.safety.notes import hazard_problems
@@ -20,10 +22,18 @@ from chemclaw.science.safety.notes import hazard_problems
 def validate(notes_dir: Path) -> list[str]:
     """Return a list of human-readable problems in `notes_dir` (empty if clean)."""
     problems: list[str] = []
+    # Notes with the file each came from, so every message can name a path without a lookup that
+    # can miss. It used to be a dict keyed by id, which the duplicate-id branch deliberately does
+    # not populate twice — so the two registry checks fell back to a literal `Path('?')` for
+    # exactly the notes a reader would most want located.
+    located: list[tuple[Note, Path]] = []
     id_to_path: dict[str, Path] = {}
-    notes = []
 
-    for path in sorted(notes_dir.rglob("*.md")):
+    # The same scan the indexer uses (`chemclaw.kg.graph.scan_notes_dir`), and deliberately not the
+    # same *loop*: `load_notes` skips an unparseable note so one bad file cannot block a query,
+    # while this must report it. Resilient indexer, strict validator, one definition of which files
+    # are in scope.
+    for path, _ in scan_notes_dir(notes_dir):
         try:
             note = read_note(path)
         except NoteError as exc:
@@ -35,53 +45,61 @@ def validate(notes_dir: Path) -> list[str]:
             problems.append(f"duplicate id {note.id!r} in {path} and {id_to_path[note.id]}")
         else:
             id_to_path[note.id] = path
-        notes.append(note)
+        located.append((note, path))
 
-    known = set(id_to_path)
+    notes = [note for note, _ in located]
+    problems.extend(
+        f"note {source!r} links to unknown note {target!r}"
+        for source, target in dangling_links(notes)
+    )
+    # Per-note hazard gate (D-080, from main): an agent-authored procedure whose components
+    # trip the rule table must carry a `## Hazards` section before it can merge.
     for note in notes:
-        for target in note.outgoing_links():
-            if target not in known:
-                problems.append(f"note {note.id!r} links to unknown note {target!r}")
-        # Per-note hazard gate (D-080, from main): an agent-authored procedure whose components
-        # trip the rule table must carry a `## Hazards` section before it can merge.
         problems.extend(hazard_problems(note))
-    # Whole-corpus check (gap KNW-6): a note type outside the registry is almost always a typo,
-    # and any retrieval filter keyed on type would then miss it silently.
-    problems.extend(_unknown_types(notes, id_to_path))
-    problems.extend(_unknown_relations(notes, id_to_path))
+    # Whole-corpus vocabulary checks (gap KNW-6, STO-8). Both are checked here rather than in the
+    # `Note` schema so the agent can *propose* a genuinely new type or relation and a human sees it
+    # at the PR-gate — while a typo, which would make the note or the edge unfindable by every
+    # filter keyed on it, cannot reach the graph. `kg-validate` runs on that same PR.
+    problems.extend(
+        _registry_problems(
+            ((note, path, note.type) for note, path in located),
+            KNOWN_NOTE_TYPES,
+            "type",
+            "chemclaw.kg.note.KNOWN_NOTE_TYPES",
+        )
+    )
+    problems.extend(
+        _registry_problems(
+            (
+                (note, path, relation.rel)
+                for note, path in located
+                for relation in note.outgoing_relations()
+            ),
+            KNOWN_RELATIONS,
+            "relation",
+            "chemclaw.kg.relations.KNOWN_RELATIONS",
+        )
+    )
     return problems
 
 
-def _unknown_relations(notes: list[Note], id_to_path: dict[str, Path]) -> list[str]:
-    """Flag any edge whose relation is not in the vocabulary (STO-8).
+def _registry_problems(
+    values: Iterable[tuple[Note, Path, str]],
+    registry: frozenset[str],
+    label: str,
+    registry_name: str,
+) -> list[str]:
+    """Flag every `(note, path, value)` whose value is outside `registry`.
 
-    The same placement argument as `_unknown_types`, one level down: checked here rather than in
-    the `Note` schema so the agent can propose a genuinely new relation and a human sees it at the
-    PR-gate — while a typo, which would make the edge unfindable by every relation-aware query,
-    cannot reach the graph.
+    One function for the note-type check and the relation check, which were the same comprehension
+    written twice with two words swapped — and were therefore two places to fix when the message,
+    the sentinel path or the "add it to the registry" hint needed changing.
     """
     return [
-        f"note {note.id!r} in {id_to_path.get(note.id, Path('?'))} uses unknown relation "
-        f"{relation.rel!r} (add it to chemclaw.kg.relations.KNOWN_RELATIONS if intended)"
-        for note in notes
-        for relation in note.outgoing_relations()
-        if relation.rel not in KNOWN_RELATIONS
-    ]
-
-
-def _unknown_types(notes: list[Note], id_to_path: dict[str, Path]) -> list[str]:
-    """Flag any note whose `type` is not in the registry (gap KNW-6).
-
-    A typo previously minted a new type in silence, and every retrieval filter keyed on type then
-    missed without an error. Checked here rather than in the schema so the agent can still *propose*
-    a genuinely new type — the PR-gate puts a human on it, and this gate runs on that same PR, so an
-    unintended type cannot reach the graph while an intended one costs one line in the registry.
-    """
-    return [
-        f"note {note.id!r} in {id_to_path.get(note.id, Path('?'))} has unknown type "
-        f"{note.type!r} (add it to chemclaw.kg.note.KNOWN_NOTE_TYPES if intended)"
-        for note in notes
-        if note.type not in KNOWN_NOTE_TYPES
+        f"note {note.id!r} in {path} uses unknown {label} {value!r} "
+        f"(add it to {registry_name} if intended)"
+        for note, path, value in values
+        if value not in registry
     ]
 
 

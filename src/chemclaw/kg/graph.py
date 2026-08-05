@@ -6,16 +6,22 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 (1–2 hops), not a vector index.
 """
 
+import logging
+import os
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
 import networkx as nx
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, NoteError, Relation, read_note
+
+log = logging.getLogger(__name__)
 
 # A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap *per file* (stat only,
 # no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
@@ -64,19 +70,32 @@ def invalidate_cache(notes_dir: Path | None = None) -> None:
         _LAST_SCAN.pop(key, None)
 
 
-def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
-    """Stat every note file under `notes_dir`; return the (path, mtime_ns, size) fingerprint."""
-    entries: set[tuple[str, int, int]] = set()
-    for path in notes_dir.rglob("*.md"):
+def scan_notes_dir(notes_dir: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Every note file under `notes_dir` with its stat, in path order.
+
+    The one definition of "what is a note file here" and the one place the race is tolerated. It
+    was written out four times — twice in this module, once in `chemclaw.kg.validate`, and once
+    more in `chemclaw.evals.retrieval`, whose own comment conceded it was "matching
+    `chemclaw.kg.graph`'s fingerprint tolerance". Four copies of a glob is four chances for one of
+    them to disagree about the extension, the recursion or the ordering.
+
+    A file that vanishes between listing and stat (a `git pull` rewriting the tree under a live
+    query) is skipped rather than raised: it simply drops out, which reads correctly as "changed"
+    to a caller diffing fingerprints and never crashes a query.
+    """
+    for path in sorted(notes_dir.rglob("*.md")):
         try:
             stat = path.stat()
         except OSError:
-            # A note removed between listing and stat (e.g. a `git pull` rewriting the tree
-            # under a live query): treat it as absent. It simply drops out of the fingerprint,
-            # which correctly busts the cache on the next stable read — never a crashed query.
             continue
-        entries.add((str(path), stat.st_mtime_ns, stat.st_size))
-    return frozenset(entries)
+        yield path, stat
+
+
+def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
+    """Stat every note file under `notes_dir`; return the (path, mtime_ns, size) fingerprint."""
+    return frozenset(
+        (str(path), stat.st_mtime_ns, stat.st_size) for path, stat in scan_notes_dir(notes_dir)
+    )
 
 
 def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
@@ -90,25 +109,48 @@ def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
     entry here differs from what was stored at the last index run, instead of the whole corpus on
     every scheduled pass (D-2026-08-02-embed-only-what-changed).
     """
-    fingerprints: dict[str, str] = {}
-    for path in notes_dir.rglob("*.md"):
-        try:
-            stat = path.stat()
-        except OSError:
-            # Vanished between listing and stat: it simply has no entry, which correctly reads as
-            # "changed" (in either direction) to a caller diffing against a stored fingerprint.
-            continue
-        fingerprints[path.stem] = f"{stat.st_mtime_ns}:{stat.st_size}"
-    return fingerprints
+    return {
+        path.stem: f"{stat.st_mtime_ns}:{stat.st_size}" for path, stat in scan_notes_dir(notes_dir)
+    }
+
+
+def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
+    """Every `(source id, target id)` link in `notes` pointing at an id no note in `notes` defines.
+
+    Sorted, so two callers reporting it produce the same order. There were two implementations of
+    this — `chemclaw.kg.validate`, which fails a merge on it, and `chemclaw.kg.analytics`, which
+    reports it as a gap in the graph a deployment is serving. They are different *uses* of one
+    question, and the question is asked here once.
+
+    Deliberately over a note list rather than over the assembled graph: a dangling target is a node
+    with no `note` attribute there, which is the same fact expressed in a form that only one of the
+    two callers has.
+    """
+    defined = {note.id for note in notes}
+    return sorted(
+        (note.id, target)
+        for note in notes
+        for target in note.outgoing_links()
+        if target not in defined
+    )
 
 
 def _parse_notes(notes_dir: Path) -> list[Note]:
-    """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files."""
+    """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files.
+
+    A file the schema rejects is skipped so one bad note cannot block every query — but it is
+    *said*, at WARNING, and counted. It used to be dropped in silence on the argument that
+    `kg-validate` reports it, which is true of the repository and not of the tree a pod is
+    serving: a note corrupted by a partial sync leaves a deployment retrieving less than it
+    should with nothing anywhere saying so.
+    """
     notes = []
-    for path in sorted(notes_dir.rglob("*.md")):
+    for path, _ in scan_notes_dir(notes_dir):
         try:
             note = read_note(path)
-        except NoteError:
+        except NoteError as exc:
+            log.warning("skipping unparseable note %s: %s", path, exc)
+            record_metric(lambda m: m.increment("chemclaw_notes_unparseable_total"))
             continue
         if note is not None:
             notes.append(note)

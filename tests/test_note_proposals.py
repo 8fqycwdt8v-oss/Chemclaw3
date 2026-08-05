@@ -137,6 +137,39 @@ def test_a_failed_submission_keeps_the_note_it_could_not_push(
     assert "could not push" in recorded.reason
 
 
+def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
+    store: InMemoryProposalStore,
+) -> None:
+    """Truncation is not redaction, and the bound was described as if it were both.
+
+    `note_proposals` is a compliance table `chemclaw.durable.retention` deliberately never prunes,
+    so anything written to `reason` is written forever. The reason text is whatever git wrote to
+    stderr, and git quotes the push URL — with its token in the userinfo — on the most ordinary
+    authentication failure there is. That message measures 118 characters against a 300-character
+    cut, so the bound the comment relied on had never once applied to the case it named.
+
+    Asserted on the token itself rather than on the redacted form, because what matters is that
+    the secret is absent, not how the remainder reads.
+    """
+    secret = "ghp_S3cretTokenValue"
+
+    class UnauthenticatedRemote:
+        async def submit(self, submission: object) -> str:
+            raise RuntimeError(
+                "fatal: could not read Username for "
+                f"'https://x-access-token:{secret}@git.example.invalid': No such device"
+            )
+
+    with pytest.raises(RuntimeError):
+        _run(propose_note(_note(), UnauthenticatedRemote()))
+
+    [recorded] = _run(store.listing(None, "", 10, None))
+    assert secret not in recorded.reason
+    # Still diagnostic: which remote failed, and why, survive the redaction.
+    assert "git.example.invalid" in recorded.reason
+    assert "could not read Username" in recorded.reason
+
+
 def test_a_store_failure_never_fails_the_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

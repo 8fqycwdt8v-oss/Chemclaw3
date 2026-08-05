@@ -27,6 +27,7 @@ from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.memory.failure import close_refuted_note, failure_note
 
 log = logging.getLogger(__name__)
@@ -91,7 +92,10 @@ async def find_notes(text: str) -> list[NoteRef]:
         graph; a single differently-worded term (e.g. just "suzuki") may still find it.
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-    needles = text.lower().split()
+    # The same tokenizer and the same haystack every other note search uses
+    # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.
+    # A bare `text.lower().split()` here made "the biaryl" require the literal word "the".
+    terms = query_terms(text)
     today = date.today()
     # A broad needle matches most of the corpus, and the whole hit list goes into the model's
     # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
@@ -106,10 +110,7 @@ async def find_notes(text: str) -> list[NoteRef]:
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
-        haystack = " ".join(
-            [note.id, note.type, note.compound_smiles or "", *note.tags, note.body]
-        ).lower()
-        if needles and all(needle in haystack for needle in needles):
+        if terms and term_coverage(note, terms) == len(terms):
             matches.append(_ref(note))
             if len(matches) == cap:
                 log.warning(

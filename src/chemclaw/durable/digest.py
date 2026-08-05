@@ -25,6 +25,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.kg.graph import load_notes
+    from chemclaw.kg.note import Note
+    from chemclaw.kg.search import query_terms, term_coverage
 
 from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -46,8 +48,10 @@ class DigestItem(BaseModel):
 async def collect_digests() -> list[DigestItem]:
     """Find, per subscription, the notes matching it that appeared since its watermark.
 
-    Matching mirrors `find_notes` (id / tags / body substring), so a chemist's watch behaves the
-    same way as the search they would otherwise re-run by hand. Freshness is judged on the note's
+    Matching mirrors `find_notes` — the same haystack and tokenizer, from `chemclaw.kg.search` —
+    so a chemist's watch behaves the same way as the search they would otherwise re-run by hand.
+    It says so because it now calls the same code, not because two implementations were compared
+    once. Freshness is judged on the note's
     own `valid_from` (populated from the experiment date, gap KNW-1) — the honest "when did this
     become knowledge" signal, rather than a file mtime that a git sync would reset on every pull.
 
@@ -77,19 +81,22 @@ async def collect_digests() -> list[DigestItem]:
     return digests
 
 
-def _matches(note: object, subscription: Subscription) -> bool:
-    """Whether a note satisfies a subscription's query and optional type filter."""
-    note_type = getattr(note, "type", "")
-    if subscription.note_type and note_type != subscription.note_type:
+def _matches(note: Note, subscription: Subscription) -> bool:
+    """Whether a note satisfies a subscription's query and optional type filter.
+
+    Matching really does mirror `find_notes` now: the same haystack and the same tokenizer
+    (`chemclaw.kg.search`), every term required. This docstring claimed the mirror while the code
+    built a third haystack of its own — narrower (no type, no structure) and whole-phrase, so a
+    chemist who subscribed to "biaryl coupling" was told about nothing unless a note contained
+    that exact run of text, while the same words typed into `find_notes` found three notes.
+    """
+    if subscription.note_type and note.type != subscription.note_type:
         return False
-    needle = subscription.query.lower()
-    haystack = " ".join(
-        [getattr(note, "id", ""), " ".join(getattr(note, "tags", [])), getattr(note, "body", "")]
-    ).lower()
-    return needle in haystack
+    terms = query_terms(subscription.query)
+    return bool(terms) and term_coverage(note, terms) == len(terms)
 
 
-def _is_new(note: object, subscription: Subscription) -> bool:
+def _is_new(note: Note, subscription: Subscription) -> bool:
     """Whether a note became knowledge after this subscriber was last told.
 
     `>=` rather than `>` on the date, because a note's `valid_from` is a *date* and the digest
@@ -102,7 +109,7 @@ def _is_new(note: object, subscription: Subscription) -> bool:
     "dated today and already sent" from "dated today and new" without having to choose between
     the two failures.
     """
-    valid_from = getattr(note, "valid_from", None)
+    valid_from = note.valid_from
     if valid_from is None or subscription.last_seen_at is None:
         # No date on either side: report it once. Being told about something already seen is a
         # nuisance; never being told is the failure this feature exists to prevent.
@@ -111,7 +118,7 @@ def _is_new(note: object, subscription: Subscription) -> bool:
         return True
     if valid_from < subscription.last_seen_at.date():
         return False
-    return getattr(note, "id", "") not in subscription.last_seen_note_ids
+    return note.id not in subscription.last_seen_note_ids
 
 
 @durable_activity("background")

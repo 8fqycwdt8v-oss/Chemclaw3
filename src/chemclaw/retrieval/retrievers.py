@@ -9,7 +9,6 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 
 import asyncio
 import logging
-import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -19,38 +18,13 @@ from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import conflicts_by_note, find_conflicts
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import WIKILINK, Note, note_id_for_reaction, split_link
+from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.retrieval.evidence import EvidenceChunk
-from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index, note_text
+from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore, Match
 
 log = logging.getLogger(__name__)
-
-# Words that carry no retrieval signal but do carry the difference between "biaryl" (three hits)
-# and "the biaryl" (none) under a whole-phrase match. Deliberately tiny and English-only: this is
-# not stemming or a language model, it is the handful of words a chemist puts around the term they
-# actually mean. A longer list would start discarding real chemistry ("in situ", "on water").
-_STOPWORDS = frozenset(
-    {"a", "an", "and", "for", "from", "in", "is", "of", "on", "or", "our", "the", "to", "with"}
-)
-# Below this a term matches too much to be worth requiring; two characters is already `pd`.
-_MIN_TERM_CHARS = 2
-
-
-def _query_terms(query: str) -> list[str]:
-    """The terms a note must contain to match `query` — lowercased, split on non-word characters.
-
-    Punctuation splits rather than being stripped, because a chemist's query carries structure in
-    it (`Pd(OAc)2`, `4-bromoanisole`, `reactants>>products`) and the parts are what a note's text
-    holds. Falls back to the whole query when nothing survives filtering — a search for `the` is
-    still a search, and returning "no terms, therefore everything" would be worse than literal.
-    """
-    terms = [
-        term
-        for term in re.split(r"[^0-9a-z]+", query.lower())
-        if len(term) >= _MIN_TERM_CHARS and term not in _STOPWORDS
-    ]
-    return terms or [query.lower()]
 
 
 def _excerpt(body: str) -> str:
@@ -157,8 +131,13 @@ class GraphRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks from notes matching every term of `query`, ranked best first.
 
-        Deterministic and case-insensitive over a note's id, tags, and body — the same haystack
-        the dense and lexical indexes build from. Matching is per *term*, not on the query
+        Deterministic and case-insensitive over `chemclaw.kg.search.search_text` — the note's id,
+        type, structure, tags and body, the one haystack the dense index, the lexical index,
+        `find_notes` and the digest all read. Until that was made one function this retriever
+        searched a *narrower* text than the agent's own `find_notes`, so a note the model had just
+        found by its type or its SMILES could not then be cited in a report.
+
+        Matching is per *term*, not on the query
         verbatim: a whole-phrase substring test only found a note that literally contained the
         sentence a chemist typed, so `biaryl` returned the campaign, the compound and the
         playbook while `the biaryl` returned nothing at all (D-138). That is the failure mode
@@ -176,12 +155,11 @@ class GraphRetriever:
         (`ester` in `polyester`). The `development-report` skill judges relevance; this retriever
         only guarantees the note exists, not that it answers the question.
         """
-        terms = _query_terms(query)
+        terms = query_terms(query)
         conflicts = await _conflict_index(self._dir)
         scored: list[tuple[int, EvidenceChunk]] = []
         for note in (await _eligible_notes(self._dir, filters)).values():
-            haystack = note_text(note).lower()
-            coverage = sum(1 for term in terms if term in haystack)
+            coverage = term_coverage(note, terms)
             if not coverage:
                 continue
             # Score a matched note by its own confidence (KM-5): among candidates the
@@ -299,7 +277,7 @@ class FingerprintReactionRetriever:
         reason. An unfiltered sweep never reaches this and still surfaces the pending note.
         """
         eligible = await _eligible_notes(self._dir, wanted)
-        kept = [match for match in matches if f"reaction-{match.id}" in eligible]
+        kept = [match for match in matches if note_id_for_reaction(match.id) in eligible]
         if len(matches) >= self._depth(page) and len(kept) < page:
             # The deeper search was itself exhausted and still did not fill a page, so there may be
             # matching reactions further down the ranking that were never looked at. Said out loud
