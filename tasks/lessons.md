@@ -1102,3 +1102,31 @@ commit about a soak script.
 **Rule: an agent told it may mutate the tree must be told how to prove it restored it**, and the
 proof is `git diff --exit-code <paths>` at the end, not a sentence saying it cleaned up. Two of the
 three said the tree was clean; one of those two was reporting on files it had not touched.
+## R5.8 — `-p no:randomly` was a no-op, and a loop over an empty list asserts nothing
+
+**Two failures of the same kind, both found by a review rather than by the suite.**
+
+**The flag that did nothing.** Every test command I ran this session carried `-p no:randomly`, and I
+reported results as though test-order randomization were controlled. `pytest-randomly` is **not
+installed** — it is in neither the venv nor `uv.lock`. `pytest -p no:X` silently accepts a plugin
+that does not exist, so the flag disabled nothing and proved nothing. I had been asserting a
+property of the run that I had never checked.
+
+**Rule: a flag is not a control until you have seen it take effect.** Check the plugin is installed
+(`pytest --trace-config`, or look in the lock file) before describing a run as controlled for what
+that plugin does. A silently-accepted no-op is indistinguishable from a working guard.
+
+**The loop that could not fail.** Five constraint tests were written as
+`for candidate in <strategy call>: assert <property>`. A strategy returning `[]` passes all of them.
+This was not hypothetical — BoFire was already short-changing one ask (`Expected 3 candidates, got
+2`), so the wave's headline claim, that the seeding path honours a stated limit, was never actually
+pinned. The fix is one line per test: bind the result, assert its length, *then* loop.
+
+**Rule: a `for` loop is not an assertion.** Any test shaped `for x in f(): assert p(x)` also needs
+`assert len(...) == n`. The same applies to `all(...)`, `sum(...) == 0` and every other reduction
+over a collection the code under test produced — they are all vacuously true on empty.
+
+**What both have in common:** each looked like a check and was a description. R5.5 said a measured
+number is only measured if its script runs green; R5.6 said a green suite proves the code matches
+the test, not that the test is right. This is the third face of it — **a guard that never executed
+is not a guard**, whether it is a plugin flag, a loop body, or an assertion the data never reaches.

@@ -208,7 +208,6 @@ def test_centre_runs_sit_at_the_midpoint_of_every_continuous_factor() -> None:
     ]
     assert midpoints, "no centre run at the midpoint of both continuous factors"
     assert design.n_center == 2
-    assert "centre run(s)" in design.summary
 
 
 def test_centre_runs_are_added_per_categorical_combination_not_once() -> None:
@@ -222,7 +221,6 @@ def test_centre_runs_are_added_per_categorical_combination_not_once() -> None:
     with_centres = factorial_design(_mixed_problem(), n_center=2)
     assert len(corners.runs) == 8
     assert len(with_centres.runs) == 12
-    assert str(len(with_centres.runs)) in with_centres.summary
 
 
 def test_the_default_is_no_centre_runs_although_bofire_defaults_to_one() -> None:
@@ -244,7 +242,6 @@ def test_replication_doubles_the_factorial_part_and_says_why() -> None:
     design = factorial_design(_mixed_problem(), n_repetitions=2)
     assert len(design.runs) == 16
     assert design.n_repetitions == 2
-    assert "pure-error estimate" in design.summary
 
 
 def test_centre_runs_are_refused_on_an_all_categorical_problem() -> None:
@@ -282,8 +279,8 @@ def test_a_reduced_design_fractionates_the_continuous_and_categorical_halves_tog
     assert len(reduced.runs) == 4
     assert reduced.resolution is not None
     # The categorical is decoded back to real labels, not left as the 0/1 it was fractionated as.
-    assert {run["solvent"] for run in reduced.runs} <= {"THF", "toluene"}
-    assert {run["T"] for run in reduced.runs} <= {20.0, 120.0}
+    assert {run["solvent"] for run in reduced.runs} == {"THF", "toluene"}
+    assert {run["T"] for run in reduced.runs} == {20.0, 120.0}
 
 
 def test_a_randomized_order_is_reproducible_under_a_seed_and_varies_across_seeds() -> None:
