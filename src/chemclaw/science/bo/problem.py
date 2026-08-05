@@ -700,14 +700,19 @@ class CampaignSpec(BaseModel):
 
 
 def require_rounds_within_ceiling(n_rounds: int) -> None:
-    """Reject a round count beyond `bo_max_rounds` — Temporal event history is finite (G4).
+    """Reject a round count beyond `bo_max_rounds` — every round costs a real evaluation.
 
-    The durable campaign carries its observation history as workflow state and re-sends it
-    to the propose activity every round, so history bytes grow quadratically with rounds;
-    an unbounded round count would be terminated by the server's hard history limit mid-run,
-    losing every already-paid evaluation. Enforced at campaign/spec *creation* — never inside
-    the `CampaignSpec` model, whose validators re-run on deserialization at workflow replay,
-    where a lowered ceiling must not fail an in-flight campaign's own input.
+    **Not an event-history bound**, though it was documented as one. The durable campaign re-sends
+    its whole observation history to the propose activity every round, so history bytes grow
+    quadratically and a campaign well inside this ceiling would have been terminated by the server
+    mid-run (measured: round 441 at batch 1). That is fixed where it lives — the workflow
+    continues-as-new on the server's own suggestion — not by a number here, which could never
+    account for batch size or problem width. What this ceiling refuses is a spec that would spend
+    thousands of evaluations, which is a mistake worth catching before the first one is paid for.
+
+    Enforced at campaign/spec *creation* — never inside the `CampaignSpec` model, whose validators
+    re-run on deserialization at workflow replay, where a lowered ceiling must not fail an
+    in-flight campaign's own input.
 
     Raises:
         ValueError: When `n_rounds` exceeds the configured `bo_max_rounds`.
@@ -785,6 +790,25 @@ class CampaignResult(BaseModel):
 
     best: Observation
     history: list[Observation]
+
+
+class CampaignCarryOver(BaseModel):
+    """What one durable run hands the next when it continues-as-new.
+
+    A campaign's whole mutable state is these two numbers-and-a-list: what has been measured, and
+    how many rounds are still owed. Everything else — the problem, the objective name, the batch,
+    the seed — is in the `CampaignSpec` the payload already carries and never changes, so it is
+    passed through unread rather than copied in here.
+
+    Exists because the round ceiling used to be a promise the workflow could not keep: the history
+    is re-sent to the propose activity every round, so event-history bytes grow quadratically and a
+    campaign at the configured `bo_max_rounds` would be terminated by the server mid-run, losing
+    every already-paid evaluation. Carrying the state across a fresh run resets that growth; the
+    carry-over is one list of observations, kilobytes at any round count this ceiling allows.
+    """
+
+    history: list[Observation]
+    rounds_remaining: int = Field(ge=0)
 
 
 def observed_value(

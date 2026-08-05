@@ -30,11 +30,13 @@ class BoSettings(BaseSettings):
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
-    # Ceiling on a campaign spec's round count. The observation history is carried as workflow
-    # state and re-sent to the propose activity every round, so history bytes grow quadratically
-    # with rounds and an unbounded spec would hit Temporal's hard event-history limit mid-run,
-    # losing every already-paid evaluation. Generous versus the default of 10 rounds; a spec
-    # beyond it is rejected at build time, not terminated by the server mid-campaign.
+    # Ceiling on a campaign spec's round count — a *budget* bound, not a Temporal one. It used to
+    # be described as protecting the event-history limit, and did not: history is re-sent to the
+    # propose activity every round, so bytes grow quadratically and a measured 178 bytes per
+    # observation puts a batch-1 campaign past the 50 MB hard limit at round 441, inside this very
+    # ceiling. The workflow now continues-as-new when the server suggests it, which removes the
+    # history bound entirely; what is left is that every round costs an evaluation, and a spec
+    # asking for thousands is a mistake worth refusing at build time.
     bo_max_rounds: int = Field(default=500, ge=1)
     # How many recent evaluations `science.bo.progress` reads for its "have the last N results
     # moved at all" statement, and how many consecutive noise-sized evaluations make a plateau.
