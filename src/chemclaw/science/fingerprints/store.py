@@ -393,8 +393,8 @@ async def find_matches(
 
     The one place the generic search knobs fall back to config, so the molecule
     and reaction entry points cannot drift in how they default (DRY). `top_k` may arrive
-    from the model (chemclaw.agent.search_tools) and lands in a SQL `LIMIT`, so it is clamped to
-    `[1, fingerprint_max_top_k]` here — the fingerprint-search analog of the `graph_max_hops`
+    from the model (the `molfp`/`rxnfp` bundles' MCP tools) and lands in a SQL `LIMIT`, so it is
+    clamped to `[1, fingerprint_max_top_k]` here — the fingerprint-search analog of `graph_max_hops`
     clamp on `expand_note`, applied at the single chokepoint both entry points share.
     `threshold` is equally model-supplied and lands in the SQL similarity comparison, so it
     is clamped to `[0, 1]` — the same bound the config default carries (Tanimoto's range);

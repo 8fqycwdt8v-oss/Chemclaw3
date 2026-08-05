@@ -86,3 +86,24 @@ def test_a_hit_still_carries_its_note_id_through_the_new_envelope(
     assert [hit["id"] for hit in payload["hits"]] == ["reaction-rxn-1"]
     assert payload["index_empty"] is False
     assert payload["verdict"].startswith("1 indexed reaction(s) matched")
+
+
+def test_the_identical_reaction_scores_a_perfect_similarity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A query matching an indexed reaction exactly comes back at Tanimoto 1.0, ranked first.
+
+    Inherited from `test_search_tools.py`, which proved it against the deleted in-process wrapper
+    (D-2026-08-05). The score is what the model reads as "this is the same transformation, not
+    merely a relative", so it is worth pinning on the path a turn actually takes rather than on a
+    lookalike of it — the wrapper had already drifted from this tool in both its arguments and its
+    result model.
+    """
+    store = InMemoryFingerprintStore(definition=reaction_definition())
+    asyncio.run(store.add(record_for_reaction("rxn-1", _ESTER_ETHYL)))
+    asyncio.run(store.add(record_for_reaction("rxn-2", _HALOGENATION)))
+
+    payload = _structured(store, monkeypatch)
+
+    assert payload["hits"][0]["id"] == "reaction-rxn-1"
+    assert payload["hits"][0]["similarity"] == 1.0
