@@ -9,6 +9,20 @@ Record with every number and its reproduction: `docs/archive/review-2026-08-05.m
 were fixed in the same pass and are not listed here; these are the ones that need a *decision*
 rather than a diff.
 
+- [ ] **api RSS grows, decelerating, and has not been shown to stop** — [M], and the *shape* of the
+      evidence is the reason it is a row rather than a conclusion. Over 81 soak rounds (~75 min, the
+      storm's `BCDFGH` at 24 turns/round) the front door went **549 → 811 MB**, and the fit's verdict
+      changed three times as the run got longer: at 29 rounds `+4,690 KB/round (± 764)` with an
+      *accelerating* tail; at 43 rounds `rises then settles, flat over the last 22`; at 81 rounds
+      `+2,666 KB/round (± 310), still +1,238 over the tail` — resolved over the run **and** the tail.
+      Round 40 *returned* 134 MB in one step, which is what allocator arenas do and a monotone leak
+      never does, so a decelerating curve against a step-wise allocator is the shape a long warm-up
+      and a slow leak share. `chemclaw_live_sessions` sat pinned at its bound of 1000 throughout, so
+      it was never the LRU filling; row counts grow exactly linearly and the pool never waits.
+      Reproduce: `make live-soak` then `make live-soak-report`. What settles it is a run several
+      times longer — the deceleration says the next doubling is the informative one — or an
+      allocator-level look (`malloc_stats`, `tracemalloc`) that a soak cannot give.
+
 - [ ] **A crash mid-submission leaves the shared checkout on `note/<id>`, with the unreviewed note
       in the tree** — [M], and the same GxP decision as the read window directly below it. Measured
       with a real git remote and a SIGKILLed child: `branch after SIGKILL: note/job-crash`, the

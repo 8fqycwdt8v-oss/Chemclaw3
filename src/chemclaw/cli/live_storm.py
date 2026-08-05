@@ -338,6 +338,14 @@ async def family_d_durable(sessions: int) -> list[Finding]:
     never going to see it.
 
     Stated as **exactly one**, both times. Zero is the failure this family exists to make visible.
+
+    **The soak found the third thing wrong with this family, and it was in the payload rather than
+    the check.** 6 of 81 rounds reported "0 job_records row(s) written", spaced ~12 rounds apart.
+    Nothing was broken: `_COLLISION_TEMPERATURE_K` had a 719-second period, so a temperature
+    recurred every ~12 minutes, `ALLOW_DUPLICATE_FAILED_ONLY` correctly rejoined the completed run
+    rather than recomputing it, and no new row was written. Invisible in a single storm and
+    unmissable over hours — which is the whole argument for running one. The period is now
+    27 hours; `exactly one` stands.
     """
     await asyncio.to_thread(_lane, "processes.sh", "restart", "mock-llm")
     since = await _scalar("select now()")
