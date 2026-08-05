@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
-from chemclaw.kg.graph import load_notes, note_file_fingerprints
+from chemclaw.kg.graph import invalidate_cache, load_notes, note_file_fingerprints
 from chemclaw.kg.search import search_text
 
 # Lexical tokenizer for the in-memory backend (lowercase alphanumeric runs) — the offline proxy of
@@ -311,8 +311,16 @@ async def reindex_notes(
     Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge. Notes
     deleted from disk leave a harmless stale row — the retrievers drop any hit whose note no longer
     loads — so a full teardown is never required.
+
+    **Reads past the graph cache deliberately.** This is the one in-process moment that correlates
+    with a merge — the PR-gate's merge webhook triggers it — and the note list below is compared
+    against a freshly scanned `note_file_fingerprints`. Without the bust the two halves could come
+    from different moments: a graph cached before the merge landed, diffed against fingerprints
+    read after it, which computes `changed` from a stale set of notes. The cost is one rescan on a
+    job that is about to re-embed anyway.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
+    await asyncio.to_thread(invalidate_cache, directory)
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         return 0

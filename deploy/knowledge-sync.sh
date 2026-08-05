@@ -21,18 +21,19 @@
 # **Where the publish lands, and why it is inside the submitter's clone.** Every reader resolves
 # `settings.knowledge_path`, which is `note_repo_dir / knowledge_dir` and nothing else — one
 # property, deliberately, so "where notes are written" and "where notes are read" cannot be two
-# answers (`core/config/`, and `kg/git_submitter.py::_return_to_base`, which returns the checkout
-# to the base branch precisely *because* readers share it). Publishing anywhere else does not fail;
+# answers (`core/config/`; and `kg/git_submitter.py` submits into a private worktree under `.git/`
+# precisely *because* readers share this tree). Publishing anywhere else does not fail;
 # it silently answers with no evidence, because a missing note is not an error. So the publish
 # target is `${CHEMCLAW_NOTE_REPO_DIR}/${CHEMCLAW_KNOWLEDGE_DIR}` — the directory the application
 # reads — and the chart derives it from those same two settings rather than naming a second path.
 #
-# That makes this script the *second* writer of that tree, the submitter being the first. It
-# therefore takes the submitter's own cross-process lock (`.git/chemclaw-submit.lock`, an advisory
-# `flock` — see `kg/git_submitter.py`) for the duration of the publish, so an `rsync --delete` can
-# never land between the submitter's `write_text` and its `git add`, and can never dirty the tree
-# under a `git checkout -B`. A held lock means a submission is in flight: skip this tick and publish
-# on the next one.
+# That makes this script the only writer of that tree — the submitter used to be the other one, and
+# since it moved its writes into a private worktree it no longer touches this directory at all. It
+# still takes the submitter's cross-process lock (`.git/chemclaw-submit.lock`, an advisory `flock` —
+# see `kg/git_submitter.py`) for the duration of the publish: the two now serialize against each
+# other's *git* operations in one clone rather than against each other's file writes, which is a
+# weaker need but not no need. A held lock means a submission is in flight: skip this tick and
+# publish on the next one.
 #
 # The token is delivered through a credential helper rather than baked into the remote URL, so it
 # never lands in `.git/config`, in `git remote -v`, or in any log line this script emits.
@@ -193,9 +194,9 @@ publish() {
 }
 
 # A full, writable clone for the PR-gate submitter (gap DEP-2) — a *different* directory from the
-# shallow read replica above, because `git checkout -B note/<id>` switches the whole working tree
-# and the submitter force-pushes, neither of which a hard-reset replica survives. Not shallow:
-# `--force-with-lease` needs real history to reason about.
+# shallow read replica above, because the submitter creates branches and force-pushes them, which
+# a hard-reset replica does not survive. Not shallow: `--force-with-lease` needs real history to
+# reason about, and `git worktree add` needs the base commit the submission branches from.
 # Idempotent, so a restarted pod reuses the existing clone instead of re-cloning.
 #
 # This runs as the *first* init container, before the publish: `git clone` refuses a non-empty

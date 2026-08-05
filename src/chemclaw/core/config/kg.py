@@ -46,9 +46,10 @@ class KgSettings(BaseSettings):
     # this remote before a human merges.
     note_base_branch: str = "main"
     git_remote: str = "origin"
-    # The checkout the GitNoteSubmitter mutates (`git checkout -B` switches its whole working
-    # tree). Point it at a dedicated clone of the knowledge repo in production; the "." default
-    # only suits a dev checkout with nothing else running in it.
+    # The clone the GitNoteSubmitter creates note branches in and force-pushes from. Its working
+    # tree is a *reader* surface only — since D-2026-08-05 a submission happens in a private
+    # worktree under `.git/` and never switches this tree. Point it at a dedicated clone of the
+    # knowledge repo in production; the "." default only suits a dev checkout.
     note_repo_dir: str = "."
     # Publishing a QM result as a graph note is best-effort: bounded attempts + its own timeout
     # so a persistent failure gives up instead of retrying forever.
