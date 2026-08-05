@@ -260,3 +260,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-04-the-schema-only-goes-forward](D-2026-08-04-the-schema-only-goes-forward.md) | The schema only goes forward, and a test says so |
 | [D-2026-08-04-what-bofire-does-when-you-actually-run-it](D-2026-08-04-what-bofire-does-when-you-actually-run-it.md) | What BoFire does when you actually run it, and the roadmap that survived it |
 | [D-2026-08-05-a-gain-is-measured-from-the-last-gain](D-2026-08-05-a-gain-is-measured-from-the-last-gain.md) | A gain is measured from the last gain, not from the last run |
+| [D-2026-08-05-a-score-reported-more-precisely-than-it-repeats](D-2026-08-05-a-score-reported-more-precisely-than-it-repeats.md) | A score reported more precisely than it repeats |

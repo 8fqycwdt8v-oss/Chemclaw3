@@ -46,6 +46,12 @@ line of enquiry into a design space just because a design space is what this too
    opposite direction from the old refusal. Where the front has one member, say that too — it means
    one run dominated every other, which is a real and unusual finding.
 
+   **Pass `assay_noise` when the chemist has stated one.** The front is drawn by comparing runs, and
+   without that number every numeric difference counts as real — so two runs the assay cannot
+   separate knock each other off a front they both belong on. It is the same number
+   `campaign_progress` requires, and on a trade-off question the chemist has usually already said
+   it. The return's `summary` states which front it drew.
+
    Keep a single objective when the chemist has one. A trade-off between yield and a cost the
    record does not measure is not a second objective; it is a conversation.
 
@@ -162,9 +168,12 @@ Three things it gives you and one it does not:
 - `in_domain: false` means the point lies outside the declared range. The model **extrapolates**
   there rather than refusing, so the mean is unconstrained and the sd widens sharply. Say both.
 - `fit` is the cross-validated quality of that surrogate, one score per objective, and its summary
-  carries the caveat. Quote it before quoting a prediction: an R² of 0.5 means the predictions
+  carries the caveats. Quote it before quoting a prediction: an R² of 0.5 means the predictions
   below it are worth very little, and over a handful of runs even a high one is a sanity check
-  rather than a measure of accuracy. Do not report a score without the run count beside it.
+  rather than a measure of accuracy. Do not report a score without the run count beside it, and
+  **never compare two of these scores** — the GP's hyperparameter fit is not deterministic, so the
+  same runs give a different number each time (measured: R² moving by about 0.06, MAE by about half
+  its value). Quote the summary's own wording rather than the raw number.
 - It does **not** record anything. The points are questions, not proposals, so nothing is added to
   the campaign — use `suggest_next_experiment` when the chemist wants something to run.
 

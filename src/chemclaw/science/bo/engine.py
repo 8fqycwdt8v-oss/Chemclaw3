@@ -437,12 +437,26 @@ def predict_at(
     extrapolates, with the sd rising about sixfold — so the point is answered and labelled rather
     than refused; `Prediction.in_domain` carries the label and its summary states it.
 
+    **A point's parameters are the caller's to validate**, as they are for `propose_candidates`: a
+    key this problem does not declare is dropped and a missing one becomes a null column. The tool
+    boundary checks it (`_require_points_match`) so the model gets a repairable sentence.
+
     Raises:
         ValueError: Below the surrogate's observation floor, or with no point to predict.
     """
     if not points:
         raise ValueError("predict_at needs at least one point to predict")
-    strategy, _ = _fitted_strategy(problem, observations, seed)
+    return interrogate_surrogate(problem, observations, points, assess_fit=False, seed=seed)[0]
+
+
+def _predictions_from(
+    problem: OptimizationProblem, strategy: Any, points: list[dict[str, ParamValue]]
+) -> list[Prediction]:
+    """Query an already-fitted strategy at the caller's points.
+
+    Takes the strategy rather than fitting one, so the prediction and the fit quality beside it
+    describe the same model rather than two identically-configured ones.
+    """
     frame = pd.DataFrame(
         [{p.name: point.get(p.name) for p in problem.parameters} for point in points]
     )
@@ -496,35 +510,89 @@ def surrogate_fit_quality(
     string, so the enum is what is read.
 
     Raises:
-        ValueError: Below the observation floor, or with fewer observations than folds.
+        ValueError: Below the observation floor, or when the **caller** named more folds than there
+            are runs. A *defaulted* fold count adapts instead — see `_resolve_folds`.
     """
-    resolved_folds = settings.bo_cv_folds if folds is None else folds
-    if resolved_folds < 2:
-        raise ValueError(f"cross-validation needs at least 2 folds; got {resolved_folds}")
-    strategy, frame = _fitted_strategy(problem, observations, seed)
-    if len(observations) < resolved_folds:
+    return interrogate_surrogate(problem, observations, [], folds=folds, seed=seed)[1]
+
+
+def _resolve_folds(folds: int | None, n_observations: int) -> int:
+    """How many folds to cross-validate over: the caller's number, or one the data can carry.
+
+    **A defaulted fold count adapts to the data; a stated one does not.** `bo_cv_folds` is 5, and a
+    three-run campaign cannot hold out a run per fold — which used to make `predict_outcome` *raise*
+    on exactly the early campaigns it is most useful for, because the tool always defaulted. When
+    the number came from config it is the system's choice, so it bends to the run count; when the
+    caller named it, asking for more folds than runs is a mistake worth a sentence rather than a
+    silent adjustment. Either way `FitQuality.folds` records what was actually used, so an adapted
+    count is visible rather than hidden.
+    """
+    if folds is None:
+        return max(2, min(settings.bo_cv_folds, n_observations))
+    if folds < 2:
+        raise ValueError(f"cross-validation needs at least 2 folds; got {folds}")
+    if n_observations < folds:
         raise ValueError(
-            f"cannot cross-validate {len(observations)} observation(s) over {resolved_folds} "
-            "folds: each fold would hold out less than one run. Supply more runs, or ask for "
-            "fewer folds."
+            f"cannot cross-validate {n_observations} observation(s) over {folds} folds: each fold "
+            "would hold out less than one run. Supply more runs, or ask for fewer folds."
         )
+    return folds
+
+
+def _fit_quality_from(
+    problem: OptimizationProblem, strategy: Any, frame: pd.DataFrame, folds: int, n: int
+) -> list[FitQuality]:
+    """Cross-validate the surrogates an already-fitted strategy chose, one score per objective."""
     scores = []
-    with _translating_surrogate_errors(f"cross-validating over {resolved_folds} folds"):
+    with _translating_surrogate_errors(f"cross-validating over {folds} folds"):
         for objective, specification in zip(
             problem.objectives, strategy.surrogate_specs.surrogates, strict=True
         ):
             surrogate = surrogate_api.map(specification)
-            _, test, _ = surrogate.cross_validate(frame, folds=resolved_folds)
+            _, test, _ = surrogate.cross_validate(frame, folds=folds)
             scores.append(
                 FitQuality(
                     objective=objective.name,
                     r2=_metric(test, RegressionMetricsEnum.R2),
                     mae=_metric(test, RegressionMetricsEnum.MAE),
-                    folds=resolved_folds,
-                    n_observations=len(observations),
+                    folds=folds,
+                    n_observations=n,
                 )
             )
     return scores
+
+
+def interrogate_surrogate(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    points: list[dict[str, ParamValue]],
+    folds: int | None = None,
+    assess_fit: bool = True,
+    seed: int | None = None,
+) -> tuple[list[Prediction], list[FitQuality]]:
+    """Ask one fitted surrogate both questions: what it expects here, and how well it predicts.
+
+    **One fit, and that is the point rather than an optimization.** The score is only worth quoting
+    beside a prediction if it describes the model that made it; fitting twice would give two
+    identically-configured models and a sentence that was true only by construction. `predict_at`
+    and `surrogate_fit_quality` are thin wrappers over this, so no caller can accidentally take the
+    two halves from two fits.
+
+    Raises:
+        ValueError: Below the observation floor, when the caller named more folds than runs, or
+            when neither a point nor a fit assessment was asked for.
+    """
+    if not points and not assess_fit:
+        raise ValueError("interrogate_surrogate was asked for neither a prediction nor a fit score")
+    resolved_folds = _resolve_folds(folds, len(observations)) if assess_fit else 0
+    strategy, frame = _fitted_strategy(problem, observations, seed)
+    predictions = _predictions_from(problem, strategy, points) if points else []
+    quality = (
+        _fit_quality_from(problem, strategy, frame, resolved_folds, len(observations))
+        if assess_fit
+        else []
+    )
+    return predictions, quality
 
 
 def _resolution(generator: str) -> int:

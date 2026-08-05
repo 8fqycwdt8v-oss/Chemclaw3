@@ -41,9 +41,8 @@ from chemclaw.science.bo.campaign_record import (
 from chemclaw.science.bo.engine import (
     factorial_design,
     initial_candidates,
-    predict_at,
+    interrogate_surrogate,
     propose_candidates,
-    surrogate_fit_quality,
 )
 from chemclaw.science.bo.featurize import featurize_problem
 from chemclaw.science.bo.problem import (
@@ -130,6 +129,10 @@ class ExperimentSuggestion(BaseModel):
     # actually show. Empty on a single-objective problem, where there is one best point and no front
     # to draw. This is what turns "here is the trade-off" from a sentence into a computation (W3).
     front: list[Observation] = Field(default_factory=list)
+    # The assay reproducibility the front was drawn with, or None when it was drawn at exact
+    # precision. Carried so the summary can say which, rather than leaving a reader to assume the
+    # stricter reading was the deliberate one.
+    front_tolerance: float | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -148,11 +151,18 @@ class ExperimentSuggestion(BaseModel):
         readings = []
         if len(self.scales) > 1:
             named = ", ".join(f"{scale.direction} {scale.name}" for scale in self.scales)
+            drawn = (
+                f"Runs differing by {self.front_tolerance:.3g} or less were treated as "
+                "indistinguishable, so neither knocked the other off."
+                if self.front_tolerance
+                else "No assay reproducibility was given, so every numeric difference counted as "
+                "real — pass `assay_noise` and the front will usually be longer and truer."
+            )
             readings.append(
                 f"This is a trade-off over {len(self.scales)} objectives ({named}), so there is no "
                 f"single best point. `front` holds the {len(self.front)} run(s) of those supplied "
                 "that nothing else beats on every objective at once — quote those as the "
-                "trade-off, and read the sd below against the lead objective only."
+                f"trade-off, and read the sd below against the lead objective only. {drawn}"
             )
         for index, candidate in enumerate(self.candidates, start=1):
             if candidate.predicted_sd is None:
@@ -263,6 +273,7 @@ async def suggest_next_experiment(
     problem: OptimizationProblem,
     observations: list[Observation] | str | None = None,
     count: int = 1,
+    assay_noise: float | None = None,
 ) -> ExperimentSuggestion:
     """Suggest the next experiment(s) to run for an optimization problem (Bayesian optimization).
 
@@ -324,6 +335,12 @@ async def suggest_next_experiment(
             several objectives, give each run's `values` map naming every one of them.
             Omit or pass an empty list to get seed points for a fresh campaign.
         count: How many candidates to propose (a batch).
+        assay_noise: The assay's reproducibility in the lead objective's own units, if the chemist
+            has stated one ("+/-2%" is `2.0`). Used only for the `front` on a multi-objective
+            problem: two runs differing by less than this are not distinguishable, so neither
+            beats the other and both stay on the front. Without it the front treats every numeric
+            difference as real and is usually shorter than the chemist's true trade-off. Same
+            number and same meaning as `campaign_progress`'s required argument.
 
     The suggestion is **recorded** against the campaign this problem defines, and the returned
     `campaign_id` is the handle for it. Quote that id back to the chemist: asking again about the
@@ -386,7 +403,12 @@ async def suggest_next_experiment(
         # The front of the runs the caller gave us, not of anything the model predicted — a
         # trade-off is a statement about measurements. Empty for one objective, where `best_of`
         # already answers "which run won".
-        front=pareto_front(problem, history) if len(problem.objectives) > 1 else [],
+        front=(
+            pareto_front(problem, history, assay_noise or 0.0)
+            if len(problem.objectives) > 1
+            else []
+        ),
+        front_tolerance=assay_noise,
     )
 
 
@@ -569,7 +591,17 @@ class SurrogateAnswer(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def summary(self) -> str:
-        """The fit quality first, because it is what licenses reading the predictions at all."""
+        """The fit quality first, because it is what licenses reading the predictions at all.
+
+        An absent fit says so in words rather than as an empty string. A blank summary reads as "no
+        caveat" to whatever composes the answer, which is the opposite of what it means.
+        """
+        if not self.fit:
+            return (
+                "Fit quality was not assessed on this call, so nothing here says how well this "
+                "model predicts runs it has not seen. Read the predictions as the model's belief, "
+                "not as accuracy."
+            )
         return " ".join([quality.summary for quality in self.fit])
 
 
@@ -610,10 +642,11 @@ async def predict_outcome(
             value for every parameter the problem declares.
         points: The conditions to predict at, each naming **every** parameter — one dict per
             question. These are not proposals and are not recorded against the campaign.
-        assess_fit: Cross-validate the surrogate and return the score (default true). Set it false
-            only when the fit quality is already known from an earlier call in the same
-            conversation; it costs a few extra fits and is what tells a chemist whether the
-            prediction is worth anything.
+        assess_fit: Cross-validate the surrogate and return the score (default true). It is what
+            tells a chemist whether the prediction is worth anything, and it costs one refit per
+            fold — measured at roughly three times the call's latency on a ten-run problem. Set it
+            false only for a follow-up question in the same conversation, where the fit quality is
+            already known and repaying it buys nothing.
 
     Returns:
         One `Prediction` per point — the predicted value, the posterior sd, and whether the point is
@@ -634,8 +667,7 @@ async def predict_outcome(
     # models a categorical space, so a prediction made without them would answer about a different
     # model than the one that proposed.
     featurized = await featurize_problem(default_store(), problem)
-    predictions = await asyncio.to_thread(predict_at, featurized.problem, history, asked)
-    fit: list[FitQuality] = []
-    if assess_fit:
-        fit = await asyncio.to_thread(surrogate_fit_quality, featurized.problem, history)
+    predictions, fit = await asyncio.to_thread(
+        interrogate_surrogate, featurized.problem, history, asked, None, assess_fit
+    )
     return SurrogateAnswer(predictions=predictions, fit=fit)
