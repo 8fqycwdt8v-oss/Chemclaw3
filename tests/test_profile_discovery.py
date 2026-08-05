@@ -10,6 +10,7 @@ expressible at all now that the domain capabilities are out of process — and a
 underneath everything: a profile *attenuates*, it never authorizes.
 """
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
+from chemclaw.agent.chemclaw_agent import advertised_tool_names, build_agent, connector_tools
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles, profile_files
 from chemclaw.agent.profiles import _REGISTRY, get_profile, registered_profile_names
 from chemclaw.api.app import create_app
@@ -135,6 +136,35 @@ def test_the_shipped_profile_narrows_both_halves_of_the_surface() -> None:
     assert attached == {
         "calc": ["calculator_trust", "compute_xtb_energy", "predict_pka", "predict_solubility"]
     }
+
+
+@pytest.mark.parametrize("profile", [None, "property-lookup"])
+def test_advertised_tool_names_matches_the_surface_the_agent_really_builds(
+    profile: str | None,
+) -> None:
+    """`advertised_tool_names` must equal what `build_agent` + `connector_tools` actually produce.
+
+    It has to answer that question *without* calling `connector_tools`, because constructing a
+    connector's MCP tool opens an `httpx.AsyncClient` that only a turn's exit stack ever closes —
+    so it reads the manifests and re-applies the same two narrowings by hand. Re-applying a rule is
+    exactly how two implementations of it drift, and the drift would be invisible: the skill
+    surface would simply be scoped against a slightly wrong set of tools and every turn would look
+    fine. So the two are compared here, over both the full surface and the narrowing profile,
+    which is the case where the rules actually do something.
+    """
+    load_profiles()
+    agent = build_agent(chat_client=object(), profile=profile)
+    connectors = connector_tools(profile)
+    try:
+        real = {t.name for t in agent.default_options["tools"]}
+        for connector in connectors:
+            real |= set(connector.allowed_tools or ())
+    finally:
+        # Unconnected, but each one owns a client; releasing them keeps the test from leaking.
+        for connector in connectors:
+            asyncio.run(connector.close())
+
+    assert advertised_tool_names(profile) == real
 
 
 def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:

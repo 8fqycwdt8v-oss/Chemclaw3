@@ -6,6 +6,19 @@ description: >-
   composing every data source and tool, and how to draft new conditions/protocols grounded
   in that evidence. Cite everything, separate evidence from analogy, and route anything new
   through the PR-gate.
+tools:
+  - gather_evidence
+  - find_notes
+  - expand_note
+  - similar_reactions
+  - similar_molecules
+  - substructure_matches
+  - compute_xtb_energy
+  - predict_pka
+  - predict_solubility
+  - compute_dft_energy
+  - suggest_next_experiment
+  - propose_knowledge_note
 ---
 
 # Deep research

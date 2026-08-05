@@ -1130,3 +1130,20 @@ over a collection the code under test produced — they are all vacuously true o
 number is only measured if its script runs green; R5.6 said a green suite proves the code matches
 the test, not that the test is right. This is the third face of it — **a guard that never executed
 is not a guard**, whether it is a plugin flag, a loop body, or an assertion the data never reaches.
+
+## 2026-08-05 — `git checkout <file>` is not an undo when the file has uncommitted work
+
+**The revert that destroyed the work it was reverting.** To prove a new drift-guard test was not
+vacuous, I mutated `chemclaw_agent.py`, ran the test (it failed — the guard was real), then ran
+`git checkout src/chemclaw/agent/chemclaw_agent.py` to undo the mutation. That restored the file to
+**HEAD**, not to its pre-mutation state, deleting an hour of uncommitted edits to the same file. The
+mutation check succeeded and cost more than it proved.
+
+**Rule: to mutation-check a file with uncommitted changes, copy it aside first**
+(`cp f /tmp/f.bak` … `cp /tmp/f.bak f`), or commit before mutating. `git checkout`/`git restore`
+take their content from the index or HEAD and have no notion of "the state I was just in" — there
+is nothing to recover from afterwards, because the working copy was the only copy.
+
+**The general shape:** an undo is only an undo if it restores the state you actually left. Every
+`git` command that writes the working tree (`checkout`, `restore`, `stash`, `reset --hard`) resolves
+against a *committed* baseline, so on a dirty file each of them is a delete dressed as a revert.
