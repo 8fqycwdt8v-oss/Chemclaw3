@@ -365,3 +365,48 @@ def test_an_exclusion_round_trips_through_the_discriminated_union() -> None:
     assert isinstance(revived.constraints[0], ExcludeConstraint)
     assert revived.constraints[0].describe() == "never catalyst=Pd(OAc)2 with solvent=DMSO"
     assert campaign_id_for(revived) == campaign_id_for(problem)
+
+
+def test_an_exhausted_space_is_refused_with_a_sentence_instead_of_a_keyerror() -> None:
+    """The crash two independent reviews found, and the mystery it turned out to be.
+
+    When every cell of a discrete space has been run, BoFire's `_optimize_acqf_discrete` drops the
+    already-run rows, hands an empty frame to `domain.inputs.transform`, and raises
+    `KeyError: '<parameter>'`. That is neither a `ValueError` nor one of `_SURROGATE_FAILURES`, so
+    `connectors.server` replaced it with "an internal error occurred" — nothing the model can act
+    on, and it retries.
+
+    `_require_observed_params_match`'s docstring records a live `KeyError: 'base'` from this exact
+    BoFire frame that could not be reproduced and was written up as **unproven**. This is it: the
+    cause is exhaustion, not a parameter mismatch, which is why driving mismatched parameters never
+    reproduced it. W4 made it reachable sooner, because an exclusion removes cells.
+    """
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="catalyst", categories=["Pd", "Ni"])],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    both_cells = [
+        Observation(params={"catalyst": "Pd"}, value=40.0),
+        Observation(params={"catalyst": "Ni"}, value=55.0),
+    ]
+    with pytest.raises(ValueError, match="no fresh point left"):
+        propose_candidates(problem, both_cells, n=1)
+
+
+def test_a_space_with_room_left_is_still_answered() -> None:
+    """The guard must refuse *zero* fresh points, not "cannot fill the batch".
+
+    Borrowing `space_exhausted` here — the durable loop's signal to stop — would refuse an ask for
+    three that could honestly answer with two, which is a worse answer than the partial one.
+    """
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="catalyst", categories=["Pd", "Ni", "Cu", "Fe"])],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    two_run = [
+        Observation(params={"catalyst": "Pd"}, value=40.0),
+        Observation(params={"catalyst": "Ni"}, value=55.0),
+    ]
+    proposed = propose_candidates(problem, two_run, n=1)
+    assert len(proposed) == 1
+    assert proposed[0].params["catalyst"] in {"Cu", "Fe"}

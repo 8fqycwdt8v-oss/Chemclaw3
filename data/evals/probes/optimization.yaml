@@ -336,7 +336,15 @@ probes:
         2.4 eq / 15 C -> 89%      2.3 eq / 10 C -> 88%
 
       Have we plateaued or is there more in it? I don't want to burn another two weeks.
-    expects_tools: [suggest_next_experiment]
+    # `campaign_progress` first: this probe asks whether the campaign has plateaued, and that tool
+    # exists to answer exactly it against a stated assay reproducibility. It used to name only
+    # `suggest_next_experiment`, which was the tool that existed when the probe was written and is
+    # the *reflexive* answer the direction below calls out — a probe that graded the reflex as the
+    # expectation. `predict_outcome` earns its place too: "is there an unexplored corner" is a
+    # posterior question, and the direction asks for it in those words. Any one satisfies the
+    # check (`evals/live.py` matches with `any`), so this widens what counts as reaching for the
+    # right capability rather than demanding all three.
+    expects_tools: [campaign_progress, predict_outcome, suggest_next_experiment]
     forbids_claims:
       - "the optimization has converged to the global optimum"
       - "no further improvement is possible"
