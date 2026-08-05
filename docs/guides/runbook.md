@@ -132,6 +132,15 @@ rather than asserting it. It is an HTTP mock of the **Responses** API, not chat-
 not an injected chat client: the streaming assembler, the middleware stack, budget admission, the
 audit sink and the session store all sit between the socket and the agent.
 
+**`make live-soak` repeats the storm for as long as you leave it and fits what drifts.** It asks the
+one question no single run can — does anything grow that should not — so it is checkpointed per
+round to `.live/soak.jsonl` and re-running it *resumes*: on a host whose container is reclaimed on a
+timer, a reclaim costs one round rather than the run. `make live-soak-report` fits every series.
+It deliberately runs families `BCDFGH` rather than all eight, because family A restarts the front
+door at each admission cap and family E SIGKILLs a worker, and the RSS of a process that has just
+been replaced is not a series. Ask `make live-storm` whether the system survives being disturbed;
+ask this one what drifts when it is not.
+
 **Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
 `data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
 probe launches is resolved against Temporal rather than taken from the turn's account of it — a job

@@ -17,7 +17,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm live-soak live-soak-report mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -171,3 +171,9 @@ live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_
 
 live-storm:  ## Stress, chaos and adversarial pass against the live stack — mock model, no LLM calls.
 	uv run python -m chemclaw.cli.live_storm $(ARGS)
+
+live-soak:  ## Repeat the storm for hours and fit what drifts; checkpointed, so it survives a restart.
+	bash infra/live/soak.sh $(ARGS)
+
+live-soak-report:  ## Fit every series in the soak record so far.
+	bash infra/live/soak.sh report
