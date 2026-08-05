@@ -293,14 +293,17 @@ asserted `count >= 1` and `graph_cache_ttl_seconds >= 0` — both true under eve
 including the fixed one — in a file written to stop exactly that. It now takes a read *while* the
 submitter's checkout lock is held, which is the assertion that inverts when the fix lands.
 
-**The soak found no leak, and the way it did not is the finding.** At 29 rounds the fit said
-`+4,690 KB/round (± 764), still +6,896 over the tail` — resolved, accelerating, one step from a filed
-memory leak. At 43 rounds the same series, same process, nothing changed, said `rises then settles,
-flat within its noise over the last 22 rounds`; round 40 had *returned* 134 MB, which is what
-allocator arenas do and what a leak never does. `chemclaw_live_sessions` sat pinned at its bound of
-1000 throughout, so it was never the LRU filling. The ADR that came out of it: a trend claim needs
-two fits, and "the tail is flat" must never be reported in the same words as "we did not look at the
-tail".
+**The soak found a leak, and it took four readings to say so.** api RSS went **549 MB → 998 MB over
+138 rounds** (~2 h 15 m) — ~3,200 KB per round of ~82 turns, about 39 KB retained per turn, with no
+plateau at any window examined. The readings on the way there were *accelerating* (29 rounds),
+*plateau* (43), *decelerating* (104) and finally *steady, first half +3,166 / second half +3,177*
+(138). Every one of those fits was resolved with a tight error bar and three of them were wrong, for
+one identifiable reason: the comparison was tail-versus-whole, and the whole **contains** the tail —
+so on a series that rises in steps an early flat stretch drags the whole-run slope below the tail's
+and "tail below whole" reads as deceleration. `describe()` now compares two equal-length halves.
+`chemclaw_live_sessions` sat pinned at its bound of 1000 throughout, so it was never the LRU filling.
+It is a [H] BACKLOG row: on OpenShift this is a pod that OOMs on a timer, and finding *what* is
+retained needs an allocator-level look a soak cannot give.
 
 **And one mistake was mine and cost a commit.** Three review subagents were mutating the tree by
 design; one did not restore what it deleted, and my `git add -A` committed the removal of two lines

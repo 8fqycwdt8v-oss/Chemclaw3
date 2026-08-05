@@ -71,12 +71,31 @@ def test_a_warm_up_curve_is_separated_from_a_leak() -> None:
     assert "rises then settles" in describe(warm_up, "KB")
 
 
-def test_a_real_leak_is_named_with_its_slope_and_its_tail() -> None:
+def test_a_real_leak_is_named_by_its_two_halves_rather_than_by_the_whole() -> None:
+    """Both halves resolved: the verdict compares them to each other, never the tail to the whole.
+
+    The whole *contains* the tail, so on a series that rises in steps the whole-run slope is dragged
+    down by an early flat stretch and a tail below it reads as deceleration when nothing
+    decelerated. This repository's own soak did exactly that: `whole +2,317 / tail +1,345` was
+    reported as "decelerating" at 104 rounds, and at 138 the two halves were +3,166 and +3,177 —
+    identical — with the last quarter steeper still.
+    """
     leak = [100.0 + 20.0 * i for i in range(12)]
     said = describe(leak, "KB")
-    assert "grows" in said
-    assert "+20.0 KB/round" in said
-    assert "tail" in said
+    assert "grows and steady" in said
+    assert "first half +20.0" in said and "second half +20.0" in said
+
+
+def test_a_leak_that_gets_worse_is_not_reported_as_steady() -> None:
+    """The case tail-versus-whole would have hidden behind a depressed whole-run slope."""
+    accelerating = [100.0 + i * i for i in range(16)]
+    assert "steepening" in describe(accelerating, "KB")
+
+
+def test_a_leak_that_is_genuinely_slowing_says_so() -> None:
+    """And the opposite must still be reachable, or "steepening" would just be the default."""
+    slowing = [100.0 + 400.0 * (i**0.5) for i in range(16)]
+    assert "slowing" in describe(slowing, "KB")
 
 
 def test_a_falling_series_is_reported_as_falling() -> None:

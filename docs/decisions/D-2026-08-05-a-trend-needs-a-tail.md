@@ -34,13 +34,21 @@ Concretely, in `chemclaw.cli.soak_report`:
 
 - `fit()` returns a slope **with its standard error**; `Trend.resolved` is `|slope| > 2·stderr` and
   requires at least four points.
-- `describe()` fits `values[len//2:]` as well, and distinguishes three outcomes that the first draft
-  collapsed into two:
+- `describe()` fits both halves as well, and distinguishes four outcomes the first draft collapsed
+  into two:
   - whole unresolved → *flat within its own noise*,
   - whole resolved, **tail shorter than four points** → *grows N/round; too few tail points to say
     whether it settles*,
-  - whole resolved, tail resolved → *grows N/round, still M over the tail*,
-  - whole resolved, tail long enough and unresolved → *rises then settles*.
+  - whole resolved, tail long enough and unresolved → *rises then settles*,
+  - both halves resolved → *grows and steady / slowing / steepening — first half N, second half M*.
+
+**And the comparison is between the two halves, never between the tail and the whole**, which is the
+correction the run itself forced. The whole *contains* the tail: on a series that rises in steps, an
+early flat stretch drags the whole-run slope below the tail's, so "tail below whole" reads as
+deceleration when nothing decelerated. This soak did exactly that — at 104 rounds `whole +2,317 /
+tail +1,345` was written down as "decelerating", and at 138 rounds the two halves came out **+3,166
+and +3,177**, identical, with the last quarter at **+5,138**. Two equal-length independent windows
+can be compared; a window and its own superset cannot.
 
 The middle case is the decision. "The tail is flat" and "we did not look at the tail" both fail
 `resolved`, and they are opposite statements: one is evidence of a plateau, the other is absence of
@@ -51,6 +59,11 @@ evidence. Collapsing them is exactly how a five-round record gets read as a sett
 
 - A soak must run long enough that its **second half** is a fittable series, not merely long enough
   that its total is. Twice the minimum, not the minimum.
+- The readings this rule produced on its first real subject went *accelerating* (29 rounds) →
+  *plateau* (43) → *decelerating* (104) → *steady, ~3,200 KB/round* (138), and every one of them was
+  resolved with a tight error bar. Three of the four were wrong, and only the last was checked
+  against an equal-length comparison window. A resolved fit is a statement about the data in front
+  of it; treating it as a statement about the system is a separate step that has to be earned.
 - The verdict is allowed to say it cannot answer, and the run is not a failure when it does. That is
   the same property `live_storm._knee` gained, and the same reason: a harness that returns a number
   while unable to measure is worse than one that returns nothing, because the number gets quoted.

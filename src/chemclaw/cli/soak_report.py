@@ -91,7 +91,7 @@ def describe(values: Sequence[float], unit: str) -> str:
             return f"unresolved — {whole.n} point(s) is too few to fit"
         return f"flat within its own noise (slope {whole.slope:+.1f} ± {band:.1f} {unit}/round)"
     direction = "grows" if whole.slope > 0 else "falls"
-    tail = fit(values[len(values) // 2 :])
+    head, tail = fit(values[: len(values) // 2]), fit(values[len(values) // 2 :])
     # A tail that is too short to fit and a tail that is genuinely flat both fail `resolved`, and
     # they are opposite statements — "it settled" versus "we did not look". Collapsing them is how
     # a five-round record gets read as a plateau, so the short case is named as short.
@@ -106,9 +106,22 @@ def describe(values: Sequence[float], unit: str) -> str:
             f"rises then settles — {whole.slope:+.1f} {unit}/round over the whole run, "
             f"flat within its noise over the last {tail.n} rounds"
         )
+    # Both halves resolved, so the series is still moving and the only question left is whether it
+    # is slowing. **That comparison is between the two halves, never between the tail and the
+    # whole**, because the whole *contains* the tail: on a series that rises in steps, the whole-run
+    # slope is dragged down by an early flat stretch, and a tail slope below it reads as
+    # deceleration when nothing decelerated. Measured on this repository's own soak — at 104 rounds
+    # `whole +2,317 / tail +1,345` said "decelerating", and the two halves at 138 rounds were
+    # +3,166 and +3,177, i.e. flat-out identical, with the last quarter at +5,138. The reading was
+    # an artefact of where the steps happened to fall, and it was reported before it was checked.
+    trend = (
+        "steady"
+        if abs(tail.slope - head.slope) <= _RESOLVING_SIGMA * (head.stderr + tail.stderr)
+        else ("slowing" if abs(tail.slope) < abs(head.slope) else "steepening")
+    )
     return (
-        f"{direction} {whole.slope:+.1f} {unit}/round "
-        f"(± {_RESOLVING_SIGMA * whole.stderr:.1f}), still {tail.slope:+.1f} over the tail"
+        f"{direction} and {trend} — first half {head.slope:+.1f}, second half {tail.slope:+.1f} "
+        f"{unit}/round (± {_RESOLVING_SIGMA * tail.stderr:.1f})"
     )
 
 
