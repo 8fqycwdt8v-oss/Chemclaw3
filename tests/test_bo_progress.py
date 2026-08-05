@@ -137,11 +137,17 @@ def test_a_series_still_climbing_is_not_plateaued() -> None:
     assert "still moving" in progress.summary
 
 
-def test_the_same_series_at_one_point_steps_is_plateaued() -> None:
-    """The identical shape with 1-point steps is inside the noise, so it is not progress.
+def test_a_series_creeping_past_the_noise_in_small_steps_is_not_plateaued() -> None:
+    """A climb of 1-point steps against +/-2 noise is still a climb once it accumulates.
 
-    The pair with the test above is the whole point: what makes a gain real is the assay, not the
-    slope, and the only thing that changed between them is the step size.
+    **This test replaced its own opposite** (D-2026-08-05). The first version asserted `plateaued`
+    here, arguing that what makes a gain real is the assay rather than the slope. That is true of a
+    single step and false of a series: a chemist comparing run 1 with run 7 measures +6 on a +/-2
+    assay, which is a real, repeatable gain and the whole reason to keep going. Calling it a plateau
+    tells a lab leader to stop a campaign that is working.
+
+    The counter is anchored at the last real gain, so the third run (+3 over the anchor at 50)
+    resets it and the series never accumulates five flat evaluations.
     """
     progress = read_progress(
         _series_problem(),
@@ -149,7 +155,26 @@ def test_the_same_series_at_one_point_steps_is_plateaued() -> None:
         assay_noise=2.0,
         window=5,
     )
-    assert progress.plateaued is True
+    assert progress.plateaued is False
+    assert progress.best_value == 56.0
+
+
+def test_a_long_creep_ten_times_the_noise_is_not_plateaued() -> None:
+    """The case that found the defect: +20.9 against +/-2, once reported as a plateau.
+
+    Twelve runs climbing 1.9 each. Every individual step is inside the assay, and the campaign has
+    nonetheless gained ten times the noise — which is what a chemist measures when they compare the
+    first run with the last. The old semantics returned `evaluations_since_improvement=11` here.
+    """
+    progress = read_progress(
+        _series_problem(),
+        _series([50.0 + 1.9 * step for step in range(12)]),
+        assay_noise=2.0,
+        window=5,
+    )
+    assert progress.plateaued is False
+    assert progress.evaluations_since_improvement < 5
+    assert progress.best_value == pytest.approx(70.9)
 
 
 def test_below_the_observation_floor_it_refuses_instead_of_verdicting() -> None:

@@ -260,6 +260,11 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       stated ±2.0, so they are not distinguishable from each other — and both facts are now separate
       fields rather than one verdict. Rounding the second up to the first would have been `op-13`'s
       error with the sign flipped.
+      **The plateau arithmetic was later superseded by
+      D-2026-08-05-a-gain-is-measured-from-the-last-gain**, after a review found it reporting a
+      campaign that climbed +20.9 against a ±2 assay as plateaued: the counter measured each run
+      against a continuously updated running best, so a climb in sub-noise steps never reset it.
+      `op-13`'s numbers above are unchanged by that fix.
 
 - [x] **W2 — a screen cannot hold a continuous factor, and that is what makes three knobs inert** —
       [S]. Measured (M-5): on the all-categorical domain `factorial_design` accepts today,
