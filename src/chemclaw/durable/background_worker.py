@@ -70,6 +70,11 @@ async def main() -> None:
         # `terminationGracePeriodSeconds` has to sit above it — a drain the kubelet SIGKILLs
         # through is not a drain.
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
+        # Beside it for the same reason: the other bound on what this process may have in flight.
+        # Unset, temporalio admits 100 activities at once against a Postgres pool an order of
+        # magnitude smaller — and this queue's work is almost entirely database work (the retention
+        # sweep, the reindex, the chain verification, every job record).
+        max_concurrent_activities=settings.worker_max_concurrent_activities,
     )
     logger.info(
         "background worker connected: address=%s namespace=%s queue=%s %s",

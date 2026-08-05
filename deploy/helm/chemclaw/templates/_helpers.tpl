@@ -47,6 +47,27 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end -}}
 
+{{- /* The migration hook Job's own secrets, deliberately a second helper rather than more keys in
+       `chemclaw.env`. That helper is included by every Deployment, so anything added to
+       `secrets.keys` is mounted on the front door and every worker for the life of the pod — and
+       the credential this carries is the one that owns the schema and can rewrite `audit_events`
+       (D-2026-08-05-append-only-by-grant-not-by-contract). It belongs on a Job that exists for the
+       seconds a release takes, and nowhere else.
+
+       `optional: true` because a single-principal deployment is fully supported: absent, the key
+       is simply unset and `postgres_migration_dsn` falls back to `postgres_dsn`. A required key
+       would make splitting the principal mandatory for every dev database and CI run. */ -}}
+{{- define "chemclaw.migrationEnv" -}}
+{{- range $configKey, $secretEnv := .Values.secrets.migrationKeys }}
+- name: {{ $secretEnv }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $.Values.secrets.name }}
+      key: {{ $secretEnv }}
+      optional: true
+{{- end }}
+{{- end -}}
+
 {{- /* The image reference every pod uses, in one place so a digest cannot be honoured in some
        templates and not others.
 
@@ -395,4 +416,39 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 {{- toJson $urls -}}
+{{- end -}}
+
+{{- /* How many processes in this release may open a Postgres pool — the multiplicand in
+       `pg_pool_max_size × processes` that `core/config/store.py` has always stated in prose and
+       nothing computed (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+
+       Derived from the SAME values that render the Deployments, for the same reason
+       `chemclaw.connectorUrls` is: a hand-maintained count is a second declaration of the
+       topology, and this chart has watched one of those go stale before. The front door counts at
+       its HPA ceiling rather than its floor, exactly as CHEMCLAW_SERVICE_FLEET_REPLICAS does —
+       the budget has to hold at the fleet's largest legal shape, not its smallest. Every worker and
+       connector server pods `replicas` processes and pools once each (`chemclaw.core.db.pooling` in
+       `durable/serve.py` and `connectors/server.py`).
+
+       One front-door pod is one pooled process, with no uvicorn-worker factor, because `Settings`
+       refuses CHEMCLAW_SERVICE_UVICORN_WORKERS above 1 outright (five per-process guarantees break
+       across processes). Multiplying by a number that can only ever be 1 would be arithmetic
+       nothing can exercise; if that guard is ever lifted, this is the second place to change and
+       the validator's message is the first.
+
+       The migration hook Job is deliberately NOT counted: it uses `connect()`, not the pool, and
+       it has finished before any app container starts. */ -}}
+{{- define "chemclaw.pooledProcesses" -}}
+{{- $total := .Values.service.replicas | int -}}
+{{- if .Values.service.autoscaling.enabled -}}
+{{- $total = .Values.service.autoscaling.maxReplicas | int -}}
+{{- end -}}
+{{- $total = add $total (.Values.workers.background.replicas | int) -}}
+{{- range $name, $cfg := .Values.connectors -}}
+{{- if $cfg.enabled -}}
+{{- if $cfg.server -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
+{{- if $cfg.worker -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $total -}}
 {{- end -}}

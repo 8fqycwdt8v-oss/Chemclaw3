@@ -42,9 +42,23 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
-          command: ["python", "-m", "chemclaw.science.calc.migrate"]
+          {{- /* Migrate, then reconcile the runtime role's privileges — in that order, in this
+                 Job, because the grants name tables the migrations create and a grant applied
+                 before its table exists fails. One container rather than a second hook Job so the
+                 ordering is the shell's `&&` rather than a hook weight two files apart, and so a
+                 failed migration cannot be followed by a grant run at all.
+
+                 `db-grants` is separate from `db-migrate` in the Makefile and re-run on *every*
+                 release, unlike the migrations, which are applied once per file and tracked: a
+                 grant is a reconciliation against a schema that keeps growing and a role that may
+                 be created at any time (D-2026-08-05-append-only-by-grant-not-by-contract). */}}
+          command:
+            - sh
+            - -c
+            - python -m chemclaw.core.migrate && python -m chemclaw.core.grants
           env:
             {{- include "chemclaw.env" . | nindent 12 }}
+            {{- include "chemclaw.migrationEnv" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
           resources:

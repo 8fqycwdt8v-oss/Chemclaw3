@@ -1,85 +1,103 @@
-# Task: deep review of the agentic engine, the agent harness and deep-research mode
+# Task: deep review of the database integration concept
 
-Branch: `claude/agentic-engine-refactor-b1la3v`. Decision:
-`docs/decisions/D-2026-08-05-one-rule-in-three-places-is-three-rules.md`.
+Branch: `claude/database-integration-review-zez7zo`.
 
-**The review had one lens: find a rule the code states more than once.** In `agent/`, `api/runner.py`
-and the retrieval path that `gather_evidence` drives, every duplicated rule found was either already
-producing a defect or one edit away from producing one — and the one performance finding was the
-opposite shape, a derivation stated *nowhere* as reusable and therefore repeated on every call.
+The review found the connection pool's *demand* side unbounded, invisible and undeclared, and the
+database with no privilege model at all. What held up under measurement is recorded below too,
+because a review that lists only defects misrepresents the thing reviewed.
 
-_(The previous occupant of this file was the tool/skill seam (#129,
-`docs/decisions/D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md`), which landed on
-`main` while this branch was in flight; before that, the live-test lane for Temporal + durable
-workflows (#124/#127). Both are in `git log`.)_
+_(The previous occupant of this file was the deep review of the agentic engine, harness and
+deep-research path (#128, `docs/decisions/D-2026-08-05-one-rule-in-three-places-is-three-rules.md`),
+which landed on `main` while this branch was in flight; before that the tool/skill seam (#129) and
+the live-test lane for Temporal + durable workflows (#124/#127). All are in `git log`.)_
 
 ---
 
 ## Plan
 
-- [x] **1. Read the engine end to end** — `agent/` (33 modules), `api/runner.py`, the harness wiring
-      (`chemclaw_agent`, `harness_mode`, `harness_todo`, `plan_gate`, `loop_cap`), and the
-      deep-research path (`research_tools`, `retrieval/retrievers`, `hybrid`, `verifier`,
-      `runner_answer`, the `deep-research` skill).
-- [x] **2. Measure the three suspected hot spots before changing any of them.** Two did not survive
-      the measurement and were left alone (see Review).
-- [x] **3. One emitter for the plan** — `_PlanEmitter` in `api/runner.py`, both sites through it;
-      the post-resume site can no longer emit `[]`.
-- [x] **4. One resolver for the harness dimensions** — `harness_enabled_for` / `autonomy_for` /
-      `PLAN_ONLY` in `agent/harness_mode.py`; `build_agent`, `_build_harness_agent` and
-      `plan_gate.gate_applies` all read through them. `_resolved_autonomy` deleted, `instructions`
-      passed rather than re-derived, `gate_applies` typed.
-- [x] **5. Cache the conflict index behind the notes fingerprint** — `kg.conflicts.conflict_index`,
-      `kg.graph.cached_notes`/`NotesFingerprint` made public as the seam it keys on, and the whole
-      scan moved off the event loop.
-- [x] **6. Tests, ADR, backlog.** 7 new tests; the `PlanEvent` one fails against the previous code.
-      One measured finding handed to `BACKLOG.md` as a decision rather than patched.
+- [x] **1. The connection budget is a fleet number.** `pg_fleet_pooled_processes` ×
+      `pg_pool_max_size` ≤ `pg_fleet_max_connections`, checked in `Settings` beside the turn
+      ceiling; `chemclaw.pooledProcesses` derives the count from the topology the chart renders;
+      `pooling()` binds the pool gauges so every pooled process reports on its pool;
+      `ChemclawPgPoolSaturated` and `ChemclawFleetAboveItsConnectionCeiling`.
+      ADR `D-2026-08-05-the-connection-budget-is-a-fleet-number`.
+- [x] **2. A worker may not outrun its pool.** `worker_max_concurrent_activities` on both
+      `Worker(...)` constructors; temporalio's default of 100 against a pool of 8 turns saturation
+      into retry churn instead of backpressure.
+- [x] **3. Readiness answers for the store it cannot serve without.** A bounded, cached database
+      probe in `/readyz`, gated on `session_store="postgres"`; `/healthz` untouched.
+- [x] **4. A sweep that commits once can lose everything it did.** Per-session commit in
+      `_prune_session_messages`; a bounded batch per pass, with the remainder reported.
+- [x] **5. Append-only by grant, not by contract.** `postgres_migration_dsn`; the runner moves to
+      `chemclaw.core.migrate`; `infra/sql/grants/` applied by `make db-grants` (*not* a numbered
+      migration — see the review below); `tests/test_database_privileges.py` derives the matrix
+      from `src/`; the migration credential mounted only on the hook Job.
+- [x] **6. The record.** `infra/sql/README.md` inventory checked by `tests/test_schema_inventory.py`
+      in both directions; BACKLOG rows for the unlisted retention tables, the `session_owners`
+      orphan and the audit-append ceiling; closed the two stale rows; fixed `bit_hamming_ops` and
+      the Appendix B migration numbers.
 
----
+## Measured, and not defects
+
+Recorded so they are not re-litigated:
+
+- **SSE polling against the pool.** 200 streams ÷ `session_event_poll_seconds=2.0` = 100 borrows/s
+  per front-door process, each a sub-millisecond indexed `SELECT` on
+  `session_events_unconsumed_idx` ≈ 0.1 connection-seconds/s. The pool is not the constraint; the
+  event loop is, which is D-119's original finding.
+- **The audit chain's global advisory mutex.** Every append across the fleet serializes on
+  `pg_advisory_xact_lock(0x43484D4157_00_01)` for ~4 round trips, so the ceiling is a few hundred
+  appends/s deployment-wide — far above current demand, and correct by design, since a forked chain
+  cannot be repaired. A ceiling worth stating, not a defect worth fixing.
+- **The SQL surface itself.** Every application statement binds its values; the four sites that
+  interpolate an *identifier* are each guarded (a closed `_PRUNABLE` map, `table.isidentifier()`,
+  an int from config, a validated identifier regex), and the one un-parameterized surface — a
+  warehouse binding's `where:` — is a documented operator-authored trust boundary.
 
 ## Review
 
-**The plan emitted as an empty checklist.** Two emit sites, two predicates: the turn loop guarded on
-truthiness, the post-resume site on `is not None`. A turn that empties its todo list during a
-mid-turn resume — what MAF's own instructions tell the model to do when the chemist changes topic —
-produced `plan events: [['step one'], []]`, and an empty `PlanEvent` renders as "the agent has no
-plan", the rendering reserved for an agent that does not plan at all.
-`test_an_emptied_plan_is_not_streamed_as_an_empty_checklist` fails against the previous code
-(verified by stashing `src/` and running it).
+**What the review actually changed.** Five defects, each verified against the tree before being
+believed and each pinned by a test that fails without its fix (checked by reverting the source file
+and re-running): the fleet connection ceiling, the unbounded worker concurrency, the pool gauges
+missing from eleven of seventeen pooled processes, the readiness probe that skipped the store it
+cannot serve without, the retention sweep that committed once, and the absent privilege model.
 
-**The harness posture, decided three times.** `X if profile.X is None else profile.X` appeared in
-`build_agent`, in `_resolved_autonomy` and in `gate_applies`. That triplication has already cost one
-live defect: `api/runner.py` read `settings` directly, so a `plan_only` profile under a global
-`execute` got the gate attached and its approval never spent, and one human decision authorized
-every later turn. `_build_harness_agent` also re-derived the profile's instructions while its
-docstring said `build_agent` had pre-resolved them — a sentence describing code that did not exist.
-Both are one call now.
+**Two things the plan got wrong, corrected while building.**
 
-**The conflict index, recomputed on every retrieval call — the only measured win.** It was the one
-whole-corpus derivation not cached behind the stat fingerprint (the parsed notes and the assembled
-graph both are), and it ran on the event loop. On a 2,000-note corpus over 7 substrates, a
-three-source `gather_evidence` sweep:
+*The grants started as a numbered migration.* They cannot be. `infra/sql/*.sql` is applied exactly
+once per file and tracked by checksum, which is right for a schema change and wrong for a grant in
+two ways at once: a deployment creating its runtime role after the first `db-migrate` would never
+have grants applied, and every table added by a later migration would ship ungranted and break the
+application on first use of it. Caught by applying it to a live Postgres, creating the role, and
+watching the second `db-migrate` do nothing. Now `infra/sql/grants/`, re-applied on every deploy by
+`make db-grants`, invisible to the runner's non-recursive glob by construction.
 
-| | before | after |
-| --- | --- | --- |
-| first sweep, cold corpus | 3,915 ms | 2,249 ms |
-| second sweep, corpus unchanged | 2,458 ms | 22 ms |
+*The grant matrix was written by hand and was wrong three times.* `tests/test_database_privileges.py`
+derives it from the SQL literals in `src/` and caught all three: `turn_costs` upserts and so needs
+`UPDATE`, and `job_records`/`note_index` were reported as over-grants until the derivation learned
+to read f-string SQL — which is exactly where the two genuine upserts had been hiding from it. That
+is the argument for deriving rather than maintaining, made by the thing itself on its first run.
 
-(200 substrates: 1,549 → 1,415 ms cold, 98 → 19 ms warm.) The cold-sweep half comes from holding the
-lock across the computation, so three concurrent sources miss once between them instead of three
-times in parallel.
+**One test-suite property surfaced and worked around rather than fixed.** The two new retention
+tests initially failed only when run with the rest of their file: the sweep selects expired sessions
+globally, so rows another test left behind land inside the batch under test. The suite isolates one
+schema per *run*, not per test — a known limitation (`tests/pg.py`; BACKLOG LIVE-6). The helper now
+clears the table it counts, which is correct locally; the general fix is still LIVE-6's.
 
-**Two suspected hot spots did not survive being measured, and that is the useful half of this
-review.** `_current_plan` runs a full harness todo `load_state` per streamed update, which looked
-like an obvious per-token cost: it is 14 µs, or 21 ms across a 1,500-update turn. `GraphRetriever`
-builds 2,000 evidence chunks for the 40 `gather_evidence` keeps, which looked like obvious waste: the
-excerpt work for all 2,000 is 5.8 ms against a 3 ms unavoidable scan, and bounding the per-source
-list would have changed how `hybrid` mode fuses ranks for no gain. Both left exactly as they were.
+**What was checked and deliberately not changed.** Recorded above under "Measured, and not
+defects": the SSE poll rate (0.1 connection-seconds/s — the event loop is the constraint, not the
+pool), the audit chain's fleet-wide append mutex (a few hundred appends/s, correct by design, now a
+BACKLOG row so it is not rediscovered as a bug), and the SQL surface itself (every value bound;
+every identifier interpolation guarded).
 
-**What was found and deliberately not fixed.** `conflicts._suspected` is O(k²) in the notes sharing
-a `(type, compound_smiles)` and emitted 141,156 conflicts over that same corpus — ~141
-`conflicts_with` ids per evidence chunk reaching the model. Caching bounds how often that is paid
-and nothing about whether it is worth showing. Capping it changes what KM-8 tells a chemist, so it
-went to `BACKLOG.md` with its numbers.
+**What remains open**, as BACKLOG rows rather than as work done badly: the eight tables retention
+neither prunes nor refuses, the `session_owners` row that outlives its session's history, and the
+backup/ownership question for a Postgres this chart does not deploy. Each needs a *policy* decision
+first, and inventing one inside a sweep is precisely what this module's three documented refusals
+exist to prevent.
 
-**Gate:** `make lint type test` green — 3,243 passed, 135 skipped (3,236 before; +7 new tests).
+**A note on what could not be verified here.** `make helm-validate` needs `helm`, whose download the
+sandbox proxy blocks, so the chart's template changes are covered by `tests/test_deploy_chart.py`
+and `tests/test_helm_chart.py` (which read the templates as text) and by CI's separate `chart` job —
+not by a local render. Everything else, including the privilege boundary, was verified against a
+real Postgres 16 + pgvector 0.8.0 running in this session.

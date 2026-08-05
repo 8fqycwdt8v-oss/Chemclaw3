@@ -823,10 +823,15 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `hpc_api_token`, `temporal_api_key` and the DSN are one `logger.debug("%s", settings)` from a
       log. The "three-secret model" is four in `values.yaml`, and `hpc_artifact_store_token` has no
       chart key at all — so a cross-origin artifact store is fetched unauthenticated.
-- [ ] **One database credential can rewrite the audit chain** — [M]. The migrations
-      `CREATE EXTENSION vector` (superuser on most managed Postgres) and that same DSN is the
-      runtime credential. `infra/sql/006` calls `audit_events` "append-only by contract": no
-      `REVOKE`, no trigger, no separate role.
+- [x] **One database credential can rewrite the audit chain** — closed by
+      D-2026-08-05-append-only-by-grant-not-by-contract. `postgres_migration_dsn` splits the schema
+      owner from the runtime role; `infra/sql/grants/` grants the runtime role exactly the verbs
+      `src/` executes, derived from the SQL literals and checked in both directions by
+      `tests/test_database_privileges.py`. Verified against a live Postgres: INSERT on
+      `audit_events` succeeds, UPDATE/DELETE/TRUNCATE are refused, as are DDL, the ledger, and
+      DELETE on the tables retention already refuses to prune. The owner credential can still
+      rewrite the trail — this narrows who holds that power and for how long, so the chain and the
+      anchors remain the evidence, and the ADR says so rather than claiming tamper-proofing.
 
 **Trust: the system predicts without saying when not to be trusted.**
 
@@ -986,6 +991,31 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       the database, because a PITR rolls the database copy back into agreement with the truncated
       trail it exists to catch. `runbook.md` §(xiii) is the restore procedure and states what the
       system requires of each of the four stores.
+- [ ] **The audit trail's append rate has a fleet-wide ceiling** — [L], and recorded so it is not
+      rediscovered as a defect. Every `PostgresAuditSink.record` takes
+      `pg_advisory_xact_lock(0x43484D4157_00_01)` before reading the chain tip, so every audited
+      tool call in the whole deployment serializes on one lock for ~4 round trips — a ceiling of a
+      few hundred appends/second fleet-wide, on the turn's own hot path (the write is awaited, and
+      shielded so a cancelled turn keeps its row). Correct by design: two appends that read one tip
+      fork the chain, and a forked chain cannot be repaired. Far above current demand — 48
+      concurrent turns at a handful of tool calls each is well under one percent utilisation — so
+      this is a number to know before scaling the fleet an order of magnitude, not work to do now.
+      Measured during the 2026-08-05 database review.
+- [ ] **Eight tables retention neither prunes nor refuses** — [M]. `durable/retention.py` names
+      two prunable tables and *refuses* three with stated reasons (`audit_events`, `job_records`,
+      `calculation_results`), which is the right shape. The rest are simply unlisted:
+      `session_owners`, `session_turns`, `turn_costs`, `predictions`, `measurements`,
+      `note_proposals`, `plan_approvals`, `bo_suggestions`. Each grows for the life of the
+      deployment with no policy either way, and "unlisted" reads as neither decided nor deferred.
+      Wants: a disposal decision per table — pruned, or refused with its reason — not a sweep that
+      picks them up by default. `infra/sql/README.md` is the current inventory. (2026-08-05
+      database review.)
+- [ ] **A pruned session keeps its listable identity** — [L]. Retention prunes `session_messages`
+      and leaves the `session_owners` row, so `SessionOwnerStore.list_for_owner` still returns the
+      session and opening it shows an empty conversation. Not a correctness bug — the id is
+      genuinely still owned — but the listing means "what was I working on", and an entry with
+      nothing behind it does not answer that. Wants: either the owner row goes with the last
+      message, or the listing filters on remaining history. (2026-08-05 database review.)
 - [ ] **No backup *tooling*, and three stores whose recovery is someone else's** — [M]. The anchor
       made a restore safe to perform; nothing here performs one. Deliberately: this chart deploys
       neither Postgres nor Temporal (the row below), so a `pg_dump` CronJob would claim ownership of
@@ -2043,8 +2073,14 @@ risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-
       malformed value on a real field (crashes every pod at import). Both mutation-verified.
       Entra/Nextflow contract tests still deferred until a real tenant exists — recorded-response
       tests written against a guessed shape assert one's own assumptions, not correctness.
-- [ ] **Migration rollback is unaddressed** — `infra/sql` migrations are forward-only; a GxP
-      deployment needs a tested down-path or an explicit ADR that forward-only is the policy — [M].
+- [x] **Migration rollback is unaddressed** — closed by D-2026-08-04-the-schema-only-goes-forward,
+      which took the second of the two options this row offered. Forward-only *is* the policy, and
+      the reasons a tested down-path is worse here are stated: a scripted `DROP COLUMN` against the
+      hash-chained `audit_events` is the operation that control exists to prevent, an additive
+      schema makes "deploy the previous image" a complete revert already, and an inverse nobody
+      ever runs is a second schema definition that drifts. `tests/test_migrations_are_additive.py`
+      enforces it per file. (Found still open by the 2026-08-05 database review, a day after the
+      ADR that answers it.)
 
 Track F verdict: do **not** re-derive the 29 AG-*/KM-* proposals. Load-bearing few, ranked:
 **KM-13 retrieval evaluation** (everything else in the knowledge layer is unfalsifiable without it,

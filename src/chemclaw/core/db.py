@@ -176,6 +176,42 @@ async def connection(
         raise ConnectionError(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
 
 
+def bind_pool_metrics() -> None:
+    """Expose this process's pool gauges, so pool saturation is visible wherever a pool exists.
+
+    Called by `pooling()` rather than by any one process's startup code, which is the whole point:
+    all three of these gauges used to be bound in the front door's `create_app`, so the eleven of
+    the shipped chart's seventeen pooled processes that are *not* the front door — every Temporal
+    worker, every connector server — served a `/metrics` surface with no pool reading on it at all.
+    `requests_waiting` is the signal D-119 introduced to make "the pool is too small" legible, and
+    it was absent from exactly the processes that do the long database work (the retention sweep,
+    the reindex, the chain verification). Binding it where the pool is opened means a process
+    cannot acquire a pool without also acquiring its witness — the same argument
+    D-2026-08-01-every-process-carries-its-own-witness made for probes, which left this behind.
+
+    `chemclaw_pg_pool_max_size` is the per-process half of the fleet connection budget: `sum()` of
+    it across pods is what the deployment may open, and comparing that to
+    `chemclaw_pg_fleet_max_connections` is the only way to see a fleet scaled past its ceiling by
+    hand, since `Settings` validates the shape the chart rendered and never re-runs
+    (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+
+    Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
+    its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception
+    `core/logging.py` declares.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(pool_stats()["pool_size"]))
+    METRICS.bind_gauge("chemclaw_pg_pool_available", lambda: float(pool_stats()["pool_available"]))
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_requests_waiting", lambda: float(pool_stats()["requests_waiting"])
+    )
+    METRICS.bind_gauge("chemclaw_pg_pool_max_size", lambda: float(settings.pg_pool_max_size))
+    METRICS.bind_gauge(
+        "chemclaw_pg_fleet_max_connections", lambda: float(settings.pg_fleet_max_connections)
+    )
+
+
 @asynccontextmanager
 async def pooling() -> AsyncIterator[None]:
     """Pool this process's Postgres connections for the duration of the block.
@@ -185,9 +221,12 @@ async def pooling() -> AsyncIterator[None]:
     then borrows instead of connecting, which is what removes the per-call handshake that was
     timing out under load. On exit every pool is closed so a shutdown does not leave sockets
     behind for the database to reap.
+
+    Binds the pool gauges on the way in, so every process that pools also reports on its pool.
     """
     global _POOLING
     _POOLING = True
+    bind_pool_metrics()
     try:
         yield
     finally:

@@ -66,6 +66,16 @@ class MemorySettings(BaseSettings):
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
+    # How many expired sessions one conversation-prune pass may work
+    # (D-2026-08-05-a-sweep-that-commits-once). The conversation prune costs three round trips per
+    # session — it cannot be one `DELETE`, because whether an expired row may go depends on rows
+    # that are not expiring (D-145) — so the first pass against a deployment that has never pruned
+    # would attempt an unbounded number of them inside one activity, exceed
+    # `retention_timeout_seconds`, and spend an attempt having committed only what it reached.
+    # Capped, each pass commits a bounded amount, reports the remainder in its own result, and the
+    # schedule drains the tail. 500 is roughly a minute of round trips: far more than a steady
+    # state produces in a day, far less than a first pass over a year of history.
+    retention_max_sessions_per_pass: int = Field(default=500, gt=0)
     # Scheduled verification of the tamper-evident audit chain (gap SCH-5). A chain checked only
     # by a manual `make audit-verify` detects tampering only when someone remembers to look.
     # Only earns a Schedule where a durable audit sink is actually configured.

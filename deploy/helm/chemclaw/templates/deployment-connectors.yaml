@@ -113,6 +113,17 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "connector-worker-{{ $name }}"
+            {{- /* The bundle's own activity ceiling when it declares one, else the shared default.
+                   Same argument as `resources` below and it belongs to the same shape of bundle:
+                   a worker whose activities are long *waits* rather than database work (`qm` holds
+                   one slot per in-flight HPC job for up to 24 h) is bounded by memory, not by the
+                   connection pool, so the number that protects the pool would throttle it for no
+                   reason. An explicit `env` entry beats the same key arriving through `envFrom`,
+                   which is how the ConfigMap's fleet-wide value reaches every other worker. */}}
+            {{- if $cfg.maxConcurrentActivities }}
+            - name: CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES
+              value: {{ $cfg.maxConcurrentActivities | quote }}
+            {{- end }}
             {{- include "chemclaw.workerMetricsEnv" $ | nindent 12 }}
             {{- include "chemclaw.env" $ | nindent 12 }}
           envFrom:

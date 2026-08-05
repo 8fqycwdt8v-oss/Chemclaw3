@@ -27,7 +27,7 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
-from chemclaw.science.calc.migrate import migrate
+from chemclaw.core.migrate import migrate
 
 # Not a `Settings` field on purpose: `core/config/` is the operator-facing deployment
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.

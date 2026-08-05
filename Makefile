@@ -17,7 +17,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm live-soak live-soak-report mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm live-soak live-soak-report mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -56,7 +56,13 @@ chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHR
 	uv run chemclaw --admin
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
-	uv run python -m chemclaw.science.calc.migrate
+	uv run python -m chemclaw.core.migrate
+
+db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on every deploy).
+	@# Not part of `db-migrate`: the migrations are applied once per file and tracked, while the
+	@# grants must be re-applied whenever the schema grows or the runtime role appears. Separate
+	@# targets keep that difference visible; the chart's hook Job runs both, in this order.
+	uv run python -m chemclaw.core.grants
 
 schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
 	uv run python -m chemclaw.cli.schedules

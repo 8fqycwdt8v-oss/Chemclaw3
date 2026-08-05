@@ -140,7 +140,7 @@ in none of them.
   (`temporal_api_key` instead of the mTLS trio) if that trade changes.
 - **Postgres/pgvector**: an operator- or managed-instance with mTLS and the existing
   `pg_statement_timeout_seconds`. Migrations run as a **pre-deploy Helm hook** Job
-  (`templates/migrate-job.yaml` → `python -m chemclaw.science.calc.migrate`, i.e. `make db-migrate`, D-034) that
+  (`templates/migrate-job.yaml` → `python -m chemclaw.core.migrate`, i.e. `make db-migrate`, D-034) that
   completes before any app container starts — no container ever races the DDL. The migrator takes a
   transaction advisory lock (so two overlapping deploys serialize) and a `lock_timeout` (so an
   `ALTER TABLE` that cannot get `ACCESS EXCLUSIVE` fails in seconds instead of queueing in front of

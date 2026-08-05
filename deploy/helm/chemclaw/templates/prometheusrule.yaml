@@ -161,6 +161,49 @@ spec:
               Sessions, the audit trail and the calculation cache all live there; a turn that
               cannot reach it fails or silently degrades to log-only auditing.
 
+        {{- /* D-119 introduced `requests_waiting` as *the* reading that distinguishes "the pool is
+               too small" from "the database is down" — the pair that presented as connect timeouts
+               against an idle server — and nothing has ever consumed it. Alerting on it is the
+               whole reason it exists. Deliberately `max()` across pods and not a rate: one
+               saturated process is one process whose requests are queueing, and averaging that
+               away across a healthy fleet is how a per-pod saturation stays invisible. */}}
+        - alert: ChemclawPgPoolSaturated
+          expr: max(chemclaw_pg_pool_requests_waiting) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Callers are queueing for a Postgres connection
+            description: >-
+              A process has more concurrent database work than `CHEMCLAW_PG_POOL_MAX_SIZE` allows,
+              so callers wait and then fail as `ConnectionError` after
+              `CHEMCLAW_PG_POOL_TIMEOUT_SECONDS`. Raise the pool (and `postgres.maxConnections`
+              with it — `Settings` refuses a pair that stops agreeing) or lower the concurrency
+              feeding it: `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` on the front door,
+              `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES` on a worker.
+
+        {{- /* The other direction, and the one no single pod can see: `Settings` refuses a
+               configuration whose declared product exceeds the ceiling, but it validates the shape
+               the chart rendered and never re-runs. A `kubectl scale`, an in-cluster HPA edit, or a
+               stuck rollout leaving both generations up all push the live sum past what the server
+               will serve, with every pod's own config still perfectly valid — the same blind spot
+               `ChemclawFleetAboveItsTurnCeiling` covers for turns. Self-disabling: the ceiling
+               gauge is 0 when undeclared. */}}
+        - alert: ChemclawFleetAboveItsConnectionCeiling
+          expr: >-
+            max(chemclaw_pg_fleet_max_connections) > 0
+            and sum(chemclaw_pg_pool_max_size) > max(chemclaw_pg_fleet_max_connections)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: The fleet can open more Postgres connections than it is allowed to
+            description: >-
+              More pooled processes are running than `postgres.maxConnections` accounts for, so the
+              database can be asked for more connections than it will serve — which surfaces as
+              connect failures against a server that is not busy. Either scale back or raise
+              `postgres.maxConnections` with a number from the server's own `max_connections`.
+
     - name: chemclaw.cost
       rules:
         - alert: ChemclawTokenBurnHigh

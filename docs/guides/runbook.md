@@ -188,6 +188,33 @@ Applied migrations are recorded in the `schema_migrations` ledger with a checksu
 re-running is safe and an edited already-applied file is flagged as drift rather than silently
 skipped.
 
+**Always follow `make db-migrate` with `make db-grants`** (the Helm hook Job runs both, in that
+order, so this only concerns migrating by hand). The grants are *not* in the tracked migration set
+and are re-applied on every deploy on purpose: a table added by a new migration ships with no grant
+until they run, so a split-principal deployment breaks on first use of it with
+`InsufficientPrivilege`. They no-op where no `chemclaw_app` role exists.
+
+### Splitting the database principal (optional, GxP)
+
+By default one credential does everything, and `infra/sql/006` describes `audit_events` as
+"append-only by contract" — which the hash chain and the signed anchors *detect* violations of, and
+which nothing prevented. To make it append-only in fact
+(D-2026-08-05-append-only-by-grant-not-by-contract):
+
+1. Create a login role the application runs as, owning nothing:
+   `CREATE ROLE chemclaw_app LOGIN PASSWORD '…';`
+2. Point `CHEMCLAW_POSTGRES_DSN` at it, and put the schema owner's DSN in
+   `CHEMCLAW_POSTGRES_MIGRATION_DSN` — in the chart, `secrets.migrationKeys`, which is mounted on
+   the migration hook Job and on nothing else.
+3. `make db-migrate && make db-grants`.
+
+Verify it took: as `chemclaw_app`, `INSERT INTO audit_events …` succeeds and
+`DELETE FROM audit_events` fails with `InsufficientPrivilege`. The owner credential can still
+rewrite the trail — this narrows who holds that power and for how long, it does not remove it — so
+the chain and the anchors remain the evidence. The role also needs no `CREATE EXTENSION` right;
+that stays with the migrator, which is where `vector` already required superuser on most managed
+Postgres.
+
 **`job_records` is the one table a chemist's answers now depend on** (023, D-157): every finished
 connector job writes what it ran, on what arguments, its whole result, and the reason it was
 started. It is what `get_durable_job_status` reads for a job Temporal has forgotten and what
@@ -588,7 +615,7 @@ missing until D-2026-08-01-a-migration-waits-in-front-of-live-traffic, and each 
 
 **Why `helm rollback` below is safe: every migration in `infra/sql/` only expands.** Checked over
 the whole directory, not one `infra/sql/*.sql` file contains a `DROP TABLE` or `DROP COLUMN` — every
-one is a new table or an `ADD COLUMN`, and `chemclaw.science.calc.migrate` refuses to let an applied
+one is a new table or an `ADD COLUMN`, and `chemclaw.core.migrate` refuses to let an applied
 file change afterward (a checksum mismatch raises `MigrationError`; see (ii)). So the schema only
 ever grows, which is exactly what a rollback needs: the older binary a rollback restores was written
 against a schema that is still a strict subset of whatever is live, so every table and column it
