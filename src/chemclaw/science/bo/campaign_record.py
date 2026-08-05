@@ -155,6 +155,19 @@ class Campaign(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     campaign_id: str = Field(min_length=1)
+    # The **lead** objective only, for display and for querying by hand. Since multi-objective
+    # shipped, a trade-off campaign's second and further axes live in `problem["objectives"]`, which
+    # is authoritative; this pair cannot represent them, so a report reading only these two sees a
+    # trade-off as single-objective. Identity is unaffected — `campaign_id_for` hashes the whole
+    # list. No column was added because nothing queries by objective yet; when something does, read
+    # `problem->'objectives'` or add a generated column off it.
+    #
+    # This note lived in `infra/sql/031_bo_campaigns.sql` for a few hours and had to move: editing
+    # an applied migration changes its checksum, and the runner then refuses to migrate *any*
+    # database that already had it — a comment took every existing deployment's migrations down
+    # while CI, which always starts from an empty database, stayed green
+    # (D-2026-08-04-the-schema-only-goes-forward). It belongs with the code that writes the columns
+    # anyway.
     objective: str = Field(min_length=1)
     # `str`, not `Objective`'s `Literal["minimize", "maximize"]`, and deliberately so: this model is
     # built from a `bo_campaigns` row on every `resume_campaign`, so a narrower type would make a

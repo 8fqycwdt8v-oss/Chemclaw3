@@ -64,8 +64,42 @@ def configure_logging() -> None:
             handler.setFormatter(JsonFormatter())
 
 
+# Set once per process: `metrics.set_meter_provider` refuses a second call and warns, and the only
+# thing this flag has to be right about is not producing that warning on a re-entry.
+_NOOP_METERS_INSTALLED = False
+
+
+def _install_noop_meter_provider() -> None:
+    """Make "telemetry off" mean a no-op provider, not the *absence* of one.
+
+    **This is the fix for the front door's memory leak**, and the distinction it turns on is the
+    whole finding: with no meter provider set, the OpenTelemetry API does not discard instrument
+    calls — it *proxies* them, and it keeps every proxy forever so it can back them if a provider
+    arrives later. `_ProxyMeterProvider._meters` and `_ProxyMeter._instruments` are module-level
+    lists that only ever grow — `_ProxyMeterProvider` in the `opentelemetry.metrics` internals.
+
+    MAF creates one duration histogram per exposed MCP function, and this system rebuilds its
+    connector tool surface every turn — so a turn with telemetry *off* leaked 35 `_ProxyMeter`s,
+    35 `_ProxyHistogram`s, 70 locks and 35 lists, permanently. Measured with the front door's own
+    load (`chemclaw.cli.leak_probe`): **+178 live objects and +20.7 KB of RSS per turn before,
+    +3.3 objects and +2.7 KB after** — and what remains is the session LRU filling toward its cap,
+    which is bounded by construction. Over the 162-round soak that is the 549 MB → 1,066 MB the
+    review recorded and could not name.
+
+    Idempotent by a module flag rather than by asking the API what is installed, because
+    `get_meter_provider()` has the side effect of resolving and caching one.
+    """
+    global _NOOP_METERS_INSTALLED
+    if _NOOP_METERS_INSTALLED:
+        return
+    from opentelemetry import metrics
+
+    metrics.set_meter_provider(metrics.NoOpMeterProvider())
+    _NOOP_METERS_INSTALLED = True
+
+
 def configure_telemetry() -> None:
-    """Enable OpenTelemetry export if configured — a no-op by default.
+    """Enable OpenTelemetry export if configured; install a no-op provider when it is not.
 
     Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, it calls MAF's `configure_otel_providers`
     exactly once, which reads the standard `OTEL_EXPORTER_OTLP_*` environment variables for the
@@ -73,8 +107,12 @@ def configure_telemetry() -> None:
     if they are missing we re-raise with a clear message naming the missing dependency, so an
     admin who flips the flag without the extras gets a directive error rather than a cryptic one.
     Called once per process at each worker's entrypoint, after `configure_logging`.
+
+    **Off is not "do nothing"** — see `_install_noop_meter_provider`. Returning early was the
+    default path in every deployment, and it is what leaked.
     """
     if not settings.otel_enabled:
+        _install_noop_meter_provider()
         return
     # Bridge our one config value to the standard OTLP env var MAF/OTel read (F6-T5), so the
     # collector endpoint stays a single `CHEMCLAW_OTEL_ENDPOINT` like every other endpoint.

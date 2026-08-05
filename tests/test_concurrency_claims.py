@@ -96,9 +96,16 @@ def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim() 
         assert await claims.claim(session_id, "slow", -1.0) is True  # already lapsed
         assert await claims.claim(session_id, "new", 60.0) is True  # taken over
 
-        # The lapsed worker, still running, doing exactly what a live holder does.
-        await claims.refresh(session_id, "slow", 600.0)
+        # The lapsed worker, still running, doing exactly what a live holder does. `refresh`
+        # reports that the claim is no longer its own — the signal `_hold_turn_claim` acts on, and
+        # the thing that was silently discarded until the 2026-08-05 review: the UPDATE matched no
+        # row, raised nothing, and the caller could not tell a takeover from a healthy heartbeat.
+        assert await claims.refresh(session_id, "slow", 600.0) is False
         await claims.release(session_id, "slow")
+
+        # And the other direction, or `is False` above would pass against a `refresh` that always
+        # said no — which would stop every heartbeat in the system on its first beat.
+        assert await claims.refresh(session_id, "new", 60.0) is True
 
         # If either had landed, this would succeed — the slot would be free (release) or held by
         # a holder nobody is running (refresh under the wrong name).

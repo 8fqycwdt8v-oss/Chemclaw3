@@ -239,7 +239,11 @@ _CYCLE_EDGES: dict[Edge, str] = {
         "a connector bundle's own durable jobs live in durable.* (registry, workflows, activities)"
     ),
     ("chemclaw.durable", "chemclaw.connectors"): (
-        "the connector-job wrapper launches into a bundle's queue and registry"
+        "template activities resolve a connector's manifest to run a bundle's job as a step "
+        "(durable/template_activities.py). NOT the connector-job wrapper, which this reason used "
+        "to name: `durable/connector_job.py` imports nothing from any connector, and "
+        "`test_the_connector_job_wrapper_imports_no_connector` below pins that separately, because "
+        "this policy is package-granular and cannot express it"
     ),
     ("chemclaw.agent", "chemclaw.durable"): ("agent tools start durable jobs (interaction, tools)"),
     ("chemclaw.durable", "chemclaw.agent"): (
@@ -282,6 +286,12 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.api", "chemclaw.durable"),
     ("chemclaw.api", "chemclaw.kg"),
     ("chemclaw.cli", "chemclaw.agent"),
+    # `cli.leak_probe` builds the *real* front door in its own process — that is the whole point:
+    # the leak it measures is in what a turn retains, and an in-process repro that faked the app
+    # measured zero. A CLI that drives the service it ships beside is the same shape as
+    # `cli.connectors_dev` driving the connector servers, not a layering inversion: nothing in
+    # `api` imports `cli`, so the edge stays one-way.
+    ("chemclaw.cli", "chemclaw.api"),
     ("chemclaw.cli", "chemclaw.connectors"),
     ("chemclaw.cli", "chemclaw.core"),
     # `cli.schedules`/`cli.verify_audit_chain` are thin `main()` shims that call back down into
@@ -453,3 +463,39 @@ def test_the_kernel_imports_no_sibling(module: str) -> None:
 def test_retrieval_does_not_import_orchestration(module: str) -> None:
     """A retrieval module in a clean interpreter pulls in nothing from `chemclaw.agent`."""
     _assert_no_forbidden_transitive_import(module, _RETRIEVAL_FORBIDDEN)
+
+
+def test_the_connector_job_wrapper_imports_no_connector() -> None:
+    """`durable/connector_job.py`'s central claim, machine-checked for the one module that makes it.
+
+    The wrapper's docstring says it "imports nothing from any connector" — that is the whole seam:
+    a child is addressed by a workflow type name and a task queue, two plain strings, so core needs
+    no knowledge of any bundle. The policy above cannot express it, because it is *package*
+    granular and `chemclaw.durable → chemclaw.connectors` is legitimately allowed for
+    `template_activities`. So the claim was machine-unguarded: importing a bundle's workflow class
+    straight into the wrapper would have passed every test in this file. Found by the 2026-08-05
+    review.
+
+    Read from the AST rather than by importing, so a module that is merely *reachable* from the
+    wrapper at runtime does not count — the claim is about what this file declares.
+    """
+    source = (_SRC_ROOT / "durable" / "connector_job.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    reaches = sorted(
+        {
+            name
+            for node in ast.walk(tree)
+            for name in (
+                [node.module or ""]
+                if isinstance(node, ast.ImportFrom)
+                else [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else []
+            )
+            if name.startswith("chemclaw.connectors")
+        }
+    )
+    assert not reaches, (
+        f"durable/connector_job.py imports {reaches}; the wrapper is the one module in this "
+        "package that must name no connector, because that is what lets a bundle own its workflow"
+    )

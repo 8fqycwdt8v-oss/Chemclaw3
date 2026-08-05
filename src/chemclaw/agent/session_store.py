@@ -502,17 +502,26 @@ class SessionTurnClaims:
             await conn.commit()
         return taken
 
-    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
-        """Push this holder's claim out by another lease, so a long turn is not stolen from.
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """Push this holder's claim out by another lease; False if it is no longer ours.
 
         A no-op when the claim is gone or now belongs to someone else: that means this worker was
         already declared dead, and re-taking the slot behind the live holder's back is exactly
         the interleaving the guard exists to prevent.
+
+        **It returns whether the claim survived, and that return value is the point.** The no-op
+        was correct and silent: `rowcount` was discarded, so a holder whose lease had been taken
+        over could not tell, and `api/state.py::_hold_turn_claim` reacts only to *exceptions* — of
+        which a silent takeover raises none. Its own warning ("another worker may start a turn on
+        this session") was therefore unreachable in exactly the scenario it describes. Found by
+        the 2026-08-05 review.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_TURN_REFRESH, (lease_seconds, session_id, holder))
+                still_ours = cur.rowcount == 1
             await conn.commit()
+        return still_ours
 
     async def release(self, session_id: str, holder: str) -> None:
         """Give the slot back at the end of the turn (idempotent; only this holder's row goes)."""

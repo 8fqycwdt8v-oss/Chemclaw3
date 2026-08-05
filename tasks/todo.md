@@ -105,3 +105,50 @@ pgvector predates migration 013's `bit_jaccard_ops`. Removing the skip was attem
 Postgres 16 was built and pgvector installed — and when that still fell short the new code path was
 measured directly against it with `027` + `036` applied by hand. The other 135 skips are the
 standing offline set (Temporal test server, `xtb`/`crest` binaries).
+
+---
+
+# Task: the front door's leak, and a comment that broke migrations everywhere (2026-08-05)
+
+Branch `claude/temporal-workflows-llm-testing-5nziyp`, rebuilt on `main` after three parallel
+sessions (#130–#132) landed the worktree fix, the multi-file proposal and the redaction
+independently. What follows is what was left.
+
+- [x] **1. The [H] RSS leak, named and fixed** — `chemclaw.cli.leak_probe`, `make leak-probe`.
+- [x] **2. The migration drift guard** — a comment could not change what a migration did, and it
+      should not be able to break one. Plus the 031 revert and an immutability test.
+- [x] **3. `refresh` reporting a lost claim**, the webhook contract, the layering invariant.
+- [x] **4. The mutant walk** — eight behavioural survivors killed in the two leading files.
+
+---
+
+## Review — what was actually measured
+
+**The leak's cause was not the shape the soak suggested.** The soak said "steepening", which reads
+as an unbounded structure filling; the cause was `configure_telemetry()` **returning early**. With
+no meter provider set the OpenTelemetry API proxies every instrument call and retains the proxy
+forever, so a turn with telemetry *off* leaked 35 `_ProxyMeter`s, 35 `_ProxyHistogram`s, 70 locks
+and 35 lists. Measured in-process against the real front door: **+20.7 KB and +178 live objects per
+turn before, +2.7 KB and +3.3 after.**
+
+**The hypothesis I went in with was wrong, and refuting it took one line.** MAF re-entering
+unconnected tools into the agent's process-lifetime exit stack was plausible and documented in this
+repo's own docstring; the soak's `chemclaw_connectors_unreachable_total` sat flat at 0, which was
+evidence against it, so the probe counted those callbacks first: flat at zero across 200 turns.
+Killing the plausible explanation before building on it is what left the search pointed where the
+answer was.
+
+**A comment broke migrations everywhere and CI could not see it.** `031_bo_campaigns.sql` was edited
+on `main` — comments only, and the comment was true — and the byte-level drift guard then refused to
+migrate any database that had already applied it. CI always starts from an empty database. Second
+occurrence: `006_audit_events.sql`, failing the same way for four days.
+
+**Three sessions did the same review in parallel, and mine was not always the better answer.** The
+worktree placement I chose (a sibling of `knowledge_dir`) is worse than the one that landed (under
+`.git/`), the plan-emission helper that landed holds its own state where mine passed it, and the
+redaction that landed reuses `redact_secrets` and a config value where mine wrote a local regex.
+Rebuilding the branch on `main` and re-applying only what was genuinely missing cost an hour and was
+the right call: shipping the worse duplicate of a GxP control would have been much more expensive.
+
+**Left open, deliberately:** the 600 s heartbeat/detection coupling, and the string-mutation
+survivors that a substring `pytest.raises(match=...)` cannot kill.

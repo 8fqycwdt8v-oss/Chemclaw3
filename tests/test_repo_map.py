@@ -21,6 +21,7 @@ test that graded prose would be gamed by padding.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -67,10 +68,29 @@ def _tracked_directories(parent: Path) -> set[str]:
             for path in directory.rglob("*")
         )
 
+    def tracked(directory: Path) -> bool:
+        # A directory git ignores is not part of the repository, so it cannot need a row in the
+        # repository map. Asked of git rather than kept as a name list here, because the failure
+        # this fixes is a *tool's* scratch tree: `make mutants` materialises `mutants/` — a full
+        # copy of the repo — for the length of its run, and `make test` in the same window went red
+        # naming a directory that is not in the tree and never will be. A hard-coded exclusion
+        # would have to be extended for the next tool; `.gitignore` already knows.
+        return (
+            subprocess.run(
+                ["git", "check-ignore", "-q", str(directory)],
+                cwd=parent,
+                capture_output=True,
+            ).returncode
+            != 0
+        )
+
     return {
         entry.name
         for entry in parent.iterdir()
-        if entry.is_dir() and not entry.name.startswith((".", "__")) and has_content(entry)
+        if entry.is_dir()
+        and not entry.name.startswith((".", "__"))
+        and tracked(entry)
+        and has_content(entry)
     }
 
 

@@ -31,9 +31,12 @@ what an explicit refusal here forces it to be, instead of a line in a file that 
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from chemclaw.core.migrate import _statements
 
 _MIGRATIONS = Path(__file__).resolve().parents[1] / "infra" / "sql"
 
@@ -50,15 +53,16 @@ _DESTRUCTIVE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# `--` line comments, stripped before the scan. Every migration in this tree is heavily commented
-# and several comments discuss what they are careful *not* to drop; scanning the prose would fail
-# the check on the files that explain the policy best.
-_COMMENT = re.compile(r"--[^\n]*")
+# Comment stripping is the *runner's* `_statements`, imported rather than reimplemented. Every
+# migration here is heavily commented and several comments discuss what they are careful *not* to
+# drop, so scanning the prose would fail the check on the files that explain the policy best — and
+# the runner needs the identical reduction, because its drift checksum is taken over it. Two
+# spellings of "the SQL, without the prose" is how a test and the thing it guards start disagreeing.
 
 
-def _statements(path: Path) -> str:
-    """The migration's SQL with `--` comments removed."""
-    return _COMMENT.sub("", path.read_text(encoding="utf-8"))
+def _sql(path: Path) -> str:
+    """The migration's SQL with its comment lines removed, as the runner sees it."""
+    return _statements(path.read_text(encoding="utf-8"))
 
 
 def _migration_files() -> list[Path]:
@@ -85,7 +89,7 @@ def test_a_migration_destroys_nothing(path: Path) -> None:
     Parametrized per file rather than folded into one assertion so a violation names the migration
     that introduced it — the message an author needs is "036 drops a column", not "some file does".
     """
-    found = _DESTRUCTIVE.findall(_statements(path))
+    found = _DESTRUCTIVE.findall(_sql(path))
     assert not found, (
         f"{path.name} contains a destructive statement ({found[0].strip()!r}). The schema is "
         "forward-only and additive (D-2026-08-04-the-schema-only-goes-forward): rollback is "
@@ -105,7 +109,7 @@ def test_every_migration_is_re_runnable() -> None:
     """
     offenders: list[str] = []
     for path in _migration_files():
-        sql = _statements(path)
+        sql = _sql(path)
         for match in re.finditer(
             r"^\s*CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|SCHEMA|TYPE|VIEW)\b(.*?)$",
             sql,
@@ -119,3 +123,49 @@ def test_every_migration_is_re_runnable() -> None:
             if "IF NOT EXISTS" not in rest.upper():
                 offenders.append(f"{path.name}: CREATE {kind}{rest[:60]}")
     assert not offenders, "migrations must be re-runnable:\n" + "\n".join(offenders)
+
+
+def test_no_merged_migration_had_its_statements_changed() -> None:
+    """A merged migration's *statements* are immutable. Its comments are not, and that is the fix.
+
+    `core/migrate.py` records a checksum per file and refuses to run when it changes. The
+    checksum used to cover the whole file, which made every comment edit an outage: migrations
+    refuse on **every database that already applied the file**, while CI stays green because CI
+    always starts from an empty one. It happened twice, from two different sessions, and both edits
+    were *correct* — `006_audit_events.sql` renaming a module the D-148 package move had moved,
+    `031_bo_campaigns.sql` recording that two columns hold the lead objective only.
+
+    So the guard now hashes the statements (`_statements`), and this test asks the same question of
+    history that the runner asks of the ledger. One definition of "changed", used by both — the
+    alternative is a test and a runtime guard that can disagree about whether a file drifted.
+
+    Asked of git because the question *is* history: what a file contained in the commit that
+    introduced it. A file added in the working tree and not yet committed is skipped — it has not
+    landed, so it is still free to change.
+    """
+    repo = _MIGRATIONS.parents[1]
+    edited: list[str] = []
+    for path in sorted(_MIGRATIONS.glob("*.sql")):
+        introduced = subprocess.run(
+            ["git", "log", "--diff-filter=A", "--format=%H", "--", path.name],
+            cwd=_MIGRATIONS,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        if not introduced:
+            continue  # added in the working tree; not merged, so not yet immutable
+        original = subprocess.run(
+            ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if original.returncode != 0:
+            continue  # renamed on the way in; `--follow` semantics are not worth the ambiguity
+        if _statements(original.stdout) != _statements(path.read_text(encoding="utf-8")):
+            edited.append(path.name)
+    assert not edited, (
+        f"migration(s) whose statements changed after being merged: {edited}. The runner keys on a "
+        "checksum of exactly this, so it breaks `make db-migrate` on every database that already "
+        "applied them. Put the change in a new migration."
+    )
