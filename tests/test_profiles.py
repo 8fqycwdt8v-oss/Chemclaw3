@@ -10,6 +10,7 @@ regardless of profile. See `docs/archive/audit/10-config-extensibility.md` §6/�
 import pytest
 
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, build_agent, connector_tools
+from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies
 from chemclaw.agent.profiles import (
     AgentProfile,
     get_profile,
@@ -124,3 +125,40 @@ def test_get_profile_resolution_and_registration() -> None:
         from chemclaw.agent.profiles import _REGISTRY
 
         _REGISTRY.pop("probe-profile", None)
+
+
+def test_a_profiles_harness_answer_is_the_same_one_the_plan_gate_gets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The builder and the gate must resolve a profile's harness dimensions identically.
+
+    They used to hold three copies of the same `override or default` rule — one in `build_agent`,
+    one in `_build_harness_agent`, one in `gate_applies` — and that triplication has cost a live
+    defect before: reading `settings` directly instead of the profile let a `plan_only` profile
+    under a global `execute` get the gate attached while its approval was never spent, so one human
+    decision authorized every later turn (DARK-1). One resolver now answers for all three, and this
+    pins the agreement in the direction that matters: a profile that asks for the approval-first
+    posture gets the harness *and* the middleware that gates it.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", False)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+    profile = AgentProfile(name="gxp", harness_enabled=True, harness_autonomy="plan_only")
+
+    assert gate_applies(profile), "the deployment default must not decide this for the profile"
+    agent = build_agent(chat_client=object(), profile=profile)
+    assert "TodoProvider" in {type(p).__name__ for p in agent.context_providers}
+    assert enforce_plan_approval in list(agent.middleware or [])
+
+
+def test_a_harness_profiles_instructions_are_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The harness path advertises the profile's prompt, as the classic path does.
+
+    It resolved the prompt a second time from the same rule rather than taking the one
+    `build_agent` had already resolved — true by duplication, which is the state a docstring
+    claiming "pre-resolved by `build_agent`" describes wrongly.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    profile = AgentProfile(name="terse-harness", instructions="Answer tersely.")
+    agent = build_agent(chat_client=object(), profile=profile)
+    assert "Answer tersely." in agent.default_options["instructions"]
+    assert _INSTRUCTIONS not in agent.default_options["instructions"]

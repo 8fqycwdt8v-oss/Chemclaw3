@@ -6,9 +6,10 @@ The review found the connection pool's *demand* side unbounded, invisible and un
 database with no privilege model at all. What held up under measurement is recorded below too,
 because a review that lists only defects misrepresents the thing reviewed.
 
-_(The previous occupant of this file was the live-test lane for Temporal + durable workflows + LLM
-+ Postgres, `docs/decisions/D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md`; it is in
-`git log`.)_
+_(The previous occupant of this file was the deep review of the agentic engine, harness and
+deep-research path (#128, `docs/decisions/D-2026-08-05-one-rule-in-three-places-is-three-rules.md`),
+which landed on `main` while this branch was in flight; before that the tool/skill seam (#129) and
+the live-test lane for Temporal + durable workflows (#124/#127). All are in `git log`.)_
 
 ---
 

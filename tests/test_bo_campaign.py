@@ -28,6 +28,7 @@ from chemclaw.science.bo.objectives import (
     solubility_objective,
 )
 from chemclaw.science.bo.problem import (
+    CampaignCarryOver,
     CampaignResult,
     CampaignSpec,
     CategoricalParameter,
@@ -276,14 +277,66 @@ def test_durable_campaign_runs_end_to_end() -> None:
     asyncio.run(_run())
 
 
+def test_a_resumed_run_picks_the_campaign_up_instead_of_re_seeding() -> None:
+    """The continue-as-new carry-over is a real resumption, not a restart.
+
+    `_carry_on_if_history_is_filling_up` ends a run mid-campaign and hands the next one a
+    `CampaignCarryOver`. The trigger is the server's own `is_continue_as_new_suggested()`, which a
+    test cannot force without pushing tens of thousands of events through the loop — so what is
+    pinned here is the half that carries the risk: that a run *given* a carry-over spends exactly
+    the rounds still owed, keeps the observations already paid for, and never re-seeds.
+
+    A re-seed would be the expensive bug — silently paying for `n_initial` evaluations again every
+    time the history filled up, on a campaign long enough to fill it more than once.
+    """
+
+    async def _run() -> None:
+        spec = CampaignSpec(
+            problem=build_problem(load_dataset()),
+            objective_name="reizman_suzuki",
+            n_initial=4,
+            n_rounds=5,
+        )
+        carried = await _seed_history(spec)
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-bo-resume",
+                workflows=[BoCampaignWorkflow],
+                activities=_BO_ACTIVITIES,
+            ):
+                envelope = await client.execute_workflow(
+                    BoCampaignWorkflow.run,
+                    args=[spec.model_dump(mode="json"), carried.model_dump(mode="json")],
+                    id="bo-campaign-resume-test",
+                    task_queue="test-bo-resume",
+                )
+        result = CampaignResult.model_validate(envelope.data)
+        # Three carried observations plus the two rounds still owed — not 4 seed + 5 rounds, and
+        # not 3 + 5: the resumed run honours `rounds_remaining`, not the spec's `n_rounds`.
+        assert len(result.history) == 5
+        assert result.history[:3] == carried.history
+        assert result.best == best_of(spec.problem, result.history)
+
+    asyncio.run(_run())
+
+
+async def _seed_history(spec: CampaignSpec) -> CampaignCarryOver:
+    """Three real observations plus two rounds owed — a campaign caught mid-flight."""
+    seed = await propose_initial(spec.problem, 3, spec.seed)
+    history = await evaluate_candidates(spec.objective_name, seed)
+    return CampaignCarryOver(history=history, rounds_remaining=2)
+
+
 def test_round_ceiling_is_enforced_at_creation_not_in_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`require_rounds_within_ceiling` gates creation; the spec model itself stays config-free.
 
-    The workflow re-sends the full observation history to every propose round, so an unbounded
-    round count grows Temporal event history quadratically until the server terminates the
-    campaign — hence the config-backed ceiling. But `CampaignSpec` crosses the Temporal
+    The ceiling bounds what a spec may *spend* — every round is a real evaluation. It is not what
+    keeps the campaign inside Temporal's event history, though it was once described that way;
+    `_carry_on_if_history_is_filling_up` does that. But `CampaignSpec` crosses the Temporal
     serialization boundary: a model validator reading live `bo_max_rounds` would make an
     in-flight campaign's own input fail deserialization at replay when the setting is lowered.
     So the ceiling is a creation-time check, and a spec serialized under a higher ceiling must

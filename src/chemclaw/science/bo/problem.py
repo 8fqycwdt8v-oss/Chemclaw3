@@ -700,14 +700,19 @@ class CampaignSpec(BaseModel):
 
 
 def require_rounds_within_ceiling(n_rounds: int) -> None:
-    """Reject a round count beyond `bo_max_rounds` — Temporal event history is finite (G4).
+    """Reject a round count beyond `bo_max_rounds` — every round costs a real evaluation.
 
-    The durable campaign carries its observation history as workflow state and re-sends it
-    to the propose activity every round, so history bytes grow quadratically with rounds;
-    an unbounded round count would be terminated by the server's hard history limit mid-run,
-    losing every already-paid evaluation. Enforced at campaign/spec *creation* — never inside
-    the `CampaignSpec` model, whose validators re-run on deserialization at workflow replay,
-    where a lowered ceiling must not fail an in-flight campaign's own input.
+    **Not an event-history bound**, though it was documented as one. The durable campaign re-sends
+    its whole observation history to the propose activity every round, so history bytes grow
+    quadratically and a campaign well inside this ceiling would have been terminated by the server
+    mid-run (measured: round 441 at batch 1). That is fixed where it lives — the workflow
+    continues-as-new on the server's own suggestion — not by a number here, which could never
+    account for batch size or problem width. What this ceiling refuses is a spec that would spend
+    thousands of evaluations, which is a mistake worth catching before the first one is paid for.
+
+    Enforced at campaign/spec *creation* — never inside the `CampaignSpec` model, whose validators
+    re-run on deserialization at workflow replay, where a lowered ceiling must not fail an
+    in-flight campaign's own input.
 
     Raises:
         ValueError: When `n_rounds` exceeds the configured `bo_max_rounds`.
@@ -746,6 +751,45 @@ def require_names_do_not_clash(problem: OptimizationProblem) -> None:
         )
 
 
+def require_descriptors_distinguish_categories(problem: OptimizationProblem) -> None:
+    """No two categories may carry the same descriptor row — the surrogate cannot tell them apart.
+
+    Featurizing replaces a label with a position in descriptor space, and BoFire's
+    `CategoricalDescriptorInput` gives the model *only* that position: the label is gone. Two
+    categories at the same position are therefore one point to the surrogate, and it will predict
+    one value for both — **measured**, on a two-descriptor parameter whose A and B rows matched:
+    with A observed at 10 and B at 90, `predict_at` returned 70.85 for each. No warning, no error;
+    a chemist reads a confident recommendation for a reagent the model has never distinguished from
+    another.
+
+    Two ways to get here, both plausible. Two category labels pointing at the same SMILES
+    (`"Pd(OAc)2"` and `"palladium acetate"`) featurize identically by construction. Or a caller
+    supplies `descriptors` directly and repeats a row.
+
+    **Outside the model, for the reason `require_names_do_not_clash` gives**: nothing forbade this
+    before, so a stored or in-flight campaign may carry it, and `OptimizationProblem`'s validators
+    re-run at workflow replay and on every `resume_campaign` read. A model-level rule would strand
+    those rather than refuse a new one.
+
+    Raises:
+        ValueError: Naming the parameter and the categories that collide.
+    """
+    for parameter in problem.parameters:
+        if not isinstance(parameter, CategoricalParameter) or parameter.descriptors is None:
+            continue
+        seen: dict[tuple[tuple[str, float], ...], str] = {}
+        for category, row in parameter.descriptors.items():
+            key = tuple(sorted(row.items()))
+            if key in seen:
+                raise ValueError(
+                    f"parameter {parameter.name!r}: categories {seen[key]!r} and {category!r} have "
+                    "identical descriptors, so the surrogate sees one point where you named two "
+                    "and will report the same prediction for both. Drop one, or give them "
+                    "descriptors that actually differ."
+                )
+            seen[key] = category
+
+
 def require_campaign_startable(spec: CampaignSpec) -> None:
     """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
@@ -766,10 +810,12 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
 
     Raises:
         ValueError: When the round count exceeds `bo_max_rounds`, the problem names more than one
-            objective, or a parameter and an objective share a name.
+            objective, a parameter and an objective share a name, or two categories carry the same
+            descriptor row.
     """
     require_rounds_within_ceiling(spec.n_rounds)
     require_names_do_not_clash(spec.problem)
+    require_descriptors_distinguish_categories(spec.problem)
     if len(spec.problem.objectives) > 1:
         named = ", ".join(objective.name for objective in spec.problem.objectives)
         raise ValueError(
@@ -785,6 +831,25 @@ class CampaignResult(BaseModel):
 
     best: Observation
     history: list[Observation]
+
+
+class CampaignCarryOver(BaseModel):
+    """What one durable run hands the next when it continues-as-new.
+
+    A campaign's whole mutable state is these two numbers-and-a-list: what has been measured, and
+    how many rounds are still owed. Everything else — the problem, the objective name, the batch,
+    the seed — is in the `CampaignSpec` the payload already carries and never changes, so it is
+    passed through unread rather than copied in here.
+
+    Exists because the round ceiling used to be a promise the workflow could not keep: the history
+    is re-sent to the propose activity every round, so event-history bytes grow quadratically and a
+    campaign at the configured `bo_max_rounds` would be terminated by the server mid-run, losing
+    every already-paid evaluation. Carrying the state across a fresh run resets that growth; the
+    carry-over is one list of observations, kilobytes at any round count this ceiling allows.
+    """
+
+    history: list[Observation]
+    rounds_remaining: int = Field(ge=0)
 
 
 def observed_value(

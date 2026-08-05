@@ -19,6 +19,7 @@ from chemclaw.science.bo.problem import (
     ParamValue,
     best_of,
     discrete_candidate_count,
+    require_descriptors_distinguish_categories,
     require_names_do_not_clash,
     require_rounds_within_ceiling,
     space_exhausted,
@@ -82,6 +83,7 @@ async def optimize(
     # a trade-off has no answer for it — and discovering that *after* n_initial + n_rounds*batch
     # evaluations would spend the whole budget to raise. Same reason the two rules above are here.
     require_names_do_not_clash(problem)
+    require_descriptors_distinguish_categories(problem)
     if len(problem.objectives) > 1:
         named = ", ".join(objective.name for objective in problem.objectives)
         raise ValueError(

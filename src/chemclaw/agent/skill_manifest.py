@@ -22,9 +22,27 @@ Deliberately *not* here: enforcement at load time. A manifest declaring a tool d
 access to it — tools are advertised by the agent's own registry/profile and gated by
 `enforce_tool_authz`. The declaration is documentation the gate validates, never an authorization
 input, so this module cannot widen what a skill's reader may do (audit doc 10 §7).
+
+It is, since D-2026-08-05, read at run time too — by `chemclaw.agent.skill_access.
+ToolScopedSkillsSource`, which *hides* a skill whose whole declared capability is absent from the
+agent's surface. That is the same one-way direction: the declaration can only cost a skill its
+visibility, never buy it a tool. `declared_tools` below is the reader, and it exists here rather
+than in the source because MAF's `SkillFrontmatter` keeps only the Agent Skills spec's own fields
+and drops `tools:` on the floor — the declaration is invisible to a `Skill` object, so anything
+that wants it must read the file.
 """
 
+import logging
+from collections.abc import Iterable
+from pathlib import Path
+
+import frontmatter
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = logging.getLogger(__name__)
+
+# Where a skill's frontmatter lives inside its directory — the Agent Skills spec's filename.
+SKILL_FILENAME = "SKILL.md"
 
 
 class SkillManifest(BaseModel):
@@ -55,3 +73,59 @@ class SkillManifest(BaseModel):
     # Free-form grouping (e.g. "retrieval", "optimization") — human-facing only; nothing dispatches
     # on a tag today, so it stays an unconstrained list rather than an invented enum.
     tags: list[str] = Field(default_factory=list)
+
+
+def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
+    """Each discovered skill's declared tool dependencies, by skill name.
+
+    The run-time reader of the `tools:` declaration, for `chemclaw.agent.skill_access.
+    ToolScopedSkillsSource`. Built once when the agent is built, not per turn: the skills tree does
+    not change while the process runs, and re-reading every `SKILL.md` on every turn would trade the
+    whole point of progressive disclosure for a filter.
+
+    **Tolerant where `chemclaw.cli.validate_skills` is strict, and deliberately so.** An unreadable
+    or invalid `SKILL.md` is reported there, loudly, before deploy; here it is simply absent from
+    the map, which the source reads as "declares nothing" and therefore leaves visible. The failure
+    directions are not symmetric: a validator that shrugs ships a broken skill, while a *filter*
+    that raises takes down every live conversation over a frontmatter typo. Both halves see the same
+    files, so the strict one is what actually holds the line.
+
+    A skill missing from the returned map and a skill mapped to an empty set mean the same thing to
+    every caller, so the two are not distinguished.
+
+    Args:
+        skills_dirs: The directories to walk — the configured tree plus each enabled connector
+            bundle's own `skills/` (the same list `build_agent` hands `FileSkillsSource`).
+
+    Returns:
+        `{skill name: declared tool names}`, keyed by the frontmatter `name` because that is what a
+        `Skill` object carries and therefore what the filter can match on. A duplicate name across
+        two directories keeps the first, matching `FileSkillsSource`'s own precedence.
+    """
+    declared: dict[str, frozenset[str]] = {}
+    for directory in skills_dirs:
+        for path in sorted(Path(directory).glob(f"*/{SKILL_FILENAME}")):
+            manifest = _read_manifest(path)
+            if manifest is not None:
+                declared.setdefault(manifest.name, frozenset(manifest.tools))
+    return declared
+
+
+def _read_manifest(path: Path) -> SkillManifest | None:
+    """One skill's validated frontmatter, or None (logged) if it cannot be read.
+
+    Separate from `declared_tools` so the "why swallow it" reasoning sits next to the `except`:
+    both failure modes are reported properly by `make skill-validate`, and neither is worth raising
+    on the path that serves a live turn.
+
+    The catch is broad on purpose. `frontmatter.load` surfaces whatever the YAML parser raises,
+    which is not one type, and `model_validate` adds `ValidationError`; enumerating them would
+    leave the next parser error to break every conversation in the deployment.
+    """
+    try:
+        return SkillManifest.model_validate(frontmatter.load(path).metadata)
+    except Exception as exc:
+        logger.warning(
+            "skill %s has unreadable frontmatter, treating it as undeclared: %s", path, exc
+        )
+        return None

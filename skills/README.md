@@ -29,8 +29,27 @@ system reads them and a field the validator ignores is a field that silently rot
 |---|---|---|
 | `name` | yes | lowercase letters/numbers/hyphens, ≤64 chars, no leading/trailing/double hyphen. **Must match the directory name** and be unique (a duplicate name is skipped). |
 | `description` | yes | ≤1024 chars. This is the L1 text the model sees to decide *whether* to load the skill — make it say when to reach for it. |
-| `tools` | no | The capabilities this skill's judgment is written about, **by tool name** — in-process tools, generated connector job launchers, and tools an enabled connector serves, all in one list. Validated against the live surface, so a renamed or deleted tool fails CI instead of leaving stale prose. Omit it for pure process guidance. |
+| `tools` | no | The capabilities this skill's judgment is written about, **by tool name** — in-process tools, generated connector job launchers, and tools an enabled connector serves, all in one list. Validated in both directions: a declared tool must exist, and a tool the body names must be declared. Omit it only for pure process guidance — see below, because the list is load-bearing. |
 | `tags` | no | Free-form grouping ("retrieval", "optimization"). Human-facing only — nothing dispatches on a tag. |
+
+### `tools:` decides whether the skill is advertised at all
+
+The declaration is not documentation any more (D-2026-08-05). At build time the agent drops a skill
+**every** one of whose declared tools is missing from what that agent advertises — because judgment
+about a capability the model cannot reach reads to it as an available path, and it plans around one.
+Measured against the shipped `property-lookup` profile, which narrows the surface to five tools,
+that was 8 of 28 skills teaching tools nothing could call.
+
+Three consequences for an author:
+
+- **Declaring nothing means "always visible."** That is right for process guidance that depends on
+  no capability (`development-report`, `playbook-distillation`) and wrong for anything else, so
+  `make skill-validate` fails a skill whose body names a tool the frontmatter omits.
+- **Over-declaring is safe, under-declaring is not.** One surviving tool keeps the skill, so a
+  generous list can only keep a skill visible; a short list can hide it from an agent that can run
+  exactly what it teaches.
+- **It grants nothing.** A declaration cannot make a tool callable — `authorize_tool` and the
+  profile decide that. It can only cost a skill its place on the list.
 
 ### Naming a note type in the body
 

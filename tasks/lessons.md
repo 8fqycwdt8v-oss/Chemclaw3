@@ -1164,3 +1164,114 @@ the test going red — a derivation that under-reports produces *green* on the m
 **What this shares with R5.5/R5.6 and the vacuous-loop entry above:** each was a mechanism that ran,
 reported, and did not check what it claimed. The new face here is that a *derivation* has two
 failure directions, and only one of them is loud.
+## 2026-08-05 — `git checkout <file>` is not an undo when the file has uncommitted work
+
+**The revert that destroyed the work it was reverting.** To prove a new drift-guard test was not
+vacuous, I mutated `chemclaw_agent.py`, ran the test (it failed — the guard was real), then ran
+`git checkout src/chemclaw/agent/chemclaw_agent.py` to undo the mutation. That restored the file to
+**HEAD**, not to its pre-mutation state, deleting an hour of uncommitted edits to the same file. The
+mutation check succeeded and cost more than it proved.
+
+**Rule: to mutation-check a file with uncommitted changes, copy it aside first**
+(`cp f /tmp/f.bak` … `cp /tmp/f.bak f`), or commit before mutating. `git checkout`/`git restore`
+take their content from the index or HEAD and have no notion of "the state I was just in" — there
+is nothing to recover from afterwards, because the working copy was the only copy.
+
+**The general shape:** an undo is only an undo if it restores the state you actually left. Every
+`git` command that writes the working tree (`checkout`, `restore`, `stash`, `reset --hard`) resolves
+against a *committed* baseline, so on a dirty file each of them is a delete dressed as a revert.
+
+## Measure the hot spot before refactoring it (2026-08-05, agentic-engine review)
+
+Three things looked like obvious waste on the turn hot path. I wrote a benchmark for all three
+before touching any of them, and **two were noise**: the harness todo re-read per streamed update
+is 14 µs (21 ms across a whole turn), and `GraphRetriever` building 2,000 evidence chunks for the 40
+`gather_evidence` keeps costs 5.8 ms against a 3 ms scan that has to happen anyway. Bounding the
+per-source list would have changed how `hybrid` mode fuses ranks — a real semantic risk — to buy
+nothing measurable. The third was 2,458 ms per sweep.
+
+**Rule:** "this runs per token / builds N and keeps 40" is a *hypothesis about* a cost, never the
+cost. Benchmark all the candidates in one script before editing any of them, and let the numbers
+pick which one to fix. The two changes I did not make are the review's best outcome, not its
+leftovers.
+
+Corollary, from the same benchmark: the first number was misleading too. `_conflict_index` measured
+892 ms on a corpus I built with 7 substrates, and 11 ms on the same 2,000 notes spread over 2,000
+substrates. The cost lived entirely in the corpus *shape*, so I re-ran across three shapes before
+quoting anything — and the shape that is slow (many runs on one substrate) turned out to be the
+shape this system exists for, which is the argument the finding needed.
+
+## A rule written in three places is three rules (2026-08-05)
+
+`X if profile.X is None else profile.X` for the harness dimensions appeared in `build_agent`, in
+`_resolved_autonomy` and in `gate_applies` — and the repo's own history records what that already
+cost: a fourth site (`api/runner.py`) read `settings` directly, so a `plan_only` profile under a
+global `execute` never spent its approval. Two `PlanEvent` emit sites had drifted the same way, one
+guarding on truthiness and one on `is not None`.
+
+**Rule:** when a review finds the same conditional in two places, do not fix the divergence — remove
+the ability to diverge. A helper that holds the state *and* the predicate (`_PlanEmitter`) makes two
+call sites identical by construction; two call sites that both remember to call the same predicate
+are still two rules. And check the docstrings while you are there: `_build_harness_agent` claimed its
+instructions were "pre-resolved by `build_agent`" while resolving them itself — the prose described
+the code that should have existed, which is exactly the drift CLAUDE.md's "measure it, don't argue
+it" is about.
+
+## R5.9 — A ceiling is a claim about a limit, and claims get measured
+
+`bo_max_rounds=500` was documented, in two places, as the thing keeping a durable campaign inside
+Temporal's event-history limit. It was not. The history is re-sent to the propose activity every
+round, so bytes grow quadratically, and at a measured 178 bytes per `Observation` a batch-1
+campaign crosses the 50 MB hard limit at round **441** — inside the ceiling. A campaign at the
+documented maximum would have been terminated by the server with every paid evaluation lost, by
+exactly the failure the ceiling was written to prevent.
+
+Nobody had multiplied. The number was chosen as "generous versus the default of 10", the *reason*
+was written beside it, and the two were never checked against each other. The reason read as
+derived because it was specific and mechanistically correct — the history really does grow
+quadratically — and being right about the mechanism is what made it convincing while being wrong
+about the number.
+
+**Rule: a config bound that names a system limit must show the arithmetic that reaches it.** If a
+comment says "this keeps us under X", the value's derivation from X belongs in the comment, or the
+bound is not doing what it says. And when the arithmetic does not close — as here — the fix is
+usually not a smaller number: a number can only be right for one problem shape, so prefer the
+signal the platform already publishes (`is_continue_as_new_suggested()`) over any constant a
+reviewer would have to re-derive.
+
+**Corollary, from the same review:** the ceiling was documented in the config comment, in
+`require_rounds_within_ceiling`'s docstring, *and* in a test's docstring — three copies of one
+wrong claim, all agreeing, none measured. Agreement across copies is not corroboration; they are
+one statement, written once and pasted.
+
+## R5.10 — "It skips here" is not a reason to migrate its call sites blind
+
+Changing `upsert_campaign` + `add_suggestion` into one atomic `record()` meant rewriting every call
+site in `tests/test_postgres_campaign_store.py` — a file whose every test **skips offline**, because
+the sandbox has no Postgres. I rewrote them mechanically, saw 3242 local tests pass, and pushed. CI
+failed three of them.
+
+The mechanical substitution was wrong in a way only running it shows: several tests opened with
+`await store.upsert_campaign(...)` as *setup* — create the campaign row, no suggestion. Replacing
+that with `record(campaign, Suggestion(...))` inserted an extra suggestion row each time, so a test
+asserting two suggestions found three, and a test unpacking `[suggestion] = suggestions_for(...)`
+got two and raised `too many values to unpack`. The old API had two verbs because the two writes
+were separable; collapsing them collapsed a distinction the tests were using.
+
+**What I should have done, and did second:** get the dependency running. `postgresql-16` was already
+installed in this sandbox — `initdb` + `pg_ctl` as the `postgres` user, `apt-get install
+postgresql-16-pgvector`, and a real database existed in about two minutes. The full migration still
+would not apply (pgvector 0.6.0 has no `bit_jaccard_ops`; 002/003 need >= 0.7), but
+`031_bo_campaigns.sql` depends on nothing else, so applying that one file alone and driving the
+store from a script measured all three failures — and two claims I had written but never run: that a
+non-finite float is refused, and that the rolled-back transaction leaves no campaign row.
+
+**Rule: before editing tests that skip in this environment, spend five minutes trying to unskip
+them.** A skipped test is not a passing test, and a green local suite that skipped the file you just
+rewrote is evidence about the other files. Where the dependency genuinely cannot run, say so in the
+PR *and* reproduce the changed test bodies in a script against whatever partial substrate does run —
+"CI will tell me" is a slower, more public version of running it.
+
+**The narrower trap:** when an API change merges two calls into one, the call sites that used only
+*half* of the old pair are the ones that break. Grep for the callers of each old name separately
+before replacing either.

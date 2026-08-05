@@ -47,6 +47,8 @@ from agent_framework import AgentSession
 from agent_framework._harness._mode import AgentModeProvider, get_agent_mode, set_agent_mode
 
 from chemclaw.agent.harness_todo import todo_plan_items
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,38 @@ MODEL_MODE_TOOL = "mode_set"
 # The mode in which the harness loop runs (`todos_remaining(looping_modes=["execute"])`).
 EXECUTE_MODE = "execute"
 PLAN_MODE = "plan"
+
+# The autonomy setting that asks for the approval-first posture — the value `harness_autonomy` takes
+# when a human must approve the plan before anything executes. A constant because three decisions
+# compare against it (which mode a session starts in, whether the loop predicate is conditioned on
+# an approval, whether the tool gate is attached at all), and a deployment that ran two of the three
+# would be one that cannot do anything or one that cannot be stopped.
+PLAN_ONLY = "plan_only"
+
+
+def harness_enabled_for(profile: AgentProfile) -> bool:
+    """Whether the harness runs for `profile`: its own override, or the deployment's default."""
+    return bool(
+        settings.harness_enabled if profile.harness_enabled is None else profile.harness_enabled
+    )
+
+
+def autonomy_for(profile: AgentProfile) -> str:
+    """The autonomy `profile` runs under: its own override, or the deployment's default.
+
+    **One resolver for both dimensions, because the three decisions that read them must agree.**
+    The `X if profile.X is None else profile.X` rule was written out three times — once in
+    `build_agent` for whether to wire the harness at all, once in `_build_harness_agent` for the
+    starting mode and the loop predicate, once in `plan_gate.gate_applies` for whether the tool gate
+    is attached and whether a finished turn spends its approval. That triplication has already cost
+    a live defect once: `chemclaw.api.runner` read `settings` directly instead, so a profile
+    narrowed to `plan_only` under a global `execute` got the gate attached and its approval never
+    spent, and one decision authorized every later turn (`gate_applies` records it). A rule spelled
+    out in three places is a rule three places can disagree about; this is the one place.
+    """
+    return str(
+        settings.harness_autonomy if profile.harness_autonomy is None else profile.harness_autonomy
+    )
 
 
 class PlanApprovalModeProvider(AgentModeProvider):

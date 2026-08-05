@@ -3,6 +3,9 @@ name: knowledge-graph-query
 description: >-
   Judgment for answering a question from the Markdown knowledge graph by
   traversing note links (1–2 hops), not by top-k vector similarity.
+tools:
+  - find_notes
+  - expand_note
 ---
 
 # Knowledge-graph query
