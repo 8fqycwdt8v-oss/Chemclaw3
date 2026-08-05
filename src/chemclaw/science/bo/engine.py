@@ -70,6 +70,7 @@ from chemclaw.science.bo.problem import (
     Prediction,
     ScreeningDesign,
     discrete_candidate_count,
+    distinct_candidate_count,
     observed_value,
     params_key,
     point_in_domain,
@@ -380,10 +381,60 @@ def propose_candidates(
         raise ValueError(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
+    _require_fresh_points_exist(problem, observations, n)
     strategy, _ = _fitted_strategy(problem, observations, seed)
     with _translating_surrogate_errors(f"asking for {n} candidate(s)"):
         candidates = strategy.ask(n)
+    # Fewer than `n` is allowed and is not an error: a discrete space with two fresh cells left
+    # should answer a request for three with two. Only *zero* is a failure, and the guard above
+    # already refused that. The durable loop never reaches the partial case — it stops on
+    # `space_exhausted` before asking — so this only ever shortens an inline answer.
     return _frame_to_candidates(problem, candidates)
+
+
+def _require_fresh_points_exist(
+    problem: OptimizationProblem, observations: list[Observation], n: int
+) -> None:
+    """Refuse an ask a finite space cannot answer, before BoFire fails on it obscurely.
+
+    **This is the guard the inline path never had.** `campaign.optimize` and `BoCampaignWorkflow`
+    both stop on `space_exhausted`; `suggest_next_experiment` — the path a chemist actually reaches
+    — went straight to `ask()`. When every cell of a discrete space has been run,
+    `_optimize_acqf_discrete` drops the already-run rows, hands an empty frame to
+    `domain.inputs.transform`, and raises `KeyError: '<parameter name>'`. That is neither a
+    `ValueError` nor one of `_SURROGATE_FAILURES`, so `connectors.server` replaces it with "an
+    internal error occurred" — nothing the model can repair, and it will simply retry.
+
+    Worth stating because it was a real mystery: `_require_observed_params_match`'s docstring
+    records a live `KeyError: 'base'` from this same BoFire frame that could not be reproduced and
+    was written up as **unproven**. It is this. The cause is exhaustion, not a parameter mismatch,
+    which is why driving mismatched parameters never reproduced it. W4 made it reachable sooner —
+    an exclusion removes cells, so a 2x2 minus one pairing exhausts after three runs, not four.
+
+    **The fix is this guard and not a wider `except`.** Adding `KeyError` to `_SURROGATE_FAILURES`
+    was tried and reverted: `test_propose_candidates_does_not_swallow_unrelated_errors` in
+    `tests/test_bo.py` exists to stop exactly that, and it is right — wrapping a `KeyError`
+    would misdiagnose a code
+    defect as bad chemistry data *and* make it non-retryable on the durable path, telling a chemist
+    to "vary the inputs" about a bug in this repository. A cause we understand gets a sentence; one
+    we do not gets a stack trace.
+    """
+    space = discrete_candidate_count(problem)
+    if space is None:
+        return
+    run = distinct_candidate_count(observations)
+    if run < space:
+        # Fresh cells remain. Fewer than `n` of them is fine — BoFire returns what it can — so the
+        # threshold here is *zero fresh points*, not `space_exhausted`'s "cannot fill a batch".
+        # That distinction matters: `space_exhausted` is the durable loop's signal to stop, and
+        # borrowing it here would refuse an ask for three that could honestly answer with two.
+        return
+    raise ValueError(
+        f"this decision space holds {space} distinct condition(s) and all {run} have been run, so "
+        "there is no fresh point left to propose. The screen is complete — report the best runs "
+        "rather than asking for another, or widen the space (add an option, relax a bound, or "
+        "drop a constraint), which makes it a new campaign."
+    )
 
 
 def _fitted_strategy(

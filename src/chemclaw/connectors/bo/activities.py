@@ -22,10 +22,11 @@ acquisition step — a single opaque call with no unit boundary to report progre
 shape as calc's two CREST jobs (`connectors.calc.activities`) — in the shared
 `chemclaw.durable.heartbeat.beating` timer, so a stuck fit is noticed within
 `bo_activity_heartbeat_timeout_seconds` instead of at the full `bo_activity_timeout_seconds`
-budget. `evaluate_candidates` has a real unit boundary (one candidate), so it heartbeats directly
-between them instead, mirroring calc's per-species pattern; a registered objective is not
-guaranteed sub-second (`chemclaw.science.bo.objectives.solubility_objective` calls an uncached
-calculator), so a batch is not always fast enough to skip this.
+budget. `evaluate_candidates` has a real unit boundary (one candidate) and so beats between them,
+mirroring calc's per-species pattern — *and* wraps each evaluation in the same timer, because a
+registered objective is not guaranteed sub-second
+(`chemclaw.science.bo.objectives.solubility_objective` calls an uncached calculator) and a beat
+between candidates says nothing while one is running.
 """
 
 import asyncio
@@ -81,15 +82,29 @@ async def evaluate_candidates(
 ) -> list[Observation]:
     """Evaluate each candidate with the named objective into observations.
 
-    Heartbeats between candidates rather than through `beating`: a batch has a real unit
-    boundary (one candidate), the same shape calc's reaction/scan jobs report progress at, so a
-    background timer would only obscure it.
+    Heartbeats **both between candidates and inside one**, and needs both. The beat between them
+    carries the honest progress report — "candidate 2/5" is a real unit boundary, the same shape
+    calc's per-species jobs report at — and is what keeps a long batch of *fast* candidates alive,
+    where no single evaluation ever runs long enough for a timer to fire.
+
+    The timer inside covers the opposite case, which had no protection at all: a registered
+    objective is not guaranteed fast (`solubility_objective` calls an uncached calculator), so one
+    candidate slower than `bo_activity_heartbeat_timeout_seconds` went silent mid-evaluation.
+    Temporal would declare the worker dead and retry the activity from the top, re-paying every
+    candidate already evaluated in the batch — the silently-killed-and-retried shape REV-3 fixed
+    for calc's CREST jobs and Conn-F2 fixed for the two propose activities, left open here because
+    a per-candidate beat looks like it covers a per-candidate wait and does not.
     """
     objective = get_objective(objective_name)
     observations = []
     for index, candidate in enumerate(candidates, start=1):
-        activity.heartbeat(f"evaluating candidate {index}/{len(candidates)}")
-        value = await objective(candidate.params)
+        progress = f"evaluating candidate {index}/{len(candidates)}"
+        activity.heartbeat(progress)
+        value = await beating(
+            objective(candidate.params),
+            progress,
+            settings.bo_activity_heartbeat_timeout_seconds,
+        )
         observations.append(
             Observation(
                 params=candidate.params,

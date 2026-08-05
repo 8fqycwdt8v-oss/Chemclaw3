@@ -1184,7 +1184,66 @@ instructions were "pre-resolved by `build_agent`" while resolving them itself �
 the code that should have existed, which is exactly the drift CLAUDE.md's "measure it, don't argue
 it" is about.
 
-## R5.9 — A refactor's first job is to find which of two copies is right
+## R5.9 — A ceiling is a claim about a limit, and claims get measured
+
+`bo_max_rounds=500` was documented, in two places, as the thing keeping a durable campaign inside
+Temporal's event-history limit. It was not. The history is re-sent to the propose activity every
+round, so bytes grow quadratically, and at a measured 178 bytes per `Observation` a batch-1
+campaign crosses the 50 MB hard limit at round **441** — inside the ceiling. A campaign at the
+documented maximum would have been terminated by the server with every paid evaluation lost, by
+exactly the failure the ceiling was written to prevent.
+
+Nobody had multiplied. The number was chosen as "generous versus the default of 10", the *reason*
+was written beside it, and the two were never checked against each other. The reason read as
+derived because it was specific and mechanistically correct — the history really does grow
+quadratically — and being right about the mechanism is what made it convincing while being wrong
+about the number.
+
+**Rule: a config bound that names a system limit must show the arithmetic that reaches it.** If a
+comment says "this keeps us under X", the value's derivation from X belongs in the comment, or the
+bound is not doing what it says. And when the arithmetic does not close — as here — the fix is
+usually not a smaller number: a number can only be right for one problem shape, so prefer the
+signal the platform already publishes (`is_continue_as_new_suggested()`) over any constant a
+reviewer would have to re-derive.
+
+**Corollary, from the same review:** the ceiling was documented in the config comment, in
+`require_rounds_within_ceiling`'s docstring, *and* in a test's docstring — three copies of one
+wrong claim, all agreeing, none measured. Agreement across copies is not corroboration; they are
+one statement, written once and pasted.
+
+## R5.10 — "It skips here" is not a reason to migrate its call sites blind
+
+Changing `upsert_campaign` + `add_suggestion` into one atomic `record()` meant rewriting every call
+site in `tests/test_postgres_campaign_store.py` — a file whose every test **skips offline**, because
+the sandbox has no Postgres. I rewrote them mechanically, saw 3242 local tests pass, and pushed. CI
+failed three of them.
+
+The mechanical substitution was wrong in a way only running it shows: several tests opened with
+`await store.upsert_campaign(...)` as *setup* — create the campaign row, no suggestion. Replacing
+that with `record(campaign, Suggestion(...))` inserted an extra suggestion row each time, so a test
+asserting two suggestions found three, and a test unpacking `[suggestion] = suggestions_for(...)`
+got two and raised `too many values to unpack`. The old API had two verbs because the two writes
+were separable; collapsing them collapsed a distinction the tests were using.
+
+**What I should have done, and did second:** get the dependency running. `postgresql-16` was already
+installed in this sandbox — `initdb` + `pg_ctl` as the `postgres` user, `apt-get install
+postgresql-16-pgvector`, and a real database existed in about two minutes. The full migration still
+would not apply (pgvector 0.6.0 has no `bit_jaccard_ops`; 002/003 need >= 0.7), but
+`031_bo_campaigns.sql` depends on nothing else, so applying that one file alone and driving the
+store from a script measured all three failures — and two claims I had written but never run: that a
+non-finite float is refused, and that the rolled-back transaction leaves no campaign row.
+
+**Rule: before editing tests that skip in this environment, spend five minutes trying to unskip
+them.** A skipped test is not a passing test, and a green local suite that skipped the file you just
+rewrote is evidence about the other files. Where the dependency genuinely cannot run, say so in the
+PR *and* reproduce the changed test bodies in a script against whatever partial substrate does run —
+"CI will tell me" is a slower, more public version of running it.
+
+**The narrower trap:** when an API change merges two calls into one, the call sites that used only
+*half* of the old pair are the ones that break. Grep for the callers of each old name separately
+before replacing either.
+
+## R5.11 — A refactor's first job is to find which of two copies is right
 
 Every finding in the 2026-08-05 knowledge-management review had the same shape: a rule written in
 two places, with a docstring in one of them asserting the other agreed. `note_text` said "one
@@ -1212,7 +1271,7 @@ Rules:
 3. When a docstring enumerates exceptions to its own claim ("on every exit — except…"), the claim
    is already false. Treat the enumeration as the finding.
 
-## R5.10 — Inverting a test is not the same as rewriting it, and the difference is which one still tests
+## R5.12 — Inverting a test is not the same as rewriting it, and the difference is which one still tests
 
 `tests/test_pr_gate_read_window.py` was written to pin a measured defect so its fix would have a
 regression target, and it said so. Three of its four tests drove `git checkout -B` by hand — so

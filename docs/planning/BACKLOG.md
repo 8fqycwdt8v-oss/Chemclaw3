@@ -25,6 +25,25 @@ is a decision about what a chemist is shown rather than a diff.
       pairing on something narrower than `(type, compound)` — each changes what KM-8 shows a
       chemist, which is why it is a decision and not a patch.
 
+## Open — Left by the BO deep review (2026-08-05, D-2026-08-05-a-ceiling-that-does-not-hold)
+
+- [ ] **The durable campaign does not write the campaign store.** Both paths share one campaign-id
+      space, so `resume_campaign` on a campaign that ran durably reports no such campaign about work
+      that was actually done. Investigated and confirmed a gap, not a design choice — but closing it
+      needs a decision, not a fix: `record_suggestion` writes `opened_by`, and `BoCampaignWorkflow`
+      deliberately does not know the actor (core's `ConnectorJobWorkflow` owns attribution, D-093).
+      Recording from inside the workflow means either threading identity through a seam built to
+      keep it out, or writing a fabricated actor into an audited column. Decide which, then build.
+      Also the one item that could not be verified offline — it needs both a Temporal broker and
+      Postgres.
+- [ ] **`bo_suggestions` stores no snapshot of the problem it was proposed against.** The campaign
+      row carries the *latest* problem, so a suggestion read back after the space widened is
+      described by a decision space it was not made in. Cheap to add (one JSONB column); worth a
+      migration only alongside the row above, since both touch the same tables.
+- [ ] **No unique index makes a BO write idempotent.** A retried `record()` appends a second
+      identical suggestion. Harmless today (the read takes the latest) and a real duplicate once the
+      durable path writes.
+
 ## Open — Left by the CHECKMATE deep review of the live/durable spine (2026-08-05)
 
 Record with every number and its reproduction: `docs/archive/review-2026-08-05.md`. Nine findings

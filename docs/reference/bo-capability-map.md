@@ -30,25 +30,33 @@ measurements in that register changed a wave below, and one reversed a refusal.
 
 Exactly one module imports BoFire — `science/bo/engine.py`, and `tests/test_connector_isolation.py`
 plus `tests/test_workflow_registry.py` keep `bofire`/`botorch`/`torch` out of every core process.
-`bofire[optimization,cheminfo]>=0.4.1` is declared (`pyproject.toml:15`), so both heavy extras — the
-BoTorch strategies and the RDKit/Mordred featurisers — are installed and almost entirely unused.
+`bofire[optimization,cheminfo]>=0.4.1` is declared (`pyproject.toml:15`), so both heavy extras are
+installed: the BoTorch strategies are now substantially in use, the RDKit/Mordred featurisers are
+deliberately not (`science/bo/featurize.py` uses cached GFN2-xTB descriptors instead, so a
+suggestion can cite the calculations behind its search space — see the `DEFERRED.md` row).
+
+**This section is dated.** It describes the wiring as it stood *before* W1–W5, which is what makes
+it worth keeping: the roadmap below is read against it. The table's third column is therefore a
+snapshot, and the rows W1–W5 moved say so.
 
 | BoFire concept | in use | passed any configuration? |
 | --- | --- | --- |
 | input features | `ContinuousInput`, `CategoricalInput`, `CategoricalDescriptorInput` | bounds / categories / a descriptor matrix |
-| output features | `ContinuousOutput` | exactly one, always (`engine.py:169`) |
-| objectives | `MinimizeObjective`, `MaximizeObjective` | `w=1.0`, fixed (`engine.py:148-155`) |
-| strategies | `RandomStrategy` (seeding), `SoboStrategy` (proposing), `FractionalFactorialStrategy` (screens) | `domain` and `seed` only |
-| acquisition function | — | **never set**; BoFire's `SoboStrategy` default stands |
-| surrogate | — | **never set**; BoFire picks per domain |
+| output features | `ContinuousOutput` | one per objective; **more than one since W3** (`MoboStrategy`) |
+| objectives | `MinimizeObjective`, `MaximizeObjective` | `w=1.0`, fixed |
+| strategies | `RandomStrategy` (seeding), `SoboStrategy` / `MoboStrategy` (proposing, **W3**), `FractionalFactorialStrategy` (screens) | `domain` and `seed`; the fractional design's knobs since **W2** |
+| acquisition function | qLogNEHVI on the multi-objective path (**W3**) | otherwise **never set**; BoFire's `SoboStrategy` default stands |
+| surrogate | read back via `strategy.predict` and `cross_validate` (**W5**) | **never set**; BoFire picks per domain |
 | `Domain` | `Domain(inputs=…, outputs=…, constraints=…)` | linear limits and categorical exclusions are passed since **W4** |
 
-The neutral spec that crosses the connector boundary has two fields:
+The neutral spec that crosses the connector boundary carries a list of objectives, singular no
+longer (**W3**); `objective` remains as the lead one, which is what every persisted row holds:
 
 ```python
-class OptimizationProblem(BaseModel):        # problem.py:121
+class OptimizationProblem(BaseModel):
     parameters: list[Parameter]              # ContinuousParameter | CategoricalParameter
-    objective: Objective                     # SINGULAR: {name, direction}
+    objectives: list[Objective]              # {name, direction}, lead first
+    constraints: list[Constraint]            # linear limits and categorical exclusions (W4)
 ```
 
 **What is good around it, so this does not read as a report of failure.** `featurize.py` turns a
