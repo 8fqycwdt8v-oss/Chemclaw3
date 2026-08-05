@@ -14,18 +14,20 @@ is not a decision at all but a record that git was never reached — the retry t
 supersedes it (see `_UPSERT`).
 """
 
+import json
 from contextlib import AbstractAsyncContextManager
 
 import psycopg
-from psycopg.rows import TupleRow
+from psycopg.rows import DictRow, TupleRow, dict_row
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.kg.proposal import NoteProposal, ProposalState
+from chemclaw.kg.submission import NoteFile
 
 _COLUMNS = (
-    "id, note_id, note_type, content_hash, content, branch, reference, actor, session_id, "
-    "correlation_id, state, submitted_at, decided_at, decided_by, reason"
+    "id, note_id, note_type, content_hash, content, dependencies, branch, reference, actor, "
+    "session_id, correlation_id, state, submitted_at, decided_at, decided_by, reason"
 )
 
 # The mutable columns of an unchanged re-proposal: a fresh reference (the submitter may have
@@ -47,14 +49,15 @@ _COLUMNS = (
 # are evaluated against the old row — so the two stay consistent however they are ordered.
 _UPSERT = """
     INSERT INTO note_proposals
-        (note_id, note_type, content_hash, content, branch, reference, actor, session_id,
-         correlation_id, state, reason)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (note_id, note_type, content_hash, content, dependencies, branch, reference, actor,
+         session_id, correlation_id, state, reason)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (note_id, content_hash) DO UPDATE SET
         reference = EXCLUDED.reference,
         actor = EXCLUDED.actor,
         session_id = EXCLUDED.session_id,
         correlation_id = EXCLUDED.correlation_id,
+        dependencies = EXCLUDED.dependencies,
         submitted_at = now(),
         state = CASE WHEN note_proposals.state = 'failed'
                      THEN EXCLUDED.state ELSE note_proposals.state END,
@@ -104,27 +107,44 @@ def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]
     )
 
 
-def _proposal(row: TupleRow) -> NoteProposal:
-    """Build a `NoteProposal` from a `_COLUMNS`-ordered row.
+def _rows(conn: psycopg.AsyncConnection[TupleRow]) -> psycopg.AsyncCursor[DictRow]:
+    """A cursor whose rows are keyed by column name, for the length of one statement.
 
-    Through the pydantic model rather than around it, so a schema drift fails here — where the
-    column order is visible — instead of flowing on as a plausible-looking wrong field.
+    Scoped to the cursor rather than set on the connection, which would follow it back into the
+    shared pool and change what the next borrower reads.
+
+    Worth the extra line because `_proposal` used to index `row[0]..row[14]` against a string
+    `_COLUMNS` constant: reordering that string — or inserting a column into the middle of it,
+    which the `dependencies` addition does — silently swapped every same-typed field after the
+    insertion point. `_proposal`'s docstring claimed pydantic would catch that. It cannot: `branch`
+    and `reference` are both `str`, and a swap between them is a valid model.
     """
+    return conn.cursor(row_factory=dict_row)
+
+
+def _dependencies_json(proposal: NoteProposal) -> str:
+    """The supporting files as the JSONB the column stores."""
+    return json.dumps([file.model_dump() for file in proposal.dependencies])
+
+
+def _proposal(row: DictRow) -> NoteProposal:
+    """Build a `NoteProposal` from a row keyed by column name."""
     return NoteProposal(
-        id=row[0],
-        note_id=row[1],
-        note_type=row[2],
-        content=row[4],
-        branch=row[5],
-        reference=row[6],
-        actor=row[7],
-        session_id=row[8],
-        correlation_id=row[9],
-        state=ProposalState(row[10]),
-        submitted_at=row[11],
-        decided_at=row[12],
-        decided_by=row[13],
-        reason=row[14],
+        id=row["id"],
+        note_id=row["note_id"],
+        note_type=row["note_type"],
+        content=row["content"],
+        dependencies=tuple(NoteFile(**file) for file in row["dependencies"]),
+        branch=row["branch"],
+        reference=row["reference"],
+        actor=row["actor"],
+        session_id=row["session_id"],
+        correlation_id=row["correlation_id"],
+        state=ProposalState(row["state"]),
+        submitted_at=row["submitted_at"],
+        decided_at=row["decided_at"],
+        decided_by=row["decided_by"],
+        reason=row["reason"],
     )
 
 
@@ -134,13 +154,15 @@ class PostgresProposalStore:
     async def upsert(self, proposal: NoteProposal) -> int:
         """Insert the proposal (or refresh an unchanged re-proposal); return the row id."""
         async with _connect() as conn:
-            cursor = await conn.execute(
+            cursor = _rows(conn)
+            await cursor.execute(
                 _UPSERT,
                 (
                     proposal.note_id,
                     proposal.note_type,
                     proposal.content_hash,
                     proposal.content,
+                    _dependencies_json(proposal),
                     proposal.branch,
                     proposal.reference,
                     proposal.actor,
@@ -152,12 +174,13 @@ class PostgresProposalStore:
             )
             row = await cursor.fetchone()
             await conn.commit()
-        return int(row[0]) if row is not None else 0
+        return int(row["id"]) if row is not None else 0
 
     async def read(self, proposal_id: int) -> NoteProposal | None:
         """One proposal in full, or None when there is no such row."""
         async with _connect() as conn:
-            cursor = await conn.execute(_SELECT_ONE, (proposal_id,))
+            cursor = _rows(conn)
+            await cursor.execute(_SELECT_ONE, (proposal_id,))
             row = await cursor.fetchone()
         return _proposal(row) if row is not None else None
 
@@ -168,7 +191,8 @@ class PostgresProposalStore:
         wanted = state.value if state is not None else ""
         cursor_id = before_id or 0
         async with _connect() as conn:
-            cursor = await conn.execute(
+            cursor = _rows(conn)
+            await cursor.execute(
                 _SELECT_MANY, (wanted, wanted, actor, actor, cursor_id, cursor_id, limit)
             )
             rows = await cursor.fetchall()
@@ -179,7 +203,8 @@ class PostgresProposalStore:
     ) -> NoteProposal | None:
         """Record a decision on an open proposal; None when absent or already decided."""
         async with _connect() as conn:
-            cursor = await conn.execute(_DECIDE, (state.value, decided_by, reason, proposal_id))
+            cursor = _rows(conn)
+            await cursor.execute(_DECIDE, (state.value, decided_by, reason, proposal_id))
             row = await cursor.fetchone()
             await conn.commit()
         return _proposal(row) if row is not None else None

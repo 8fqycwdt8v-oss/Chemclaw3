@@ -19,6 +19,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
 from chemclaw.kg.note import Note, Relation
+from chemclaw.kg.relations import KNOWN_RELATIONS
 from chemclaw.memory.failure import close_refuted_note, failure_note
 
 
@@ -320,3 +321,14 @@ def test_the_conflict_index_is_empty_when_detection_is_off(
 def test_the_conflict_index_of_an_absent_directory_is_empty() -> None:
     """A deployment with no note tree yet asks the same question and gets a usable answer."""
     assert conflicts_module.conflict_index(Path("/nonexistent-knowledge-dir"), date.today()) == {}
+
+
+def test_the_conflicting_relations_are_all_real_relations() -> None:
+    """A relation named here but absent from the vocabulary detects nothing, and says nothing.
+
+    `_CONFLICTING_RELATIONS` is matched against edges whose relation `kg-validate` has already
+    forced into `KNOWN_RELATIONS`; a name outside it can therefore never match, so the detector
+    would quietly stop finding declared conflicts while every test using the other member kept
+    passing.
+    """
+    assert conflicts_module._CONFLICTING_RELATIONS <= KNOWN_RELATIONS

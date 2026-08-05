@@ -1275,3 +1275,56 @@ PR *and* reproduce the changed test bodies in a script against whatever partial 
 **The narrower trap:** when an API change merges two calls into one, the call sites that used only
 *half* of the old pair are the ones that break. Grep for the callers of each old name separately
 before replacing either.
+
+## R5.11 — A refactor's first job is to find which of two copies is right
+
+Every finding in the 2026-08-05 knowledge-management review had the same shape: a rule written in
+two places, with a docstring in one of them asserting the other agreed. `note_text` said "one
+definition … cannot drift" while three haystacks drifted. `_matches` said "matching mirrors
+`find_notes`" while building its own. `kg/proposal.py` said a failed row is replayable "because the
+bytes it would have written are still here" while storing `files[0]`. `git_submitter.py` said the
+checkout returns to base "on every exit" and then enumerated exceptions.
+
+The habit that turns this from a reading exercise into a measurement is small: **when a comment
+claims two things agree, compute the difference.** Not "do they look equivalent" — set-difference
+them over the real corpus. It took nine lines to learn that five notes and fourteen notes were
+each visible to one reader and invisible to another, and no amount of reading the three functions
+side by side would have produced those numbers.
+
+The second half is that a *union* is a behaviour change and needs its own evidence. Widening the
+retriever's haystack was justified by re-running the gold set before and after, not by the
+argument that the union is obviously better. The rule was "one definition", not "this one" — the
+measurement chose which.
+
+Rules:
+1. When prose asserts two implementations agree, diff them over real data before believing or
+   disbelieving it. The script is usually under twenty lines.
+2. When consolidating N implementations into one, the choice between them is a behaviour change:
+   measure the gated number both ways and record both, even when you expect no movement.
+3. When a docstring enumerates exceptions to its own claim ("on every exit — except…"), the claim
+   is already false. Treat the enumeration as the finding.
+
+## R5.12 — Inverting a test is not the same as rewriting it, and the difference is which one still tests
+
+`tests/test_pr_gate_read_window.py` was written to pin a measured defect so its fix would have a
+regression target, and it said so. Three of its four tests drove `git checkout -B` by hand — so
+against the fixed submitter they went green, unchanged, having tested git rather than ChemClaw.
+The file that existed to prevent "an assertion true under every implementation" contained three.
+
+Sign-flipping them would have preserved that. The fix was to make each test drive the real
+submitter, and to pair every absence assertion with a positive one — "the note is not in the
+shared tree" is also true of a submission that never ran, and the non-vacuity check
+(`ls-tree` on the branch really does contain it) is what separates the two.
+
+Then: every new test was run against a mutation that removes the behaviour it claims to pin. Four
+mutations, four expected failures. That is cheap — one `sed`, one `pytest` — and it is the only
+thing that distinguishes a regression target from a description of one.
+
+Rules:
+1. Before inverting a test that pinned old behaviour, check what it actually drives. If it drives
+   the standard library or a subprocess rather than the code under test, it needs rewriting, and
+   inverting it would hide that.
+2. Pair every "X is absent" assertion with evidence that the run which should have produced X
+   happened at all.
+3. A test written as a future regression target earns its name only after you have watched it fail
+   for the right reason. Mutate, run, restore — three commands.

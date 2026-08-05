@@ -35,6 +35,10 @@ class KgSettings(BaseSettings):
     # `fingerprint_max_top_k` bounds for substructure search. Hitting the cap logs a warning, so
     # a truncated result is never silent (D-066 #4).
     graph_max_results: int = Field(default=50, ge=1)
+    # How many hub notes `find_knowledge_gaps` reports (`chemclaw.kg.analytics.analyze`). Same
+    # argument as the two caps above and it was the one that stayed a literal: a number that
+    # shapes a model-facing result is a knob, not a constant.
+    graph_analytics_top_n: int = Field(default=5, ge=1)
     # Edge length of a rendered structure depiction (gap TOOL-5). Config, not a magic number, so
     # a deployment whose surface renders larger cards can change it without a code edit.
     structure_render_size_px: int = Field(default=320, gt=0)
@@ -42,14 +46,21 @@ class KgSettings(BaseSettings):
     # this remote before a human merges.
     note_base_branch: str = "main"
     git_remote: str = "origin"
-    # The checkout the GitNoteSubmitter mutates (`git checkout -B` switches its whole working
-    # tree). Point it at a dedicated clone of the knowledge repo in production; the "." default
-    # only suits a dev checkout with nothing else running in it.
+    # The clone the GitNoteSubmitter creates note branches in and force-pushes from. Its working
+    # tree is a *reader* surface only — since D-2026-08-05 a submission happens in a private
+    # worktree under `.git/` and never switches this tree. Point it at a dedicated clone of the
+    # knowledge repo in production; the "." default only suits a dev checkout.
     note_repo_dir: str = "."
     # Publishing a QM result as a graph note is best-effort: bounded attempts + its own timeout
     # so a persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
+    # How much of a failed submission's error text the `note_proposals` record keeps. Bounded
+    # because the text is whatever git wrote to stderr, and an unbounded field on a compliance
+    # table is a place for a repository path to be stored forever. It is a bound and *not* a
+    # redaction — the credential case is handled by redacting before this cut, because a
+    # token-bearing remote URL measures well under any length worth keeping.
+    proposal_reason_chars: int = Field(default=300, ge=1)
     # Wall-clock bound on a single git command in the PR-gate submitter. A hung fetch/push (dead
     # remote, credential prompt) is killed after this, so it can never deadlock the process-wide
     # submit lock; the failed activity then retries.

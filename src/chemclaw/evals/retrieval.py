@@ -33,6 +33,7 @@ from typing import Any, TypeVar
 
 from chemclaw.core.config import NOTE_INDEX_SOURCES, settings
 from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
+from chemclaw.kg.graph import scan_notes_dir
 from chemclaw.retrieval.retrievers import GraphRetriever
 
 _T = TypeVar("_T")
@@ -102,18 +103,15 @@ _RETRIEVAL_MEMO: dict[tuple[str, tuple[int, int], str, frozenset[tuple[str, str]
 def _corpus_signature(corpus_dir: str) -> tuple[int, int]:
     """A cheap content signature of the corpus: (note-file count, newest mtime_ns).
 
-    Stat-only over the same `*.md` set the retriever parses — any add, edit, or delete
-    changes the count or the newest mtime, invalidating the memo without reading a byte.
-    A file vanishing mid-scan (e.g. a `git pull` rewriting the tree) is simply absent,
-    matching `chemclaw.kg.graph`'s fingerprint tolerance.
+    Stat-only over the same `*.md` set the retriever parses — any add, edit, or delete changes the
+    count or the newest mtime, invalidating the memo without reading a byte. It walks the corpus
+    through `chemclaw.kg.graph.scan_notes_dir` rather than repeating the glob: this used to be its
+    own `rglob` under a comment conceding it was "matching `chemclaw.kg.graph`'s fingerprint
+    tolerance", which is a copy admitting to being one.
     """
     count = 0
     newest = 0
-    for path in Path(corpus_dir).rglob("*.md"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
+    for _, stat in scan_notes_dir(Path(corpus_dir)):
         count += 1
         newest = max(newest, stat.st_mtime_ns)
     return count, newest

@@ -6,15 +6,16 @@ validated, rendered, and submitted on a feature branch as a pull request; a huma
 merges. The git/GitHub mechanics sit behind the `NoteSubmitter` protocol so the
 gate logic — which notes qualify, where they land, what the PR says — is one
 tested function independent of how submission happens.
+
+The types a submission is *made of* — `NoteFile`, `NoteSubmission`, `NoteSubmitter` — live in
+`chemclaw.kg.submission`, because the durable proposal record needs them too and this module
+already imports that one.
 """
 
-from typing import Protocol
-
-from pydantic import BaseModel, Field
-
 from chemclaw.core.config import settings
+from chemclaw.core.logging import redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, note_relative_path
 from chemclaw.kg.proposal import (
     NoteProposal,
     ambient_provenance,
@@ -22,67 +23,49 @@ from chemclaw.kg.proposal import (
     record_proposal_submitted,
 )
 from chemclaw.kg.render import render_note
-
-# How much of a submitter's error message the record keeps. Bounded because the text is whatever
-# git wrote to stderr, and an unbounded field on a compliance table is a place for a repository
-# path or a token-bearing remote URL to be stored forever.
-_REASON_CHARS = 300
-
-
-class NoteFile(BaseModel):
-    """One file a submission writes: where it goes and what it contains."""
-
-    path: str
-    content: str
-
-
-class NoteSubmission(BaseModel):
-    """Everything needed to open a PR that adds one note — and whatever it depends on.
-
-    **Why this carries a list rather than a single file.** It used to be exactly one `path` plus
-    one `content`, and that single field was a structural constraint on the whole knowledge graph:
-    a note could never link to another note that did not already exist on the base branch, because
-    a dangling `[[wikilink]]` fails `kg-validate` on the very PR being opened.
-    `connectors/qm/knowledge.py` documented that as the reason it emitted no link at all, which is
-    why computed results and the knowledge graph were disjoint stores (STO-7).
-
-    A submission is properly a *reviewable unit*, and the unit is "this note and the notes it needs
-    to make sense" — a `job-result` and the `compound` it is about. Both land in one PR, one human
-    signs off on both, and the link resolves.
-
-    `files` is ordered with the subject note first, so `files[0]` is the note the submission is
-    about. Deliberately *not* also exposed as `path`/`content` convenience properties: a read-only
-    property shadows anything `model_copy(update=...)` writes, so the old field names would keep
-    resolving and silently ignore the update. One shape, no aliases.
-    """
-
-    branch: str
-    files: list[NoteFile] = Field(min_length=1)
-    title: str
-    body: str
-
-
-class NoteSubmitter(Protocol):
-    """Submits a note as a reviewable PR and returns a reference (e.g. the PR URL).
-
-    Contract nuance: when the note is byte-identical to what the base branch
-    already contains, an implementation may return the reference *without*
-    creating anything new — there is nothing to review, so re-proposing an
-    unchanged note is an idempotent no-op, not an error.
-    """
-
-    async def submit(self, submission: NoteSubmission) -> str:
-        """Create the branch + PR for `submission`; return a human-visible reference.
-
-        For an unchanged note this may be the branch name without a fresh push
-        (see the class docstring).
-        """
-        ...
+from chemclaw.kg.submission import NoteFile, NoteSubmission, NoteSubmitter
 
 
 def _note_file(note: Note, directory: str) -> NoteFile:
     """Where one note lands in the knowledge tree, and what is written there."""
-    return NoteFile(path=f"{directory}/{note.type}/{note.id}.md", content=render_note(note))
+    return NoteFile(
+        path=f"{directory}/{note_relative_path(note.type, note.id)}", content=render_note(note)
+    )
+
+
+def _build_submission(
+    note: Note, directory: str, dependencies: list[Note] | None
+) -> NoteSubmission:
+    """The branch, files and PR text one proposal writes — the whole of what git will see.
+
+    Split out of `propose_note` because that function was doing five jobs in ninety lines, and
+    only two of them (record, submit) are about the gate's *durability*. What a submission
+    contains is a question with its own answer, and it is now testable without a submitter.
+
+    Files are deduplicated by id with the subject note first: a caller may legitimately list the
+    same dependency twice (two computed properties of one compound), and writing one path twice in
+    a commit is at best noise and at worst two different renderings racing.
+    """
+    seen = {note.id}
+    files = [_note_file(note, directory)]
+    for dependency in dependencies or ():
+        if dependency.id in seen:
+            continue
+        seen.add(dependency.id)
+        files.append(_note_file(dependency, directory))
+
+    extra = f" with {len(files) - 1} supporting note(s)" if len(files) > 1 else ""
+    return NoteSubmission(
+        branch=f"note/{note.id}",
+        files=files,
+        title=f"Add {note.type} note: {note.id}",
+        body=(
+            f"Agent-proposed **{note.type}** note `{note.id}`"
+            + (f" (source: {note.source})" if note.source else "")
+            + extra
+            + ".\n\nRequires human review before merge — GxP: AI proposes, human signs off."
+        ),
+    )
 
 
 async def propose_note(
@@ -120,29 +103,7 @@ async def propose_note(
         raise ValueError("PR-gate is for agent-authored notes; human notes commit directly")
 
     directory = knowledge_dir if knowledge_dir is not None else settings.knowledge_dir
-    # Deduplicated by id, subject note first: a caller may legitimately list the same dependency
-    # twice (two computed properties of one compound), and writing one path twice in a commit is
-    # at best noise and at worst two different renderings racing.
-    seen = {note.id}
-    files = [_note_file(note, directory)]
-    for dependency in dependencies or ():
-        if dependency.id in seen:
-            continue
-        seen.add(dependency.id)
-        files.append(_note_file(dependency, directory))
-
-    extra = f" with {len(files) - 1} supporting note(s)" if len(files) > 1 else ""
-    submission = NoteSubmission(
-        branch=f"note/{note.id}",
-        files=files,
-        title=f"Add {note.type} note: {note.id}",
-        body=(
-            f"Agent-proposed **{note.type}** note `{note.id}`"
-            + (f" (source: {note.source})" if note.source else "")
-            + extra
-            + ".\n\nRequires human review before merge — GxP: AI proposes, human signs off."
-        ),
-    )
+    submission = _build_submission(note, directory, dependencies)
     # The durable record, built here rather than at the eight call sites: an obligation that must
     # hold for every proposal belongs to the one wrapper they all run inside, which is the
     # placement rule the actor stamp and the job record already follow. Recording happens on *both*
@@ -152,7 +113,11 @@ async def propose_note(
     proposal = NoteProposal(
         note_id=note.id,
         note_type=note.type,
-        content=files[0].content,
+        content=submission.files[0].content,
+        # Everything else the submission would write. Kept because a submission is one reviewable
+        # unit (D-133) and a record of one file of it can neither be replayed — the replayed note's
+        # link to its compound would dangle — nor honestly shown to a reviewer.
+        dependencies=tuple(submission.files[1:]),
         branch=submission.branch,
         actor=actor,
         session_id=session_id,
@@ -163,10 +128,17 @@ async def propose_note(
     except Exception as exc:
         # A submission that never reached git is the case `chemclaw_notes_publish_failures_total`
         # made countable and still left unrecoverable: the note itself was gone, with nothing to
-        # replay. The row keeps the rendered bytes, so the knowledge survives the outage that lost
-        # the branch. Recorded on every retry, which is harmless — the record keys on the content,
-        # so N attempts at one note collapse onto one row.
-        failure = proposal.model_copy(update={"reason": str(exc)[:_REASON_CHARS]})
+        # replay. The row keeps every file's rendered bytes, so the knowledge survives the outage
+        # that lost the branch — and the *unit* survives it, which storing only the subject note
+        # did not: a replayed `job-result` whose `compound` was dropped links to a note that does
+        # not exist and fails `kg-validate` on the PR it reopens. Recorded on every retry, which is
+        # harmless — the record keys on the content, so N attempts collapse onto one row.
+        # Redacted *before* it is truncated. The cut is a length bound and was described as if it
+        # were also a privacy one; a realistic credential-bearing git failure — git quoting a push
+        # URL with its token in the userinfo — measures 118 characters against a 300-character
+        # cut, so the token was stored verbatim, in full, in a compliance table nothing prunes.
+        reason = redact_secrets(str(exc))[: settings.proposal_reason_chars]
+        failure = proposal.model_copy(update={"reason": reason})
         await record_proposal_failed(failure)
         raise
     # Counted after the submitter returns, so the number means "a note reached the branch", not "we

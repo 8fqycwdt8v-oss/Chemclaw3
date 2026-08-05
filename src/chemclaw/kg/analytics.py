@@ -24,6 +24,8 @@ from collections import Counter
 import networkx as nx
 from pydantic import BaseModel, Field
 
+from chemclaw.core.config import settings
+from chemclaw.kg.graph import dangling_links
 from chemclaw.kg.note import Note
 
 
@@ -47,17 +49,21 @@ class GraphGaps(BaseModel):
 _DISTILLED_TYPES = frozenset({"playbook", "optimization-campaign", "campaign", "report"})
 
 
-def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int = 5) -> GraphGaps:
+def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int | None = None) -> GraphGaps:
     """Summarize the graph's structural gaps.
 
     Args:
         graph: The indexed note graph (`chemclaw.kg.graph.build_graph`).
         notes: The parsed notes behind it, for the metadata the graph nodes do not carry.
-        top_n: How many hubs to report.
+        top_n: How many hubs to report; the configured `graph_analytics_top_n` by default. It was
+            a literal `5` with no caller ever passing anything else, which made the one number in
+            this module that shapes a model-facing result the only one an operator could not
+            change — unlike its siblings `graph_max_results` and `graph_max_hops`.
 
     Returns:
         The gap summary. Every list is sorted, so the result is deterministic and diffable.
     """
+    hubs = settings.graph_analytics_top_n if top_n is None else top_n
     by_type = Counter(note.type for note in notes)
     return GraphGaps(
         total_notes=len(notes),
@@ -68,8 +74,8 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int = 5) -> GraphGap
         ),
         type_counts=dict(sorted(by_type.items())),
         tags_without_distillation=_undistilled_tags(notes),
-        most_cited=_hubs(graph, top_n),
-        dangling_links=_dangling(graph, notes),
+        most_cited=_hubs(graph, hubs),
+        dangling_links=[f"{source} -> {target}" for source, target in dangling_links(notes)],
     )
 
 
@@ -99,19 +105,3 @@ def _hubs(graph: nx.DiGraph, top_n: int) -> list[tuple[str, int]]:
         key=lambda item: (-item[1], item[0]),
     )
     return [(node, degree) for node, degree in ranked[:top_n] if degree > 0]
-
-
-def _dangling(graph: nx.DiGraph, notes: list[Note]) -> list[str]:
-    """Links pointing at ids no note defines, as `source -> target` strings.
-
-    `kg-validate` already fails a *merge* on these; reporting them here covers the graph a
-    deployment is actually serving, which can differ from the repo when a sync is mid-flight or a
-    note was removed on the base branch.
-    """
-    defined = {note.id for note in notes}
-    return sorted(
-        f"{note.id} -> {target}"
-        for note in notes
-        for target in note.outgoing_links()
-        if target not in defined
-    )

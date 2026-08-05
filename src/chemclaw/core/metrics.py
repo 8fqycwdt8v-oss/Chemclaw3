@@ -107,6 +107,15 @@ _COUNTERS: dict[str, str] = {
         "Wall-clock seconds accumulated by finished durable jobs, by connector."
     ),
     "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
+    # A note the indexer cannot parse is dropped from the graph so one bad file cannot block every
+    # query — which is right, and was silent. `kg-validate` reports these in CI, over the
+    # repository; nothing reported them over the tree a pod is actually serving, where a partial
+    # sync or a truncated write leaves the deployment retrieving less than it should. A non-zero
+    # rate here is a corpus problem, not a traffic problem, so it is a counter rather than a log
+    # line alone.
+    "chemclaw_notes_unparseable_total": (
+        "Note files skipped by the indexer because they failed to parse; they are not retrievable."
+    ),
     # The counterpart to the line above, and the reason it could not stand alone: a best-effort
     # publish that fails is logged inside a workflow and swallowed, because the science is already
     # durable and a dead git remote must not fail a completed job. That is the right call about the

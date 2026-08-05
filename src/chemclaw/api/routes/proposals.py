@@ -24,6 +24,7 @@ from chemclaw.api.schemas import (
     KnowledgeMergedIn,
     ProposalDecisionIn,
     ProposalDetail,
+    ProposalFile,
     ProposalSummary,
     _proposal_summary,
 )
@@ -89,10 +90,11 @@ async def list_note_proposals(
 async def get_note_proposal(
     proposal: VisibleProposal,
 ) -> ProposalDetail:
-    """One proposal with the note exactly as it would land in the tree."""
+    """One proposal with everything it would write, exactly as it would land in the tree."""
     return ProposalDetail(
         **_proposal_summary(proposal).model_dump(),
         content=proposal.content,
+        dependencies=[ProposalFile(**file.model_dump()) for file in proposal.dependencies],
         session_id=proposal.session_id,
         correlation_id=proposal.correlation_id,
     )

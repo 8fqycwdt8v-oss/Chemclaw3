@@ -48,25 +48,32 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   aborts startup with a validation error naming the field — unset it in any inherited environment.
 - **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that submits notes — the default is always
   wrong in a deployment.** It ships as `.` (a dev convenience), which resolves to the process CWD.
-  Every submission opens with `git reset --hard` + `git clean -fd`, so pointing it at the checkout
-  the service itself runs from would wipe uncommitted work there — `_require_dedicated_checkout`
-  refuses before any git command runs, with `note_repo_dir '.' resolves to <path> — the checkout
-  this process is running from`. That error is the guard doing its job, not a broken deployment:
-  point the variable at a **dedicated, writable, non-shallow clone** of the knowledge repo, used by
-  nothing else (`git checkout -B note/<id>` switches the whole working tree, and
-  `--force-with-lease` needs real history). The Helm chart already supplies one —
+  Every submission creates `note/<id>` in that clone and force-pushes it to the clone's origin, so
+  pointing it at the checkout the service itself runs from would publish agent-authored notes into
+  the source repository — `_require_dedicated_checkout` refuses before any git command runs, with
+  `note_repo_dir '.' resolves to <path> — the checkout this process is running from`. That error is
+  the guard doing its job, not a broken deployment: point the variable at a **dedicated, writable,
+  non-shallow clone** of the knowledge repo, used by nothing else (`--force-with-lease` needs real
+  history, and so does the worktree each submission branches from). The Helm chart already supplies one —
   `knowledge.noteRepoPath`, default `/var/lib/chemclaw/note-repo`, provisioned by
   `deploy/knowledge-sync.sh`. It is also the tree the retriever serves from, because it has to be:
   `settings.knowledge_path` is `note_repo_dir` joined with `knowledge_dir` and there is no second
   resolution, so the sync publishes into that subdirectory (taking the submitter's checkout lock
-  while it does) rather than to a path of its own. The *shallow* replica at
+  while it does) rather than to a path of its own. Since D-2026-08-05 that working tree is a
+  *reader* surface only: a submission happens in a private worktree under `.git/` and never
+  switches it, and the sync is the one thing that writes it. The *shallow* replica at
   `knowledge.sync.checkoutPath` is what it publishes from, never what anything reads.
   Leaving it unset outside Helm is the quieter failure: `knowledge-sync.sh` logs
   `CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned` and skips the clone, so the
   first note submission is the thing that discovers it.
 - **Note submission is serialized per host.** Keep the background worker at one replica (see
   `deploy/helm/chemclaw/values.yaml`); the PR-gate's checkout lock is host-local, so a second
-  replica needs the distributed lock still open in `docs/planning/BACKLOG.md`.
+  replica needs the distributed lock still open in `docs/planning/BACKLOG.md`. Per-submission
+  worktrees did not change this — they buy isolation from *readers*, not throughput — and the lock
+  matters more than it did: each submission sweeps leftover worktrees under the shared clone, which
+  is safe only because the lock guarantees no sibling submission owns one. On a filesystem where
+  `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and the blast
+  radius is a live worktree deleted mid-submission rather than two interleaved branches.
 
 ## Talk to the agent from a terminal (testing)
 
@@ -119,8 +126,8 @@ whether the audit chain still verifies. Nothing is scored from prose. The report
 reindex` fills `note_index`; the fingerprint tables are filled only as a side effect of the ELN
 sync, so start `ElnSyncWorkflow` on `background-jobs` once. The PR-gate needs a *dedicated* clone —
 `bootstrap.sh` creates `.live/knowledge-repo` and `processes.sh` points `CHEMCLAW_NOTE_REPO_DIR` at
-it, because `note_repo_dir` defaults to the working checkout and every submission begins
-`git reset --hard` + `git clean -fd`, so the gate refuses it (G4) and the whole
+it, because `note_repo_dir` defaults to the working checkout and every submission force-pushes a
+note branch to that clone's origin, so the gate refuses it (G4) and the whole
 knowledge-contribution half of a run silently disappears.
 
 **`make live-storm` is the third stage, and it needs no model at all.** Point the lane at the mock
@@ -477,6 +484,22 @@ change, previously-indexed rows fall out of search (safe: no wrong scores, just 
 until you **re-index** them (re-run the ELN sync / re-add molecules). If search comes back
 empty after a config change, that is the tell: the index predates the new definition and needs
 rebuilding.
+
+## (vi-b) After an upgrade that changes what a note's indexed text is
+
+`note_index` rows are keyed on a **stat** fingerprint (mtime + size), which detects a changed
+*note* and by construction cannot detect a changed *definition of the text* — the file is
+untouched, so an incremental `make reindex` finds nothing to do and the stored embeddings go on
+describing the old text forever.
+
+One upgrade has done this so far: D-2026-08-05 made a note's searchable text include its `type`
+and its `compound_smiles`, which the dense and lexical indexes had never seen. **Run `make
+reindex-full` once after upgrading past it.** The symptom of skipping it is not an error — dense
+and lexical search simply keep answering as if the change had not happened, while the substring
+leg answers as if it had.
+
+The same applies to `CHEMCLAW_EMBEDDING_MODEL`: changing it serves mixed-generation vectors until
+a full reindex, and nothing detects that either (it is a known open item, not a solved one).
 
 ## (vii) Read eval-drift alerts
 

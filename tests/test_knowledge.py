@@ -23,7 +23,7 @@ from chemclaw.durable.connector_job import ConnectorJobResult
 from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import NoteFile, NoteSubmission
+from chemclaw.kg.submission import NoteFile, NoteSubmission
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 
 _RESULT = QMJobResult(
@@ -157,12 +157,14 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
 
 
 def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
-    """After a submission, `note_repo_dir` is back on `base` — not stuck on the note branch.
+    """After a submission, `note_repo_dir` is on `base` — because it was never taken off it.
 
     `note_repo_dir` is also where readers (`chemclaw.kg.graph.load_notes` et al.) resolve
-    `settings.knowledge_path`, so a checkout left on `note/<id>` would make every reader
-    see one proposed note's isolated content instead of the merged knowledge base until
-    the next submission happened to switch branches again first (the bug this proves fixed).
+    `settings.knowledge_path`, so a checkout on `note/<id>` makes every reader see one proposed
+    note's isolated content instead of the merged knowledge base. This used to be a statement
+    about *restoring* the tree; since D-2026-08-05 the submission happens in its own worktree and
+    the tree is never switched, which `tests/test_pr_gate_read_window.py` states directly. Kept
+    here as the end-to-end form of it, from the other side of the submitter.
     """
     _, work = _make_remote_and_clone(tmp_path)
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -175,15 +177,14 @@ def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
 
 
 def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> None:
-    """A submission that fails *after* the branch checkout must still restore the tree.
+    """A submission that fails after the branch is created leaves nothing behind.
 
-    This is the PR-gate bypass the `try/finally` closes. `_return_to_base` used to be reached
-    only on the two success returns, so a rejected push (a dead remote, a protected ref, a
-    hook) left `note_repo_dir` on `note/<id>` with the unreviewed, agent-authored note in the
-    working tree — and every reader resolves that same checkout through
-    `settings.knowledge_path`, so the note was served as merged knowledge and counted as
-    merged by `ingest/eln/sync._merged_note_bodies`. Retrying did not repair it: the retry
-    re-creates the same branch. Nothing but a *later, successful* submission ever fixed it.
+    Historically this was the PR-gate bypass a `try/finally` closed: a rejected push (a dead
+    remote, a protected ref, a hook) left `note_repo_dir` on `note/<id>` with the unreviewed note
+    in the working tree, served as merged knowledge by every reader and counted as merged by
+    `ingest/eln/sync._merged_note_bodies`. The tree is no longer switched at all, so the failure
+    path's obligation is a different one — dispose of the worktree — and that is asserted here
+    too, because a `finally` that stops running is exactly how the original defect happened.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -196,16 +197,16 @@ def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> No
 
     assert _current_branch(work) == "main"
     assert not (work / "knowledge" / "job-result" / "job-unreviewed.md").exists()
+    assert not list((work / ".git" / "chemclaw-worktrees").iterdir())
 
 
 def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) -> None:
-    """Restoring `base` also discards a note written but never staged.
+    """A note written but never staged reaches no reader either.
 
-    A submission carries a note *and its dependencies*, so it can die between two
-    `write_text` calls — here on the containment check of the second file. The first file is
-    already on disk and untracked, and a bare `checkout` back to `base` keeps untracked files,
-    which would hand an unreviewed note to every reader of the checkout just as surely as
-    being stuck on the note branch would. The restore discards first, so nothing survives it.
+    A submission carries a note *and its dependencies*, so it can die between two `write_text`
+    calls — here on the containment check of the second file. The first file is already on disk
+    and untracked. It used to be discarded by the restoring `reset --hard` + `clean -fd`; it is
+    now simply somewhere no reader looks, and goes with the worktree.
     """
     _, work = _make_remote_and_clone(tmp_path)
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -224,19 +225,23 @@ def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) 
 
     assert _current_branch(work) == "main"
     assert not (work / "knowledge" / "job-result" / "job-pair.md").exists()
+    assert not list((work / ".git" / "chemclaw-worktrees").iterdir())
 
 
-def test_submit_busts_the_graph_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A submission rewrites the tree, so no graph cached across it may survive it.
+def test_submit_leaves_a_readers_cache_alone_because_it_never_touches_their_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse of what this test asserted, and the clearest single statement of the fix.
 
-    `checkout -B`/`reset --hard` replace the working tree wholesale — twice, into the note branch
-    and back to base — and where `note_repo_dir` and `knowledge_dir` overlap (a dev checkout) a
-    graph cached before that would describe a tree that no longer exists for the whole
-    `graph_cache_ttl_seconds` window (DA-5).
+    It used to assert that a submission cleared every cached graph, because a submission rewrote
+    the shared working tree twice — into `note/<id>` and back — and a graph cached across that
+    would describe a tree that no longer existed for up to `graph_cache_ttl_seconds`.
 
-    The invalidation belongs to the *restore*, not to the write: the note only ever exists on
-    `note/<id>`, so busting the cache mid-submission cached nothing useful and merely widened the
-    window in which a concurrent reader could scan the checked-out note branch (DARK-10).
+    The submission now happens in a worktree under `.git/` that no reader scans, so there is
+    nothing to invalidate: busting would advertise a tree change that did not happen and pay an
+    O(notes) rescan for it. "The cache survived" is only the right outcome if the cache is also
+    still *correct*, so that is asserted too rather than assumed — the cached notes must equal what
+    a cold scan of the same directory returns.
     """
     from chemclaw.kg import graph as kg_graph
 
@@ -246,20 +251,26 @@ def test_submit_busts_the_graph_cache(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(settings, "graph_cache_enabled", True)
     monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 60.0)
     kg_graph.invalidate_cache()
-    kg_graph.load_notes(notes_dir)  # populate the cache and open the TTL window
+    cached_before = [note.id for note in kg_graph.load_notes(notes_dir)]
     assert str(notes_dir) in kg_graph._LAST_SCAN
 
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
     asyncio.run(submitter.submit(_note_submission("job-xyz")))
 
-    assert kg_graph._LAST_SCAN == {}  # the window was closed, so the next read re-scans
+    # The reader's window is untouched: no rescan was forced, because nothing it reads moved.
+    assert str(notes_dir) in kg_graph._LAST_SCAN
+    assert [note.id for note in kg_graph.load_notes(notes_dir)] == cached_before
+    # And what it holds is what is really there — not-busting is correct, not merely observed.
+    kg_graph.invalidate_cache()
+    assert [note.id for note in kg_graph.load_notes(notes_dir)] == cached_before
 
 
 def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
     """Two concurrent submits serialize: each remote branch holds exactly its own note.
 
-    Without the submit lock, the interleaved `checkout -B` calls would land one
-    note's file on the other note's branch (the checkout switches the whole tree).
+    Without the submit lock the two would contend for `.git/worktrees/` and for the `note/<id>`
+    refs — and, before the worktrees, for the one working tree, where the failure mode was not an
+    error but one note's file committed onto the other note's branch.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -389,7 +400,7 @@ def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
     already-tracked changes, no pathspec) instead of the file it names — nothing new gets
     staged, `_write_and_push`'s "nothing to commit" idempotence check trips, and `submit`
     returns a branch name as if it had succeeded while the written note is never committed or
-    pushed, then silently wiped by `_return_to_base`'s `reset --hard`/`clean -fd`.
+    pushed, then discarded unseen with the submission's worktree.
     """
     _, work = _make_remote_and_clone(tmp_path)
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -424,10 +435,15 @@ def test_submit_refuses_the_checkout_the_process_runs_from(
 ) -> None:
     """A submitter pointed at the process's own checkout is refused before any git op.
 
-    Every submission starts with `git reset --hard` + `git clean -fd`; against a
-    non-dedicated checkout (the `note_repo_dir="."` default resolves to the process
-    CWD — typically the developer's own repo) that would silently destroy uncommitted
-    work and untracked files. The refusal must fire before anything destructive runs.
+    The reason changed and the guard did not. It used to protect uncommitted work from the
+    `reset --hard` + `clean -fd` every submission ran; the submission no longer touches the shared
+    tree, so that danger is gone. What remains is worse and still live: a submission creates
+    `note/<id>` here and **force-pushes it to this repository's origin**, so pointed at the
+    ChemClaw source checkout — which the `note_repo_dir="."` default resolves to — the gate would
+    publish an agent-authored knowledge note into the code repository.
+
+    Asserted as the absence of the mutation rather than as an exception alone: no note branch and
+    no worktree may exist afterwards, which is what "refused before any git op" actually claims.
     """
     _, work = _make_remote_and_clone(tmp_path)
     uncommitted = work / "work-in-progress.txt"
@@ -447,15 +463,30 @@ def test_submit_refuses_the_checkout_the_process_runs_from(
     with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
         asyncio.run(submitter.submit(_note_submission("job-own")))
 
-    assert uncommitted.read_text(encoding="utf-8") == "do not destroy\n"  # nothing was wiped
+    # Nothing ran: no branch was created here, and no worktree. (The untracked file surviving is
+    # no longer evidence of anything — the submitter could not destroy it even without the guard.)
+    assert uncommitted.read_text(encoding="utf-8") == "do not destroy\n"
+    branches = subprocess.run(
+        ["git", "-C", str(work), "branch", "--list", "note/*"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert branches.strip() == ""
+    assert not (work / ".git" / "chemclaw-worktrees").exists()
 
 
 def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> None:
-    """Residue staged by a failed prior submission is not committed into the next note's branch.
+    """Residue staged in the shared checkout is not committed into the next note's branch.
 
-    A submission that dies between `git add` and `git commit` (timeout kill, rejecting
-    hook) leaves its note staged; `checkout -B` preserves staged changes, so without a
-    reset the next submission would silently commit the stray note into its own PR.
+    A submission that died between `git add` and `git commit` used to leave its note staged in the
+    shared index, and `checkout -B` preserves staged changes, so the next submission silently
+    committed the stray into its own PR. A linked worktree has its own index, so the two cannot
+    meet at all — the defence is structural rather than a scrub each time.
+
+    Which means the stray is now *also* still staged afterwards, and that is asserted here: the
+    mirror image of dropping `reset --hard`, and the clearest statement that the shared tree is no
+    longer the submitter's to scrub.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     stray = work / "knowledge" / "job-result" / "job-stray.md"
@@ -474,14 +505,23 @@ def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> No
     ).stdout
     assert "knowledge/job-result/job-b.md" in files
     assert "job-stray.md" not in files
+    staged = subprocess.run(
+        ["git", "-C", str(work), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "job-stray.md" in staged, "the operator's staged work is not the submitter's to discard"
 
 
 def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
     """A symlinked `knowledge` dir committed on the base branch cannot redirect the write.
 
-    Containment must hold against the tree as it exists *after* `checkout -B` swaps
-    in the base branch: a symlink merged onto base would otherwise resolve as a real
-    directory pre-checkout, pass the check, then be followed by the write.
+    Containment must hold against the tree as it exists *after* the base branch is materialized:
+    a symlink merged onto base would otherwise resolve as a real directory beforehand, pass the
+    check, then be followed by the write. This is also the test that forbids creating the
+    submission worktree with `--no-checkout` — with nothing on disk there is no symlink to
+    resolve, the check passes vacuously, and this inverts.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")

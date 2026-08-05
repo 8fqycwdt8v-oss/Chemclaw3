@@ -38,7 +38,7 @@ from chemclaw.ingest.eln.warehouse.binding import (
 from chemclaw.ingest.eln.warehouse.connect import open_warehouse
 from chemclaw.ingest.eln.warehouse.driver import Warehouse, WarehouseQueryError
 from chemclaw.ingest.eln.warehouse.expr import as_text
-from chemclaw.kg.note import note_id_for_reaction
+from chemclaw.kg.note import note_id_for_reaction, note_relative_path
 from chemclaw.retrieval.evidence import EvidenceChunk
 
 logger = logging.getLogger(__name__)
@@ -172,13 +172,14 @@ def _is_merged_note(key: str) -> bool:
     """Whether this reaction already has a merged note in the knowledge graph.
 
     Asked per hit rather than by listing the directory, because the question is about a handful of
-    ids and the answer for each is one filename: the graph *is* the checkout (`kg` keeps notes as
-    Markdown in git, laid out `<type>/<id>.md`), so this is a `stat` per returned row instead of a
-    full `readdir` of a corpus that grows without bound. On the chat hot path that difference is the
-    whole cost of the check.
+    ids and the answer for each is one filename: the graph *is* the checkout, so this is a `stat`
+    per returned row instead of a full `readdir` of a corpus that grows without bound. On the chat
+    hot path that difference is the whole cost of the check. The layout it depends on comes from
+    `chemclaw.kg.note.note_relative_path` rather than being re-spelled here, so this cannot be the
+    one reader that disagrees with the PR-gate about where a note lands.
 
     Deliberately not cached: a merge lands between two queries, and a stale answer would keep
     surfacing a reaction a reviewer had just signed off on — the exact duplication this prevents.
     """
-    note = Path(settings.knowledge_path) / "reaction" / f"{note_id_for_reaction(key)}.md"
+    note = Path(settings.knowledge_path) / note_relative_path("reaction", note_id_for_reaction(key))
     return note.is_file()

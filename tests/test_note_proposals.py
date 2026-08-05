@@ -137,6 +137,72 @@ def test_a_failed_submission_keeps_the_note_it_could_not_push(
     assert "could not push" in recorded.reason
 
 
+def test_a_multi_file_submission_records_every_file_it_would_have_written(
+    store: InMemoryProposalStore,
+) -> None:
+    """The measured gap (D-2026-08-05): the record kept `files[0]` and dropped the rest.
+
+    A submission is one reviewable unit — a note and the notes its links depend on (D-133) — and
+    the record of a `FAILED` one is only replayable if the unit is what was kept. It was not: a
+    `job-result` proposal replayed from its row would have written a note whose
+    `[[wikilink]]` to its `compound` dangled, failing `kg-validate` on the very PR it reopened.
+    Two docstrings asserted the opposite while it was true.
+    """
+
+    class DeadRemote:
+        async def submit(self, submission: object) -> str:
+            raise RuntimeError("could not push to origin")
+
+    compound = Note(id="compound-ethanol", type="compound", created_by="agent", body="the compound")
+    subject = _note(body="rests on [[compound-ethanol]]")
+
+    with pytest.raises(RuntimeError):
+        _run(propose_note(subject, DeadRemote(), dependencies=[compound]))
+
+    [recorded] = _run(store.listing(None, "", 10, None))
+    assert recorded.state is ProposalState.FAILED
+    assert "rests on" in recorded.content
+    # Everything else the submission would have written, with the paths it would have written them
+    # to — which is what "replayable" means.
+    assert [file.path for file in recorded.dependencies] == [
+        "knowledge/compound/compound-ethanol.md"
+    ]
+    assert "the compound" in recorded.dependencies[0].content
+
+
+def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
+    store: InMemoryProposalStore,
+) -> None:
+    """Truncation is not redaction, and the bound was described as if it were both.
+
+    `note_proposals` is a compliance table `chemclaw.durable.retention` deliberately never prunes,
+    so anything written to `reason` is written forever. The reason text is whatever git wrote to
+    stderr, and git quotes the push URL — with its token in the userinfo — on the most ordinary
+    authentication failure there is. That message measures 118 characters against a 300-character
+    cut, so the bound the comment relied on had never once applied to the case it named.
+
+    Asserted on the token itself rather than on the redacted form, because what matters is that
+    the secret is absent, not how the remainder reads.
+    """
+    secret = "ghp_S3cretTokenValue"
+
+    class UnauthenticatedRemote:
+        async def submit(self, submission: object) -> str:
+            raise RuntimeError(
+                "fatal: could not read Username for "
+                f"'https://x-access-token:{secret}@git.example.invalid': No such device"
+            )
+
+    with pytest.raises(RuntimeError):
+        _run(propose_note(_note(), UnauthenticatedRemote()))
+
+    [recorded] = _run(store.listing(None, "", 10, None))
+    assert secret not in recorded.reason
+    # Still diagnostic: which remote failed, and why, survive the redaction.
+    assert "git.example.invalid" in recorded.reason
+    assert "could not read Username" in recorded.reason
+
+
 def test_a_store_failure_never_fails_the_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -294,6 +360,34 @@ def test_the_queue_is_listable_over_http(client: TestClient, store: InMemoryProp
 
     detail = client.get(f"/proposals/{listed[0]['id']}").json()
     assert "yield 82%" in detail["content"]
+
+
+def test_the_detail_route_shows_every_file_the_reviewer_is_signing_off_on(
+    client: TestClient, store: InMemoryProposalStore
+) -> None:
+    """`GET /proposals/{id}` claimed to show "the note exactly as it would land in the tree".
+
+    For a submission with dependencies it showed one file of an indivisible unit — so a reviewer
+    approved a `[[wikilink]]` whose far end was not on screen, which is precisely the review the
+    multi-file submission was introduced to make possible (D-133).
+    """
+    compound = Note(id="compound-ethanol", type="compound", created_by="agent", body="the compound")
+    _run(
+        propose_note(
+            _note(body="rests on [[compound-ethanol]]"),
+            FakeSubmitter(),
+            dependencies=[compound],
+        )
+    )
+
+    listed = client.get("/proposals").json()
+    detail = client.get(f"/proposals/{listed[0]['id']}").json()
+
+    assert "rests on" in detail["content"]
+    assert [file["path"] for file in detail["dependencies"]] == [
+        "knowledge/compound/compound-ethanol.md"
+    ]
+    assert "the compound" in detail["dependencies"][0]["content"]
 
 
 def test_an_unknown_state_filter_is_refused(

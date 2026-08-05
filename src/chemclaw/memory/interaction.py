@@ -7,7 +7,8 @@ later retrieval. Any source notes the answer drew on are cited as `[[...]]` back
 """
 
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import NoteSubmitter, propose_note
+from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.submission import NoteSubmitter
 
 
 def note_from_confirmed_answer(

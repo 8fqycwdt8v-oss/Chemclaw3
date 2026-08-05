@@ -1,5 +1,6 @@
 """Behavioral tests for the NetworkX indexer and validation (plan steps 2.3, 2.4)."""
 
+import logging
 import time
 from pathlib import Path
 
@@ -39,6 +40,24 @@ def test_load_notes_skips_unreadable_file(tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
     (tmp_path / "bad.md").write_bytes("---\nid: b\ntype: t\n---\nl\xf6slich\n".encode("latin-1"))
     assert [note.id for note in graph.load_notes(tmp_path)] == ["a"]
+
+
+def test_a_skipped_note_is_said_out_loud(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Resilient is not the same as silent, and the indexer was both.
+
+    `kg-validate` reports an unparseable note — over the repository, in CI. Nothing reported it
+    over the tree a pod is actually serving, where a partial sync or a truncated write leaves the
+    deployment retrieving less than it should with no signal anywhere. The skip is still the right
+    behaviour; being unable to tell it happened was not.
+    """
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    (tmp_path / "bad.md").write_bytes("---\nid: b\ntype: t\n---\nl\xf6slich\n".encode("latin-1"))
+    graph.invalidate_cache()
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.graph"):
+        assert [note.id for note in graph.load_notes(tmp_path)] == ["a"]
+
+    assert any("bad.md" in record.getMessage() for record in caplog.records)
 
 
 def test_validate_reports_unreadable_note(tmp_path: Path) -> None:

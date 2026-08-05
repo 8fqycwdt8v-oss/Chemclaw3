@@ -65,36 +65,6 @@ rather than a diff.
       fit resolved with a tight error bar, because the comparison was tail-versus-whole and the whole
       contains the tail (`D-2026-08-05-a-trend-needs-a-tail`).
 
-- [ ] **A crash mid-submission leaves the shared checkout on `note/<id>`, with the unreviewed note
-      in the tree** — [M], and the same GxP decision as the read window directly below it. Measured
-      with a real git remote and a SIGKILLed child: `branch after SIGKILL: note/job-crash`, the
-      unreviewed note present, and `load_notes` returning it as knowledge. `_return_to_base` runs
-      from a `finally`, which process death does not; nothing else in the application resets the
-      tree — `grep -rn "reset.*--hard" src/` finds only `_submit_locked`/`_return_to_base`. Bounded
-      in the shipped topology only by the deployment sidecar's `rsync -a --delete`
-      (`deploy/knowledge-sync.sh`, 300 s default) and **unbounded** in the `infra/live/` one.
-      `git_submitter.py:212` says the checkout is returned to base "on every exit"; it enumerates
-      exceptions. **One fix closes this and the read window** — a `git worktree` for the submission,
-      so the shared tree is never switched — which is the reason to take it once and deliberately.
-
-- [ ] **A `FAILED` proposal for a multi-file submission cannot be replayed** — [M].
-      `kg/pr_gate.py:155` stores `content=files[0].content`, so a submission with dependencies keeps
-      only the subject note and the replayed note's `[[wikilink]]` would dangle — the exact failure
-      `NoteSubmission`'s multi-file design exists to prevent (STO-7/D-133). Measured on a two-file
-      submission through a failing submitter: stored row = 131 chars, dependency body absent. 4 of
-      the 9 `propose_note` call sites pass `dependencies=`. `kg/proposal.py:59` claims the row can
-      be replayed "because the bytes it would have written are still here"; `routes/proposals.py:92`
-      claims the reviewer sees "the note exactly as it would land in the tree". Both are false for a
-      multi-file unit. Either store every file or say the row is subject-only — silence is the bug.
-
-- [ ] **`pr_gate._REASON_CHARS = 300` does not do what its comment says** — [M], security-adjacent.
-      The bound is justified as keeping "a token-bearing remote URL" out of the compliance table; a
-      realistic credential-bearing git failure (`fatal: Authentication failed for
-      'https://svc-chemclaw:ghp_…@ghe.corp.example.com/kg/knowledge.git/'`) measures **235 chars**,
-      so `msg[:300]` stores it verbatim in `note_proposals.reason`, and the path never reaches the
-      `core/logging` redaction inventory. Truncation is not redaction; the fix is to route the reason
-      through the existing redactor, and the threshold belongs in config either way (G3).
-
 - [ ] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — [S]. A holder whose lease was taken
       over cannot detect it: `session_store.py:504` returns `None`, and `api/state.py:220` reacts
       only to *exceptions*, which a silent takeover does not raise — so its own warning ("another
@@ -118,25 +88,6 @@ rather than a diff.
       worth its maintenance is the decision.
 
 ## Open — Found by the deeper testing pass (2026-08-04)
-
-- [ ] **The PR-gate has a read window: an unreviewed note is readable as knowledge while the
-      submission holds the checkout** — [M], and it is a **compliance** finding rather than a
-      reliability one, because the PR-gate is the "AI proposes, human signs off" line (D-005).
-      Measured, not argued (`tests/test_pr_gate_read_window.py`): `settings.knowledge_path` is
-      `note_repo_dir / knowledge_dir`, the same working tree `GitNoteSubmitter` switches with
-      `git checkout -B note/<id>`; the note is committed into that tree; `invalidate_cache()` runs
-      only in `_return_to_base`, and `load_notes` caches for `graph_cache_ttl_seconds` (60 s). So a
-      concurrent reader — `find_notes`, `gather_evidence`, the digest job, the ELN sync — can read
-      the unreviewed note during the window **and keep serving it for up to a TTL afterwards**.
-      Nothing filters it: `created_by == "agent"` is read in exactly one place
-      (`retrieval/harness.py`, to label a chunk "agent-authored" in a report) and no reader consults
-      `note_proposals.state`. Reachable in the shipped topology, not only in dev — the runbook says
-      the retriever serves from that same tree "because it has to be".
-      **The fix is architectural**: `git worktree add` for the submission, so the shared tree is
-      never switched at all. `git_submitter.py`'s docstring already considered per-note worktrees
-      and rejected them as over-engineering *for concurrency* — this is a different reason, and it
-      was not weighed. Left unexecuted deliberately; the tests above pin today's behaviour so the
-      fix has a regression target.
 
 - [ ] **A SIGKILLed connector worker costs 600 s before its job resumes, and one setting decides
       that for every calc job** — [M]. Measured by the storm's chaos family: the workflow is
@@ -1762,8 +1713,8 @@ section, and STO-5/11/13 stay deliberately open.
       `nx.DiGraph` with a tuple of relations per edge rather than moving to `MultiDiGraph`.
 - [x] **STO-9 [Med] Bi-temporality stopped at the node.** **Done (D-134):** `Relation` carries its
       own `valid_from`/`valid_to`, honoured by `kg.graph.related(..., as_of=)`.
-- [x] **STO-10 [Med] `knowledge/` was empty.** **Done (D-135):** 37 seed notes covering all ten
-      types and all fourteen relations, with real instances of the awkward cases (a superseded
+- [x] **STO-10 [Med] `knowledge/` was empty.** **Done (D-135):** 38 seed notes covering all eleven
+      types and all fifteen relations, with real instances of the awkward cases (a superseded
       pair, a declared conflict, calculation crosslinks). `evals/retrieval_corpus/` was correctly
       **not** promoted — a test asserts the two share no ids.
 - [x] **STO-12 [Low] `embed_texts` re-embedded every query.** **Done (D-135):** bounded cache keyed

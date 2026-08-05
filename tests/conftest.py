@@ -24,7 +24,7 @@ import pytest
 
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
-from chemclaw.kg.pr_gate import NoteSubmission
+from chemclaw.kg.submission import NoteSubmission
 from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 

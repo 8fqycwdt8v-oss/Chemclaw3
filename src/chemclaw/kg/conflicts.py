@@ -101,19 +101,23 @@ def _suspected(notes: list[Note]) -> list[Conflict]:
     materially different confidence between them is worth a reader's eye. Notes with no stated
     confidence are skipped — an absent confidence is not a low one.
     """
-    grouped: dict[tuple[str, str], list[Note]] = defaultdict(list)
+    # Carry the confidence alongside the note rather than re-reading `note.confidence` inside the
+    # loop: the filter above already established it is not None, and expressing that structurally
+    # is what removes the `assert` that used to narrow the type here. An `assert` is stripped under
+    # `python -O`, so a narrowing that only holds because of one is a narrowing that can stop
+    # holding in production and nowhere else.
+    grouped: dict[tuple[str, str], list[tuple[Note, float]]] = defaultdict(list)
     for note in notes:
         if note.compound_smiles and note.confidence is not None:
-            grouped[(note.type, note.compound_smiles)].append(note)
+            grouped[(note.type, note.compound_smiles)].append((note, note.confidence))
 
     threshold = settings.conflict_confidence_gap
     found: list[Conflict] = []
     for group in grouped.values():
-        ordered = sorted(group, key=lambda note: note.id)
-        for index, left in enumerate(ordered):
-            for right in ordered[index + 1 :]:
-                assert left.confidence is not None and right.confidence is not None
-                gap = abs(left.confidence - right.confidence)
+        ordered = sorted(group, key=lambda pair: pair[0].id)
+        for index, (left, left_confidence) in enumerate(ordered):
+            for right, right_confidence in ordered[index + 1 :]:
+                gap = abs(left_confidence - right_confidence)
                 if gap < threshold or not _overlaps(left, right):
                     continue
                 found.append(
@@ -123,8 +127,8 @@ def _suspected(notes: list[Note]) -> list[Conflict]:
                         kind="suspected",
                         detail=(
                             f"both describe {left.compound_smiles} as {left.type} notes valid at "
-                            f"the same time, with confidence {left.confidence} vs "
-                            f"{right.confidence}"
+                            f"the same time, with confidence {left_confidence} vs "
+                            f"{right_confidence}"
                         ),
                     )
                 )

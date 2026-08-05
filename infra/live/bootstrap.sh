@@ -119,9 +119,9 @@ ensure_note_repo() {
     return
   fi
   # A *dedicated* clone, because the PR-gate refuses anything else and is right to:
-  # `GitNoteSubmitter` starts every submission with `git reset --hard` + `git clean -fd`
-  # (poisoned-index recovery), so pointing it at the working checkout would destroy uncommitted
-  # work. `note_repo_dir` defaults to "." — the checkout — so a lane that does not set this
+  # `GitNoteSubmitter` creates `note/<id>` here and force-pushes it to this clone's origin, so
+  # pointing it at the working checkout would publish agent-authored notes into the source
+  # repository. `note_repo_dir` defaults to "." — the checkout — so a lane that does not set this
   # starts workers whose every note submission is refused before a git command runs (G4).
   #
   # That is not a small subset of the system: the PR-gate is the one path job results, reports and

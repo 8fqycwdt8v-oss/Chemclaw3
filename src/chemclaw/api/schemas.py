@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from chemclaw.core.config import settings
 from chemclaw.kg.proposal import NoteProposal
@@ -140,15 +140,27 @@ class ProposalSummary(BaseModel):
     reason: str
 
 
-class ProposalDetail(ProposalSummary):
-    """A proposal with the rendered note, exactly as it would land in the tree.
+class ProposalFile(BaseModel):
+    """One further file the submission would write beside its subject note."""
 
-    The note itself rather than a summary of it: a reviewer signing off on machine-written
-    knowledge is signing off on the bytes, and a paraphrase is the one thing a GxP review must not
-    be given.
+    path: str
+    content: str
+
+
+class ProposalDetail(ProposalSummary):
+    """A proposal with everything it would write, exactly as it would land in the tree.
+
+    The bytes rather than a summary of them: a reviewer signing off on machine-written knowledge is
+    signing off on the bytes, and a paraphrase is the one thing a GxP review must not be given.
+
+    `dependencies` is the rest of the submission — the `compound` note a `job-result` cites, say —
+    and it is here because without it the sentence above was false for exactly the submissions that
+    need review most. A note and the notes its links depend on are one reviewable unit (D-133);
+    showing one file of it invited a reviewer to approve a link they could not see the far end of.
     """
 
     content: str
+    dependencies: list[ProposalFile] = Field(default_factory=list)
     session_id: str
     correlation_id: str
 

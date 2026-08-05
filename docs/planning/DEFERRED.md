@@ -45,7 +45,7 @@ the trigger is checkable rather than a feeling.
 
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
-| **Sub-quadratic playbook clustering** (KM-14, half) | `memory/playbook.py` pairwise Tanimoto is O(n²) — simple and exact. The corpus is **37 notes** | ~10⁴ reactions (~10⁸ comparisons per run); switch to per-reaction Postgres HNSW k-NN |
+| **Sub-quadratic playbook clustering** (KM-14, half) | `memory/playbook.py` pairwise Tanimoto is O(n²) — simple and exact. The corpus is **38 notes** | ~10⁴ reactions (~10⁸ comparisons per run); switch to per-reaction Postgres HNSW k-NN |
 | **Substructure pattern-fingerprint prefilter** | `find_substructure_matches` bounds its scan to `substructure_scan_max_records` (5000) and warns on truncation, and matching runs in a worker thread under `substructure_match_timeout_seconds` (D-080), so both footguns are closed. Screening with a pattern fingerprint first would raise the ceiling, but ECFP bits cannot screen substructures soundly — it needs a dedicated pattern-fingerprint column and index. Honest residual: the wall-clock bound frees the caller and the event loop, not the CPU (RDKit exposes no interruption hook); killing the work outright needs a subprocess | The truncation warning fires in real use, past ~10⁴ molecules |
 | **`within=` id-array scaling** | Retrieval eligibility ships the full eligible-id list as one SQL array parameter; fine at 10³–10⁴ notes | The corpus approaches ~10⁵ notes — then index type/tag/currency columns instead |
 | **Per-key in-flight dedup in the calculation store** | Two *concurrent* misses on one key both compute (benign last-writer-wins upsert); serializing needs cross-process locking | Duplicate expensive runs (real HPC/DFT) become a measured cost |

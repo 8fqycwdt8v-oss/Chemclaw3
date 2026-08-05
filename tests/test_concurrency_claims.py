@@ -219,9 +219,11 @@ def test_the_submit_lock_excludes_a_second_operating_system_process(tmp_path: Pa
     """A second process cannot take the checkout lock while this one holds it.
 
     `_checkout_lock`'s docstring is explicit — "it genuinely excludes other processes" — and until
-    now nothing put a process behind that claim. It is load-bearing for a GxP control: two
-    submitters sharing `note_repo_dir` interleave `checkout -B` calls, and the failure mode is not
-    an error but a note committed onto someone else's branch.
+    now nothing put a process behind that claim. It stayed load-bearing when the submission moved
+    into its own worktree (D-2026-08-05): two submitters sharing `note_repo_dir` both mutate
+    `.git/worktrees/` and the ref store, and — the part that makes it structural — each submission
+    sweeps every worktree under the shared root, which is only safe because no other submission can
+    own one.
 
     The child is a real interpreter, not a thread and not a second file object in this process,
     since only a separate process tests what the sentence says.

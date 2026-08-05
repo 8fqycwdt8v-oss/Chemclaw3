@@ -33,6 +33,7 @@ justification and which nothing was protecting.
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from chemclaw.core.config import settings
@@ -149,6 +150,38 @@ _MIN_REDACTABLE = 8
 
 _REDACTED = "***"
 
+# A credential carried in a URL's userinfo — `scheme://user:secret@host`, which is how a token
+# reaches a git remote and how a password reaches a DSN. Matched structurally rather than by value
+# because this is the one credential class the inventory above *cannot* cover: a git helper, a
+# sidecar or a remote configured outside this process holds the token, so it is nowhere in
+# `os.environ` here and the substring pass has nothing to look for. The user is kept and only the
+# secret replaced, so a redacted line still says which remote and which principal failed.
+_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]*:)[^/\s@]*@")
+
+
+def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
+    """Return `text` with every credential this process can recognize replaced by `***`.
+
+    The redaction `SecretRedactingFilter` applies to a log line, exposed so anything that
+    *persists* an error message can apply the same one. The PR-gate is the case that forced it:
+    a failed submission stores git's stderr in `note_proposals.reason`, a compliance table nobody
+    prunes, and it bounded that text by truncating it — but truncation is not redaction, and a
+    realistic token-bearing push failure measures well under any length worth keeping, so the
+    credential was stored verbatim and in full.
+
+    `extra_secrets` is for values a caller resolved itself (the filter's per-connector bearer-token
+    variable names), keeping the lazy `connectors` import out of this module.
+    """
+    redacted = text
+    for secret in _secret_values(extra_secrets):
+        redacted = redacted.replace(secret, _REDACTED)
+    # A *callable* replacement, not a `\1`-style template. A template is compiled lazily by the
+    # `re` machinery on first use, and that compilation does `import re` — on the logging path,
+    # which `tests/test_filtering_a_record_never_imports_anything` forbids for the reason recorded
+    # there: an import from inside a filter re-entered the filter under Temporal's sandbox and
+    # wedged the worker. The test caught this the first time it ran.
+    return _URL_USERINFO.sub(lambda match: f"{match.group(1)}{_REDACTED}@", redacted)
+
 
 def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...]:
     """The distinct secret values this process actually holds, longest first.
@@ -237,13 +270,8 @@ class SecretRedactingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact in place and always keep the record."""
-        secrets = _secret_values(self._connector_token_envs)
-        if not secrets:
-            return True
         message = record.getMessage()
-        redacted = message
-        for secret in secrets:
-            redacted = redacted.replace(secret, _REDACTED)
+        redacted = redact_secrets(message, self._connector_token_envs)
         if redacted != message:
             # Collapsed to a plain message: the args have been folded in, and leaving them would
             # let a formatter re-render the original.
