@@ -84,11 +84,46 @@ def _read_sql_files() -> dict[str, str]:
     return {path.name: path.read_text() for path in sorted(sql_dir.glob("*.sql"))}
 
 
+def _statements(text: str) -> str:
+    """A migration file reduced to the SQL it runs: `--` comments and blank lines removed.
+
+    What the drift guard is protecting is that an applied migration's *effect* never changes. A
+    comment cannot change an effect, and hashing the whole file made every comment edit a
+    deployment outage — `make db-migrate` refuses on any database that already applied the file,
+    while CI, which always starts from an empty one, stays green. It happened twice from two
+    different sessions: `006_audit_events.sql` was corrected on 2026-08-01 to name the module that
+    the D-148 package move had renamed, and `031_bo_campaigns.sql` on 2026-08-05 to say that two
+    columns hold the lead objective only. Both edits were *right*, and both broke migrations for
+    four days and an hour respectively.
+
+    Line-oriented rather than SQL-aware on purpose: a `--` inside a string literal would be
+    mangled by a naive strip, so only lines whose first non-space characters are `--` are dropped,
+    never a trailing comment on a statement line. That under-strips and never over-strips, which is
+    the safe direction — the worst case is that a trailing-comment edit still trips the guard,
+    which is the behaviour we had.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("--")
+    )
+
+
 def _checksum(text: str) -> str:
-    """SHA-256 of a migration file's text, to detect edits after it was applied.
+    """SHA-256 of a migration file's *statements*, to detect edits after it was applied.
 
     File integrity, deliberately not `chemclaw.core.ids.stable_hash` (which is for
-    content-addressed *identity* keys over JSON) — here the raw bytes are what matter.
+    content-addressed *identity* keys over JSON) — here the bytes are what matter, minus the ones
+    that cannot run (see `_statements`).
+    """
+    return hashlib.sha256(_statements(text).encode()).hexdigest()
+
+
+def _legacy_checksum(text: str) -> str:
+    """The whole-file hash this ledger recorded before the guard became statement-only.
+
+    Kept so an existing database is not declared drifted by the fix itself: a recorded checksum
+    that matches this is accepted once and rewritten to the statement hash, after which the file's
+    comments are free to change. Without it, every row in every deployed `schema_migrations` would
+    mismatch on the first run after this change — turning a fix for an outage into a bigger one.
     """
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -145,10 +180,19 @@ async def migrate(dsn: str | None = None) -> list[str]:
             )
             row = await cursor.fetchone()
             if row is not None:
-                if row[0] != checksum:
+                if row[0] == _legacy_checksum(text):
+                    # Recorded before the guard became statement-only. The file is unchanged in
+                    # every way that matters *and* in every way that does not, so upgrade the row
+                    # in place rather than making the reader prove it again next time.
+                    await conn.execute(
+                        "UPDATE schema_migrations SET checksum = %s WHERE filename = %s",
+                        (checksum, name),
+                    )
+                elif row[0] != checksum:
                     raise MigrationError(
                         f"migration {name} was edited after being applied "
-                        f"(recorded checksum differs); add a new migration file instead"
+                        f"(its statements differ, not just its comments); "
+                        f"add a new migration file instead"
                     )
                 continue
             await conn.execute(text)

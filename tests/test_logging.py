@@ -32,10 +32,54 @@ def test_configure_logging_applies_configured_level(monkeypatch: pytest.MonkeyPa
         root.setLevel(original)
 
 
-def test_configure_telemetry_is_a_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With OTel off (the default), telemetry setup does nothing and never raises."""
+def test_configure_telemetry_is_safe_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With OTel off (the default), telemetry setup never raises and wires no exporter."""
     monkeypatch.setattr(settings, "otel_enabled", False)
     configure_telemetry()  # must return cleanly without importing/wiring any exporter
+
+
+def test_telemetry_off_installs_a_noop_meter_provider_rather_than_leaving_none() -> None:
+    """Off must mean a no-op provider, not the *absence* of one — the front door's memory leak.
+
+    With no meter provider set, the OpenTelemetry API does not discard instrument calls: it
+    **proxies** them and keeps every proxy forever, so it can back them if a provider arrives
+    later (`_ProxyMeterProvider._meters` and `_ProxyMeter._instruments` are module-level lists
+    that only ever grow). MAF creates one duration histogram per exposed MCP function and this
+    system rebuilds its connector tool surface every turn, so a turn with telemetry off leaked
+    35 `_ProxyMeter`s, 35 `_ProxyHistogram`s, 70 locks and 35 lists — permanently.
+
+    Measured end to end with `chemclaw.cli.leak_probe` against the real front door: **+178 live
+    objects and +20.7 KB of RSS per turn before, +3.3 objects and +2.7 KB after** — and what
+    remains is the session LRU filling toward its cap, which is bounded by construction.
+
+    The test this replaces asserted that disabled telemetry "does nothing", which was true and
+    was the defect.
+
+    **In a subprocess, deliberately**, and for the same reason as the test below it: a meter
+    provider is global and can be set exactly once, so proving this in-process would decide the
+    question for every test that ran afterwards.
+    """
+    probe = (
+        "from chemclaw.core.logging import configure_telemetry; configure_telemetry();"
+        "from opentelemetry.metrics import get_meter;"
+        "from opentelemetry.metrics._internal import _PROXY_METER_PROVIDER as p;"
+        "before = len(p._meters);"
+        "[get_meter(f'm{i}').create_histogram(name=f'h{i}') for i in range(50)];"
+        "print(len(p._meters) - before)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env={**os.environ, "CHEMCLAW_OTEL_ENABLED": "false"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    proxied = int(result.stdout.strip().splitlines()[-1])
+    assert proxied == 0, (
+        f"{proxied} of 50 instrument creations were proxied and retained; the API only stops "
+        "proxying once a provider is installed, so telemetry-off still leaks"
+    )
 
 
 def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:

@@ -146,8 +146,8 @@ class SessionTurns(Protocol):
         """Take the session's turn slot for `lease_seconds`; False if someone else holds it."""
         ...
 
-    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
-        """Extend this holder's claim, so a long turn is not declared dead and stolen from."""
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """Extend this holder's claim; False once the claim is no longer this holder's."""
         ...
 
     async def release(self, session_id: str, holder: str) -> None:
@@ -217,7 +217,23 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
     while True:
         await asyncio.sleep(interval)
         try:
-            await claims.refresh(session_id, _WORKER_ID, lease_seconds)
+            if not await claims.refresh(session_id, _WORKER_ID, lease_seconds):
+                # The claim is no longer ours: it lapsed and another worker took the session while
+                # this turn was still running. Nothing raised — the UPDATE simply matched no row —
+                # so before the 2026-08-05 review this was indistinguishable from a healthy
+                # refresh, and the warning below was unreachable in the one case it names.
+                #
+                # Stop rather than keep trying: every further refresh would match no row either,
+                # and a heartbeat that cannot succeed is a timer burning a connection every few
+                # seconds. The turn itself continues — cancelling a chemist's answer because a
+                # lease lapsed would trade a real result for a race that has already happened.
+                METRICS.increment("chemclaw_turn_claims_lost_total")
+                logger.warning(
+                    "the turn claim for session %s was taken over while the turn was running; "
+                    "another worker may already have started a turn on this session",
+                    session_id,
+                )
+                return
         except Exception:  # noqa: BLE001 - a dead heartbeat task is worse than a logged refresh
             # Widened for the reason the release below it was (D-130): this runs in a task the
             # turn only ever cancels, never awaits, so an exception the tuple did not name would

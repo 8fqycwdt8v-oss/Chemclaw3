@@ -171,6 +171,14 @@ _COUNTERS: dict[str, str] = {
         "Failed refreshes of a running turn's session claim (D-121): the claim may lapse and "
         "another worker start a turn on the same session."
     ),
+    # The counter above is the *warning*; this is the event it warns about, and until the
+    # 2026-08-05 review nothing could see it. A refresh that matches no row raises nothing — the
+    # takeover has simply already happened — so the failure counter stayed at zero through the one
+    # outcome it exists to predict.
+    "chemclaw_turn_claims_lost_total": (
+        "Running turns whose session claim was taken over by another worker (D-121): the lease "
+        "lapsed while the turn was still going, so two workers may have run on one session."
+    ),
     # A guard that switches itself off is worse than one that fails loudly, and this one did
     # exactly that 32 times in a 126-second load test while nothing but a WARNING said so.
     "chemclaw_rollback_watermark_unavailable_total": (

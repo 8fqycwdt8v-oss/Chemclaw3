@@ -21,7 +21,14 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.core.migrate import _LEDGER_FILE, MigrationError, _read_sql_files
+from chemclaw.core.migrate import (
+    _LEDGER_FILE,
+    MigrationError,
+    _checksum,
+    _legacy_checksum,
+    _read_sql_files,
+    _statements,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,6 +69,55 @@ def test_an_empty_directory_is_not_mistaken_for_no_work(tmp_path: Path) -> None:
 def test_the_error_type_exists_for_a_drifted_migration() -> None:
     """`MigrationError` is what an edited-after-applied file raises; keep it importable."""
     assert issubclass(MigrationError, RuntimeError)
+
+
+_APPLIED = """-- what this migration is for
+CREATE TABLE IF NOT EXISTS widgets (
+    id BIGSERIAL PRIMARY KEY  -- the key
+);
+"""
+
+
+def test_editing_a_comment_does_not_count_as_drift() -> None:
+    """The whole-file hash made a corrected comment an outage on every existing database.
+
+    Twice, from two different sessions, and both edits were right: `006_audit_events.sql` renamed a
+    module the D-148 package move had moved, `031_bo_campaigns.sql` recorded that two columns hold
+    the lead objective only. Each made `make db-migrate` refuse on any database that had already
+    applied the file, while CI stayed green because CI starts from an empty one. A comment cannot
+    change what a migration did, so it cannot be drift.
+    """
+    recommented = _APPLIED.replace("-- what this migration is for", "-- what this migration does")
+    assert _checksum(recommented) == _checksum(_APPLIED)
+
+
+def test_changing_a_statement_still_counts_as_drift() -> None:
+    """The guard has to keep the power the fix above could have cost it."""
+    altered = _APPLIED.replace("id BIGSERIAL PRIMARY KEY", "id TEXT PRIMARY KEY")
+    assert _checksum(altered) != _checksum(_APPLIED)
+
+
+def test_a_trailing_comment_is_left_alone_rather_than_stripped_unsafely() -> None:
+    """Under-strip, never over-strip: a `--` inside a string literal must survive.
+
+    Only lines whose first non-space characters are `--` are dropped. The cost is that editing a
+    *trailing* comment still reads as drift, which is the behaviour we already had and is the safe
+    direction to be wrong in.
+    """
+    assert "-- the key" in _statements(_APPLIED)
+    assert "INSERT INTO t VALUES ('a -- b')" in _statements("INSERT INTO t VALUES ('a -- b')\n")
+
+
+def test_a_ledger_row_written_before_the_fix_is_upgraded_rather_than_rejected() -> None:
+    """The fix must not declare every deployed database drifted on its first run.
+
+    Every existing `schema_migrations` row holds a whole-file hash. Without recognising it, the
+    change that fixes an outage would cause a bigger one, so the runner accepts the legacy value
+    once and rewrites the row — verified against the live database, where `036`'s row went from the
+    file hash to the statement hash and the run reported "already up to date".
+    """
+    assert _legacy_checksum(_APPLIED) != _checksum(_APPLIED)
+    assert _legacy_checksum(_APPLIED) == _legacy_checksum(_APPLIED)
 
 
 # --- the two locks (a readiness-review finding) ---------------------------------------------

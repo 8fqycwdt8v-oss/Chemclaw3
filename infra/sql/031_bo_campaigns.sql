@@ -13,8 +13,7 @@
 -- identity link to any BO run. So the system had a word for a campaign and no object behind it.
 --
 -- **A campaign is identified by its problem, not minted per call.** `campaign_id` is a hash of the
--- decision space, every objective, and any constraints, so a chemist refining the same optimization
--- across three turns
+-- decision space and the objective, so a chemist refining the same optimization across three turns
 -- accumulates three suggestions against *one* campaign — which is what makes it an entity rather
 -- than a turn — and nobody has to remember to "start" one first. Two people optimizing the same
 -- space converge on the same row, which is the behaviour worth having: it is the same campaign.
@@ -24,13 +23,6 @@
 -- only record of what was proposed before the latest data arrived.
 CREATE TABLE IF NOT EXISTS bo_campaigns (
     campaign_id  TEXT        PRIMARY KEY,
-    -- The **lead** objective only, for display and for querying by hand. Since multi-objective
-    -- shipped, a trade-off campaign's second and further axes live in `problem->'objectives'`,
-    -- which is authoritative; these two columns cannot represent them and a report reading only
-    -- this pair sees a trade-off as single-objective. The id above still covers every objective —
-    -- `campaign_id_for` hashes the whole list — so identity is unaffected. No column was added
-    -- because nothing queries by objective yet; when something does, read `problem->'objectives'`
-    -- or add a generated column off it.
     objective    TEXT        NOT NULL,
     direction    TEXT        NOT NULL,
     -- The full `OptimizationProblem`, descriptors included, so the row reconstructs the space that

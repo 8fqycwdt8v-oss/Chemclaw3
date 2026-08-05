@@ -50,20 +50,18 @@ Record with every number and its reproduction: `docs/archive/review-2026-08-05.m
 were fixed in the same pass and are not listed here; these are the ones that need a *decision*
 rather than a diff.
 
-- [ ] **api RSS grows without bound under sustained load: 549 MB → 1,066 MB in ~2 h 40 m** — [H],
-      the highest-priority row this review produced, because on OpenShift it is a pod that OOMs on a
-      timer. Measured over the full 162-round soak (the storm's `BCDFGH` at 24 turns/round): first
-      half `+2,666 KB/round`, second half `+3,864` (± 219), last quarter `+4,363` — **steepening**,
-      not merely steady, at every window examined, and ~47 KB retained per turn at the current rate.
-      The run ended by being stopped, not by plateauing. `chemclaw_live_sessions` sat pinned at its `service_max_live_sessions` bound of
-      1000 throughout, so it is not the LRU filling; row counts grow exactly linearly, the pool never
-      waits, and round wall-clock is flat or falling. Reproduce: `make live-soak`, then
-      `make live-soak-report`. Finding *what* is retained needs an allocator-level look
-      (`tracemalloc`, `malloc_stats`) that a soak cannot give — but it is no longer a question of
-      whether there is something to find. **Note the history before quoting an early reading:** the
-      same series read *accelerating* at 29 rounds, *plateau* at 43 and *decelerating* at 104, every
-      fit resolved with a tight error bar, because the comparison was tail-versus-whole and the whole
-      contains the tail (`D-2026-08-05-a-trend-needs-a-tail`).
+- [x] **api RSS grew without bound because telemetry "off" meant no meter provider at all** —
+      closed. With none set, the OpenTelemetry API does not discard instrument calls: it *proxies*
+      them and keeps every proxy forever, in module-level lists that only grow.
+      `configure_telemetry()` returned early when `otel_enabled` was false — the default every
+      deployment runs — and MAF creates a duration histogram per exposed MCP function while this
+      system rebuilds its connector tool surface every turn, so each turn leaked 35 `_ProxyMeter`s,
+      35 `_ProxyHistogram`s, 70 locks and 35 lists. Measured with `make leak-probe` against the real
+      front door: **+20.7 KB and +178 live objects per turn before, +2.7 KB and +3.3 after**, with
+      what remains being the session LRU filling toward its cap. Two methods agreed — a gc type
+      histogram named the types, `tracemalloc` named the allocation lines — and the fix is one call.
+      The plausible hypothesis going in (MAF re-entering unconnected tools into the agent's
+      process-lifetime exit stack) was **refuted** by a one-line probe: flat at zero over 200 turns.
 
 - [ ] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — [S]. A holder whose lease was taken
       over cannot detect it: `session_store.py:504` returns `None`, and `api/state.py:220` reacts
@@ -104,19 +102,13 @@ rather than a diff.
       pass. On OpenShift, where pod eviction is routine rather than exotic, this is ten minutes of
       dead time per eviction.
 
-- [ ] **103 mutants survive in the seven invariant-bearing modules, and two files hold two thirds
-      of them** — [M]. `make mutants`, 686 mutants, 506 killed. The distribution is the finding:
-      `api/runner_trace.py` **37**, `kg/pr_gate.py` **29**, `kg/note.py` 16,
-      `science/calc/store.py` 11, `agent/authz.py` 8, `agent/audit_store.py` 2. The two leaders are
-      not a coincidence — `runner_trace.py` shipped a real defect on 2026-08-04, and `pr_gate.py`
-      is the GxP control whose read window this same pass measured. Three survivors were already
-      closed by the tests they asked for (budget token accumulation, the empty-role-list
-      convention, the `or`-vs-`and` duck-typing guard); these are what is left.
-      **Read them with the equivalent mutants subtracted.** `chain_hash`'s `chars=None` is
-      genuinely equivalent (64 chars either way), and most `authz.py` survivors are string
-      mutations that `pytest.raises(match=...)` cannot kill because it searches a substring. The
-      work is to walk the two leading files, not to drive the number to zero.
-      One notable non-string survivor: `PostgresAuditSink.record` with
+- [ ] **The remaining mutant survivors are string mutations** — [S], and the row is kept only so
+      the number is not re-derived from scratch. `make mutants`, 686 mutants: the two leading files
+      have been walked and their eight *behavioural* survivors killed
+      (`tests/test_review_2026_08_05.py`). What is left in `api/runner_trace.py` and `kg/pr_gate.py`
+      is overwhelmingly string mutation, which a substring `pytest.raises(match=...)` cannot kill,
+      plus genuinely equivalent cases like `chain_hash`'s `chars=None` (64 characters either way).
+      One named non-equivalent survivor remains: `PostgresAuditSink.record` with
       `statement_timeout_seconds=None` — nothing asserts the audit insert carries a timeout.
 
 Closed by this pass: the storm's two missing families (E and H are wired, and `FAMILIES` plus the

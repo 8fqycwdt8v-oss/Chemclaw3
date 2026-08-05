@@ -36,8 +36,17 @@ from chemclaw.kg.proposal import (
     list_proposals,
 )
 
-# Where a git host puts the body signature. `sha256=<hex>` is the shape GitHub, GitLab and Azure
-# DevOps webhooks all produce, so an operator wires this without a translation step.
+# Where *this* endpoint expects the body signature, in the `sha256=<hex>` shape GitHub's own
+# `X-Hub-Signature-256` uses.
+#
+# **A translation step is required, and this comment used to say the opposite.** It claimed the
+# shape was what "GitHub, GitLab and Azure DevOps webhooks all produce, so an operator wires this
+# without a translation step" — false on both halves, measured by the 2026-08-05 review: GitHub
+# sends the signature under `X-Hub-Signature-256` with a pull-request payload, GitLab sends
+# `X-Gitlab-Token` carrying the raw secret rather than an HMAC, and Azure DevOps uses Basic auth.
+# This route additionally requires a `{"note_ids": [...]}` body (`api/schemas.py`), which no host
+# emits for a merge. So the contract is deliberately *ours*: a small proxy or a CI step maps the
+# host's event onto it, and that is a step to document rather than a claim to make disappear.
 _WEBHOOK_SIGNATURE_HEADER = "X-Chemclaw-Signature"
 
 

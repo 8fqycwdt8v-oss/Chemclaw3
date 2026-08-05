@@ -580,11 +580,19 @@ browse `note/*` refs in the git host, and a rejection left no trace at all. Both
 - **Decide**: `POST /proposals/{id}/decision` with `{"approved": true}` or
   `{"approved": false, "reason": "…"}`. A rejection **must** state why; that is the record's whole
   purpose. Deciding twice is a `409`, not a silent overwrite — the first decision stands.
-- **Merges close themselves** when the git host's post-merge webhook calls
-  `POST /events/knowledge-merged` with `{"note_ids": ["…"]}`. That body must be signed:
+- **Merges close themselves** when something calls `POST /events/knowledge-merged` with
+  `{"note_ids": ["…"]}`, signed as
   `X-Chemclaw-Signature: sha256=<HMAC-SHA256 of the raw body under CHEMCLAW_NOTE_WEBHOOK_SECRET>`.
   Without the secret configured the route still forces a reindex for an operator running it by
   hand, and refuses to close anything.
+  **That "something" is not a git host directly — a translation step is required, and this page
+  used to imply otherwise.** GitHub signs under `X-Hub-Signature-256` and posts a whole
+  pull-request payload; GitLab sends `X-Gitlab-Token`, which is the raw secret rather than an HMAC;
+  Azure DevOps uses Basic auth. None of them emits a `note_ids` list, because only this system
+  knows which note ids a merged branch carried. So wire the host's post-merge hook to a small proxy
+  or a CI job that reads the merged branch, collects the note ids, and re-signs the body for this
+  endpoint. The contract here is deliberately ours; the mapping is the operator's, and it is one
+  step rather than a missing feature.
 
 **If the queue only ever grows**, the webhook is the first thing to check: `curl` it with a signed
 body naming a note you know was merged and read `proposals_closed` in the response. A `401` means

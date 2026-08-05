@@ -80,8 +80,9 @@ class _RecordingClaims:
         self.held[session_id] = holder
         return True
 
-    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
-        """Extend the holder's claim (a no-op for an in-memory slot that cannot expire)."""
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """Extend the claim (an in-memory slot cannot expire, so it stays ours)."""
+        return True
 
     async def release(self, session_id: str, holder: str) -> None:
         """Give the slot back, with a suspension point standing in for the DELETE's round trip."""

@@ -13,6 +13,7 @@ that survived it are recorded side by side.
 
 import ast
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,8 @@ from chemclaw.connectors import jobs as jobs_module
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
+from chemclaw.kg.note import Note
+from chemclaw.kg.pr_gate import propose_note
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -446,3 +449,165 @@ def test_compaction_never_deletes_the_turn_that_triggered_it(
     assert "question 3" in rendered and "answer 3" in rendered, (
         "the turn that triggered compaction was compacted away by it"
     )
+
+
+def _agent_note(note_id: str, body: str) -> Note:
+    """One agent-authored note, the only kind the PR-gate accepts."""
+    return Note(id=note_id, type="job-result", created_by="agent", body=body)
+
+
+# --------------------------------------------------------------------------------------------
+# The mutant walk: what survived in the two files that hold two thirds of the survivors
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_content_with_a_name_but_no_call_id_is_still_traced() -> None:
+    """`key = call_id or name`, so a call identified only by its name is legitimate input.
+
+    The guard reads `hasattr(content, "arguments") or hasattr(content, "call_id")`, and replacing
+    the first half with a constant `False` survived every test: every fixture happened to carry a
+    `call_id` too. A provider that identifies a call by name alone would have been dropped
+    silently — the shape D-138 already cost this system once.
+    """
+    trace = ToolCallTrace()
+    content = SimpleNamespace(name="find_notes", arguments='{"text": "suzuki"}')
+    events = trace.feed(SimpleNamespace(contents=[content]))
+    calls = [event for event in events if isinstance(event, ToolCallEvent)]
+    assert [call.tool for call in calls] == ["find_notes"]
+
+
+def test_an_update_with_no_contents_attribute_is_skipped_rather_than_fatal() -> None:
+    """`getattr(update, "contents", None)` — the default is load-bearing and was untested.
+
+    Removing it (so the attribute is required) survived the suite because every fake update in the
+    tree has `contents`. A real provider's keep-alive or usage-only update need not, and the trace
+    is duck-typed precisely because MAF's shapes vary by version: raising here would kill the turn.
+    """
+    assert trace_feed_is_empty(ToolCallTrace(), SimpleNamespace())
+
+
+def trace_feed_is_empty(trace: ToolCallTrace, update: Any) -> bool:
+    """Feed one update and report that it produced nothing — a name for the assertion above."""
+    return trace.feed(update) == []
+
+
+def test_one_unreadable_content_does_not_drop_the_ones_after_it() -> None:
+    """`continue`, not `break`: updates carry several contents and only some are calls.
+
+    Both `continue`s in `feed` could be turned into `break` with the suite green, because no test
+    put a real call *after* an irrelevant content in one update. MAF routinely does — text and a
+    function call arrive together — so this silently loses calls.
+    """
+    trace = ToolCallTrace()
+    events = trace.feed(
+        SimpleNamespace(
+            contents=[
+                SimpleNamespace(text="thinking out loud"),
+                SimpleNamespace(call_id="c1", name="predict_pka", arguments='{"smiles": "CCO"}'),
+            ]
+        )
+    )
+    calls = [event for event in events if isinstance(event, ToolCallEvent)]
+    assert [call.tool for call in calls] == ["predict_pka"]
+
+    # The second `continue` too: a fragment for a call this trace never saw opened is skipped, and
+    # a real call after it in the same update must still be read.
+    fresh = ToolCallTrace()
+    after_orphan = fresh.feed(
+        SimpleNamespace(
+            contents=[
+                SimpleNamespace(call_id="never-opened", arguments='{"x":'),
+                SimpleNamespace(call_id="c2", name="find_notes", arguments='{"text": "a"}'),
+            ]
+        )
+    )
+    assert [c.tool for c in after_orphan if isinstance(c, ToolCallEvent)] == ["find_notes"]
+
+
+def test_a_call_flushed_without_a_name_is_announced_under_its_key() -> None:
+    """`self._names.pop(key, key)` — the default is the fallback, and nothing reached it.
+
+    Popping with `None`, or with no default at all, both survived the suite: every test's call has
+    its name recorded first. A stream whose fragments arrive before (or without) the opening named
+    content still has to announce *something*, and the call id is the only handle there is —
+    `ToolCallEvent(tool=None)` would be a typed lie, and raising would kill the turn.
+    """
+    trace = ToolCallTrace()
+    trace._names["c-keyed"] = "predict_pka"
+    trace.feed(SimpleNamespace(contents=[SimpleNamespace(call_id="c-keyed", arguments='{"a":')]))
+    del trace._names["c-keyed"]  # the opening content is gone, as a replayed stream would leave it
+    calls = [event for event in trace.flush() if isinstance(event, ToolCallEvent)]
+    assert [call.tool for call in calls] == ["c-keyed"]
+
+
+def test_the_result_number_cap_is_a_ceiling_not_an_exclusive_bound(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`<=`, not `<`: a result with exactly the cap's worth of values is complete, not truncated.
+
+    An off-by-one here logs a warning and drops a value on a result that was within budget, which
+    is the same silent-incompleteness defect the cap exists to announce.
+    """
+    exact = ", ".join(str(n + 0.5) for n in range(settings.stream_max_result_numbers))
+    with caplog.at_level(logging.WARNING, logger="chemclaw.api.runner_trace"):
+        events = ToolCallTrace().feed(
+            SimpleNamespace(contents=[SimpleNamespace(call_id="c", name="calc", result=exact)])
+        )
+    numbers = [getattr(event, "numbers", None) for event in events]
+    assert any(n is not None and len(n) == settings.stream_max_result_numbers for n in numbers)
+    # The list is the same length either way — `values[:cap]` of exactly `cap` values is itself —
+    # so the *warning* is what tells the two bounds apart, and announcing a truncation that did not
+    # happen is the same silent-incompleteness defect in reverse.
+    assert not caplog.records, "a complete result was reported as truncated"
+
+
+def test_propose_note_deduplicates_dependencies_and_keeps_the_subject_first() -> None:
+    """The dependency loop's four survivors at once — dedup, order, and what lands in `files`.
+
+    `seen`, the `in` test, the `continue` and both `append`s could each be broken with the suite
+    green, because no test proposed a note *with* dependencies. A caller may legitimately list one
+    twice (two computed properties of one compound), and writing a path twice in a commit is at
+    best noise; dropping the subject note from position 0 is worse, since `NoteProposal.content`
+    reads `files[0]`.
+    """
+    captured: list[Any] = []
+
+    class _Capturing:
+        async def submit(self, submission: Any) -> str:
+            captured.append(submission)
+            return str(submission.branch)
+
+    subject = _agent_note("subject-note", "see [[dep-a]] and [[dep-b]]")
+    dep_a = _agent_note("dep-a", "the first dependency")
+    dep_b = _agent_note("dep-b", "the second dependency")
+    # `dep_b` comes *after* the duplicate on purpose: with `break` in place of `continue` the
+    # duplicate would end the loop and silently drop it, which is the mutation this pins.
+    asyncio.run(propose_note(subject, _Capturing(), dependencies=[dep_a, dep_a, dep_b, subject]))
+
+    paths = [file.path for file in captured[0].files]
+    assert paths[0].endswith("subject-note.md"), "the subject note must stay at files[0]"
+    assert len(paths) == 3, f"a dependency was dropped or duplicated: {paths}"
+    assert any(path.endswith("dep-a.md") for path in paths)
+    assert any(path.endswith("dep-b.md") for path in paths), (
+        "the dependency after the duplicate was dropped"
+    )
+
+
+def test_propose_note_honours_an_explicit_knowledge_directory() -> None:
+    """`knowledge_dir if knowledge_dir is not None else settings.knowledge_dir`, inverted, survived.
+
+    Nothing passed the argument, so the default and the override were indistinguishable — and the
+    inverted version writes every note into the *configured* directory while ignoring the caller,
+    which for the ELN and memory jobs that pass one means notes landing in the wrong tree.
+    """
+    captured: list[Any] = []
+
+    class _Capturing:
+        async def submit(self, submission: Any) -> str:
+            captured.append(submission)
+            return str(submission.branch)
+
+    asyncio.run(
+        propose_note(_agent_note("scoped-note", "body"), _Capturing(), knowledge_dir="elsewhere")
+    )
+    assert captured[0].files[0].path.startswith("elsewhere/")

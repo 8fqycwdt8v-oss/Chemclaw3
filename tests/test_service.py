@@ -725,8 +725,10 @@ class _SharedTurnClaims:
         self.holders[session_id] = holder
         return True
 
-    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
-        pass  # nothing elapses inside a test, so a refresh has nothing to do
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        # Nothing elapses inside a test, so a refresh has nothing to do — but it still reports
+        # whether the claim is ours, which is what the heartbeat now acts on.
+        return self.holders.get(session_id) == holder
 
     async def release(self, session_id: str, holder: str) -> None:
         if self.holders.get(session_id) == holder:
