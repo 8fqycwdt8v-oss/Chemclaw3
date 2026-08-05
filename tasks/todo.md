@@ -23,7 +23,7 @@ _(The previous occupant of this file was the live-test lane for Temporal + durab
 - [x] **2. A worker may not outrun its pool.** `worker_max_concurrent_activities` on both
       `Worker(...)` constructors; temporalio's default of 100 against a pool of 8 turns saturation
       into retry churn instead of backpressure.
-- [ ] **3. Readiness answers for the store it cannot serve without.** A bounded, cached database
+- [x] **3. Readiness answers for the store it cannot serve without.** A bounded, cached database
       probe in `/readyz`, gated on `session_store="postgres"`; `/healthz` untouched.
 - [ ] **4. A sweep that commits once can lose everything it did.** Per-session commit in
       `_prune_session_messages`; a bounded batch per pass, with the remainder reported.

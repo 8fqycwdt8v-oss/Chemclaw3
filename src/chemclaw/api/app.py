@@ -319,6 +319,12 @@ def create_app(
     # infinity, not 0: an empty snapshot must always be treated as stale, and 0 would be "fresh"
     # for the first `service_readiness_cache_seconds` of process uptime.
     app.state.connector_health_at = float("-inf")
+    # The database probe's cached verdict and when it was taken. `True` before any probe has run,
+    # because readiness must not report a store unreachable on the strength of never having asked —
+    # the kubelet's first probe answers within one interval, and refusing traffic until then would
+    # turn every rollout into a needless gap.
+    app.state.database_reachable = True
+    app.state.database_probed_at = float("-inf")
     # The pool gauges are deliberately *not* bound here any more (D-119's saturation signal, plus
     # the connection-budget pair). `chemclaw.core.db.pooling` binds them, so every process that
     # opens a pool reports on it rather than only the one process that happened to have the

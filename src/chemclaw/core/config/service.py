@@ -240,3 +240,11 @@ class ServiceSettings(BaseSettings):
     # states are *reported*, never gating, so the only cost of caching is that a reported state
     # can be up to this stale. 0 probes on every request (the pre-cache behavior).
     service_readiness_cache_seconds: float = Field(default=5.0, ge=0)
+    # The database probe's own statement budget, deliberately not `pg_statement_timeout_seconds`.
+    # A `SELECT 1` that has not answered in two seconds has answered: the store is not serving.
+    # Keeping this separate from the store timeout is what makes probing safe at all — the argument
+    # against holding readiness on the database (`connectors/server.py`) is an argument against an
+    # *unbounded* wait, and a readiness route exists to say "not ready" quickly. Well under the
+    # kubelet's own probe timeout, so the answer arrives rather than being cut off as a timeout
+    # whose cause the pod never logs.
+    service_readiness_db_timeout_seconds: float = Field(default=2.0, gt=0)

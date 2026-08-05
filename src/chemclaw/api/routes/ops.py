@@ -6,8 +6,11 @@ pins that allowlist to exactly these. `/schedules` lives beside them because it 
 audience: an operator asking "is the machinery running", not a chemist asking about chemistry.
 """
 
+import logging
 import time
+from http import HTTPStatus
 
+import psycopg
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
@@ -15,9 +18,12 @@ from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.state import state
 from chemclaw.connectors.health import ConnectorHealth
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
+
+log = logging.getLogger(__name__)
 
 
 async def healthz() -> dict[str, str]:
@@ -46,28 +52,75 @@ async def _connector_health(request: Request) -> list[ConnectorHealth]:
     return health
 
 
-async def readyz(request: Request) -> dict[str, str]:
-    """Readiness: the agent can be built, plus each enabled connector's reachability.
+async def _database_reachable(request: Request) -> bool:
+    """Whether Postgres answers, re-probed at most once per `service_readiness_cache_seconds`.
 
-    The connector states are *reported*, not required: an unreachable connector costs the
-    agent that capability, and hiding it would leave a chemist wondering why an answer got
-    worse. It is re-probed here rather than read from a startup snapshot so the answer is
-    current, and the probe also refreshes the `chemclaw_connectors_unhealthy` gauge — a
-    readiness probe runs on the cadence a gauge wants anyway, so one bounded sweep serves
-    both. A deployment that would rather not serve at all in this state sets
-    `connectors_required`, which fails startup instead.
+    Cached on the same window and for the same reason as the connector sweep: this route is
+    unauthenticated by necessity and runs every ten seconds per pod, so an uncached probe is a
+    database round trip any caller can trigger at will.
 
-    The sweep is cached for `service_readiness_cache_seconds`. This route is unauthenticated
-    by necessity (a kubelet cannot present a token) and runs every 10 seconds per pod, so an
-    uncached probe is a fan-out any caller can trigger at will — N HTTP round trips per
-    request against the connector fleet. Caching does not weaken the signal: the connector
-    states are reported, never gating, so the only cost is that a reported state can be up to
-    one window stale. Set 0 to probe every time.
+    Bounded by `service_readiness_db_timeout_seconds`, its **own** short budget rather than the
+    pool's. That distinction is the whole reason a probe is safe here. `connectors/server.py`
+    deliberately does not hold its readiness on the database, because an unreachable one would hold
+    it for the full pool timeout — but that is an argument against an *unbounded* wait, not against
+    answering the question. A readiness probe exists to report "not ready" quickly; a probe that
+    reports it in a second is doing its job, and one that hangs for ten is the failure.
+
+    A failure is reported, never raised: this route must answer, and `False` is the answer.
+    """
+    front = state(request)
+    window = settings.service_readiness_cache_seconds
+    now = time.monotonic()
+    if window and now - front.database_probed_at < window:
+        return front.database_reachable
+    try:
+        async with db.connection(
+            settings.session_store_dsn or settings.postgres_dsn,
+            statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
+        ) as conn:
+            await conn.execute("SELECT 1")
+        reachable = True
+    except (psycopg.Error, ConnectionError, TimeoutError):
+        log.warning("readiness: Postgres did not answer", exc_info=True)
+        reachable = False
+    front.database_reachable = reachable
+    front.database_probed_at = now
+    return reachable
+
+
+async def readyz(request: Request, response: Response) -> dict[str, str]:
+    """Readiness: the agent can be built, Postgres answers, and each connector's reachability.
+
+    **The database gates; the connectors do not**, and the asymmetry is the point. An unreachable
+    connector costs the agent one capability, so its state is *reported* — hiding it would leave a
+    chemist wondering why an answer got worse — and a deployment that would rather not serve at all
+    in that state sets `connectors_required`, which fails startup instead. Postgres under
+    `session_store="postgres"` is not a capability: the session claim, the conversation history, the
+    owner lookup and the audit sink all go through it, so a pod that cannot reach it cannot serve a
+    turn at all. It reported itself ready anyway until the 2026-08-05 database review — probing the
+    thing that costs a capability and not the thing that costs the service
+    (D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without).
+
+    Not gated under `session_store="memory"`, where there is no store to answer for.
+
+    503 rather than an exception, so the body still names what failed — a kubelet only reads the
+    status, but an operator running `curl` reads the reason. `/healthz` is deliberately untouched:
+    a database outage must drain these pods from the Route, not restart them into a crash loop that
+    would leave nothing to serve the moment it comes back.
+
+    Both probes are cached for `service_readiness_cache_seconds`. Caching does not weaken the
+    connector signal (reported, never gating) and bounds the database one to at most one round trip
+    per window per pod. Set 0 to probe every time.
     """
     state(request).agent()
     health = await _connector_health(request)
+    ready = True
+    if settings.session_store == "postgres":
+        ready = await _database_reachable(request)
+    if not ready:
+        response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     return {
-        "status": "ready",
+        "status": "ready" if ready else "database unreachable",
         "connectors": ", ".join(f"{item.name}={item.state}" for item in health),
     }
 

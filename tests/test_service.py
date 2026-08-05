@@ -8,7 +8,8 @@ per turn via a spy tool.
 
 import asyncio
 import json
-from collections.abc import Callable, MutableMapping
+from collections.abc import AsyncIterator, Callable, MutableMapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,6 +18,7 @@ from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 from chemclaw.api.app import LiveSession, _LiveSessions, create_app
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
@@ -113,6 +115,98 @@ def test_healthz_is_ok() -> None:
     """Liveness needs no agent and returns 200."""
     with _client(_FakeAgent()) as client:
         assert client.get("/healthz").json() == {"status": "ok"}
+
+
+def _unreachable_database(*_args: Any, **_kwargs: Any) -> Any:
+    """A `db.connection` replacement that fails the way an unreachable server does."""
+    raise ConnectionError("Postgres unreachable at host=db: connection refused")
+
+
+def test_readyz_reports_unready_when_the_store_it_needs_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `session_store="postgres"` a pod that cannot reach Postgres cannot serve a turn.
+
+    It reported itself ready anyway until the 2026-08-05 database review: the route probed every
+    enabled connector — each of which costs the agent one capability — and never the store the
+    session claim, the conversation history, the owner lookup and the audit sink all go through
+    (D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without).
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _unreachable_database)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 503
+    assert res.json()["status"] == "database unreachable"
+
+
+def test_a_database_outage_drains_the_pod_without_restarting_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Liveness must not follow readiness here, or an outage becomes a fleet-wide crash loop.
+
+    Restarting every front-door pod because a shared database is down destroys the capacity that
+    would serve the moment it returns, and a restarted pod is no closer to reaching it. Draining
+    them from the Route is the whole of the correct response.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _unreachable_database)
+    with _client(_FakeAgent()) as client:
+        assert client.get("/readyz").status_code == 503
+        assert client.get("/healthz").status_code == 200
+
+
+def test_readyz_does_not_probe_a_database_a_memory_deployment_does_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session_store="memory"` has no store to answer for, so there is nothing to probe.
+
+    The probe would otherwise report every dev run and every CLI-shaped deployment unready for
+    lacking a database none of them use.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+
+    def _must_not_be_called(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a memory-store deployment probed the database")
+
+    monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _must_not_be_called)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ready"
+
+
+def test_readyz_reuses_its_database_verdict_inside_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unauthenticated route probed every ten seconds must not be a database fan-out on demand.
+
+    The same cache the connector sweep uses, for the same reason: any caller can hit this route at
+    will, so an uncached probe is one round trip per request against the store.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
+    probes = 0
+
+    @asynccontextmanager
+    async def _counting_connection(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+        nonlocal probes
+        probes += 1
+
+        class _Conn:
+            async def execute(self, _sql: str) -> None:
+                return None
+
+        yield _Conn()
+
+    monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _counting_connection)
+    with _client(_FakeAgent()) as client:
+        for _ in range(5):
+            assert client.get("/readyz").status_code == 200
+    assert probes == 1
 
 
 def test_static_chat_page_is_served() -> None:
