@@ -9,12 +9,12 @@ Record with every number and its reproduction: `docs/archive/review-2026-08-05.m
 were fixed in the same pass and are not listed here; these are the ones that need a *decision*
 rather than a diff.
 
-- [ ] **api RSS grows without bound under sustained load: 549 MB → 998 MB in ~2 h 15 m** — [H], the
-      highest-priority row this review produced, because on OpenShift it is a pod that OOMs on a
-      timer. Measured over 138 soak rounds (the storm's `BCDFGH` at 24 turns/round): **~3,200 KB per
-      round of ~82 turns ≈ 39 KB retained per turn**, first half `+3,166`, second half `+3,177`,
-      last quarter `+5,138` — no plateau at any window examined, and the most recent quarter steeper
-      than the run. `chemclaw_live_sessions` sat pinned at its `service_max_live_sessions` bound of
+- [ ] **api RSS grows without bound under sustained load: 549 MB → 1,066 MB in ~2 h 40 m** — [H],
+      the highest-priority row this review produced, because on OpenShift it is a pod that OOMs on a
+      timer. Measured over the full 162-round soak (the storm's `BCDFGH` at 24 turns/round): first
+      half `+2,666 KB/round`, second half `+3,864` (± 219), last quarter `+4,363` — **steepening**,
+      not merely steady, at every window examined, and ~47 KB retained per turn at the current rate.
+      The run ended by being stopped, not by plateauing. `chemclaw_live_sessions` sat pinned at its `service_max_live_sessions` bound of
       1000 throughout, so it is not the LRU filling; row counts grow exactly linearly, the pool never
       waits, and round wall-clock is flat or falling. Reproduce: `make live-soak`, then
       `make live-soak-report`. Finding *what* is retained needs an allocator-level look
