@@ -45,13 +45,16 @@ from agent_framework._harness._loop import ShouldContinueCallable, ShouldContinu
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
+    PLAN_ONLY,
     approvable_plan_hash,
+    autonomy_for,
+    harness_enabled_for,
     revoke_execute,
     session_mode,
 )
 from chemclaw.agent.live_session import get_current_session
 from chemclaw.agent.plan_approval_store import plan_approval_store
-from chemclaw.core.config import settings
+from chemclaw.agent.profiles import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +189,7 @@ def approved_todos_remaining(
     return _should_continue
 
 
-def gate_applies(profile: Any) -> bool:
+def gate_applies(profile: AgentProfile) -> bool:
     """Whether the plan gate governs an agent built for `profile` — the one predicate, twice used.
 
     `build_agent` decides from it whether to attach the middleware, and `chemclaw.api.runner`
@@ -195,14 +198,12 @@ def gate_applies(profile: Any) -> bool:
     `harness_autonomy="plan_only"` under a global `execute` got the gate attached and its approval
     never spent, so one decision authorized every later turn — DARK-1 again, for exactly the
     sessions a deployment had narrowed on purpose.
+
+    The two dimensions are resolved by `chemclaw.agent.harness_mode`, which is also where
+    `build_agent` reads them — so "does the gate apply" and "does the harness start in plan mode"
+    can no longer be answered by two copies of the same fallback rule.
     """
-    harness = (
-        settings.harness_enabled if profile.harness_enabled is None else profile.harness_enabled
-    )
-    autonomy = (
-        settings.harness_autonomy if profile.harness_autonomy is None else profile.harness_autonomy
-    )
-    return bool(harness) and str(autonomy) == "plan_only"
+    return harness_enabled_for(profile) and autonomy_for(profile) == PLAN_ONLY
 
 
 async def consume_turn_approval(session: AgentSession) -> None:

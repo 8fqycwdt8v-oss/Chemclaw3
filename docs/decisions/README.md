@@ -264,3 +264,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-05-a-score-reported-more-precisely-than-it-repeats](D-2026-08-05-a-score-reported-more-precisely-than-it-repeats.md) | A score reported more precisely than it repeats |
 | [D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches](D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md) | A skill that outlives the tools it teaches |
 | [D-2026-08-05-a-trend-needs-a-tail](D-2026-08-05-a-trend-needs-a-tail.md) | A trend needs a tail, not just a slope |
+| [D-2026-08-05-one-rule-in-three-places-is-three-rules](D-2026-08-05-one-rule-in-three-places-is-three-rules.md) | One rule written in three places is three rules |

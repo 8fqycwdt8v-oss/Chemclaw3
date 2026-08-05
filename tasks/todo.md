@@ -1,115 +1,85 @@
-# Task: the tool/skill seam — a skill that outlives the tools it teaches
+# Task: deep review of the agentic engine, the agent harness and deep-research mode
 
-Branch: `claude/tool-skill-integration-refactor-qmjbe3`. Decision:
-`docs/decisions/D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md`.
+Branch: `claude/agentic-engine-refactor-b1la3v`. Decision:
+`docs/decisions/D-2026-08-05-one-rule-in-three-places-is-three-rules.md`.
 
-**The question was whether the two halves of layer 3 — the judgment (`SKILL.md`) and the
-capability it is written about (tools) — are actually joined. They are joined at *build* time
-(`make skill-validate` refuses a skill declaring a tool nothing provides) and not at *run* time:
-nothing narrows the advertised skill set by what the turn can actually call.** Measured against
-the one shipped narrowing profile, `property-lookup` (5 callable tools): **8 of 28 skills are
-advertised whose entire declared capability is unreachable** — `experiment-design` teaching
-`suggest_next_experiment`, `qm-job-submission` teaching `compute_dft_energy`, `reaction-search`
-teaching all three fingerprint tools, and five more. The profile compensates in prose ("if a
-question needs experimental history, say that it is outside this mode"), which is exactly the shape
-this repository fixes with structure.
+**The review had one lens: find a rule the code states more than once.** In `agent/`, `api/runner.py`
+and the retrieval path that `gather_evidence` drives, every duplicated rule found was either already
+producing a defect or one edit away from producing one — and the one performance finding was the
+opposite shape, a derivation stated *nowhere* as reusable and therefore repeated on every call.
 
-_(The previous occupant of this file was the live-test lane for Temporal + durable workflows
-(#124/#127); it is in `git log` and its outcome is in `docs/decisions/`.)_
+_(The previous occupant of this file was the tool/skill seam (#129,
+`docs/decisions/D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md`), which landed on
+`main` while this branch was in flight; before that, the live-test lane for Temporal + durable
+workflows (#124/#127). Both are in `git log`.)_
 
 ---
 
 ## Plan
 
-### 1. Make the `tools:` declaration trustworthy (prerequisite for 2)
-
-- [x] `make skill-validate` gains the missing direction: a tool a skill's **body** names in a
-      checkable form must be **declared** in its frontmatter. Today only the reverse is checked
-      (declared ⇒ exists), so `tools:` can be silently incomplete — and an incomplete declaration
-      is what would make step 2 hide the wrong skill.
-- [x] Fix the one violator (`deep-research`, 4 undeclared) and fill in the declarations of the
-      three other skills that clearly teach tools (`knowledge-graph-query`,
-      `knowledge-graph-write`, `safety-screening`). Skills that name no tool stay undeclared —
-      pure process guidance depends on nothing.
-- [x] Fix the dangling reference the gate cannot see: `experiment-design` names
-      `` `find_similar_reactions` ``, an in-process function the agent cannot call. The tool is
-      `similar_reactions`.
-
-### 2. Scope skills by the capability the turn actually has
-
-- [x] `ToolScopedSkillsSource`: hide a skill whose declared tools are **all** absent from this
-      agent's advertised surface. Conservative on purpose — one surviving tool keeps the skill,
-      and an undeclared skill is always visible; over-hiding judgment is worse than under-hiding.
-- [x] `advertised_tool_names(profile)` — both halves of the surface under one profile, computed
-      from manifests rather than by building connector tools (which would open httpx clients).
-      Pinned by a test against what `_capability_tools` + `connector_tools` actually yield, so the
-      two narrowings cannot drift.
-
-### 3. Refactor the three skill sources onto one narrowing base (Rule of Three)
-
-- [x] `_NarrowingSkillsSource`: await the inner source, short-circuit when unconfigured, filter by
-      a subclass predicate. Three copies of that loop become one.
-
-### 4. Close the gate that fails open
-
-- [x] A typo'd key in `skill_role_gates` silently un-gates the skill (`_permitted` reads "absent
-      from the map" as "ungated"), and nothing validated it — `skills_enabled` is validated, its
-      security-relevant twin was not. `make skill-validate` should check both maps.
-
-### 5. Delete the parallel tool surface
-
-- [x] `agent/search_tools.py` is an unregistered copy of the `molfp`/`rxnfp` connector tools
-      carrying an explicit hand-sync obligation ("Keep the two in sync") that has **already
-      failed**: no `threshold` argument, and a different result model. Two callers, one of them a
-      test that proves nothing about the production path.
-- [x] Its three assertions move to `test_molfp_server.py` / `test_rxnfp_server.py`, over the MCP
-      tools a turn really calls, so the deletion *raises* production-path coverage.
-- [x] `examples/research_demo.py` reaches the fingerprint capability the way it already reaches
-      the calculators: through the connector's own server module.
-
-### 6. Record and verify
-
-- [x] ADR, `skills/README.md`, `agent/README.md`, `ARCHITECTURE.md` row if the tree changes.
-- [x] `make lint type test` green; `skill-validate`, `connector-validate`, `prose-validate` green.
+- [x] **1. Read the engine end to end** — `agent/` (33 modules), `api/runner.py`, the harness wiring
+      (`chemclaw_agent`, `harness_mode`, `harness_todo`, `plan_gate`, `loop_cap`), and the
+      deep-research path (`research_tools`, `retrieval/retrievers`, `hybrid`, `verifier`,
+      `runner_answer`, the `deep-research` skill).
+- [x] **2. Measure the three suspected hot spots before changing any of them.** Two did not survive
+      the measurement and were left alone (see Review).
+- [x] **3. One emitter for the plan** — `_PlanEmitter` in `api/runner.py`, both sites through it;
+      the post-resume site can no longer emit `[]`.
+- [x] **4. One resolver for the harness dimensions** — `harness_enabled_for` / `autonomy_for` /
+      `PLAN_ONLY` in `agent/harness_mode.py`; `build_agent`, `_build_harness_agent` and
+      `plan_gate.gate_applies` all read through them. `_resolved_autonomy` deleted, `instructions`
+      passed rather than re-derived, `gate_applies` typed.
+- [x] **5. Cache the conflict index behind the notes fingerprint** — `kg.conflicts.conflict_index`,
+      `kg.graph.cached_notes`/`NotesFingerprint` made public as the seam it keys on, and the whole
+      scan moved off the event loop.
+- [x] **6. Tests, ADR, backlog.** 7 new tests; the `PlanEvent` one fails against the previous code.
+      One measured finding handed to `BACKLOG.md` as a decision rather than patched.
 
 ---
 
 ## Review
 
-Done and verified: `make lint type test` green (one unrelated flake, below), and
-`skill-validate` / `connector-validate` / `prose-validate` all pass. The `property-lookup` profile
-now advertises 17 skills instead of 28; the default profile still advertises all 28, asserted by
-`test_no_shipped_skill_is_orphaned_on_the_full_surface`.
+**The plan emitted as an empty checklist.** Two emit sites, two predicates: the turn loop guarded on
+truthiness, the post-resume site on `is not None`. A turn that empties its todo list during a
+mid-turn resume — what MAF's own instructions tell the model to do when the chemist changes topic —
+produced `plan events: [['step one'], []]`, and an empty `PlanEvent` renders as "the agent has no
+plan", the rendering reserved for an agent that does not plan at all.
+`test_an_emptied_plan_is_not_streamed_as_an_empty_checklist` fails against the previous code
+(verified by stashing `src/` and running it).
 
-Four things worth keeping:
+**The harness posture, decided three times.** `X if profile.X is None else profile.X` appeared in
+`build_agent`, in `_resolved_autonomy` and in `gate_applies`. That triplication has already cost one
+live defect: `api/runner.py` read `settings` directly, so a `plan_only` profile under a global
+`execute` got the gate attached and its approval never spent, and one human decision authorized
+every later turn. `_build_harness_agent` also re-derived the profile's instructions while its
+docstring said `build_agent` had pre-resolved them — a sentence describing code that did not exist.
+Both are one call now.
 
-- **The measurement, not the reasoning, settled the design.** "Hide a skill when *every* declared
-  tool is gone" and "when *any* is" both sound right in prose. The first hides 8 skills under
-  `property-lookup`; the second hides 20, including `deep-research` and `calculation-selection` —
-  the two that profile's own instructions tell the model to load. The conservative rule was not a
-  preference, it was the one that did not break the shipped profile. Both sides of the boundary are
-  now pinned, because the rejected reading is what a future change drifts into.
-- **One widening was measured and rejected.** The prose gate cannot see a backticked tool name with
-  no call parentheses (`` `predict_pka` ``), which is how skills usually write one. Widening rule 2
-  produces 60 candidates over the corpus, ~46 of them result-field names (`created_by`,
-  `yield_percent`, `index_empty`) — a rule wrong more often than the prose. The asymmetry that
-  explains it is worth remembering: *checking that a known name is present is safe with a loose
-  pattern; checking that an unknown name is absent needs a strict one.* The one real defect it was
-  hiding (`find_similar_reactions`) is fixed by hand, and deleting `search_tools.py` removed the
-  module that made the name plausible.
-- **The drift guard was mutation-checked.** `advertised_tool_names` re-applies the narrowing rules
-  `connector_tools` applies, which is exactly how two implementations of one rule diverge — and the
-  divergence would be silent, since the skill surface would simply be scoped against a slightly
-  wrong tool set. Dropping the `tool_names` narrowing from one side fails the test, so it is a
-  guard rather than a description. (That check also cost an hour: `git checkout` on a file with
-  uncommitted work is a delete, not an undo. Recorded in `tasks/lessons.md`.)
-- **Nothing widens.** All three skill sources only remove; `authorize_tool`, the audit middleware
-  and the profile narrowing are untouched and still run afterwards. A `tools:` declaration can cost
-  a skill its visibility and can never grant a tool.
+**The conflict index, recomputed on every retrieval call — the only measured win.** It was the one
+whole-corpus derivation not cached behind the stat fingerprint (the parsed notes and the assembled
+graph both are), and it ran on the event loop. On a 2,000-note corpus over 7 substrates, a
+three-source `gather_evidence` sweep:
 
-**The one failure, and why it is not ours.** `tests/test_bo_predict.py::test_the_suggestion_wires_
-the_assay_noise_through_to_the_front` hit its own `@pytest.mark.timeout(60)` in the full run. It
-passes alone (14.6s) and passes with its whole file (38/38, 103s). It fits a GP and runs a
-multi-start acquisition, and its own docstring records the variance as the known risk ("a sibling
-was measured spiking from 4.3s to 39.9s"). Nothing in this change is on the BO path — the only
-`connectors/registry.py` edit is extracting `endpoint_tool_names`, which no suggestion calls.
+| | before | after |
+| --- | --- | --- |
+| first sweep, cold corpus | 3,915 ms | 2,249 ms |
+| second sweep, corpus unchanged | 2,458 ms | 22 ms |
+
+(200 substrates: 1,549 → 1,415 ms cold, 98 → 19 ms warm.) The cold-sweep half comes from holding the
+lock across the computation, so three concurrent sources miss once between them instead of three
+times in parallel.
+
+**Two suspected hot spots did not survive being measured, and that is the useful half of this
+review.** `_current_plan` runs a full harness todo `load_state` per streamed update, which looked
+like an obvious per-token cost: it is 14 µs, or 21 ms across a 1,500-update turn. `GraphRetriever`
+builds 2,000 evidence chunks for the 40 `gather_evidence` keeps, which looked like obvious waste: the
+excerpt work for all 2,000 is 5.8 ms against a 3 ms unavoidable scan, and bounding the per-source
+list would have changed how `hybrid` mode fuses ranks for no gain. Both left exactly as they were.
+
+**What was found and deliberately not fixed.** `conflicts._suspected` is O(k²) in the notes sharing
+a `(type, compound_smiles)` and emitted 141,156 conflicts over that same corpus — ~141
+`conflicts_with` ids per evidence chunk reaching the model. Caching bounds how often that is paid
+and nothing about whether it is worth showing. Capping it changes what KM-8 tells a chemist, so it
+went to `BACKLOG.md` with its numbers.
+
+**Gate:** `make lint type test` green — 3,243 passed, 135 skipped (3,236 before; +7 new tests).
