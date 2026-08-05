@@ -410,4 +410,3 @@ def test_a_space_with_room_left_is_still_answered() -> None:
     proposed = propose_candidates(problem, two_run, n=1)
     assert len(proposed) == 1
     assert proposed[0].params["catalyst"] in {"Cu", "Fe"}
-

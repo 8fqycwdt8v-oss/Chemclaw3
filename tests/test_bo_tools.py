@@ -11,12 +11,16 @@ BoFire and coming back as an internal `KeyError` the connector must sanitize int
 "an internal error occurred".
 """
 
+import ast
 import asyncio
+from pathlib import Path
 
 import pytest
+import yaml
 
 from chemclaw.connectors.bo.server import tools as bo_tools
 from chemclaw.connectors.bo.server.tools import suggest_next_experiment
+from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -362,3 +366,102 @@ def test_an_observation_that_disagrees_with_itself_is_refused() -> None:
     )
     with pytest.raises(ValueError, match="disagrees with itself"):
         asyncio.run(suggest_next_experiment(_trade_off_problem(), runs))
+
+
+def test_two_categories_with_the_same_descriptor_row_are_refused() -> None:
+    """The surrogate cannot tell them apart, so it answers one number for both — measured.
+
+    Featurizing replaces a label with a position in descriptor space; BoFire's
+    `CategoricalDescriptorInput` gives the model the position and nothing else. Two categories at
+    one position are one point to the model. Measured before the guard existed: with A observed at
+    10 and B at 90 on an otherwise identical two-descriptor parameter, `predict_at` returned the
+    same 70.85 for each — a confident recommendation for a reagent never distinguished from
+    another, with no warning anywhere.
+
+    Refused at the tool boundary rather than in the model, because a campaign stored before this
+    rule existed must still deserialize (the reason `require_names_do_not_clash` sits there too).
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+            CategoricalParameter(
+                name="base",
+                categories=["A", "B"],
+                descriptors={
+                    "A": {"homo_ev": -6.1, "lumo_ev": -1.2},
+                    "B": {"homo_ev": -6.1, "lumo_ev": -1.2},
+                },
+            ),
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    runs = [
+        Observation(params={"temperature": 40.0, "base": "A"}, value=10.0),
+        Observation(params={"temperature": 80.0, "base": "B"}, value=90.0),
+        Observation(params={"temperature": 60.0, "base": "A"}, value=30.0),
+    ]
+    with pytest.raises(ValueError, match="identical descriptors"):
+        asyncio.run(suggest_next_experiment(problem, runs))
+
+
+def test_observations_json_encoded_as_a_non_array_are_refused_with_a_sentence() -> None:
+    """`json.loads` decodes any JSON, so the tolerance needed a floor under it.
+
+    The string tolerance exists for a real failure — the model sometimes sends the observations
+    array JSON-encoded as one string. But three call sites decoded it and iterated the result
+    unchecked, so `"42"` became an int nothing can iterate (a `TypeError` the connector reports as
+    "an internal error occurred") and `"{}"` iterated its *keys*, failing with a validation error
+    about strings that were never observations. Both now say what is wrong.
+    """
+    problem = _problem()
+    with pytest.raises(ValueError, match="must be an array of objects"):
+        asyncio.run(suggest_next_experiment(problem, "42"))
+    with pytest.raises(ValueError, match="must be an array of objects"):
+        asyncio.run(suggest_next_experiment(problem, "{}"))
+    with pytest.raises(ValueError, match="not valid JSON"):
+        asyncio.run(suggest_next_experiment(problem, "[{"))
+    # And the tolerance itself still works: a real array, JSON-encoded, is accepted.
+    encoded = (
+        '[{"params": {"temperature": 40.0, "solvent": "THF"}, "value": 55.0},'
+        ' {"params": {"temperature": 90.0, "solvent": "toluene"}, "value": 71.0}]'
+    )
+    assert asyncio.run(suggest_next_experiment(problem, encoded)).candidates
+
+
+def test_every_tool_that_spends_is_declared_state_changing() -> None:
+    """The manifest's partition is derived from the code, not maintained beside it.
+
+    The `state_changing`/`read_only` split drives `agent/authz.py` and the plan gate, and it **fails
+    open**: a tool wrongly listed read-only ships an ungated spend that looks exactly like a gated
+    one. Both BO tools that featurize were listed read-only until a review traced the call chain —
+    `featurize_problem` runs xTB per option and upserts into `calculation_results`, and
+    `record_suggestion` writes two tables.
+
+    So this reads the tool bodies rather than restating the answer: any `@server.tool()` that calls
+    one of those two must appear under `state_changing`. Restating the list would pin today's names
+    and stay green the day someone adds featurization to `campaign_progress`, which is the only
+    change worth catching.
+    """
+    source = ast.parse(Path(bo_tools.__file__).read_text())
+    spending = {"featurize_problem", "record_suggestion"}
+    should_be_gated = {
+        node.name
+        for node in ast.walk(source)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and any(isinstance(d, ast.Call) for d in node.decorator_list)
+        and {
+            call.func.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        & spending
+    }
+    manifest = ConnectorManifest.model_validate(
+        yaml.safe_load((Path(bo_tools.__file__).parents[1] / "connector.yaml").read_text())
+    )
+    assert manifest.endpoint is not None
+    declared = set(manifest.endpoint.state_changing)
+    assert should_be_gated, "the scan found no spending tool at all — it has stopped measuring"
+    assert should_be_gated <= declared, (
+        f"{sorted(should_be_gated - declared)} spend or write but are not declared state_changing"
+    )

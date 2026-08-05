@@ -1183,3 +1183,30 @@ are still two rules. And check the docstrings while you are there: `_build_harne
 instructions were "pre-resolved by `build_agent`" while resolving them itself — the prose described
 the code that should have existed, which is exactly the drift CLAUDE.md's "measure it, don't argue
 it" is about.
+
+## R5.9 — A ceiling is a claim about a limit, and claims get measured
+
+`bo_max_rounds=500` was documented, in two places, as the thing keeping a durable campaign inside
+Temporal's event-history limit. It was not. The history is re-sent to the propose activity every
+round, so bytes grow quadratically, and at a measured 178 bytes per `Observation` a batch-1
+campaign crosses the 50 MB hard limit at round **441** — inside the ceiling. A campaign at the
+documented maximum would have been terminated by the server with every paid evaluation lost, by
+exactly the failure the ceiling was written to prevent.
+
+Nobody had multiplied. The number was chosen as "generous versus the default of 10", the *reason*
+was written beside it, and the two were never checked against each other. The reason read as
+derived because it was specific and mechanistically correct — the history really does grow
+quadratically — and being right about the mechanism is what made it convincing while being wrong
+about the number.
+
+**Rule: a config bound that names a system limit must show the arithmetic that reaches it.** If a
+comment says "this keeps us under X", the value's derivation from X belongs in the comment, or the
+bound is not doing what it says. And when the arithmetic does not close — as here — the fix is
+usually not a smaller number: a number can only be right for one problem shape, so prefer the
+signal the platform already publishes (`is_continue_as_new_suggested()`) over any constant a
+reviewer would have to re-derive.
+
+**Corollary, from the same review:** the ceiling was documented in the config comment, in
+`require_rounds_within_ceiling`'s docstring, *and* in a test's docstring — three copies of one
+wrong claim, all agreeing, none measured. Agreement across copies is not corroboration; they are
+one statement, written once and pasted.

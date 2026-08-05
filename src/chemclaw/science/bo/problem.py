@@ -751,6 +751,45 @@ def require_names_do_not_clash(problem: OptimizationProblem) -> None:
         )
 
 
+def require_descriptors_distinguish_categories(problem: OptimizationProblem) -> None:
+    """No two categories may carry the same descriptor row — the surrogate cannot tell them apart.
+
+    Featurizing replaces a label with a position in descriptor space, and BoFire's
+    `CategoricalDescriptorInput` gives the model *only* that position: the label is gone. Two
+    categories at the same position are therefore one point to the surrogate, and it will predict
+    one value for both — **measured**, on a two-descriptor parameter whose A and B rows matched:
+    with A observed at 10 and B at 90, `predict_at` returned 70.85 for each. No warning, no error;
+    a chemist reads a confident recommendation for a reagent the model has never distinguished from
+    another.
+
+    Two ways to get here, both plausible. Two category labels pointing at the same SMILES
+    (`"Pd(OAc)2"` and `"palladium acetate"`) featurize identically by construction. Or a caller
+    supplies `descriptors` directly and repeats a row.
+
+    **Outside the model, for the reason `require_names_do_not_clash` gives**: nothing forbade this
+    before, so a stored or in-flight campaign may carry it, and `OptimizationProblem`'s validators
+    re-run at workflow replay and on every `resume_campaign` read. A model-level rule would strand
+    those rather than refuse a new one.
+
+    Raises:
+        ValueError: Naming the parameter and the categories that collide.
+    """
+    for parameter in problem.parameters:
+        if not isinstance(parameter, CategoricalParameter) or parameter.descriptors is None:
+            continue
+        seen: dict[tuple[tuple[str, float], ...], str] = {}
+        for category, row in parameter.descriptors.items():
+            key = tuple(sorted(row.items()))
+            if key in seen:
+                raise ValueError(
+                    f"parameter {parameter.name!r}: categories {seen[key]!r} and {category!r} have "
+                    "identical descriptors, so the surrogate sees one point where you named two "
+                    "and will report the same prediction for both. Drop one, or give them "
+                    "descriptors that actually differ."
+                )
+            seen[key] = category
+
+
 def require_campaign_startable(spec: CampaignSpec) -> None:
     """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
@@ -771,10 +810,12 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
 
     Raises:
         ValueError: When the round count exceeds `bo_max_rounds`, the problem names more than one
-            objective, or a parameter and an objective share a name.
+            objective, a parameter and an objective share a name, or two categories carry the same
+            descriptor row.
     """
     require_rounds_within_ceiling(spec.n_rounds)
     require_names_do_not_clash(spec.problem)
+    require_descriptors_distinguish_categories(spec.problem)
     if len(spec.problem.objectives) > 1:
         named = ", ".join(objective.name for objective in spec.problem.objectives)
         raise ValueError(

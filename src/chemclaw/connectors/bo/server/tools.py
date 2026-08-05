@@ -13,10 +13,14 @@ decision space defines, and until it existed nothing could read one back, so the
 suggestion tool tells the agent to quote was a handle onto a store with no reader and the
 ask→observe→ask loop could not cross a session.
 
-Layer discipline (G6): this is read-only *capability*. The judgment — how to turn a vague
-"optimize the reaction" into a concrete problem, which historic runs are comparable enough to
-seed it, and how to present a suggestion a human must still run — lives in the bundled
-`experiment-design` skill.
+Layer discipline (G6): this is deterministic *capability*, not judgment. The judgment — how to turn
+a vague "optimize the reaction" into a concrete problem, which historic runs are comparable enough
+to seed it, and how to present a suggestion a human must still run — lives in the bundled
+`experiment-design` skill. This line used to say "read-only", which is false of two of the five
+tools and was false when written: `suggest_next_experiment` and `predict_outcome` both featurize,
+which runs xTB and writes `calculation_results`, and the first also writes `bo_campaigns` and
+`bo_suggestions`. `connector.yaml` classifies both as `state_changing` accordingly, and
+`tests/test_bo_tools.py` derives that classification from these bodies so the two cannot drift.
 
 BoFire lives on this side of the connector boundary now: only the neutral
 `chemclaw.science.bo.problem` types
@@ -28,6 +32,7 @@ questions.
 import asyncio
 import json
 import statistics
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, computed_field
@@ -56,6 +61,7 @@ from chemclaw.science.bo.problem import (
     ScreeningDesign,
     observed_value,
     pareto_front,
+    require_descriptors_distinguish_categories,
     require_names_do_not_clash,
     require_observations_cover_objectives,
 )
@@ -271,6 +277,43 @@ def _require_params_match(
         )
 
 
+def _as_list(value: object, noun: str) -> list[Any]:
+    """Accept an array the model JSON-*encoded* as a string, and refuse anything that is not a list.
+
+    **The tolerance is real and worth keeping.** On a large batch the model occasionally emits the
+    observations array as a single JSON string rather than as an array — a live e2e finding on a
+    six-parameter problem. Schema validation would reject the whole call before the tool body runs,
+    so nothing reaches the model to self-correct from; decoding the string is strictly more
+    permissive and costs a correct call nothing.
+
+    **The refusal is the part that was missing.** `json.loads` decodes *any* JSON, so the three
+    call sites that did this inline turned `"null"` into `None`, `"42"` into an int and `"{}"` into
+    a dict, then iterated it — `for item in None` is a `TypeError` the model reads as an internal
+    error, and iterating `"{}"` yields its *keys*, so a malformed call became a confusing
+    validation failure about strings that were never observations. One helper, one sentence, three
+    call sites, per this repo's Rule of Three.
+
+    Raises:
+        ValueError: When the string does not decode, or decodes to something that is not a list.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"{noun} arrived as a string that is not valid JSON ({error}). Send it as a JSON "
+                "array of objects, not as text."
+            ) from error
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{noun} must be an array of objects; got {type(value).__name__}. Send one entry per "
+            "run, each an object, or an empty array if there are none yet."
+        )
+    return value
+
+
 @server.tool()
 async def suggest_next_experiment(
     problem: OptimizationProblem,
@@ -364,14 +407,7 @@ async def suggest_next_experiment(
     # no-op (`model_validate` short-circuits on an exact-type match), so every direct and test
     # caller that passes real models is unaffected.
     problem = OptimizationProblem.model_validate(problem)
-    # On a large batch the model occasionally emits the observations array JSON-*encoded* as a
-    # single string rather than as an array — a live e2e finding on a six-parameter problem.
-    # Schema validation would otherwise reject the whole call before this body runs, with no
-    # detail reaching the model to self-correct from. Accepting the string is strictly more
-    # permissive (a real list is untouched), so it is robustness, not a behaviour change.
-    if isinstance(observations, str):
-        observations = json.loads(observations)
-    history = [Observation.model_validate(item) for item in observations] if observations else []
+    history = [Observation.model_validate(item) for item in _as_list(observations, "observations")]
     # The tool owns its contract, so the declared/observed parameter agreement is checked here —
     # after the models exist and before anything downstream indexes by parameter name.
     require_names_do_not_clash(problem)
@@ -382,6 +418,9 @@ async def suggest_next_experiment(
     # a problem that declares structures would silently fall back to an opaque category.
     # Runs *after* the coercion above, because it needs a real `OptimizationProblem`.
     featurized = await featurize_problem(default_store(), problem)
+    # After featurization, not before: two labels pointing at the same molecule are distinct until
+    # xTB gives them the same descriptor row, and from there the surrogate cannot tell them apart.
+    require_descriptors_distinguish_categories(featurized.problem)
     if history:
         candidates = await asyncio.to_thread(propose_candidates, featurized.problem, history, count)
     else:
@@ -466,11 +505,7 @@ async def campaign_progress(
         the spread of the recent window, a plateau verdict, and a `summary` stating the limit.
     """
     problem = OptimizationProblem.model_validate(problem)
-    # Same tolerance as `suggest_next_experiment`: the model sometimes emits the observations array
-    # JSON-encoded as one string, and rejecting the call teaches it nothing.
-    if isinstance(observations, str):
-        observations = json.loads(observations)
-    history = [Observation.model_validate(item) for item in observations]
+    history = [Observation.model_validate(item) for item in _as_list(observations, "observations")]
     require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
@@ -552,6 +587,12 @@ async def generate_screening_design(
     Both `n_center` and `n_repetitions` need at least one continuous factor and are **refused** on
     an all-categorical problem: BoFire ignores them there, and a silently ignored argument is worse
     than an error. Repeat an all-categorical screen yourself if you want replicates.
+
+    `n_center` is refused on one further shape — a *reduced* design (`n_generators > 0`) that also
+    carries a categorical factor. The reduction re-encodes each category onto two numeric levels, so
+    a centre row would place it at 0.5, which is neither of them. Ask for centre points on the full
+    grid instead. `n_repetitions` is unaffected: a replicate repeats whole rows, so it needs no
+    midpoint.
 
     **A problem carrying constraints is refused here.** A factorial screen enumerates the corners of
     the space and honours no limit, so it would hand back runs that violate one. Either drop the
@@ -660,13 +701,8 @@ async def predict_outcome(
         inside the declared space — plus the cross-validated fit quality per objective.
     """
     problem = OptimizationProblem.model_validate(problem)
-    # Same tolerance the other tools have: the model sometimes emits an array JSON-encoded as one
-    # string, and rejecting the call teaches it nothing.
-    if isinstance(observations, str):
-        observations = json.loads(observations)
-    named = json.loads(points) if isinstance(points, str) else points
-    asked: list[dict[str, ParamValue]] = [dict(point) for point in named]
-    history = [Observation.model_validate(item) for item in observations]
+    asked: list[dict[str, ParamValue]] = [dict(point) for point in _as_list(points, "points")]
+    history = [Observation.model_validate(item) for item in _as_list(observations, "observations")]
     require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
@@ -675,6 +711,7 @@ async def predict_outcome(
     # models a categorical space, so a prediction made without them would answer about a different
     # model than the one that proposed.
     featurized = await featurize_problem(default_store(), problem)
+    require_descriptors_distinguish_categories(featurized.problem)
     predictions, fit = await asyncio.to_thread(
         interrogate_surrogate, featurized.problem, history, asked, None, assess_fit
     )
