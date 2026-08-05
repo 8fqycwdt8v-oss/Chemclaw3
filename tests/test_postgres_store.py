@@ -9,7 +9,7 @@ version.
 import asyncio
 
 from chemclaw.core.chem import require_canonical_smiles
-from chemclaw.science.calc.migrate import migrate
+from chemclaw.core.migrate import migrate
 from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.store import (
     CalculationKey,

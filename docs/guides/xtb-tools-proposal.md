@@ -247,7 +247,7 @@ Three properties fall out, and they are the reason this seam is worth building f
   which is precisely the provenance story `StoredResult.provenance` was designed for.
 
 **Storage.** Reuse `ResultStore` with `calc_type="structure"` and `calc_version="1"`; no new
-backend, no new migration beyond what `src/chemclaw/science/calc/migrate.py` already does. Coordinates are rounded before
+backend, no new migration beyond what `src/chemclaw/core/migrate.py` already does. Coordinates are rounded before
 hashing (default 1e-4 Å) so bit-level float noise from a re-run does not fork the cache.
 
 ### 4.2 Seam B — `XtbSpec`: one request model for every task

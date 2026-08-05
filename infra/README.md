@@ -16,4 +16,14 @@ rather than sleeps. Both are reached through `make live-*`; the procedure is in
 `docs/guides/runbook.md`.
 
 `sql/` is the migration set `make db-migrate` applies, in filename order, against
-a ledger with per-file checksums.
+a ledger with per-file checksums. The schema is forward-only and additive
+(D-2026-08-04-the-schema-only-goes-forward), and one table per row is inventoried
+in `sql/README.md`.
+
+`sql/grants/` is deliberately **not** part of that set, and the runner's glob is
+non-recursive so it cannot be swept in. Those files are `make db-grants`, which
+re-runs on every deploy after the migrations: a grant is a reconciliation between
+a schema that keeps growing and a runtime role that may be created at any time, so
+run-once semantics would leave a later table ungranted and the application broken
+on first use of it (D-2026-08-05-append-only-by-grant-not-by-contract). They no-op
+where no `chemclaw_app` role exists, which is every dev database.

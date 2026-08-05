@@ -50,6 +50,13 @@ async def run_bundle_worker(connector: str) -> None:
         # activity is the expensive science, so re-running it because the pod was killed rather
         # than drained is the costliest version of this failure.
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
+        # How many of that expensive science may run at once. Unset, temporalio admits 100 — which
+        # for `calc` means 100 concurrent xTB runs on a two-CPU pod, and for every bundle means
+        # more activities than the Postgres pool can serve connections to
+        # (D-2026-08-05-a-worker-may-not-outrun-its-pool). A bundle whose activities are long waits
+        # rather than work — `qm`, which holds a slot per in-flight HPC job — raises it in the
+        # chart, where the memory that actually bounds it is also declared.
+        max_concurrent_activities=settings.worker_max_concurrent_activities,
     )
     logger.info("%s connector worker connected: queue=%s %s", connector, queue, describe(queue))
     await serve_worker(worker, component=f"connector-worker-{connector}")

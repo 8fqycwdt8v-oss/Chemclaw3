@@ -437,6 +437,27 @@ class FrontDoorState:
         """Record the moment of the sweep the snapshot came from."""
         self._app.state.connector_health_at = at
 
+    @property
+    def database_reachable(self) -> bool:
+        """Whether the last readiness probe reached Postgres (True until one has run)."""
+        reachable: bool = self._app.state.database_reachable
+        return reachable
+
+    @database_reachable.setter
+    def database_reachable(self, reachable: bool) -> None:
+        """Store the last probe's verdict; the readiness route writes here."""
+        self._app.state.database_reachable = reachable
+
+    @property
+    def database_probed_at(self) -> float:
+        """When the database was last probed (`time.monotonic`); -inf means "never"."""
+        return float(self._app.state.database_probed_at)
+
+    @database_probed_at.setter
+    def database_probed_at(self, at: float) -> None:
+        """Record the moment of the probe the verdict came from."""
+        self._app.state.database_probed_at = at
+
 
 def state(request: Request) -> FrontDoorState:
     """The typed view over this request's `app.state` — how every route reads process state."""

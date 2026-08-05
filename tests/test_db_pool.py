@@ -21,6 +21,7 @@ import pytest
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import Metrics
 from tests.pg import migrated_db_or_skip
 
 
@@ -138,5 +139,50 @@ def test_pool_saturation_is_visible_as_a_gauge() -> None:
         assert stats["pool_size"] >= 1
         # Borrowed for the duration of the block, so it is not among the available ones.
         assert stats["pool_available"] < stats["pool_size"]
+
+    asyncio.run(_run())
+
+
+_POOL_GAUGES = (
+    "chemclaw_pg_pool_size",
+    "chemclaw_pg_pool_available",
+    "chemclaw_pg_pool_requests_waiting",
+    "chemclaw_pg_pool_max_size",
+    "chemclaw_pg_fleet_max_connections",
+)
+
+
+def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that opens a pool cannot do so without also exposing the readings that describe it.
+
+    This is the half the gauge above was missing. All three pool gauges were bound in the front
+    door's `create_app`, so of the seventeen processes the shipped chart pools in, the eleven that
+    are workers and connector servers served a `/metrics` surface with no pool reading at all —
+    including the background worker, which runs the retention sweep, the reindex and the chain
+    verification, the longest database work in the deployment. D-119 introduced `requests_waiting`
+    as the signal that distinguishes "the pool is too small" from "the database is down"; it was
+    absent exactly where that distinction is hardest to make from a log.
+
+    Run against a *fresh* registry, because an unbound gauge is omitted from the exposition rather
+    than rendered as 0 — on the shared singleton this would pass in any session where some earlier
+    test happened to build the front door, which is precisely the accident it exists to rule out.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        registry = Metrics()
+        # `bind_pool_metrics` resolves METRICS at call time (the declared lazy import that keeps
+        # `core` free of module-scope sibling imports), so patching the module attribute reaches it.
+        monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
+        assert not any(name in registry.render() for name in _POOL_GAUGES), (
+            "a fresh registry must expose no pool gauge, or this test proves nothing"
+        )
+        # No front door, no worker, no connector server — just the pool itself.
+        async with db.pooling():
+            rendered = registry.render()
+        for name in _POOL_GAUGES:
+            assert name in rendered, f"{name} is not exposed by a process that opened a pool"
 
     asyncio.run(_run())

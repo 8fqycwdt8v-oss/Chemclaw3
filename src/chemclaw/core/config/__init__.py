@@ -167,6 +167,13 @@ class Settings(
           number the shared LLM endpoint actually sees — and nothing stated it, so raising the
           per-process cap multiplied fleet demand invisibly. Only checked once an operator declares
           the ceiling their endpoint can serve; undeclared, there is nothing to check against.
+        - **A fleet opening more Postgres connections than the server will serve.** The same shape
+          one subject over, and `core/config/store.py` had stated the multiplication in prose since
+          the pool landed: `pg_pool_max_size` bounds one process, and the deployment total is that
+          times every process that opens a pool. Nothing computed it, so the shipped chart ran all
+          of its pods on the default 16 and the fleet ceiling was ~272 against the
+          `max_connections=100` D-119 measured against. Same self-disabling convention: undeclared
+          means inert.
         - **Mid-turn resume outliving the turn.** A resume wait longer than the turn deadline can
           never complete; it just burns the turn's remaining time holding an admission permit.
         - **Budgets enabled with every cap at zero.** `0` means unlimited for each cap, so this is
@@ -207,6 +214,17 @@ class Settings(
                     f"a declared fleet ceiling of {self.service_fleet_max_concurrent_turns}. Lower "
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
+                )
+        if self.pg_fleet_max_connections:
+            opened = self.pg_fleet_pooled_processes * self.pg_pool_max_size
+            if opened > self.pg_fleet_max_connections:
+                raise ValueError(
+                    f"this deployment may open {opened} Postgres connections "
+                    f"({self.pg_fleet_pooled_processes} pooled process(es) × "
+                    f"{self.pg_pool_max_size} per pool) against a declared server ceiling of "
+                    f"{self.pg_fleet_max_connections}. Lower pg_pool_max_size or the number of "
+                    "pooled processes, or raise pg_fleet_max_connections if the server's "
+                    "max_connections can serve it."
                 )
         if self.mid_turn_resume_enabled and (
             self.mid_turn_resume_timeout_seconds >= self.service_turn_timeout_seconds

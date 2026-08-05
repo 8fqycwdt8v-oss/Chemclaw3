@@ -704,8 +704,11 @@ Runs alongside every phase.
 
 ## Appendix B — New SQL migrations (`infra/sql/`, after `001_calculation_results.sql`)
 
-`002_sessions.sql` (sessions, session_messages) · `003_session_events.sql` · `004_note_embeddings.sql`
-(pgvector). All wired into `make db-migrate` (D-034).
+Planned as `002_sessions.sql` · `003_session_events.sql` · `004_note_embeddings.sql`. **Those
+numbers were never used**: the migrations landed as `008_sessions.sql`, `009_session_events.sql`
+and `012_note_index.sql`, which is what each ticket's own "Landed:" line records — this appendix
+had been contradicting the rest of its own document. The current inventory, one row per table, is
+`infra/sql/README.md`; do not re-derive it from here. All wired into `make db-migrate` (D-034).
 
 ## Appendix C — New top-level modules/dirs
 

@@ -18,13 +18,26 @@ class StoreSettings(BaseSettings):
     """
 
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
-    # The ordered `.sql` migrations `chemclaw.science.calc.migrate` applies. A setting rather than
+    # The credential that owns the schema, as distinct from the one that serves requests
+    # (D-2026-08-05-append-only-by-grant-not-by-contract). Empty falls back to `postgres_dsn`, so a
+    # single-principal database — dev, CI, `make up`, every test — needs no configuration and
+    # behaves exactly as before; splitting is a deployment's opt-in.
+    #
+    # Why it is worth splitting: `infra/sql/006` calls `audit_events` "append-only by contract",
+    # and one DSN with full DDL and DML was mounted on every pod, so the credential running a chat
+    # turn could rewrite the GxP trail recording that turn. The chain and the anchors detect that;
+    # only a privilege boundary prevents it. This DSN belongs on the migration hook Job and
+    # nowhere else — it is mounted for the seconds a release takes, not for the life of a pod.
+    postgres_migration_dsn: str = ""
+    # The ordered `.sql` migrations `chemclaw.core.migrate` applies. A setting rather than
     # a path derived from `__file__`, which is what it was until D-148: `parent.parent` happened to
-    # be the repository root only while the module sat at `science/calc/migrate.py`, and moving
-    # it two levels deeper silently pointed it inside the package — `make db-migrate` failed in CI
-    # with no SQL found. The directory is repository/workdir-relative like `knowledge_dir` and
-    # `skills_dir` (the image COPYs it to `/app/infra` beside `/app/src`), so it follows the same
-    # rule as every other data directory rather than a depth count nothing checks.
+    # be the repository root only while the module sat two levels deeper, inside the calc package,
+    # and moving it there silently pointed the path inside the package — `make db-migrate` failed
+    # in CI with no SQL found. (The module has since moved again, to `core/`, which is the reason
+    # this setting is not a depth count: it survived that move without an edit.) The directory is
+    # repository/workdir-relative like `knowledge_dir` and `skills_dir` (the image COPYs it to
+    # `/app/infra` beside `/app/src`), so it follows the same rule as every other data directory
+    # rather than a depth count nothing checks.
     sql_migrations_dir: str = "infra/sql"
     # Fail fast when the database is unreachable instead of hanging until the enclosing
     # activity's start-to-close timeout expires (libpq connect_timeout).
@@ -60,9 +73,27 @@ class StoreSettings(BaseSettings):
     # `min_size` connections are kept warm so the first request after an idle period does not pay
     # a handshake. `max_size` bounds one process; the deployment total is
     # `max_size × distinct DSNs × processes` (front-door replicas × `service_uvicorn_workers`,
-    # plus the workers), which must stay under the server's `max_connections`.
+    # plus the workers), which must stay under the server's `max_connections` — see
+    # `pg_fleet_max_connections` below, which is what turns that sentence into a check.
     pg_pool_min_size: int = Field(default=2, ge=0)
     pg_pool_max_size: int = Field(default=16, gt=0)
+    # The two halves of the fleet connection budget
+    # (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+    #
+    # The sentence above stated the multiplication and nothing computed it, so the shipped chart
+    # ran every one of its pods on the default `max_size=16` and the fleet's real ceiling was
+    # ~272 connections against the `max_connections=100` D-119 measured against. That is the same
+    # shape as the admission cap before `service_fleet_max_concurrent_turns`: a per-process bound
+    # that is correct in every pod while the fleet total is not, and no single pod can see it.
+    #
+    # `pg_fleet_pooled_processes` is how many processes may open a pool at once — every front-door
+    # process, every Temporal worker, every connector server. The chart derives it from the same
+    # values that render those Deployments (`chemclaw.pooledProcesses`), so it cannot disagree with
+    # the pods that exist. `pg_fleet_max_connections` is what the server will actually serve this
+    # deployment; 0 means undeclared and the check is inert, matching how the turn ceiling and the
+    # artifact-eviction budgets ship off until an operator states a number.
+    pg_fleet_pooled_processes: int = Field(default=1, gt=0)
+    pg_fleet_max_connections: int = Field(default=0, ge=0)
     # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
     pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)
     # How long a caller waits for a free pooled connection before the request fails as a

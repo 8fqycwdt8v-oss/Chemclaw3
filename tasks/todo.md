@@ -9,10 +9,9 @@ shape: a rule written in two places, with a docstring in one of them asserting t
 agreed. Two were behavioural defects nobody had reported; three were open [M] findings in
 `docs/planning/BACKLOG.md`; the rest was the duplication that produced all of them.
 
-_(The previous occupant of this file was the agentic-engine review (#128,
-`D-2026-08-05-one-rule-in-three-places-is-three-rules`), which landed on `main` while this branch
-was in flight; before that, the tool/skill seam (#129) and the live-test lane (#124/#127). All are
-in `git log`.)_
+_(Three reviews landed on `main` while this branch was in flight and each held this file in turn:
+the database-integration review (#131), the BO ceiling (#130) and the agentic engine (#128). All
+are in `git log`, and their decisions are in `docs/decisions/`.)_
 
 ---
 
@@ -51,7 +50,22 @@ in `git log`.)_
 - [x] ADR + ledger row; four backlog rows deleted (not struck through); the stale 37/ten/fourteen
       counts corrected; `kg/README.md`'s absolute given its condition and its unwired code named
 
----
+## Measured, and not defects
+
+Recorded so they are not re-litigated:
+
+- **SSE polling against the pool.** 200 streams ÷ `session_event_poll_seconds=2.0` = 100 borrows/s
+  per front-door process, each a sub-millisecond indexed `SELECT` on
+  `session_events_unconsumed_idx` ≈ 0.1 connection-seconds/s. The pool is not the constraint; the
+  event loop is, which is D-119's original finding.
+- **The audit chain's global advisory mutex.** Every append across the fleet serializes on
+  `pg_advisory_xact_lock(0x43484D4157_00_01)` for ~4 round trips, so the ceiling is a few hundred
+  appends/s deployment-wide — far above current demand, and correct by design, since a forked chain
+  cannot be repaired. A ceiling worth stating, not a defect worth fixing.
+- **The SQL surface itself.** Every application statement binds its values; the four sites that
+  interpolate an *identifier* are each guarded (a closed `_PRUNABLE` map, `table.isidentifier()`,
+  an int from config, a validated identifier regex), and the one un-parameterized surface — a
+  warehouse binding's `where:` — is a documented operator-authored trust boundary.
 
 ## Review
 

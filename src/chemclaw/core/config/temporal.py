@@ -46,6 +46,30 @@ class TemporalSettings(BaseSettings):
     # gives up instead of pinning a worker with unlimited retries.
     activity_max_attempts: int = Field(default=5, ge=1)
 
+    # How many activities one worker process may run at once
+    # (D-2026-08-05-a-worker-may-not-outrun-its-pool).
+    #
+    # Set because temporalio's default is **100**, and it was reaching a Postgres pool of 8 — a
+    # worker that may run twelve times more activities than it can borrow connections. The
+    # shortfall is not a crash: `db.connection` raises `ConnectionError` after
+    # `pg_pool_timeout_seconds`, Temporal classes that as transient and retries the activity, and
+    # the work eventually gets done. But it gets done as retry churn rather than as backpressure —
+    # each starved activity burns one of `activity_max_attempts` before it has computed anything,
+    # and the honest reading of the state (`chemclaw_pg_pool_requests_waiting`) was not exported by
+    # a worker at all until the same review.
+    #
+    # 8 rather than the pool's size, and deliberately equal to it rather than below: an activity
+    # borrows a connection for a fraction of its runtime, so a bound *at* the pool width already
+    # leaves the pool mostly idle, and going under it would cap throughput on a resource that is
+    # not the constraint. Equal is the point at which no activity can ever be the one that has to
+    # wait.
+    #
+    # A bundle whose activities are long waits rather than database work overrides this — `qm`
+    # holds one slot per in-flight HPC job for up to `hpc_run_timeout_seconds` (24 h) and touches
+    # the database twice in that span, so its ceiling is about memory, not connections, and its
+    # chart entry says so.
+    worker_max_concurrent_activities: int = Field(default=8, ge=1)
+
     @model_validator(mode="after")
     def _temporal_mtls_is_complete(self) -> Self:
         """A Temporal client cert without its key (or vice versa) is a silent half-config.

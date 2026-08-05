@@ -277,7 +277,10 @@ eigenständig und nicht Teil dieser Output-Qualitätsmetriken.
 
 - **3.1** MCP-Server `mcp-molfp` (~100 LOC): SMILES → ECFP4 (RDKit, radius 2, 2048 bit).
   Deterministisch, keine GPU. Radius/Bits aus Config.
-- **3.2** Postgres-Tabelle `bit(2048)` + HNSW-Index (`bit_hamming_ops`, pgvector ≥0.7).
+- **3.2** Postgres-Tabelle `bit(2048)` + HNSW-Index (`bit_jaccard_ops`, pgvector ≥0.7).
+  (Der Plan nannte `bit_hamming_ops`; ausgeliefert wurde `bit_jaccard_ops` — `infra/sql/002` und
+  `003` —, weil die Suche nach Tanimoto rankt, nicht nach Hamming-Distanz. Hier korrigiert, weil
+  dieses Dokument als gepflegt gilt, im Gegensatz zu `docs/reference/architektur.md`.)
 - **3.3** Tools `find_similar_molecules(smiles, top_k)` (Tanimoto in SQL) +
   `find_substructure_matches`.
 - **3.4** MCP-Server `mcp-rxnfp` (DRFP) analog + `find_similar_reactions`.

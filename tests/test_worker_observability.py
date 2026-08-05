@@ -187,6 +187,30 @@ def test_both_temporal_workers_go_through_the_one_runtime() -> None:
             f"{module.__name__} builds a worker that cancels in-flight activities the instant it "
             "is asked to stop, which is a hard kill with extra steps"
         )
+        assert "max_concurrent_activities=settings.worker_max_concurrent_activities" in source, (
+            f"{module.__name__} builds a worker with temporalio's default of 100 concurrent "
+            "activities, against a Postgres pool an order of magnitude smaller — the shortfall is "
+            "not a crash but retry churn, since each starved activity spends one of "
+            "activity_max_attempts on a ConnectionError before computing anything"
+        )
+
+
+def test_a_worker_may_not_admit_more_activities_than_its_pool_can_serve() -> None:
+    """The default has to hold the invariant its own comment states, not merely be a number.
+
+    An activity borrows a connection for a fraction of its runtime, so a ceiling *at* the pool
+    width already leaves the pool mostly idle — equal is the point at which no activity can be the
+    one that waits, and above it is where a shortage becomes retry churn. A deployment may still
+    raise the ceiling deliberately (the `qm` bundle does, because its activities are HPC waits
+    rather than database work); what must not happen is the shipped default drifting above the
+    shipped pool by accident.
+    """
+    from chemclaw.core.config import settings
+
+    assert settings.worker_max_concurrent_activities <= settings.pg_pool_max_size, (
+        f"a worker may run {settings.worker_max_concurrent_activities} activities against a pool "
+        f"of {settings.pg_pool_max_size}"
+    )
 
 
 # There is deliberately no "the surface leaks no identity" test here. These routes are
