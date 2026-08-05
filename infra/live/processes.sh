@@ -151,6 +151,18 @@ up() {
   start_worker worker-bo 9002 "$python" -m chemclaw.connectors.bo.worker
   start_worker worker-qm 9003 "$python" -m chemclaw.connectors.qm.worker
 
+  # The mock model, when the lane is pointed at it. Started before the front door because the front
+  # door builds a chat client at startup and would come up pointed at nothing.
+  #
+  # It is an *HTTP* mock rather than an injected `BaseChatClient` deliberately: the streaming
+  # assembler, the middleware stack, budget admission, the audit sink and the session store all sit
+  # between the socket and the agent, and the in-process scripted client in `tests/` bypasses every
+  # one of them — its own docstring records passing green while production failed 100% of the time.
+  if [ "${CHEMCLAW_LLM_BASE_URL:-}" = "http://127.0.0.1:8820/v1" ]; then
+    start mock-llm "$python" -m chemclaw.cli.mock_llm
+    wait_for mock-llm "http://127.0.0.1:8820/__mock/stats"
+  fi
+
   # The front door builds the agent — and therefore a chat client — during startup, so with no
   # model credential it does not fail at the first turn, it fails to boot at all
   # (`agent/llm_provider.py::_anthropic_client` raises on a missing key). That is correct
@@ -214,9 +226,32 @@ status() {
   done
 }
 
+# Stop one named process and bring the stack back to full — the shape every chaos check needs.
+#
+# `up` is already idempotent (it skips what is running and ready-checks what it starts), so
+# "restart X" is "stop X, then up" and nothing else. Written as a verb rather than left to the
+# caller because the caller is a test: a harness that stopped a process and then started a
+# *replacement* by hand would be measuring recovery of something the lane never runs.
+restart() {
+  local name="$1" pidfile
+  pidfile="$RUN_DIR/$name.pid"
+  [ -e "$pidfile" ] || die "no $pidfile — is the lane up?"
+  local pid
+  pid="$(cat "$pidfile")"
+  # SIGKILL, not SIGTERM: a restart check that let the process drain first would be testing a
+  # graceful shutdown, and the failure worth knowing about is the ungraceful one.
+  kill -9 "$pid" 2>/dev/null || true
+  # Wait for the pid to actually go, so `up` does not see a still-live process and skip the start.
+  for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  rm -f "$pidfile"
+  log "$name killed (pid $pid)"
+  up
+}
+
 case "${1:-up}" in
   up) up ;;
   down) down ;;
   status) status ;;
-  *) die "usage: processes.sh [up|down|status]" ;;
+  restart) [ $# -ge 2 ] || die "usage: processes.sh restart <name>"; restart "$2" ;;
+  *) die "usage: processes.sh [up|down|status|restart <name>]" ;;
 esac

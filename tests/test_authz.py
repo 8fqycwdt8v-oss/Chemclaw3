@@ -16,6 +16,7 @@ from chemclaw.agent.authz import (
     READ_ONLY_TOOLS,
     STATE_CHANGING_TOOLS,
     AuthorizationError,
+    authorize_tool,
     authorize_trigger,
     expensive_actions,
     require_actor,
@@ -209,3 +210,59 @@ def test_the_write_gate_is_a_subset_of_the_state_changing_set() -> None:
     outright contradiction.
     """
     assert DEFAULT_WRITE_TOOL_GATES <= STATE_CHANGING_TOOLS
+
+
+def test_an_operators_empty_role_list_opens_a_tool_rather_than_closing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`tool_role_gates: {tool: []}` means "no role needed", and that convention is now pinned.
+
+    Found by mutation testing (2026-08-04): flipping `_has_required_role`'s `if not required:
+    return True` to `return False` survived every test in this file. The line is reachable in
+    exactly one way — an operator listing a tool with an empty role list — and nothing exercised
+    it, so the convention was decided by one unasserted branch.
+
+    It is worth pinning precisely because the file's own comments state the *opposite* rule two
+    lines away: an empty `entra_privileged_role_set` fails **closed** ("An empty privileged set
+    means fail closed, not open"), and both privileged gates short-circuit on `not privileged`
+    before ever reaching this predicate. The asymmetry is deliberate — an operator who writes
+    `[]` against a tool has said something, whereas an unfilled chart default has not — but a
+    deliberate asymmetry that no test can tell from an accident is one refactor from being
+    "simplified" into a security change.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_authz_default", "deny")
+    monkeypatch.setattr(settings, "tool_role_gates", {"find_notes": []})
+    tokens = set_current_identity(actor="chemist@example.com", roles=frozenset())
+    try:
+        authorize_tool("find_notes")  # explicitly gated with no role required → allowed
+        # And the deny default still governs everything the operator did not list, so this is a
+        # statement about the empty list rather than about the gate being off.
+        with pytest.raises(AuthorizationError, match="approved list of tools"):
+            authorize_tool("gather_evidence")
+    finally:
+        reset_current_identity(tokens)
+
+
+def test_a_non_empty_role_list_still_refuses_an_account_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of the same predicate: a listed role the account lacks is a refusal.
+
+    Stated beside the test above so the pair reads as one decision. Without it, "empty means open"
+    could be satisfied by a gate that was open to everyone.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_authz_default", "allow")
+    monkeypatch.setattr(settings, "tool_role_gates", {"find_notes": ["chem-lead"]})
+    tokens = set_current_identity(actor="chemist@example.com", roles=frozenset({"chem-reader"}))
+    try:
+        with pytest.raises(AuthorizationError, match="roles this tool requires"):
+            authorize_tool("find_notes")
+    finally:
+        reset_current_identity(tokens)
+    tokens = set_current_identity(actor="lead@example.com", roles=frozenset({"chem-lead"}))
+    try:
+        authorize_tool("find_notes")  # holds the listed role → allowed
+    finally:
+        reset_current_identity(tokens)

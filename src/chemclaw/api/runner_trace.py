@@ -145,14 +145,26 @@ class ToolCallTrace:
                         )
                     )
                 continue
-            if name and arguments:
-                # The name and the complete arguments in one content: the call arrived whole
-                # rather than streamed, so it is finished now, and waiting would only delay it
-                # behind the next update's text. The streamed shape never looks like this — its
-                # named content carries empty arguments and its fragments carry no name.
-                self._fragments[key] = [
-                    json.dumps(arguments) if isinstance(arguments, Mapping) else str(arguments)
-                ]
+            if isinstance(arguments, Mapping) and arguments:
+                # A structured argument object: the call arrived whole rather than streamed, so it
+                # is finished now, and waiting would only delay it behind the next update's text.
+                #
+                # **The test is the argument's type, not the presence of a name**, and that
+                # distinction was measured rather than reasoned. This branch used to read
+                # `if name and arguments:` on the stated assumption that "the streamed shape never
+                # looks like this — its named content carries empty arguments and its fragments
+                # carry no name". True of Anthropic. False of the OpenAI Responses API, which puts
+                # the name on *every* `response.function_call_arguments.delta` — so each fragment
+                # matched, overwrote the ones before it, and flushed. One eight-fragment call
+                # announced **ten `tool_call` events against one `tool_result`**, the first
+                # carrying `{"t` as if it were the whole argument document
+                # (`docs/archive/storm-2026-08-04.md`).
+                #
+                # A name says nothing about completeness; only the arguments do. A string is
+                # therefore always accumulated below and finished by `_arguments_complete`, which
+                # closes a single complete fragment on the same update anyway — so the whole-call
+                # case that genuinely sends a string loses nothing.
+                self._fragments[key] = [json.dumps(arguments)]
                 done.add(key)
             else:
                 fragments = self._fragments.setdefault(key, [])

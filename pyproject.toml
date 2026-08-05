@@ -65,6 +65,8 @@ dev = [
     "pre-commit>=3.8",
     "types-pyyaml>=6.0.12.20260518",
     "scipy-stubs>=1.17.1.5",
+    "hypothesis>=6.100",
+    "mutmut>=3.0",
 ]
 
 [project.scripts]
@@ -166,7 +168,102 @@ omit = ["*/__init__.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# Regression floor, set safely below the measured offline baseline (86% with the Postgres/Temporal
-# tests skipped; CI runs those and is higher still). Ratchet upward as coverage climbs; never lower
-# it to make a red build pass — add the missing test instead.
-fail_under = 80
+# Regression floor. Ratchet upward as coverage climbs; never lower it to make a red build pass —
+# add the missing test instead.
+#
+# **Re-measured 2026-08-04 against a live Postgres: 85.30 %**, over 3,205 passing tests with the 22
+# Temporal test-server files still skipped (CI runs those, so CI is higher). The floor moves 80 →
+# 84, which is the first time it has moved: 80 was set against a much smaller tree and had stopped
+# being a floor.
+#
+# The gap between 84 and 85.30 is deliberate headroom, not slack to spend. It is roughly one
+# refactor's worth, so a legitimate change does not have to move this line in the same commit —
+# and it is small enough that a genuine regression still trips it.
+fail_under = 84
+
+# Mutation testing (`make mutants`). Coverage says which lines ran; this says whether anything
+# would have noticed them being wrong — the only question that distinguishes a test suite from an
+# execution trace. The July pass did five mutations by hand and three of them survived their own
+# test file, which is why this is configured rather than remembered.
+#
+# **Scoped to the invariant-bearing modules, not the tree.** A full-repository run is thousands of
+# mutants over an hours-long suite, and most of them land in code where a surviving mutant means
+# nothing (a log message, a docstring-shaped constant). These seven are where a silently-wrong
+# answer is expensive: the authorization gate, the PR-gate and the note schema behind it, the
+# calculation cache's identity, the budget guard, the GxP audit chain, and `runner_trace.py` —
+# which shipped a real defect on 2026-08-04 and is therefore the best available test of whether
+# its own tests are any good.
+[tool.mutmut]
+source_paths = [
+    "src/chemclaw/agent/authz.py",
+    "src/chemclaw/agent/audit_store.py",
+    "src/chemclaw/api/budget.py",
+    "src/chemclaw/api/runner_trace.py",
+    "src/chemclaw/kg/note.py",
+    "src/chemclaw/kg/pr_gate.py",
+    "src/chemclaw/science/calc/store.py",
+]
+# `also_copy` is what the mutant run sees besides the sources: mutmut copies the mutated files into
+# `mutants/` and runs pytest there, so anything the suite reads has to come along. That is close to
+# the whole repository and the list is deliberately explicit rather than "everything": this
+# project's tests read the *tree itself* as data — `test_repo_map.py` walks every directory against
+# `ARCHITECTURE.md`, `test_decision_log.py` reads `docs/decisions/`, `test_helm_chart.py` renders
+# `deploy/`, and the validators read `data/`, `knowledge/` and `skills/`. Started from the four
+# corpora and grew to this by running it: the first attempt died on `test_helm_chart.py` before a
+# single mutant was tested.
+also_copy = [
+    "ARCHITECTURE.md",
+    "CLAUDE.md",
+    "Makefile",
+    "README.md",
+    "SECURITY.md",
+    ".env.example",
+    ".github",
+    "data",
+    "src",
+    "deploy",
+    "docs",
+    "examples",
+    "infra",
+    "knowledge",
+    "skills",
+    "tasks",
+]
+# The suite twice over is the honest budget here. A mutant that merely makes a test *slow* is not
+# killed by it, and the default multiplier declares a timeout a kill.
+timeout_multiplier = 4.0
+# **Which tests a mutant is run against, and why it is not "all of them".**
+#
+# The first attempt ran the whole suite and never reached a mutant. This repository's tests read the
+# *source tree itself* as data — `test_repo_map.py` walks every directory against `ARCHITECTURE.md`,
+# `test_docstring_paths.py` resolves every backticked module pointer, `test_deploy_chart.py` renders
+# the chart — and mutmut works by copying a partial tree into `mutants/` and running pytest there.
+# Those tests fail on the copy for reasons that have nothing to do with any mutant, and none of them
+# could kill one in these seven modules anyway: a mutated branch in `authz.py` is invisible to a
+# test that reads Markdown.
+#
+# So the selection is the tests that can actually kill these mutants. That also makes the run
+# tractable — the full suite is ~4 minutes, and a mutant that has to pay it is a mutant not tested —
+# and it is the scope DA-7 asks about: the July pass found 3 of 5 hand-made mutants surviving their
+# own test file while dying under the whole suite, so "does a narrow run mislead?" is the question,
+# and this is the narrow run.
+pytest_add_cli_args_test_selection = [
+    "tests/test_authz.py",
+    "tests/test_tool_authz.py",
+    "tests/test_audit.py",
+    "tests/test_audit_store.py",
+    "tests/test_audit_chain.py",
+    "tests/test_audit_anchor.py",
+    "tests/test_concurrency_audit_chain.py",
+    "tests/test_budget.py",
+    "tests/test_concurrency_claims.py",
+    "tests/test_runner.py",
+    "tests/test_disconnect_teardown.py",
+    "tests/test_note.py",
+    "tests/test_note_proposals.py",
+    "tests/test_properties_core.py",
+    "tests/test_pr_gate.py",
+    "tests/test_pr_gate_read_window.py",
+    "tests/test_store.py",
+    "tests/test_postgres_store.py",
+]

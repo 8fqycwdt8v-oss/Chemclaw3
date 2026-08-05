@@ -254,7 +254,17 @@ case "${1:-up}" in
     pg_isready -h 127.0.0.1 -p "$PGPORT" || true
     temporal operator cluster health --address "127.0.0.1:$TEMPORAL_PORT" || true
     ;;
+  # The four verbs the chaos family needs. They are subcommands rather than inlined `pg_ctl` and
+  # `kill` calls inside the harness for the reason `connector_urls` reads the dev runner instead of
+  # rebuilding its port: one place knows how this stack is started, so a chaos test cannot restart
+  # it differently from how it was brought up and then measure the difference.
+  restart-postgres)
+    stop_postgres
+    start_postgres
+    ;;
+  stop-temporal) stop_temporal ;;
+  start-temporal) start_temporal ;;
   *)
-    die "usage: bootstrap.sh [up|down|status]"
+    die "usage: bootstrap.sh [up|down|status|restart-postgres|stop-temporal|start-temporal]"
     ;;
 esac

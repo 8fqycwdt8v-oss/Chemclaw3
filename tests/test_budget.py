@@ -160,3 +160,43 @@ def test_recently_checked_user_survives_eviction(
     tracker.record("s4", "carol", tokens=0)  # evicts bob, not alice
     with pytest.raises(BudgetExceeded, match="user turn budget"):
         tracker.check("s5", "alice")  # alice's spent budget still binds
+
+
+def test_tokens_accumulate_across_turns_rather_than_replacing_each_other(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """A token cap counts a session's *total*, so `_book` must add rather than assign.
+
+    Found by mutation testing (2026-08-04): changing `counter.tokens += max(tokens, 0)` to
+    `counter.tokens = max(tokens, 0)` survived the whole budget suite. Nothing here booked two
+    turns and then checked a token cap, so every existing test passed with a meter that
+    remembered only the last turn — and a token budget that only ever sees the newest turn is a
+    budget that is never reached, which is the failure mode of a runaway-cost guard that costs
+    money instead of saving it.
+
+    Three turns of 400 against a cap of 1000: assignment leaves the counter at 400 and admits a
+    fourth; addition reaches 1200 and refuses.
+    """
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    tracker = BudgetTracker()
+    for _ in range(3):
+        tracker.record("s1", None, tokens=400)
+    with pytest.raises(BudgetExceeded, match="session token budget"):
+        tracker.check("s1", None)
+
+
+def test_a_turn_that_metered_no_tokens_books_none(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """Zero is booked as zero — the other half of `max(tokens, 0)`, and also a survivor.
+
+    `max(tokens, 1)` survived too, which says the same thing from the opposite side: no test
+    distinguished a free turn from a one-token turn. It matters because a turn whose usage MAF
+    could not report meters as zero, and a guard that charged it anyway would make the token cap
+    a function of how many turns failed to report rather than of what they cost.
+    """
+    tracker = BudgetTracker()
+    for _ in range(50):
+        tracker.record("s-free", None, tokens=0)
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1)
+    tracker.check("s-free", None)  # fifty free turns must not have spent a single token

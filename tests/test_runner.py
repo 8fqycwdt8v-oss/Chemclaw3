@@ -13,6 +13,7 @@ reachability probe that lets the model plan against the surface it will actually
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -826,3 +827,93 @@ def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> No
     assert errors, "a turn that produced no text emitted no error — the silent death itself"
     assert errors[0].code == "empty_answer"
     assert errors[0].retryable is True, "a narrower question can succeed; this is not terminal"
+
+
+def test_a_named_fragment_stream_reassembles_into_one_call() -> None:
+    """The OpenAI Responses shape: every fragment carries the name *and* a partial document.
+
+    Measured live on 2026-08-04, driving the `openai_compatible` seam with a mock model: an
+    eight-fragment call produced **ten `tool_call` events against one `tool_result`**, the first
+    announcing `{"t` as though it were the whole argument document. `feed` had branched on
+    `name and arguments`, on the stated assumption that a streamed call's named content always
+    carries empty arguments and its fragments never carry a name — true of Anthropic, false of the
+    Responses API, and the `openai_compatible` path had never been exercised live.
+
+    A name says nothing about whether the arguments are finished. Only the arguments do.
+    """
+    trace = runner_trace.ToolCallTrace()
+    events: list[Event] = []
+    for fragment in ('{"a": 1', "7, ", '"b": 25}'):
+        events.extend(
+            trace.feed(_update(_CallContent(name="add", call_id="c1", arguments=fragment)))
+        )
+    events.extend(trace.flush())
+
+    calls = [e for e in events if isinstance(e, ToolCallEvent)]
+    assert len(calls) == 1, f"one call must announce once, got {[c.arguments for c in calls]}"
+    assert calls[0].tool == "add"
+    assert json.loads(calls[0].arguments) == {"a": 17, "b": 25}
+
+
+def test_a_whole_call_delivered_as_a_structured_object_still_announces_immediately() -> None:
+    """The other side of that fix: a Mapping is a finished call and must not wait for more.
+
+    Kept explicit because the fix narrowed the whole-call branch to the argument *type*; if that
+    narrowing had gone one step further and dropped the branch entirely, a non-streamed provider's
+    call would sit unannounced until the next update went by.
+    """
+    trace = runner_trace.ToolCallTrace()
+    events = trace.feed(_update(_CallContent(name="add", call_id="c9", arguments={"a": 1})))
+
+    calls = [e for e in events if isinstance(e, ToolCallEvent)]
+    assert len(calls) == 1
+    assert json.loads(calls[0].arguments) == {"a": 1}
+
+
+class _ResultOnlyContent:
+    """A function-result content: it carries a `call_id` and a `result`, and no `arguments` at all.
+
+    Distinct from `_CallContent`, which always defines `arguments` (as None when absent). The
+    difference is the point: `ToolCallTrace.feed` admits a content when it has *either* an
+    `arguments` attribute *or* a `call_id`, and a result content is the shape that has only the
+    second one. A class that defined both would make the guard untestable.
+    """
+
+    def __init__(self, *, call_id: str, result: str) -> None:
+        self.call_id = call_id
+        self.result = result
+
+
+def test_a_content_carrying_only_a_call_id_is_still_read() -> None:
+    """The duck-typing guard is `or`, not `and`, and a result content is why.
+
+    Found by mutation testing (2026-08-04): flipping
+    `hasattr(content, "arguments") or hasattr(content, "call_id")` to `and` survived every test of
+    this module. Under `and`, a function-result content — which has a `call_id` and no `arguments`
+    attribute — is skipped outright: no `tool_result` event, nothing appended to `outputs`, and
+    therefore no evidence for the answer verifier to score the answer against. Every citation in
+    that turn would read as fabricated.
+
+    That is the same species as the defect this module shipped on 2026-08-04, where a guard was
+    written against a stream shape somebody believed rather than one somebody had captured. So the
+    two shapes are asserted separately: a call announced from `arguments` alone, and a result read
+    from `call_id` alone.
+    """
+    trace = runner_trace.ToolCallTrace()
+    update = _Update()
+    update.contents = [_CallContent(name="find_notes", call_id="c1", arguments={"text": "x"})]
+    calls = trace.feed(update)
+    assert [event.tool for event in calls if isinstance(event, ToolCallEvent)] == ["find_notes"]
+
+    result_update = _Update()
+    result_update.contents = [_ResultOnlyContent(call_id="c1", result='[{"id": "note-a"}]')]
+    events = trace.feed(result_update)
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert [event.tool for event in results] == ["find_notes"], (
+        "a result content carries no name — it is matched back to its call by id, and dropping it "
+        "would leave the turn with a call nothing ever answered"
+    )
+    assert trace.outputs == ['[{"id": "note-a"}]'], (
+        "the full result text is what the answer verifier scores against; without it every "
+        "citation in the turn reads as fabricated"
+    )

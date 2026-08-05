@@ -3,6 +3,66 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Found by the deeper testing pass (2026-08-04)
+
+- [ ] **The PR-gate has a read window: an unreviewed note is readable as knowledge while the
+      submission holds the checkout** — [M], and it is a **compliance** finding rather than a
+      reliability one, because the PR-gate is the "AI proposes, human signs off" line (D-005).
+      Measured, not argued (`tests/test_pr_gate_read_window.py`): `settings.knowledge_path` is
+      `note_repo_dir / knowledge_dir`, the same working tree `GitNoteSubmitter` switches with
+      `git checkout -B note/<id>`; the note is committed into that tree; `invalidate_cache()` runs
+      only in `_return_to_base`, and `load_notes` caches for `graph_cache_ttl_seconds` (60 s). So a
+      concurrent reader — `find_notes`, `gather_evidence`, the digest job, the ELN sync — can read
+      the unreviewed note during the window **and keep serving it for up to a TTL afterwards**.
+      Nothing filters it: `created_by == "agent"` is read in exactly one place
+      (`retrieval/harness.py`, to label a chunk "agent-authored" in a report) and no reader consults
+      `note_proposals.state`. Reachable in the shipped topology, not only in dev — the runbook says
+      the retriever serves from that same tree "because it has to be".
+      **The fix is architectural**: `git worktree add` for the submission, so the shared tree is
+      never switched at all. `git_submitter.py`'s docstring already considered per-note worktrees
+      and rejected them as over-engineering *for concurrency* — this is a different reason, and it
+      was not weighed. Left unexecuted deliberately; the tests above pin today's behaviour so the
+      fix has a regression target.
+
+- [ ] **A SIGKILLed connector worker costs 600 s before its job resumes, and one setting decides
+      that for every calc job** — [M]. Measured by the storm's chaos family: the workflow is
+      interrupted at `species 1/5`, the activity stays `Started` against a worker identity that no
+      longer exists, and Temporal reschedules it only when `xtb_job_heartbeat_timeout_seconds`
+      expires — exactly the configured 600 s, after which the job completes normally. Durability
+      holds; the *latency* is the finding, and it had never been measured.
+      The coupling is the real issue. That one setting has to be longer than the slowest legitimate
+      gap between heartbeats — a CREST search, whose manifest says its cost "is not bounded by the
+      input's size" — **and** it is the only signal that detects a dead worker. So every calc job
+      pays the CREST-sized detection window, including the ones that heartbeat every few seconds.
+      A per-job value (long for the two `expensive: true` searches, short for everything else)
+      would decouple them; that is a config-surface decision, not a diff to slip in beside a test
+      pass. On OpenShift, where pod eviction is routine rather than exotic, this is ten minutes of
+      dead time per eviction.
+
+- [ ] **103 mutants survive in the seven invariant-bearing modules, and two files hold two thirds
+      of them** — [M]. `make mutants`, 686 mutants, 506 killed. The distribution is the finding:
+      `api/runner_trace.py` **37**, `kg/pr_gate.py` **29**, `kg/note.py` 16,
+      `science/calc/store.py` 11, `agent/authz.py` 8, `agent/audit_store.py` 2. The two leaders are
+      not a coincidence — `runner_trace.py` shipped a real defect on 2026-08-04, and `pr_gate.py`
+      is the GxP control whose read window this same pass measured. Three survivors were already
+      closed by the tests they asked for (budget token accumulation, the empty-role-list
+      convention, the `or`-vs-`and` duck-typing guard); these are what is left.
+      **Read them with the equivalent mutants subtracted.** `chain_hash`'s `chars=None` is
+      genuinely equivalent (64 chars either way), and most `authz.py` survivors are string
+      mutations that `pytest.raises(match=...)` cannot kill because it searches a substring. The
+      work is to walk the two leading files, not to drive the number to zero.
+      One notable non-string survivor: `PostgresAuditSink.record` with
+      `statement_timeout_seconds=None` — nothing asserts the audit insert carries a timeout.
+
+Closed by this pass: the storm's two missing families (E and H are wired, and `FAMILIES` plus the
+coverage table make an overstatement structurally impossible), and **SCALE-3** — see
+`docs/archive/storm-2026-08-04.md` for the per-cap tables and the mutation results. **The
+measurement is closed; the finest question it asks is not.** Raising the cap from 2 to 8 buys
+29–38 % goodput per step, far outside any measured noise — settled. Above 8 the steps buy 6–15 %
+against floors of 9 % and 15 %, so two back-to-back sweeps disagreed and the second correctly
+refused to name a knee. Whether 16 beats 8 needs more samples per cap (`--sweep-repeats`) or a
+quieter machine; the shipped default of 8 sits at the top of the resolved range.
+
 ## Open — Left by the live full-stack pass (2026-08-04)
 
 Full record with the measurements: `docs/archive/live-full-stack-2026-08-04.md`. Every layer live

@@ -108,6 +108,82 @@ Entra-enforced pass.
 
 ---
 
+## Follow-up: a much higher testing and review bar (same day)
+
+Record: `docs/archive/storm-2026-08-04.md`. Decisions:
+`docs/decisions/D-2026-08-04-the-schema-only-goes-forward.md`.
+
+**The state this started from was weaker than it read, and all three reasons were measurable
+rather than suspected:** the storm claimed eight scenario families and wired six; SCALE-3 was
+still open because the sweep varied *offered* load and never touched the cap; and no
+property-based, mutation or concurrency testing existed at all.
+
+- [x] **1. Make the harness honest before making it bigger.** `FAMILIES` declares the planned set,
+      the report prints planned-versus-ran, and the exit code depends on coverage as well as on
+      results. Families **E (chaos)** and **H (edges)** wired — the six dead behaviours now assert
+      something, plus the missing negative (arguments that parse and cannot be true).
+- [x] **2. Close SCALE-3.** `family_a_admission` restarts the front door at each
+      `service_max_concurrent_turns` ∈ {2,4,8,16,32} with offered load held at 48, **three samples
+      per cap**, and reads the knee against the spread those samples show rather than a threshold
+      chosen in advance.
+- [x] **3. Property-based tests.** `tests/test_properties_core.py` — nine properties over
+      `stable_hash`, `BoundedLru` and the two citation readers, the identity and bounding
+      primitives whose contracts are universally quantified.
+- [x] **4. Mutation testing configured.** `[tool.mutmut]` scoped to the seven invariant-bearing
+      modules; `make mutants` / `make mutant-results`.
+- [x] **5. Concurrency tests for the hazards that were only claims.**
+      `tests/test_concurrency_claims.py` and `tests/test_concurrency_audit_chain.py`.
+- [x] **6. The PR-gate read window, settled by measurement.**
+      `tests/test_pr_gate_read_window.py` — recorded, deliberately not fixed.
+- [x] **7. Migration rollback policy settled rather than left silent.**
+      `tests/test_migrations_are_additive.py` + ADR.
+
+---
+
+## Review — what was actually measured
+
+**Three product findings.** The `openai_compatible` streaming path announced **ten `tool_call`
+events for one call** (`c-fragmented` 10/1, `c-parallel` 18/6 → 1/1 and 6/6 after the fix) — a
+defect on the seam the target deployment uses, which CI and 3,000 tests had no way to see. A
+SIGKILLed connector worker costs **583 s** before its job resumes, because one setting must both
+tolerate a CREST-sized heartbeat gap and detect a dead worker. And **SCALE-3 is measured**: goodput rises 2.1×
+across the cap range, the 2 → 8 steps buy 29–38 % each (settled), and above 8 the steps are inside
+the sweep's own noise — two back-to-back sweeps disagreed and the second refused to name a knee,
+which is the harness reporting what it could not see rather than a number.
+
+**Four of the seven findings were in the measurement, not the product**, which is what happens the
+first time a signal is used:
+
+1. The storm reported "17/17 checks passed" for a matrix two families short of what it documented.
+2. Family D passed while measuring nothing — `<= 1` is a bound a run that launched nothing meets,
+   and the collision payload was cached from an earlier run. Fixing it surfaced the harder half:
+   the mock is a *separate process*, so a per-run constant does not make the payload cold.
+3. The sweep's throughput metric counted refusals as completions, which inverted SCALE-3's answer.
+   Draining a queue by refusing it is fast.
+4. Two checks were wrong about the system rather than the reverse (a 100 KB argument is legitimate
+   input; a new workflow need not recompute cached species) — the opposite correction, and worth
+   separating from the vacuous ones.
+5. **The knee was declared against a threshold nobody had measured**, one day after
+   D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with said not to. Three single-sample
+   runs straddled it, so the same stack answered "cap 8" twice and "no knee" once. Judged against
+   the sweep's own measured spread, two sweeps still disagreed (knee at 16, then unresolvable) —
+   so the answer is that the fine question is open and the harness now says so. And the correction
+   introduced its own failure: a noise floor makes a knee fire *sooner*, so a sweep that could see
+   nothing would have named cap 2 — caught only by writing the test for the opposite behaviour and
+   watching it fail.
+
+**One thing proven rather than asserted.** The audit-chain concurrency tests were shown to kill
+the mutant they exist for: with `pg_advisory_xact_lock` replaced by `pass`, both fail; restored,
+both pass. A green concurrency test whose guard can be deleted without it noticing is worse than
+none, because it gets cited.
+
+**Left open, deliberately:** the PR-gate's read window (the fix is an architectural change to a GxP
+control — `git worktree` for the submission — and is a decision to take, not a diff to slip in),
+and the heartbeat/detection coupling (a config-surface decision). Both in
+`docs/planning/BACKLOG.md` with their measurements and regression targets.
+
+---
+
 # Task: the BO capability audit and its five-wave roadmap
 
 Branches `claude/bofire-capabilities-roadmap-pmeipd` (#111) then one per wave: W1 #114, W2 #117,
