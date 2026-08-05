@@ -60,9 +60,27 @@ class StoreSettings(BaseSettings):
     # `min_size` connections are kept warm so the first request after an idle period does not pay
     # a handshake. `max_size` bounds one process; the deployment total is
     # `max_size × distinct DSNs × processes` (front-door replicas × `service_uvicorn_workers`,
-    # plus the workers), which must stay under the server's `max_connections`.
+    # plus the workers), which must stay under the server's `max_connections` — see
+    # `pg_fleet_max_connections` below, which is what turns that sentence into a check.
     pg_pool_min_size: int = Field(default=2, ge=0)
     pg_pool_max_size: int = Field(default=16, gt=0)
+    # The two halves of the fleet connection budget
+    # (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+    #
+    # The sentence above stated the multiplication and nothing computed it, so the shipped chart
+    # ran every one of its pods on the default `max_size=16` and the fleet's real ceiling was
+    # ~272 connections against the `max_connections=100` D-119 measured against. That is the same
+    # shape as the admission cap before `service_fleet_max_concurrent_turns`: a per-process bound
+    # that is correct in every pod while the fleet total is not, and no single pod can see it.
+    #
+    # `pg_fleet_pooled_processes` is how many processes may open a pool at once — every front-door
+    # process, every Temporal worker, every connector server. The chart derives it from the same
+    # values that render those Deployments (`chemclaw.pooledProcesses`), so it cannot disagree with
+    # the pods that exist. `pg_fleet_max_connections` is what the server will actually serve this
+    # deployment; 0 means undeclared and the check is inert, matching how the turn ceiling and the
+    # artifact-eviction budgets ship off until an operator states a number.
+    pg_fleet_pooled_processes: int = Field(default=1, gt=0)
+    pg_fleet_max_connections: int = Field(default=0, ge=0)
     # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
     pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)
     # How long a caller waits for a free pooled connection before the request fails as a

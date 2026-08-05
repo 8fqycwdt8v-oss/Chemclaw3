@@ -271,6 +271,16 @@ _GAUGES: dict[str, str] = {
     "chemclaw_pg_pool_size": "Connections held across this process's Postgres pools.",
     "chemclaw_pg_pool_available": "Pooled connections currently idle and available.",
     "chemclaw_pg_pool_requests_waiting": "Callers blocked waiting for a pooled connection.",
+    # The connection budget's two sides, the same pairing `chemclaw_turn_capacity` and
+    # `chemclaw_fleet_turn_ceiling` make one subject over: `sum()` of the per-process ceiling is
+    # what this deployment may open, and the declared number is what the server will serve. Config
+    # validation refuses a bad product at startup but only for the shape the chart rendered, so a
+    # `kubectl scale` or an in-cluster HPA edit is visible only by comparing these two. 0 when
+    # undeclared, which is what makes the alert self-disabling.
+    "chemclaw_pg_pool_max_size": "This process's configured maximum pooled connections.",
+    "chemclaw_pg_fleet_max_connections": (
+        "Declared fleet-wide ceiling on Postgres connections (0 = none)."
+    ),
 }
 
 

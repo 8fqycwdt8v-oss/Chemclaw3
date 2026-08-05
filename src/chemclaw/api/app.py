@@ -319,16 +319,11 @@ def create_app(
     # infinity, not 0: an empty snapshot must always be treated as stale, and 0 would be "fresh"
     # for the first `service_readiness_cache_seconds` of process uptime.
     app.state.connector_health_at = float("-inf")
-    # Pool saturation (D-119). Read live from the pools rather than mirrored, like every other
-    # gauge here; `requests_waiting` above zero is what "the pool is too small" looks like, and it
-    # is the only reading that distinguishes it from an unreachable database.
-    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(db.pool_stats()["pool_size"]))
-    METRICS.bind_gauge(
-        "chemclaw_pg_pool_available", lambda: float(db.pool_stats()["pool_available"])
-    )
-    METRICS.bind_gauge(
-        "chemclaw_pg_pool_requests_waiting", lambda: float(db.pool_stats()["requests_waiting"])
-    )
+    # The pool gauges are deliberately *not* bound here any more (D-119's saturation signal, plus
+    # the connection-budget pair). `chemclaw.core.db.pooling` binds them, so every process that
+    # opens a pool reports on it rather than only the one process that happened to have the
+    # binding — the workers and connector servers pool too and were reporting nothing
+    # (D-2026-08-05-the-connection-budget-is-a-fleet-number).
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
         lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),

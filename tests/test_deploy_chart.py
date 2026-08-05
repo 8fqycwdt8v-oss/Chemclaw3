@@ -870,6 +870,101 @@ def test_the_fleet_ceiling_has_a_runtime_check_config_validation_cannot_do() -> 
     )
 
 
+def _pooled_processes(values: dict[str, Any]) -> int:
+    """The processes this chart renders that open a Postgres pool — the helper's arithmetic.
+
+    Kept here rather than read out of the template because the point of the test is to check the
+    template against the topology *independently*; reading its own answer back would assert
+    nothing.
+    """
+    autoscaling = values["service"]["autoscaling"]
+    total = autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
+    total += values["workers"]["background"]["replicas"]
+    for bundle in values["connectors"].values():
+        if not bundle["enabled"]:
+            continue
+        if bundle.get("server"):
+            total += bundle["replicas"]
+        if bundle.get("worker"):
+            total += bundle["replicas"]
+    return int(total)
+
+
+def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() -> None:
+    """The chart may not declare a connection ceiling its own pod count exceeds.
+
+    `core/config/store.py` stated "the deployment total is max_size × processes, which must stay
+    under the server's max_connections" and nothing computed it, so the chart set no pool key at
+    all: every pod ran the code default of 16, and seventeen pooled processes made the fleet's
+    ceiling ~272 against the `max_connections=100` D-119 measured against. `Settings` now refuses
+    the product — which means shipping a chart whose own values exceed it would CrashLoop every
+    pod on first deploy. This is the check that catches that here instead.
+    """
+    values = _values()
+    processes = _pooled_processes(values)
+    per_pool = int(values["config"]["CHEMCLAW_PG_POOL_MAX_SIZE"])
+    declared = int(values["postgres"]["maxConnections"])
+
+    assert processes * per_pool <= declared, (
+        f"the chart scales to {processes} pooled processes × {per_pool} connections = "
+        f"{processes * per_pool} against a declared ceiling of {declared}; every pod would refuse "
+        "to start"
+    )
+
+    # Derived from the topology, never hand-written beside it — a second copy of the replica counts
+    # goes stale the first time a connector is enabled, which is exactly the silent multiplication
+    # the ceiling exists to catch, reintroduced by the mechanism meant to catch it.
+    assert "CHEMCLAW_PG_FLEET_POOLED_PROCESSES" not in values["config"], (
+        "the pooled-process count must be derived in templates/_helpers.tpl, not hand-written"
+    )
+    config_template = (CHART / "templates" / "config.yaml").read_text()
+    assert re.search(
+        r"^\s*CHEMCLAW_PG_FLEET_POOLED_PROCESSES:.*chemclaw\.pooledProcesses",
+        config_template,
+        flags=re.MULTILINE,
+    ), "CHEMCLAW_PG_FLEET_POOLED_PROCESSES does not come from the rendered topology"
+
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, definition = helpers.partition('define "chemclaw.pooledProcesses"')
+    assert definition, "_helpers.tpl defines no chemclaw.pooledProcesses"
+    # The front door counts at its HPA ceiling, not its floor: a budget that only holds at
+    # minReplicas is a budget the fleet breaks by scaling up, which is what it is for.
+    assert ".Values.service.autoscaling.maxReplicas" in definition
+    # And every other pooled process comes from the same blocks the Deployments do.
+    assert ".Values.workers.background.replicas" in definition
+    assert "range $name, $cfg := .Values.connectors" in definition
+
+
+def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
+    """The same blind spot the turn ceiling has, for the same reason, needing the same pair.
+
+    Startup validation sees the shape the chart rendered, once. A `kubectl scale`, an HPA edited in
+    the cluster, or a rollout leaving both generations up all push the live sum past the server's
+    ceiling while every pod's own configuration stays valid.
+
+    The saturation alert is the other half and is the older gap: `requests_waiting` has existed
+    since D-119 as *the* reading that separates an undersized pool from an unreachable database,
+    and nothing consumed it — so the signal was collected and never watched.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    assert "ChemclawFleetAboveItsConnectionCeiling" in rules
+    assert "sum(chemclaw_pg_pool_max_size) > max(chemclaw_pg_fleet_max_connections)" in rules
+    # Self-disabling, or every deployment that declares no ceiling alerts forever.
+    assert "max(chemclaw_pg_fleet_max_connections) > 0" in rules
+    assert "ChemclawPgPoolSaturated" in rules
+    assert "max(chemclaw_pg_pool_requests_waiting) > 0" in rules
+
+    from chemclaw.core.db import bind_pool_metrics
+    from chemclaw.core.metrics import METRICS
+
+    # Bound explicitly: an unbound gauge is omitted from the exposition, so asserting on the shared
+    # registry without this would depend on whether some earlier test opened a pool.
+    bind_pool_metrics()
+    rendered = METRICS.render()
+    for gauge in ("chemclaw_pg_pool_max_size", "chemclaw_pg_fleet_max_connections"):
+        assert gauge in rendered, f"the alert compares against {gauge}, which the app never exposes"
+
+
 def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     """Helm waits for a `pre-upgrade` hook, so a Job with no deadline is an unbounded wait.
 

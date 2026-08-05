@@ -179,6 +179,34 @@ connectorPort: 8080
 # port to deconflict, and one number keeps the monitor and the probes consistent by construction.
 workerMetricsPort: 9000
 
+# The database this release talks to. The chart does not deploy Postgres (see the ownership row in
+# `docs/planning/BACKLOG.md`); what it declares here is what it is allowed to *ask* of one.
+postgres:
+  # What the server will serve this deployment, in connections — the right-hand side of a bound
+  # `core/config/store.py` stated in prose for a year and nothing computed
+  # (D-2026-08-05-the-connection-budget-is-a-fleet-number). Every pooled process opens up to
+  # CHEMCLAW_PG_POOL_MAX_SIZE, so the number the database sees is that times
+  # `chemclaw.pooledProcesses`, and until this existed the shipped chart's product was ~272
+  # against the `max_connections=100` D-119 measured against.
+  #
+  # 136 is exactly what the shipped values produce (17 pooled processes × the 8 below),
+  # deliberately — this ships as a *statement* of the current shape rather than as slack, the same
+  # way CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS does. Anything that exceeds it fails `Settings`
+  # validation at startup, in every pod, naming both sides; the runtime half is
+  # `chemclaw_pg_fleet_max_connections` against `sum(chemclaw_pg_pool_max_size)`, which also
+  # catches a Deployment scaled by hand.
+  #
+  # **This is a provisioning requirement, not a preference.** A stock Postgres ships
+  # `max_connections=100` and will refuse this release at full scale. Either provision the instance
+  # for 136 plus whatever else shares it, or lower CHEMCLAW_PG_POOL_MAX_SIZE below until the
+  # product fits what you have — the startup check tells you which, in every pod, with both
+  # numbers in the message. What it will not do any more is let the fleet find out under load,
+  # which is how D-119's connect timeouts presented: an idle database and a service that could not
+  # reach it.
+  #
+  # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
+  maxConnections: 136
+
 # The pre-install/pre-upgrade migration hook (D-034).
 migrateJob:
   # Four attempts. A migration failure is usually a lock it could not get within
@@ -227,6 +255,13 @@ config:
   CHEMCLAW_HARNESS_ENABLED: "true"
   CHEMCLAW_HARNESS_AUTONOMY: "plan_only"
   CHEMCLAW_SESSION_STORE: "postgres"
+  # Stated rather than left to the code default (16), because the code default was chosen for one
+  # process and this chart runs seventeen of them. 8 matches the front door's own admission cap
+  # (CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS below), which is the process with the most claim on
+  # connections — no turn holds one across the model call, so a pool the width of the admission cap
+  # already has headroom. `postgres.maxConnections` above is this times the pooled-process count,
+  # and `Settings` refuses the pair if they stop agreeing.
+  CHEMCLAW_PG_POOL_MAX_SIZE: "8"
   # Stated rather than left to the code default, because the chart *derives* the publish target from
   # it: the knowledge-sync containers write to `knowledge.noteRepoPath` + this, which is exactly how
   # `Settings.knowledge_path` resolves. Left implicit, the chart would have to name the notes

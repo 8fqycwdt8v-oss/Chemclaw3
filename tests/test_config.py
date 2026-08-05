@@ -598,6 +598,53 @@ def test_the_fleet_ceiling_error_names_both_sides_and_every_factor() -> None:
     assert "service_fleet_max_concurrent_turns" in message
 
 
+def test_the_connection_budget_is_undeclared_by_default() -> None:
+    """A dev run, a CLI and a test have one process and no fleet, so there is nothing to bound.
+
+    Same split the turn ceiling takes, and for the same reason: a guard that fires on a laptop is a
+    guard people switch off in production too.
+    """
+    settings = Settings(_env_file=None, pg_pool_max_size=64)  # type: ignore[call-arg]
+    assert settings.pg_fleet_max_connections == 0
+
+
+def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
+    """`>`, not `>=` — the shipped chart sits exactly on its own number.
+
+    `values.yaml` declares 136 against 17 pooled processes × a pool of 8, deliberately, so the
+    ceiling ships as a statement of the current shape rather than as slack. Off by one here and
+    every pod the chart renders refuses to start.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        pg_fleet_pooled_processes=17,
+        pg_pool_max_size=8,
+        pg_fleet_max_connections=136,
+    )
+    assert settings.pg_fleet_max_connections == 136
+
+
+def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
+    """The product is the thing nobody had computed, so the message has to show it.
+
+    `core/config/store.py` stated "keep it under the server's max_connections" in prose and nothing
+    computed the left-hand side, so the shipped chart ran every pod on the default pool of 16 and
+    the fleet's real ceiling was ~272 against the max_connections=100 D-119 measured against. An
+    operator seeing this needs both numbers and both levers, not the name of one setting.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pooled_processes=17,
+            pg_pool_max_size=16,
+            pg_fleet_max_connections=136,
+        )
+    message = str(excinfo.value)
+    assert "272" in message and "136" in message
+    assert "17 pooled process" in message and "16 per pool" in message
+    assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
+
+
 def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() -> None:
     """Widening the scope must not make it unconditional.
 
