@@ -79,9 +79,16 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
 
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
 # expired row are visited, so a deployment whose sessions are all recent pays one indexed scan.
+#
+# `LIMIT` because one activity must not attempt unbounded work. The first pass against a deployment
+# that has never pruned faces every session it has ever had, under a 30 s `statement_timeout` per
+# statement — and a pass that times out is retried by Temporal, times out again, and exhausts
+# `activity_max_attempts` having deleted nothing. A bounded batch makes progress on every pass and
+# the schedule drains the tail; the count of what was left is reported rather than dropped.
 _EXPIRED_SESSIONS = (
     "SELECT DISTINCT session_id FROM session_messages "
-    "WHERE created_at < now() - make_interval(days => %s)"
+    "WHERE created_at < now() - make_interval(days => %s) "
+    "ORDER BY session_id LIMIT %s"
 )
 # The whole session, in id order: the pairing closure needs the partners, which are frequently the
 # rows that are *not* expiring.
@@ -94,10 +101,16 @@ _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%
 
 
 class RetentionOutcome(BaseModel):
-    """What one retention pass removed, per table — the job's own audit record."""
+    """What one retention pass removed, per table — the job's own audit record.
+
+    `sessions_deferred` is how many expired sessions the pass did not reach, because a cap that is
+    not reported reads as "there was nothing more": a table still growing would look bounded in
+    every result this job returns. Non-zero simply means the next scheduled pass has work.
+    """
 
     deleted: dict[str, int] = {}
     skipped: list[str] = []
+    sessions_deferred: int = 0
 
 
 def _window_days(table: str) -> int:
@@ -120,6 +133,13 @@ async def prune_expired_rows() -> RetentionOutcome:
     one that fails outright, because the growth it was meant to bound continues while the log says
     otherwise. Committing per table also bounds each transaction to one table's locks.
 
+    The same argument then applied one level down and was not made there: `session_messages` is
+    pruned per *session*, and every session's deletions sat in one transaction that committed after
+    the loop. A failure on the four thousandth session discarded the first three thousand nine
+    hundred and ninety-nine, and the transaction held its row locks across the whole sweep on the
+    single-replica background worker. So the fix is the same fix: commit each session
+    (D-2026-08-05-a-sweep-that-commits-once).
+
     The cutoff is computed in SQL (`now() - interval`) so the app clock and the database clock
     cannot disagree about what "expired" means.
     """
@@ -136,9 +156,11 @@ async def prune_expired_rows() -> RetentionOutcome:
             if table == "session_messages":
                 # Not a single sweeping DELETE: a conversation row's disposability depends on rows
                 # that may not be expiring (see the module docstring). Per session, through the
-                # pairing closure.
-                outcome.deleted[table] = await _prune_session_messages(conn, days)
-                await conn.commit()
+                # pairing closure — and committing per session, which is why no `commit()` follows
+                # this call.
+                deleted, deferred = await _prune_session_messages(conn, days)
+                outcome.deleted[table] = deleted
+                outcome.sessions_deferred = deferred
                 continue
             async with conn.cursor() as cur:
                 # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
@@ -153,8 +175,10 @@ async def prune_expired_rows() -> RetentionOutcome:
     return outcome
 
 
-async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) -> int:
-    """Delete expired conversation rows, never splitting a tool-call pairing; return the count.
+async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) -> tuple[int, int]:
+    """Delete expired conversation rows, never splitting a tool-call pairing.
+
+    Returns `(rows deleted, sessions this pass did not reach)`.
 
     Three statements per session rather than one across the table, because the decision is not
     expressible in SQL: whether an expired row may go depends on whether the rows *paired with it*
@@ -164,12 +188,27 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
     candidate's partner being non-expired is exactly the case worth catching, and a partial view
     would report the split component as safe. Sessions are handled one at a time so the memory cost
     is one conversation, not the whole expired backlog.
+
+    **One transaction per session.** Each session's deletion is committed before the next is read,
+    so a failure part way through keeps everything already removed rather than discarding the whole
+    pass — the identical argument `prune_expired_rows` makes for committing per table, which had
+    not been made here. It also bounds how long this holds row locks: one session's worth, not the
+    entire backlog's, which matters because the sweep shares the single-replica background worker
+    with every other scheduled activity.
+
+    The batch is capped and the remainder returned. A first pass against a deployment that has
+    never pruned would otherwise take an unbounded number of round trips inside one activity, and
+    exceeding `retention_timeout_seconds` costs an attempt having committed only what it reached —
+    with the cap it commits a bounded amount and says how much is left.
     """
     deleted = 0
+    cap = settings.retention_max_sessions_per_pass
     async with conn.cursor() as cur:
-        await cur.execute(_EXPIRED_SESSIONS, (days,))
+        await cur.execute(_EXPIRED_SESSIONS, (days, cap + 1))
         session_ids = [row[0] for row in await cur.fetchall()]
-    for session_id in session_ids:
+    # One over the cap was requested purely to learn whether there is a tail; it is not worked.
+    deferred = max(len(session_ids) - cap, 0)
+    for session_id in session_ids[:cap]:
         async with conn.cursor() as cur:
             await cur.execute(_SESSION_ROWS, (session_id,))
             rows = [(int(row[0]), Message.from_dict(row[1])) for row in await cur.fetchall()]
@@ -180,7 +219,8 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
                 continue
             await cur.execute(_DELETE_IDS, (session_id, sorted(disposable)))
             deleted += max(cur.rowcount, 0)
-    return deleted
+        await conn.commit()
+    return deleted, deferred
 
 
 @durable_workflow("background")
