@@ -17,6 +17,7 @@ tools:
   - campaign_progress
   - predict_outcome
   - propose_knowledge_note
+  - similar_reactions
 ---
 
 # Experiment design
@@ -90,7 +91,7 @@ line of enquiry into a design space just because a design space is what this too
    worth stating to the user: the descriptors are **electronic only** — two ligands differing
    mainly in bulk look similar — and a wrong SMILES silently describes the wrong molecule, so
    only supply structures you are sure of.
-3. **Seed with real runs.** Gather the transformation's history (`find_similar_reactions`, an
+3. **Seed with real runs.** Gather the transformation's history (`similar_reactions`, an
    `optimization-campaign` note) and turn each run into an observation: its conditions →
    objective value. Mark `provenance` "measured" for lab data, "predicted" if you filled a
    value from a model. With no runs on file, the tool returns space-filling seed points — say

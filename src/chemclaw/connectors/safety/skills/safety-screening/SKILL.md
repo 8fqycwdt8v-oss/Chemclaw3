@@ -7,6 +7,10 @@ description: >-
   assessment begins. Load this before answering anything about mutagenicity, genotoxicity, ICH M7,
   nitrosamines, elemental impurities or residual solvents — three of those now have a table and
   none of them has a model, and the difference is the whole content of this skill.
+tools:
+  - screen_hazards
+  - screen_genotoxic_alerts
+  - ich_impurity_limit
 ---
 
 # Safety screening

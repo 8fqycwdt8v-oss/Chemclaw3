@@ -8,9 +8,10 @@ and the retrieval path that `gather_evidence` drives, every duplicated rule foun
 producing a defect or one edit away from producing one — and the one performance finding was the
 opposite shape, a derivation stated *nowhere* as reusable and therefore repeated on every call.
 
-_(The previous occupant of this file was the live-test lane for Temporal + durable workflows + LLM +
-Postgres, `docs/decisions/D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md`; it is in
-`git log`.)_
+_(The previous occupant of this file was the tool/skill seam (#129,
+`docs/decisions/D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md`), which landed on
+`main` while this branch was in flight; before that, the live-test lane for Temporal + durable
+workflows (#124/#127). Both are in `git log`.)_
 
 ---
 
@@ -36,7 +37,7 @@ Postgres, `docs/decisions/D-2026-08-04-a-lane-that-only-runs-where-docker-runs.m
 
 ---
 
-## Review — what was actually measured
+## Review
 
 **The plan emitted as an empty checklist.** Two emit sites, two predicates: the turn loop guarded on
 truthiness, the post-resume site on `is not None`. A turn that empties its todo list during a

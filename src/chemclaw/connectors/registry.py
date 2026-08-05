@@ -471,6 +471,30 @@ def find_job(name: str) -> tuple[str, JobSpec]:
     raise ConnectorError(f"unknown connector job {name!r}; declared jobs: {valid}")
 
 
+def endpoint_tool_names(servers: Iterable[str] | None = None) -> list[str]:
+    """The MCP tools the enabled connectors' *endpoints* serve, sorted; `servers` selects bundles.
+
+    Distinct from `job_names` (the generated launchers, which are in-process registry tools) and
+    from `connector_tool_names` (their union). The caller that wants this one wants the half that
+    travels over MCP specifically, because that is the half a profile's `mcp_server_names` selects:
+    `chemclaw.agent.chemclaw_agent.advertised_tool_names` has to answer "what will this profile's
+    agent actually be able to call" without *building* the connector tools, since constructing one
+    opens an httpx client that nothing would then close.
+
+    Args:
+        servers: The connector names to include; `None` (the default) means every enabled bundle.
+            A name here that no enabled bundle provides is silently ignored — this function reports
+            a surface, and `connector_tools` is where a profile naming an unknown connector fails.
+    """
+    names: set[str] = set()
+    for manifest in enabled():
+        if servers is not None and manifest.name not in servers:
+            continue
+        if manifest.endpoint is not None:
+            names.update(manifest.endpoint.tools)
+    return sorted(names)
+
+
 def connector_tool_names() -> list[str]:
     """Every tool name the enabled connectors advertise — endpoint tools and job tools, sorted.
 
@@ -478,9 +502,4 @@ def connector_tool_names() -> list[str]:
     declared names
     against, so a skill or a prompt that teaches a connector tool cannot outlive it.
     """
-    names: set[str] = set()
-    for manifest in enabled():
-        if manifest.endpoint is not None:
-            names.update(manifest.endpoint.tools)
-        names.update(job.name for job in manifest.jobs)
-    return sorted(names)
+    return sorted(set(endpoint_tool_names()) | set(job_names()))

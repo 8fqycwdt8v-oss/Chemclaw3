@@ -9,10 +9,11 @@ without any credentials or database. It answers one concrete question end to end
      reasonable solvent to try, and what conditions should I run next?"
 
 Every store is in-memory and the knowledge graph is a temp directory, seeded here; the tools
-(`gather_evidence`, `find_similar_reactions`, `predict_solubility`, `suggest_next_experiment`)
-are the real ones, wired through the module seams tests use — `predict_solubility` now from
-the `calc` connector bundle, which is where the calculators live now that they run in their
-own process.
+(`gather_evidence`, `similar_reactions`, `predict_solubility`, `suggest_next_experiment`)
+are the real ones, wired through the module seams tests use. Three of the four now come straight
+out of their connector bundle's own server module, which is where the capability lives now that it
+runs in its own process — so this walkthrough drives exactly the functions a turn reaches over MCP,
+rather than an in-process lookalike of them.
 
 Run: `python -m examples.research_demo`.
 """
@@ -22,12 +23,12 @@ import tempfile
 from pathlib import Path
 
 import chemclaw.agent.research_tools as research_tools
-import chemclaw.agent.search_tools as search_tools
 import chemclaw.connectors.calc.server.tools as calc_tools
+import chemclaw.connectors.rxnfp.server.tools as rxnfp_tools
 from chemclaw.agent.research_tools import gather_evidence
-from chemclaw.agent.search_tools import find_similar_reactions
 from chemclaw.connectors.bo.server.tools import suggest_next_experiment
 from chemclaw.connectors.calc.server.tools import predict_solubility
+from chemclaw.connectors.rxnfp.server.tools import similar_reactions
 from chemclaw.core.config import settings
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
@@ -82,11 +83,12 @@ async def _investigate() -> str:
     for chunk in evidence:
         lines.append(f"- [{chunk.retriever}] [[{chunk.source_note_id}]]: {chunk.content}")
 
-    # 2) Cross-learn by structure: past runs of this exact transformation.
-    search = await find_similar_reactions(_ESTER)
+    # 2) Cross-learn by structure: past runs of this exact transformation. A hit's `id` is already
+    #    the reaction's note id, so it can be cited (or expanded) without a second lookup.
+    search = await similar_reactions(_ESTER)
     lines.append("\n## 2. Structurally similar past reactions")
     for hit in search.hits:
-        lines.append(f"- [[{hit.reaction_note_id}]] (Tanimoto {hit.similarity:.2f})")
+        lines.append(f"- [[{hit.id}]] (Tanimoto {hit.similarity:.2f})")
 
     # 3) Proactively compute a property the record is silent on: is the untried solvent
     #    2-MeTHF comparable to the tested THF? Real ESOL model, no database.
@@ -138,7 +140,7 @@ def run_demo() -> str:
     """
     saved_dir = settings.knowledge_dir
     saved_research = research_tools._reaction_store
-    saved_search = search_tools._reaction_store
+    saved_rxnfp = rxnfp_tools._store
     saved_calc = calc_tools.default_store
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,13 +151,16 @@ def run_demo() -> str:
             # The in-memory stores satisfy the same contracts as the production Postgres ones;
             # the ignores are only because these attributes are typed to the concrete backend.
             research_tools._reaction_store = lambda: reaction_store  # type: ignore[assignment,return-value]
-            search_tools._reaction_store = lambda: reaction_store  # type: ignore[assignment,return-value]
+            # The connector holds its store as a module-level object rather than a factory, which
+            # is the difference between a bundle that owns one store for its process and a core
+            # tool that resolves one per call.
+            rxnfp_tools._store = reaction_store
             calc_tools.default_store = lambda: calc_store
             return asyncio.run(_investigate())
     finally:
         settings.knowledge_dir = saved_dir
         research_tools._reaction_store = saved_research
-        search_tools._reaction_store = saved_search
+        rxnfp_tools._store = saved_rxnfp
         calc_tools.default_store = saved_calc
 
 
