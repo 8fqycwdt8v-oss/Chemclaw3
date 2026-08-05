@@ -7,17 +7,19 @@ refusal — the objection was that `cross_validate` forces us to name a surrogat
 """
 
 import asyncio
+import re
 
 import pytest
 
-from chemclaw.connectors.bo.server.tools import predict_outcome
-from chemclaw.science.bo.engine import predict_at, surrogate_fit_quality
+from chemclaw.connectors.bo.server.tools import predict_outcome, suggest_next_experiment
+from chemclaw.science.bo.engine import interrogate_surrogate, predict_at, surrogate_fit_quality
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
     Objective,
     Observation,
     OptimizationProblem,
+    pareto_front,
     point_in_domain,
 )
 
@@ -248,12 +250,16 @@ def test_the_tool_returns_predictions_and_the_fit_behind_them() -> None:
 
 
 def test_the_tool_can_skip_the_fit_assessment() -> None:
-    """Cross-validation costs extra fits; a follow-up in the same turn need not repay them."""
+    """Cross-validation costs extra fits; a follow-up in the same turn need not repay them.
+
+    The summary used to be empty here and now says the fit was not assessed — a blank caveat reads
+    as "no caveat", which is the opposite of what it means.
+    """
     answer = asyncio.run(
         predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}], False)
     )
     assert answer.fit == []
-    assert answer.summary == ""
+    assert "not assessed" in answer.summary
 
 
 def test_the_tool_refuses_a_point_that_does_not_name_every_parameter() -> None:
@@ -300,3 +306,158 @@ def test_the_tool_the_model_sees_says_a_prediction_endorses_nothing() -> None:
     assert "endorses nothing" in description
     assert "in_domain" in description
     assert "unexplored corner" in description
+
+
+# --- one fit, and the fold count that made the tool unusable early on -------------------------
+
+
+def test_a_short_campaign_is_cross_validated_rather_than_refused() -> None:
+    """The bug the review found: `predict_outcome` raised on every 3- and 4-run campaign.
+
+    `bo_cv_folds` is 5 and the tool always defaulted, so a campaign above the seeding floor but
+    below five runs — the early campaign this tool is most useful for — got a `ValueError` instead
+    of an answer. A defaulted fold count now bends to the run count, and `FitQuality.folds` records
+    what was actually used so the adaptation is visible rather than hidden.
+    """
+    for n in (3, 4):
+        answer = asyncio.run(
+            predict_outcome(_problem(), _runs()[:n], [{"temperature": 60.0, "solvent": "THF"}])
+        )
+        assert answer.fit[0].folds == n
+        assert answer.fit[0].n_observations == n
+
+
+def test_a_fold_count_the_caller_named_is_still_refused_when_the_runs_cannot_carry_it() -> None:
+    """A stated number is a claim; a defaulted one is the system's choice.
+
+    Silently adapting a fold count the caller asked for would answer a different question than the
+    one put — the same reasoning that refuses an inert screening knob rather than ignoring it.
+    """
+    with pytest.raises(ValueError, match="less than one run"):
+        surrogate_fit_quality(_problem(), _runs()[:3], folds=5)
+
+
+def test_the_prediction_and_the_score_come_from_one_fit() -> None:
+    """`interrogate_surrogate` is the single entry point, and the tool goes through it.
+
+    Fitting twice would give two identically-configured models and make "the score describes the
+    model that made this prediction" true only by construction. One fit makes it true by
+    arithmetic — and it is the claim the whole capability rests on.
+    """
+    predictions, fit = interrogate_surrogate(
+        _problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}]
+    )
+    assert len(predictions) == 1
+    assert len(fit) == 1
+    # The prediction *is* deterministic — `strategy.predict` on a fitted strategy is arithmetic —
+    # so the wrapper must agree with the combined call exactly. The score is not (see below).
+    alone = predict_at(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}])[0]
+    assert alone.values == pytest.approx(predictions[0].values)
+
+
+def test_asking_for_neither_a_prediction_nor_a_score_is_refused() -> None:
+    """An empty ask is a caller mistake, not an empty answer — the same posture as no points."""
+    with pytest.raises(ValueError, match="neither a prediction nor a fit"):
+        interrogate_surrogate(_problem(), _runs(), [], assess_fit=False)
+
+
+def test_a_skipped_fit_says_so_rather_than_returning_an_empty_summary() -> None:
+    """A blank summary reads as "no caveat", which is the opposite of what it means."""
+    answer = asyncio.run(
+        predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}], False)
+    )
+    assert answer.fit == []
+    assert "not assessed" in answer.summary
+
+
+# --- the front and the assay it was drawn with -------------------------------------------------
+
+
+def _trade_off() -> tuple[OptimizationProblem, list[Observation]]:
+    """Two runs whose impurity differs by less than any real assay can resolve."""
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="temperature", lower=20.0, upper=120.0)],
+        objectives=[
+            Objective(name="yield", direction="maximize"),
+            Objective(name="impurity", direction="minimize"),
+        ],
+    )
+    runs = [
+        Observation(
+            params={"temperature": 60.0}, value=80.0, values={"yield": 80.0, "impurity": 5.00}
+        ),
+        # Same yield, impurity better by 0.01 — real to a float, invisible to an assay.
+        Observation(
+            params={"temperature": 61.0}, value=80.0, values={"yield": 80.0, "impurity": 4.99}
+        ),
+    ]
+    return problem, runs
+
+
+def test_the_front_at_exact_precision_splits_runs_no_assay_could_tell_apart() -> None:
+    """The behaviour that prompted the tolerance, pinned so the default is a decision, not drift."""
+    problem, runs = _trade_off()
+    assert len(pareto_front(problem, runs)) == 1
+
+
+def test_a_tolerance_keeps_both_runs_the_assay_cannot_separate() -> None:
+    """With the chemist's own reproducibility, a 0.01 difference is not a difference."""
+    problem, runs = _trade_off()
+    assert len(pareto_front(problem, runs, tolerance=0.5)) == 2
+
+
+def test_the_default_tolerance_reproduces_the_front_exactly() -> None:
+    """`0.0` must be the old behaviour to the last bit — no persisted front moves."""
+    problem, runs = _trade_off()
+    assert pareto_front(problem, runs, 0.0) == pareto_front(problem, runs)
+
+
+def test_a_negative_tolerance_is_refused() -> None:
+    """It is an assay reproducibility, and a negative one would invert the comparison."""
+    problem, runs = _trade_off()
+    with pytest.raises(ValueError, match="cannot be negative"):
+        pareto_front(problem, runs, tolerance=-1.0)
+
+
+def test_the_suggestion_says_which_front_it_drew() -> None:
+    """A reader cannot tell a strict front from a tolerant one by looking at it, so it is stated."""
+    problem, runs = _trade_off()
+    strict = asyncio.run(suggest_next_experiment(problem, runs, count=1))
+    assert strict.front_tolerance is None
+    assert "every numeric difference counted as real" in strict.summary
+
+    tolerant = asyncio.run(suggest_next_experiment(problem, runs, count=1, assay_noise=0.5))
+    assert tolerant.front_tolerance == 0.5
+    assert len(tolerant.front) == 2
+    assert "indistinguishable" in tolerant.summary
+
+
+def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_does() -> None:
+    """The measurement that changed how this number is printed.
+
+    BoFire fits the GP's hyperparameters by numerical optimization and that fit is **not**
+    deterministic — not under a pinned `torch` seed and not with a fresh copy of the surrogate
+    spec. Measured over twelve identical calls on this problem: R² spanned 0.906-0.969 and MAE
+    spanned 1.16-1.80, so MAE moved by more than half its own value. The first version printed R²
+    to three decimals and MAE to three significant figures, stating a stability neither has.
+
+    This test pins the *property*, not a value: repeats must land in a band, and the summary must
+    warn a reader off comparing two scores that differ by less than it.
+    """
+    scores = [surrogate_fit_quality(_problem(), _runs())[0] for _ in range(3)]
+    assert all(-1.0 <= score.r2 <= 1.0 for score in scores)
+    # Generous, because the point is that it moves — a tight bound here would be the same
+    # over-claim the formatting fix removes.
+    assert max(s.r2 for s in scores) - min(s.r2 for s in scores) < 0.30
+    summary = scores[0].summary
+    assert "not deterministic" in summary
+    assert "Do not read a small difference" in summary
+
+
+def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats() -> None:
+    """Two decimals on R², two significant figures on MAE — what survives a repeat."""
+    summary = surrogate_fit_quality(_problem(), _runs())[0].summary
+    matched = re.search(r"R² (\d+\.\d+) and mean absolute error (\d+(?:\.\d+)?)", summary)
+    assert matched is not None, summary
+    assert len(matched.group(1).split(".")[1]) == 2
+    assert len(matched.group(2).replace(".", "").lstrip("0")) <= 2

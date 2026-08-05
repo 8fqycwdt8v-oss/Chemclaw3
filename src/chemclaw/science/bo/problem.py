@@ -497,6 +497,14 @@ class FitQuality(BaseModel):
     Cross-validated on the observations supplied, per objective. `folds` and `n_observations` are
     carried because a score without them cannot be read: R² 0.95 over ten runs and R² 0.95 over two
     hundred are different claims, and only one of them is about the chemistry.
+
+    **These numbers do not reproduce exactly, and are reported to the precision they do reproduce
+    to.** BoFire fits the GP's hyperparameters by numerical optimization, and that fit is not
+    deterministic — not under a pinned `torch` seed, and not with a fresh copy of the surrogate
+    specification. Measured over twelve identical calls on one ten-run problem: R² spanned
+    0.906–0.969 and MAE spanned 1.16–1.80, so **MAE varied by more than half its own value**. The
+    first version printed R² to three decimals and MAE to three significant figures, which stated a
+    stability neither has. Two decimals and two significant figures are what survive a repeat.
     """
 
     objective: str
@@ -508,23 +516,30 @@ class FitQuality(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def summary(self) -> str:
-        """The score with the caveat attached, for the same reason `Prediction.summary` has one.
+        """The score with both caveats attached, for the reason `Prediction.summary` has one.
 
-        The caveat is not decoration. A cross-validated R² over a campaign's worth of runs is the
+        The caveats are not decoration. A cross-validated R² over a campaign's worth of runs is the
         most over-readable number this module produces: it looks like a statement about the
-        chemistry and is a statement about ten points.
+        chemistry, and it is a statement about ten points made by a fit that would give a different
+        answer if run again.
         """
         stated = (
             f"Cross-validated on {self.n_observations} run(s) over {self.folds} folds, the "
-            f"surrogate for {self.objective!r} predicts held-out runs with R² {self.r2:.3f} and "
-            f"mean absolute error {self.mae:.3g}."
+            f"surrogate for {self.objective!r} predicts held-out runs with R² {self.r2:.2f} and "
+            f"mean absolute error {self.mae:.2g}."
+        )
+        repeatability = (
+            " Re-running this on the same runs gives a different number — the GP's hyperparameter "
+            "fit is not deterministic, and on a ten-run problem R² moved by about 0.06 and MAE by "
+            "about half its value across repeats. Do not read a small difference between two of "
+            "these scores as a difference between two models."
         )
         if self.n_observations >= settings.bo_fit_quality_trustworthy_observations:
-            return stated
+            return stated + repeatability
         return (
             f"{stated} Read it as a sanity check, not as accuracy: with fewer than "
             f"{settings.bo_fit_quality_trustworthy_observations} runs each fold holds out a "
-            "handful of points, so this number moves a lot on one unlucky split."
+            f"handful of points, so this number moves a lot on one unlucky split.{repeatability}"
         )
 
 
@@ -836,30 +851,47 @@ def best_of(problem: OptimizationProblem, observations: list[Observation]) -> Ob
     return best
 
 
-def _dominates(problem: OptimizationProblem, a: Observation, b: Observation) -> bool:
-    """Whether `a` is at least as good as `b` everywhere and strictly better somewhere."""
+def _dominates(
+    problem: OptimizationProblem, a: Observation, b: Observation, tolerance: float = 0.0
+) -> bool:
+    """Whether `a` is at least as good as `b` everywhere and strictly better somewhere.
+
+    A per-objective difference of `tolerance` or less is **no difference** in either direction, so
+    two runs the assay cannot tell apart never dominate one another.
+    """
     at_least_as_good = True
     strictly_better = False
     for objective in problem.objectives:
         left = observed_value(problem, a, objective.name)
         right = observed_value(problem, b, objective.name)
         gain = left - right if objective.direction == "maximize" else right - left
-        if gain < 0:
+        if gain < -tolerance:
             at_least_as_good = False
             break
-        if gain > 0:
+        if gain > tolerance:
             strictly_better = True
     return at_least_as_good and strictly_better
 
 
 def pareto_front(
-    problem: OptimizationProblem, observations: list[Observation]
+    problem: OptimizationProblem, observations: list[Observation], tolerance: float = 0.0
 ) -> list[Observation]:
     """The non-dominated observations: the trade-off the runs actually show.
 
     An observation is on the front when no other is at least as good on **every** objective and
     strictly better on at least one. Order is preserved, so the front reads in the order the runs
     were performed.
+
+    **`tolerance` is the assay's reproducibility, and it defaults to exact.** W1 made `assay_noise`
+    required for a plateau verdict because a difference inside the assay is not a difference; a
+    front computed at float precision makes the opposite assumption, and would split two runs that
+    differ by less than anyone can measure. Passing the number the chemist stated is what makes the
+    front a claim about chemistry rather than about floating point.
+
+    The default stays `0.0` rather than becoming required, because the difference between the two
+    tools is real: a front without the number is still a true statement about the runs as recorded,
+    whereas a plateau verdict without it is not. `ExperimentSuggestion.summary` says which one it
+    computed.
 
     **Pure Python, deliberately not `bofire.utils.multiobjective`.** This module is the campaign
     job's `params_model` and is therefore imported into the agent process, which
@@ -869,10 +901,14 @@ def pareto_front(
     Duplicate points both stay: neither dominates the other, and dropping one would quietly discard
     a replicate that is evidence about the assay.
     """
+    if tolerance < 0:
+        raise ValueError(
+            f"tolerance is an assay reproducibility and cannot be negative; got {tolerance}"
+        )
     return [
         candidate
         for candidate in observations
-        if not any(_dominates(problem, other, candidate) for other in observations)
+        if not any(_dominates(problem, other, candidate, tolerance) for other in observations)
     ]
 
 
