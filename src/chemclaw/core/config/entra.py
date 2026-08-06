@@ -82,6 +82,18 @@ class EntraSettings(BaseSettings):
     # user-scoped source (the deferred custom Snowflake ELN connector) opts in by calling
     # `exchange_obo`.
     entra_obo_enabled: bool = False
+    # Read the token's `groups` claim and fold it into the same role set every gate already
+    # matches on (D-2026-08-06-a-share-is-mounted-not-called). An AD security group is an
+    # entitlement, and this system has exactly one entitlement vocabulary; a second one (a
+    # `groups` set beside `roles`, checked in its own places) would be the same rule written
+    # twice, which is how it comes to be enforced in one place and not the other.
+    #
+    # Off by default because it needs the tenant to emit the optional claim, and because the
+    # values are group *object-ids* — a gate configured against them reads as GUIDs. Where the
+    # tenant instead assigns the group to an app role, that arrives as a normal `roles` value
+    # and nothing here is needed at all. Both wirings therefore work, and neither needs a second
+    # code path.
+    entra_group_claims_as_roles: bool = False
 
     @property
     def entra_expensive_action_set(self) -> frozenset[str]:

@@ -1,154 +1,98 @@
-# Task: deep review and refactor of knowledge management (layer 4)
+# Task: make a classical SMB share answerable in ChemClaw3
 
-Branch: `claude/knowledge-management-refactor-348v3d`. Decision:
-`docs/decisions/D-2026-08-05-three-searches-that-disagreed-about-one-note.md`.
+Branch: `claude/sharedrive-chemclaw3-access-3okznv`. Decision:
+`docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`; operator guide:
+`docs/guides/sharedrive-concept.md`.
 
-**The brief was open — "deep review, code refactoring and improvement of knowledge management" —
-so the first output was a map rather than a diff.** What it found was five problems with one
-shape: a rule written in two places, with a docstring in one of them asserting that the other
-agreed. Two were behavioural defects nobody had reported; three were open [M] findings in
-`docs/planning/BACKLOG.md`; the rest was the duplication that produced all of them.
-
-_(Three reviews landed on `main` while this branch was in flight and each held this file in turn:
-the database-integration review (#131), the BO ceiling (#130) and the agentic engine (#128). All
-are in `git log`, and their decisions are in `docs/decisions/`.)_
+Ask: a decade of reports, presentations, spreadsheets and PDFs on an on-prem Windows/SMB file
+server (>500k files, TB scale), gated by one AD security group — and inside that group everyone
+sees everything.
 
 ---
 
-## Plan (three commits on one branch, each independently green)
+## Plan — the five decisions everything else follows from
 
-### Commit 1 — one definition per rule
-- [x] `chemclaw.kg.search`: one `search_text` / `query_terms` / `term_coverage`, replacing three
-      haystacks; all four readers repointed (`find_notes`, `GraphRetriever`, the note index, the
-      digest)
-- [x] `Note.outgoing_relations`: the frontmatter form wins, so declared edge metadata reaches a
-      query
-- [x] `TemporalWindow` base; one `scan_notes_dir`; one `dangling_links`; one `_registry_problems`;
-      `note_relative_path`; `note_id_for_reaction` at the last inline site
-- [x] Observability: unparseable notes logged + counted; `proposal.py` gains `exc_info`;
-      `conflicts.py`'s narrowing `assert` becomes structural
-- [x] `proposal_reason_chars` and `graph_analytics_top_n` into config; `propose_note` split
-- [x] `redact_secrets` before the truncation that was described as if it were redaction
+- [x] **Mounted, never called.** A read-only CIFS PersistentVolume, so the code takes a POSIX path:
+      no SMB client, no credential in Python, no new network peer. D-089 needed no exception and
+      `tests/test_no_egress.py` needed no amendment.
+- [x] **A retrieve-only DataSource with a core background indexer** — the shape `vector` and
+      `lexical` already have. No widening of `IngestHalf` (it is reaction-shaped; a PowerPoint is
+      not a reaction), no core edit to `sources/base.py`, no second enable switch beside
+      `CHEMCLAW_DATA_SOURCES` (D-018).
+- [x] **Evidence, not the PR-gate.** These are pre-existing human-authored records, cited on
+      retrieval. `cli/backfill_corpus.py` PR-gates one note per document — at 500k files that is
+      500k pull requests, so it stays what it is.
+- [x] **The share's layout is a binding**, not Python (D-2026-08-04's argument, one layer up).
+      Nothing in the package names a folder, an extension list or a project code.
+- [x] **Security trimming is a source-level entitlement** in the one role vocabulary that already
+      exists. One opt-in flag unions the Entra `groups` claim into it, so both tenant wirings (app
+      role, or group object-id) work with no second code path.
 
-### Commit 2 — the PR-gate stops touching the shared checkout
-- [x] Probe first: git 2.43 permits a worktree inside `.git/` (the design had a fallback if not)
-- [x] Submit in `.git/chemclaw-worktrees/<branch>`; delete `_checkout_clean`/`_return_to_base`
-- [x] Migration repair for a parked checkout; leftover sweep (prune alone does not do it)
-- [x] `_require_dedicated_checkout`'s reason replaced, not retired; both locks kept, one for a new
-      reason
-- [x] `reindex_notes` busts the cache before it reads
-- [x] `tests/test_pr_gate_read_window.py` **rewritten**, not sign-flipped; prose corrected in the
-      runbook, the sidecar, the live bootstrap, the config field and the test docstrings
+## Build
 
-### Commit 3 — a proposal record that can be replayed
-- [x] `kg/submission.py` (forced: `pr_gate` imports `proposal`, so `proposal` cannot import back)
-- [x] `NoteProposal.dependencies` + `infra/sql/036`; `content_hash` deliberately unmoved
-- [x] `proposal_store` reads rows by name — a column inserted mid-list is exactly the hazard
-- [x] The two false docstrings corrected; `GET /proposals/{id}` returns the whole unit
+- [x] Moved the document parsers down to `ingest/documents/parse.py` (+ `formats.py`), imported by
+      `agent/attachments.py`. Forced: `ingest` may not import `agent` (`test_layering.py`), and a
+      second parser set is the duplication CLAUDE.md forbids. Reading a PDF is an ingest concern an
+      upload happens to use, so this is the right direction anyway.
+- [x] `ingest/documents/`: `binding`, `crawl`, `chunk`, `index`, `sync`, `retriever`, `README.md`.
+- [x] `infra/sql/037_document_index.sql` — content-addressed `document_chunks`, path-addressed
+      `document_files`; inventory row and grants (full DML — the sweep genuinely deletes).
+- [x] `durable/document_sync.py` on `background-jobs`: bounded chunks, heartbeating,
+      continue-as-new. Registered in the worker, in `publish._BAD_DATA_TYPES`, and in
+      `schedules.py` conditionally on a share actually being enabled.
+- [x] `sources/sharedrive/datasource.yaml` — describes the test fixture share, so it cannot rot.
+- [x] Config: five bounds plus `entra_group_claims_as_roles`, mirrored in `.env.example`.
+- [x] `api/auth.py` — union the `groups` claim; a claim *overage* is logged, never read as "no
+      groups" (it would quietly deny the users with the most access).
+- [x] `cli/sync_share.py`, `make share-estimate` / `make share-sync`.
+- [x] Helm: read-only PVC mount, on the background worker alone.
+- [x] Docs: ADR + ledger row, operator guide, `ingest/README.md`, `ARCHITECTURE.md`, `BACKLOG.md`,
+      `DEFERRED.md` (trigger updated, not deleted — this *sidesteps* the deferral).
 
-### The record
-- [x] ADR + ledger row; four backlog rows deleted (not struck through); the stale 37/ten/fourteen
-      counts corrected; `kg/README.md`'s absolute given its condition and its unwired code named
+## Verify
 
-## Measured, and not defects
+- [x] `tests/test_document_share.py` — 24 tests over a real fixture tree of real documents: crawl
+      filters, resume without double counting, unmounted-is-loud, symlink escape, page integrity
+      through chunking, dedup, no-re-embed, edit detection, **prune only on a complete crawl**,
+      entitlement (in / out / absent / ungated), citations, filters, never-raises.
+- [x] `tests/test_datasource_isolation.py` — building the share retriever loads no document parser,
+      asserted in a subprocess. Counterfactual verified: importing `parse` makes it fail.
+- [x] `tests/test_research_tools.py` — measured `{"graph": 5, "sharedrive": 5}` under the cap. A
+      flat cap in config order would read `{"graph": 10}` (D-2026-08-01).
+- [x] `tests/test_auth.py`, `test_schedules.py`, `test_helm_chart.py` — group claim and overage,
+      the conditional schedule, the read-only mount on the worker only.
+- [x] `make lint type test` green; `datasource-validate --construct` and `prose-validate` green.
+- [x] CLI smoke-tested against a fixture mount: dry run reported 2 candidates and `.doc: 1`.
 
-Recorded so they are not re-litigated:
-
-- **SSE polling against the pool.** 200 streams ÷ `session_event_poll_seconds=2.0` = 100 borrows/s
-  per front-door process, each a sub-millisecond indexed `SELECT` on
-  `session_events_unconsumed_idx` ≈ 0.1 connection-seconds/s. The pool is not the constraint; the
-  event loop is, which is D-119's original finding.
-- **The audit chain's global advisory mutex.** Every append across the fleet serializes on
-  `pg_advisory_xact_lock(0x43484D4157_00_01)` for ~4 round trips, so the ceiling is a few hundred
-  appends/s deployment-wide — far above current demand, and correct by design, since a forked chain
-  cannot be repaired. A ceiling worth stating, not a defect worth fixing.
-- **The SQL surface itself.** Every application statement binds its values; the four sites that
-  interpolate an *identifier* are each guarded (a closed `_PRUNABLE` map, `table.isidentifier()`,
-  an int from config, a validated identifier regex), and the one un-parameterized surface — a
-  warehouse binding's `where:` — is a documented operator-authored trust boundary.
+---
 
 ## Review
 
-**What was measured, not argued.** Two scripts, run before and after:
+**Two defects the tests found that a reading would not have.** Both surfaced only because the
+assertions counted things rather than describing them:
 
-| | before | after |
-|---|---|---|
-| notes matching `reaction` in the agent's haystack and no other | 5 | 0 |
-| notes findable by their own `compound_smiles` in one reader and not another | 14 | 0 |
-| declared edge confidences reaching a query | `None`, `None` | `0.5`, `0.8` |
-| declared edge `valid_from` reaching a query | `None` | `2025-06-30` |
-| gold retrieval recall / precision | 4x1.0 + 1x0.5 / 5x1.0 | unchanged |
-| a credential-bearing git failure vs the 300-char "bound" | 118 chars, stored verbatim | redacted |
+1. `InMemoryDocumentIndex.search_lexical` returned a raw shared-token count (2.0), violating
+   `EvidenceChunk`'s `[0, 1]` contract. The Postgres path hid it, because `ts_rank` happens to be
+   in range — it would have surfaced as a `ValidationError` in a chat turn. Fixed at the boundary
+   where two backends meet one DTO: `DocumentHit.score` is now bounded, and the Postgres value is
+   clamped, since `ts_rank` sums per-term weights and is only *usually* below 1.
+2. `deduplicated` counted only content already on record from an earlier pass, so it reported
+   **zero** for the commonest case there is — the same report filed into two project folders on one
+   crawl. Now `len(parsed) - len(fresh)`.
 
-The eval numbers are the reason the *union* of the three haystacks was safe to take: widening the
-retriever cost nothing on the gold set, so the fallback (narrowing `find_notes` instead) was never
-needed. Had precision moved, the goal was one definition — not a particular one.
+**Two places the design changed while building**, both wrong at scale rather than wrong in
+principle:
 
-**What the tests caught that the plan did not.** `tests/test_logging.py` — the test forbidding an
-import on the logging path — failed the first time the new redaction ran: a `\1`-style replacement
-template is compiled lazily by `re`, and that compilation imports `re`. An import from inside a
-filter once wedged a Temporal worker, which is why the rule exists; a callable replacement avoids
-it. The test was written for a defect that had already happened and caught a second instance of it
-immediately.
+- Prune began as "diff the stored path list against the crawl", which needs every path for the
+  source in memory on every chunk of a drain. Replaced with mark-and-sweep on `indexed_at`, one
+  statement per chunk — and the sweep's reference clock then had to move to the *database*, because
+  the mark is a database `now()` and worker-versus-database skew would delete freshly-marked rows.
+- The crawl cursor began as "the last accepted file". Everything skipped between that and where the
+  chunk stopped would be re-examined next pass and tallied twice, inflating a drain's skip counters
+  — and an inflating counter is worse than none, because it is read as a measurement. It is now the
+  last entry *examined*.
 
-**Where the plan was wrong.** It said to reuse `core/db.py::_redact` for git URLs; that function
-round-trips a DSN through libpq's own parser and does not apply to a git remote. The redaction was
-built in `core/logging.py` instead, beside the inventory that already existed.
-
-**What was deliberately not done.** `graph.related` and the two `crosslink` reverse lookups have no
-production caller and were kept — each is the only read path for a capability a merged ADR claims,
-and deleting one deletes the claim. They are named as declared-but-unwired in the package README
-rather than left for the next reader to guess about.
-
-**Skips, named.** `tests/test_note_proposals_postgres.py` (4 tests) skips here: the sandbox's
-pgvector predates migration 013's `bit_jaccard_ops`. Removing the skip was attempted — a local
-Postgres 16 was built and pgvector installed — and when that still fell short the new code path was
-measured directly against it with `027` + `036` applied by hand. The other 135 skips are the
-standing offline set (Temporal test server, `xtb`/`crest` binaries).
-
----
-
-# Task: the front door's leak, and a comment that broke migrations everywhere (2026-08-05)
-
-Branch `claude/temporal-workflows-llm-testing-5nziyp`, rebuilt on `main` after three parallel
-sessions (#130–#132) landed the worktree fix, the multi-file proposal and the redaction
-independently. What follows is what was left.
-
-- [x] **1. The [H] RSS leak, named and fixed** — `chemclaw.cli.leak_probe`, `make leak-probe`.
-- [x] **2. The migration drift guard** — a comment could not change what a migration did, and it
-      should not be able to break one. Plus the 031 revert and an immutability test.
-- [x] **3. `refresh` reporting a lost claim**, the webhook contract, the layering invariant.
-- [x] **4. The mutant walk** — eight behavioural survivors killed in the two leading files.
-
----
-
-## Review — what was actually measured
-
-**The leak's cause was not the shape the soak suggested.** The soak said "steepening", which reads
-as an unbounded structure filling; the cause was `configure_telemetry()` **returning early**. With
-no meter provider set the OpenTelemetry API proxies every instrument call and retains the proxy
-forever, so a turn with telemetry *off* leaked 35 `_ProxyMeter`s, 35 `_ProxyHistogram`s, 70 locks
-and 35 lists. Measured in-process against the real front door: **+20.7 KB and +178 live objects per
-turn before, +2.7 KB and +3.3 after.**
-
-**The hypothesis I went in with was wrong, and refuting it took one line.** MAF re-entering
-unconnected tools into the agent's process-lifetime exit stack was plausible and documented in this
-repo's own docstring; the soak's `chemclaw_connectors_unreachable_total` sat flat at 0, which was
-evidence against it, so the probe counted those callbacks first: flat at zero across 200 turns.
-Killing the plausible explanation before building on it is what left the search pointed where the
-answer was.
-
-**A comment broke migrations everywhere and CI could not see it.** `031_bo_campaigns.sql` was edited
-on `main` — comments only, and the comment was true — and the byte-level drift guard then refused to
-migrate any database that had already applied it. CI always starts from an empty database. Second
-occurrence: `006_audit_events.sql`, failing the same way for four days.
-
-**Three sessions did the same review in parallel, and mine was not always the better answer.** The
-worktree placement I chose (a sibling of `knowledge_dir`) is worse than the one that landed (under
-`.git/`), the plan-emission helper that landed holds its own state where mine passed it, and the
-redaction that landed reuses `redact_secrets` and a config value where mine wrote a local regex.
-Rebuilding the branch on `main` and re-applying only what was genuinely missing cost an hour and was
-the right call: shipping the worse duplicate of a GxP control would have been much more expensive.
-
-**Left open, deliberately:** the 600 s heartbeat/detection coupling, and the string-mutation
-survivors that a substring `pytest.raises(match=...)` cannot kill.
+**What is deliberately not built**, each with its row and trigger in `DEFERRED.md`: OCR, legacy
+binary Office conversion, per-file ACLs, and the universal ingest abstraction (still one caller).
+Three live edges are in `BACKLOG.md`: identity propagation into scheduled reports, a run against a
+real CIFS mount, and HNSW recall under a filtered document search.

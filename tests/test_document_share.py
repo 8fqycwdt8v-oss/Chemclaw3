@@ -1,0 +1,503 @@
+"""A mounted SMB share, end to end: crawl, index, retrieve, and the two rules that protect it.
+
+Built against a real directory tree of real documents (`tests/document_fixtures.py` writes each one
+with its own format's writer), an in-memory index, and no database or broker — so what these tests
+exercise is the actual crawl/parse/chunk/embed loop rather than a set of mocks agreeing with each
+other.
+
+The two properties worth reading the file for:
+
+- **A complete crawl may sweep; an incomplete one may not.** A CIFS mount that dropped presents to
+  `scandir` as an empty directory, and pruning on that evidence deletes a corpus that took days to
+  build. `test_a_failed_root_prunes_nothing` is the guard.
+- **Cost is measured, not asserted.** The dedup and no-re-embed tests count real `embed_texts`
+  calls, because "an unchanged share re-embeds nothing" is a claim about behaviour and the only
+  honest way to hold it is a counter (D-2026-08-01: measure it, don't argue it).
+"""
+
+import asyncio
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from chemclaw.core.embeddings import embed_texts
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.ingest.documents import sync as sync_module
+from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
+from chemclaw.ingest.documents.chunk import chunk_document
+from chemclaw.ingest.documents.crawl import crawl_share
+from chemclaw.ingest.documents.index import InMemoryDocumentIndex
+from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
+from chemclaw.ingest.documents.sync import prune_share, sync_share
+from tests.document_fixtures import (
+    _blank_pdf_bytes,
+    _docx_bytes,
+    _text_pdf_bytes,
+    _xlsx_bytes,
+)
+
+SOURCE = "sharedrive"
+
+
+def _share(root: Path) -> dict[str, Any]:
+    """A share tree that looks like a real departmental drive, including what cannot be read."""
+    projects = root / "Projects"
+    (projects / "acme-17" / "2024").mkdir(parents=True)
+    (projects / "beta-9").mkdir(parents=True)
+    (root / "SOPs").mkdir()
+    (root / "Archive").mkdir()
+
+    report = _text_pdf_bytes(["Yield 84 percent for the acme route", "Impurity below 0.5 percent"])
+    (projects / "acme-17" / "2024" / "report.pdf").write_bytes(report)
+    # The same report, filed again in another project. This is what a classical share does.
+    (projects / "beta-9" / "report-copy.pdf").write_bytes(report)
+    (projects / "acme-17" / "notes.docx").write_bytes(
+        _docx_bytes(["The palladium catalyst deactivated above 80 degrees."])
+    )
+    (root / "SOPs" / "handling.xlsx").write_bytes(
+        _xlsx_bytes({"Limits": [["solvent", "limit"], ["toluene", 890]]})
+    )
+    # Refused by name rather than returned as an empty document.
+    (projects / "beta-9" / "scanned.pdf").write_bytes(_blank_pdf_bytes(3))
+    # Formats and paths the crawl must turn away, each for a different reason.
+    (projects / "beta-9" / "legacy.doc").write_bytes(b"\xd0\xcf\x11\xe0old binary word")
+    (projects / "acme-17" / "~$notes.docx").write_bytes(b"lock")
+    (root / "Archive" / "ancient.pdf").write_bytes(report)
+    (root / "SOPs" / "huge.txt").write_bytes(b"x " * 200_000)
+
+    return {
+        "mount": str(root),
+        "required_roles": ["sharedrive.reader"],
+        "roots": [
+            {"path": "Projects", "tags": ["project-work"], "tag_from_path": {"segment": 0}},
+            {"path": "SOPs", "tags": ["sop"]},
+        ],
+        "exclude": ["~$*", "**/Archive/**"],
+        "extensions": [".pdf", ".docx", ".xlsx", ".txt"],
+        "max_file_bytes": 200_000,
+        "chunk_chars": 400,
+        "chunk_overlap_chars": 50,
+    }
+
+
+@pytest.fixture
+def share(tmp_path: Path) -> dict[str, Any]:
+    """The raw binding mapping for a freshly-built fixture share."""
+    return _share(tmp_path)
+
+
+@pytest.fixture
+def as_user() -> Iterator[Callable[[str, set[str]], None]]:
+    """Bind an ambient identity for one test and unbind it afterwards.
+
+    A `ContextVar` set inside a test leaks into every later one in the same process, and the leak
+    is invisible: a retrieval test would pass because a *previous* test happened to leave an
+    entitled actor bound. Resetting is what keeps each assertion about its own setup.
+    """
+    tokens: list[tuple[object, object]] = []
+
+    def bind(actor: str, roles: set[str]) -> None:
+        tokens.append(set_current_identity(actor, frozenset(roles)))
+
+    yield bind
+    for token in reversed(tokens):
+        reset_current_identity(token)
+
+
+@pytest.fixture
+def counted_embeddings(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
+    """Count how many texts the sync actually embeds — the cost claim, made checkable."""
+    calls: list[int] = []
+    real = embed_texts
+
+    def counting(texts: list[str]) -> list[list[float]]:
+        calls.append(len(texts))
+        return real(texts)
+
+    monkeypatch.setattr(sync_module, "embed_texts", counting)
+    yield calls
+
+
+# --- the walk -----------------------------------------------------------------------------------
+
+
+def test_the_crawl_reads_nothing_and_still_knows_what_to_skip(share: dict[str, Any]) -> None:
+    """Extension, exclusion and size filters all run on the directory entry, before any read."""
+    result = crawl_share(load_binding(share))
+    paths = {ref.path for ref in result.files}
+
+    assert "Projects/acme-17/2024/report.pdf" in paths
+    assert "SOPs/handling.xlsx" in paths
+    # Excluded by glob (lock file), by root (Archive is not a declared root *and* is excluded),
+    # by format (.doc), and by size (huge.txt is over max_file_bytes).
+    assert not any(name in path for path in paths for name in ("~$", "Archive", "legacy.doc"))
+    assert "SOPs/huge.txt" not in paths
+    assert result.skipped_oversized == 1
+    assert result.skipped_unsupported[".doc"] == 1
+    assert not result.failed_roots
+
+
+def test_a_project_code_is_lifted_out_of_the_path(share: dict[str, Any]) -> None:
+    """The commonest thing a classical share encodes is the folder a file sits in."""
+    files = {ref.path: ref.tags for ref in crawl_share(load_binding(share)).files}
+    assert set(files["Projects/acme-17/2024/report.pdf"]) == {"project-work", "acme-17"}
+    assert set(files["SOPs/handling.xlsx"]) == {"sop"}
+
+
+def test_a_bounded_crawl_resumes_without_double_counting(share: dict[str, Any]) -> None:
+    """Chunked walks must together see each entry exactly once — counters included.
+
+    The cursor is the last entry *examined*, not the last one accepted; if it were the latter,
+    everything skipped between them would be re-examined and tallied twice.
+    """
+    binding = load_binding(share)
+    whole = crawl_share(binding, limit=1000)
+
+    seen: list[str] = []
+    unsupported = 0
+    after = ""
+    for _ in range(20):
+        chunk = crawl_share(binding, after=after, limit=1)
+        seen += [ref.path for ref in chunk.files]
+        unsupported += sum(chunk.skipped_unsupported.values())
+        if not chunk.has_more:
+            break
+        after = chunk.cursor
+
+    assert seen == [ref.path for ref in whole.files]
+    assert unsupported == sum(whole.skipped_unsupported.values())
+
+
+def test_an_unmounted_share_is_loud_rather_than_empty(tmp_path: Path) -> None:
+    """The one failure that must not degrade to "the share is empty"."""
+    binding = load_binding({"mount": str(tmp_path / "nope"), "roots": [{"path": "."}]})
+    with pytest.raises(DocumentShareError, match="not mounted"):
+        crawl_share(binding)
+
+
+def test_a_symlink_out_of_the_mount_is_not_followed(tmp_path: Path) -> None:
+    """A share full of links must not publish a corpus nobody meant to expose."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("payroll")
+    mount = tmp_path / "mount"
+    (mount / "Docs").mkdir(parents=True)
+    (mount / "Docs" / "link").symlink_to(outside)
+
+    binding = load_binding({"mount": str(mount), "roots": [{"path": "Docs"}]})
+    assert crawl_share(binding).files == []
+
+
+# --- the binding --------------------------------------------------------------------------------
+
+
+def test_an_extension_nothing_can_read_is_refused_at_load() -> None:
+    """The quiet failure: `.pdff` matches nothing, so the share indexes cleanly and is empty."""
+    with pytest.raises(DocumentShareError, match="unreadable extension"):
+        load_binding({"mount": "/mnt/x", "roots": [{"path": "."}], "extensions": [".pdff"]})
+
+
+def test_overlapping_roots_are_refused() -> None:
+    """Two roots covering one file would index it twice under two tag sets, last write winning."""
+    with pytest.raises(DocumentShareError, match="overlap"):
+        load_binding(
+            {"mount": "/mnt/x", "roots": [{"path": "Projects"}, {"path": "Projects/acme"}]}
+        )
+
+
+# --- chunking -----------------------------------------------------------------------------------
+
+
+def test_a_chunk_never_spans_two_pages() -> None:
+    """A citation to the wrong page is worse than a citation to none."""
+    text = "[page 1]\n" + "alpha " * 200 + "\n\n[page 2]\nbeta"
+    chunks = chunk_document(text, chunk_chars=400, overlap_chars=50)
+    assert {chunk.coordinate for chunk in chunks} == {"page 1", "page 2"}
+    assert all(("beta" in c.content) == (c.coordinate == "page 2") for c in chunks)
+
+
+def test_a_single_oversized_line_is_split_rather_than_dropped() -> None:
+    """A CSV export whose one row is longer than any chunk still has to be retrievable."""
+    chunks = chunk_document("x" * 5000, chunk_chars=400, overlap_chars=50)
+    assert len(chunks) == 13
+    assert all(len(chunk.content) <= 400 for chunk in chunks)
+
+
+# --- the sync loop ------------------------------------------------------------------------------
+
+
+def test_the_share_is_indexed_and_every_refusal_is_counted(
+    share: dict[str, Any], counted_embeddings: list[int]
+) -> None:
+    """A first pass indexes what it can read and *reports* what it could not, per reason."""
+    index = InMemoryDocumentIndex()
+    report = asyncio.run(sync_share(SOURCE, load_binding(share), index))
+
+    assert report.indexed == 4  # report.pdf, report-copy.pdf, notes.docx, handling.xlsx
+    assert report.skipped_scan == 1  # the blank PDF, refused by name
+    assert report.skipped_oversized == 1
+    assert report.skipped_unsupported[".doc"] == 1
+    assert not report.failed_roots
+    assert report.embedded_chunks > 0
+
+
+def test_the_same_document_in_two_folders_is_embedded_once(
+    share: dict[str, Any], counted_embeddings: list[int]
+) -> None:
+    """The property that makes a TB share affordable: identity is the content, not the path."""
+    index = InMemoryDocumentIndex()
+    report = asyncio.run(sync_share(SOURCE, load_binding(share), index))
+
+    assert report.deduplicated == 1  # report-copy.pdf carries content already indexed
+    # Both paths are on record, so either can be cited...
+    stored = asyncio.run(
+        index.fingerprints(
+            SOURCE, ["Projects/acme-17/2024/report.pdf", "Projects/beta-9/report-copy.pdf"]
+        )
+    )
+    assert len(stored) == 2
+    # ...but only three distinct documents were ever chunked and embedded.
+    assert sum(counted_embeddings) == report.embedded_chunks
+
+
+def test_an_unchanged_share_re_embeds_nothing(
+    share: dict[str, Any], counted_embeddings: list[int]
+) -> None:
+    """The scheduled-run cost claim, counted rather than asserted."""
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    asyncio.run(sync_share(SOURCE, binding, index))
+    first = sum(counted_embeddings)
+
+    second = asyncio.run(sync_share(SOURCE, binding, index))
+
+    assert sum(counted_embeddings) == first  # not one further embedding call
+    assert second.indexed == 0
+    assert second.unchanged == 4
+    assert second.embedded_chunks == 0
+
+
+def test_an_edited_file_is_re_read_and_re_indexed(share: dict[str, Any], tmp_path: Path) -> None:
+    """A stat signature that moved is the only thing that costs a read."""
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    asyncio.run(sync_share(SOURCE, binding, index))
+
+    edited = tmp_path / "Projects" / "acme-17" / "notes.docx"
+    edited.write_bytes(_docx_bytes(["The nickel catalyst survived above 80 degrees."]))
+
+    report = asyncio.run(sync_share(SOURCE, binding, index))
+    assert report.indexed == 1
+    assert report.unchanged == 3
+
+
+def test_two_shares_holding_the_same_relative_path_do_not_evict_each_other(
+    share: dict[str, Any], tmp_path: Path
+) -> None:
+    """`Projects/report.pdf` is not an unusual name, and a share is not the only one mounted.
+
+    Keyed on `path` alone — which is what the first migration said — the second share's crawl
+    overwrote the first share's row and the first share's next sweep then deleted it, silently.
+    """
+    index = InMemoryDocumentIndex()
+    second_root = tmp_path / "second"
+    (second_root / "Projects" / "acme-17" / "2024").mkdir(parents=True)
+    (second_root / "Projects" / "acme-17" / "2024" / "report.pdf").write_bytes(
+        _text_pdf_bytes(["A different report that happens to live at the same relative path"])
+    )
+    second = {**share, "mount": str(second_root), "roots": [{"path": "Projects"}]}
+
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    asyncio.run(sync_share("sharedrive-2", load_binding(second), index))
+
+    path = "Projects/acme-17/2024/report.pdf"
+    assert asyncio.run(index.fingerprints(SOURCE, [path]))
+    assert asyncio.run(index.fingerprints("sharedrive-2", [path]))
+
+    # And a sweep of one share leaves the other's row alone.
+    later = asyncio.run(index.clock())
+    asyncio.run(sync_share("sharedrive-2", load_binding(second), index))
+    asyncio.run(prune_share("sharedrive-2", index, later, crawl_was_complete=True))
+    assert asyncio.run(index.fingerprints(SOURCE, [path]))
+
+
+# --- the sweep, and its guard ---------------------------------------------------------------
+
+
+def test_a_deleted_file_leaves_the_index_after_a_complete_crawl(
+    share: dict[str, Any], tmp_path: Path
+) -> None:
+    """A citation must not survive the document it points at."""
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    started = asyncio.run(index.clock())
+    asyncio.run(sync_share(SOURCE, binding, index))
+
+    (tmp_path / "SOPs" / "handling.xlsx").unlink()
+    later = asyncio.run(index.clock())
+    asyncio.run(sync_share(SOURCE, binding, index))
+    removed = asyncio.run(prune_share(SOURCE, index, later, crawl_was_complete=True))
+
+    assert removed == 1
+    assert asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"])) == {}
+    # Everything the crawl *did* see survives, because the pass restamped it.
+    assert len(asyncio.run(index.fingerprints(SOURCE, ["Projects/acme-17/notes.docx"]))) == 1
+    assert started <= later
+
+
+def test_a_failed_root_prunes_nothing(share: dict[str, Any], tmp_path: Path) -> None:
+    """The rule the corpus depends on: an unreachable share and an empty one look identical.
+
+    A dropped CIFS mount, a renamed root, a permission change — each presents as "these files are
+    not there". Of the two possible mistakes, re-indexing is recoverable and deleting is not.
+    """
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    asyncio.run(sync_share(SOURCE, binding, index))
+
+    # The share "unmounts": a declared root disappears, so the crawl reports it as failed.
+    for path in sorted((tmp_path / "SOPs").rglob("*"), reverse=True):
+        path.unlink()
+    (tmp_path / "SOPs").rmdir()
+
+    later = asyncio.run(index.clock())
+    report = asyncio.run(sync_share(SOURCE, binding, index))
+    assert report.failed_roots == ["SOPs"]
+
+    removed = asyncio.run(prune_share(SOURCE, index, later, crawl_was_complete=False))
+    assert removed == 0
+    assert len(asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))) == 1
+
+
+# --- retrieval ----------------------------------------------------------------------------------
+
+
+def _entitled_retriever(
+    share: dict[str, Any], index: InMemoryDocumentIndex
+) -> ShareDocumentRetriever:
+    """The retriever a member of the share's AD group would be served by."""
+    return ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+
+
+def test_a_hit_cites_the_file_and_the_page_it_came_from(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """Evidence a chemist cannot check is not evidence."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    as_user("user-1", {"sharedrive.reader"})
+    chunks = asyncio.run(retriever.retrieve("palladium catalyst deactivated", {}))
+
+    assert chunks, "the indexed docx should be findable by its own words"
+    assert all(chunk.retriever == SOURCE for chunk in chunks)
+    assert any("notes.docx" in chunk.source for chunk in chunks)
+    assert all(chunk.source_note_id.startswith(f"{SOURCE}:doc-") for chunk in chunks)
+
+
+def test_a_pdf_hit_keeps_its_page_coordinate(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """`[page 3]` has to survive parsing, chunking, indexing and retrieval to be worth carrying."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    as_user("user-1", {"sharedrive.reader"})
+    chunks = asyncio.run(retriever.retrieve("impurity below percent", {}))
+
+    assert any("[page " in chunk.source for chunk in chunks)
+
+
+def test_a_caller_outside_the_group_gets_nothing(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """Getting onto the share is the AD group's decision, and this is where it is honoured."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    as_user("user-2", {"some.other.role"})
+    assert asyncio.run(retriever.retrieve("palladium catalyst", {})) == []
+
+
+def test_a_gated_share_refuses_when_there_is_no_identity_to_check(share: dict[str, Any]) -> None:
+    """`require_actor`'s reject-if-absent rule, applied to a corpus instead of a tool.
+
+    This is why the report workflow — which runs with no ambient identity — sees nothing from a
+    gated share. Correct by construction, and stated rather than discovered.
+    """
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    assert asyncio.run(retriever.retrieve("palladium catalyst", {})) == []
+
+
+def test_an_ungated_share_needs_no_identity(share: dict[str, Any]) -> None:
+    """Demanding an actor to check an empty requirement would block reports for no benefit."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    ungated = {**share, "required_roles": []}
+    retriever = ShareDocumentRetriever(binding=ungated, name=SOURCE, index=index)
+
+    assert asyncio.run(retriever.retrieve("palladium catalyst", {})) != []
+
+
+def test_a_backend_failure_yields_no_evidence_instead_of_raising(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """`gather_evidence` fans out with a bare gather, so one raising leg fails the question."""
+
+    class Broken(InMemoryDocumentIndex):
+        async def search_dense(self, *args: Any, **kwargs: Any) -> Any:
+            raise ConnectionError("index unreachable")
+
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=Broken())
+    as_user("user-1", {"sharedrive.reader"})
+    assert asyncio.run(retriever.retrieve("anything", {})) == []
+
+
+def test_a_note_type_filter_returns_nothing_rather_than_ignoring_it(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """A file on a share has no knowledge-graph note type; answering anyway would ignore the ask."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    as_user("user-1", {"sharedrive.reader"})
+    assert asyncio.run(retriever.retrieve("palladium", {"type": "reaction"})) == []
+
+
+def test_a_tag_filter_scopes_to_one_project(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """The project code lifted out of the path is what makes "in ACME-17" answerable."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    as_user("user-1", {"sharedrive.reader"})
+    scoped = asyncio.run(retriever.retrieve("catalyst deactivated toluene", {"tag": "acme-17"}))
+    assert scoped
+    assert all("SOPs/" not in chunk.source for chunk in scoped)
+
+
+def test_a_date_window_excludes_a_file_modified_outside_it(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None]
+) -> None:
+    """`until` windows on whole days, so it must not drop everything touched after midnight."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = _entitled_retriever(share, index)
+
+    as_user("user-1", {"sharedrive.reader"})
+    today = datetime.now(UTC).date()
+    assert asyncio.run(retriever.retrieve("palladium catalyst", {"until": today})) != []
+    stale = today - timedelta(days=365)
+    assert asyncio.run(retriever.retrieve("palladium catalyst", {"until": stale})) == []

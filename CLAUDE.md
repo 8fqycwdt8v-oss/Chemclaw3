@@ -27,7 +27,11 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
   (D-2026-08-04-the-schema-is-a-file): `chemclaw.ingest.eln.warehouse` is a generic engine naming no
   table and no column, and the site's schema is a *binding* in the manifest, because a schema nobody
   can see yet cannot be written into Python. Both halves ship, proven against a fake driver; only the
-  tenant is missing.
+  tenant is missing. The same argument then carried a **mounted SMB/CIFS file share**
+  (`chemclaw.ingest.documents`, D-2026-08-06): the share's folder tree is a binding, the share is
+  *mounted* rather than called (no client, no credential, no egress), its documents are indexed as
+  cited evidence rather than PR-gated notes, and its AD group becomes an entitlement in the one role
+  set every gate already reads.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See

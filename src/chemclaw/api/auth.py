@@ -91,13 +91,34 @@ def validate_token(token: str) -> Principal:
 
 
 def _principal_from_claims(claims: dict[str, Any]) -> Principal:
-    """Build a `Principal` from validated claims (`oid` is mandatory — no anonymous identity)."""
+    """Build a `Principal` from validated claims (`oid` is mandatory — no anonymous identity).
+
+    Under `entra_group_claims_as_roles` the token's `groups` claim joins the same set. An AD
+    security group is an entitlement, and `authz`, `skill_access` and every manifest gate already
+    match entitlements against exactly one set — so a group belongs *in* it rather than beside it.
+    Carrying a second collection would mean every gate deciding, separately, whether it also
+    consults groups, which is the shape a rule takes just before it stops being enforced in one of
+    the places it was written.
+    """
     oid = claims.get("oid")
     if not oid:
         raise AuthError("token has no 'oid' claim")
     upn = claims.get("preferred_username") or claims.get("upn") or ""
-    roles = frozenset(claims.get("roles", []))
-    return Principal(oid=oid, upn=upn, roles=roles)
+    entitlements = list(claims.get("roles", []))
+    if settings.entra_group_claims_as_roles:
+        # Entra emits `_claim_names`/`_claim_sources` instead of `groups` for a user in more
+        # groups than the token can carry (~150+). That is an *overage*, not an empty membership,
+        # and silently treating it as one would quietly deny the users with the most access. There
+        # is no fix here — resolving it needs a Graph call, which D-089 does not permit — so it is
+        # named in the log rather than hidden behind a shorter role list.
+        if "groups" not in claims and "_claim_names" in claims:
+            logger.warning(
+                "token for %s carries a group-claim overage rather than 'groups'; "
+                "group-derived entitlements are unavailable for this user",
+                oid,
+            )
+        entitlements += list(claims.get("groups", []))
+    return Principal(oid=oid, upn=upn, roles=frozenset(entitlements))
 
 
 async def require_principal(request: Request) -> Principal:

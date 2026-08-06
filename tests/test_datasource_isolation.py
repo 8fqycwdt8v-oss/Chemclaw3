@@ -29,6 +29,11 @@ import sys
 import textwrap
 from typing import TypedDict
 
+# Everything that can open a document. A share's *retrieve* half must bring none of it: the chat
+# pod builds every active retrieve half to answer a question, and it has no reason to hold a PDF
+# reader, a Word reader, a slide reader and a spreadsheet reader to do it.
+_DOCUMENT_PARSERS = ("pypdf", "docx", "pptx", "openpyxl")
+
 # Closures a *retrieve* half brings that an ingest-only worker has no use for. `rdkit` and `numpy`
 # are deliberately absent: `core/chem.py` imports rdkit for canonical SMILES, so a worker may
 # hold it for reasons that have nothing to do with this seam, and asserting on it would make the
@@ -95,3 +100,39 @@ def test_asking_which_sources_to_ingest_imports_no_adapter_at_all() -> None:
     # `ingest/sources/base.py` imports for the contract itself, so it is expected and harmless.
     assert "chemclaw.retrieval.retrievers" not in result["report_modules"], result
     assert "chemclaw.retrieval.vector_index" not in result["report_modules"], result
+
+
+_SHARE_PROBE = textwrap.dedent(
+    """
+    import json, sys
+
+    from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
+
+    ShareDocumentRetriever(
+        binding={"mount": "/mnt/x", "roots": [{"path": "."}]}, name="sharedrive"
+    )
+    loaded = {m.split(".")[0] for m in sys.modules}
+    print(json.dumps({"parsers": sorted(loaded & set(%r))}))
+    """
+)
+
+
+def test_building_a_share_retriever_loads_no_document_parser() -> None:
+    """The chat pod answers from the index, so it must not carry the readers that filled it.
+
+    Same property `test_connector_isolation.py` holds for `calc`, and the same fix: the parsers
+    live behind `src/chemclaw/ingest/documents/parse.py`, which only the sync worker imports, while
+    the retriever and the binding it validates against import nothing third-party at all.
+
+    A subprocess, not an in-process check: by the time this file runs, another test has already
+    imported `pypdf` and `sys.modules` would answer for the whole session rather than for this
+    import graph.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", _SHARE_PROBE % (_DOCUMENT_PARSERS,)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert loaded["parsers"] == [], loaded

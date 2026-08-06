@@ -270,6 +270,20 @@ config:
 The bare `eln-json`/`eln-ord` sources carry no `config:`, so they fall back to
 `CHEMCLAW_ELN_EXPORT_DIR` / `CHEMCLAW_ORD_EXPORT_DIR`. Validate an export with `make eln-validate`.
 
+**Two sources describe themselves in a `binding:` rather than in code**, because the shape they read
+exists before this system does and differs at every site — a warehouse's tables
+(`docs/guides/warehouse-eln-concept.md`) and a mounted file share's directory tree
+(`docs/guides/sharedrive-concept.md`). For those, `make datasource-validate` only checks that the
+half resolves and the kwargs bind; `python -m chemclaw.cli.validate_datasources --construct` is what
+actually parses the binding, and it is the check to run after mounting your own manifest directory.
+
+**A mounted SMB/CIFS share** is the one source that is not reached over the network at all: enable
+`documentShare` in `values.yaml` so the volume lands read-only on the background worker, point the
+binding's `mount:` at the same path, and name the source in `CHEMCLAW_DATA_SOURCES`. Run
+`make share-estimate SHARE=<source>` against the real mount **before** enabling it — it walks the
+share, reads nothing, and reports what would be indexed and what cannot be read. The full concept,
+including how the share's AD group becomes an entitlement, is in `docs/guides/sharedrive-concept.md`.
+
 ## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 
 A capability is a **connector bundle**: one folder declaring everything it contributes. There is no

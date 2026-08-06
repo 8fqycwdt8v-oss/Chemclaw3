@@ -81,6 +81,24 @@ workers:
     # concurrent submitter's checkout. Raising this needs the distributed lock in docs/planning/BACKLOG.md first.
     replicas: 1
 
+# A classical SMB/CIFS file share, mounted read-only on the background worker so its documents can
+# be crawled into the search index (D-2026-08-06-a-share-is-mounted-not-called). Mounted, never
+# called: the code sees a POSIX path, so there is no SMB client, no credential in the application,
+# and no new network egress (D-089). Provide the PersistentVolumeClaim yourself — a CIFS PV whose
+# mount credential is a Secret the CSI driver reads, which is why no key appears under `secrets`
+# below.
+#
+# Only the background worker gets the mount: it is the only component that reads the share. The
+# front door answers from the index and would gain nothing but an attack surface.
+#
+# `mountPath` must equal the `mount:` in that source's datasource.yaml binding, and the source
+# must be named in `config.CHEMCLAW_DATA_SOURCES` — a mount with no enabled source is crawled by
+# nothing, and an enabled source with no mount fails loudly at the first crawl.
+documentShare:
+  enabled: false
+  claimName: "chemclaw-sharedrive"
+  mountPath: "/mnt/sharedrive"
+
 # The knowledge graph is a Git-backed Markdown tree that every reader resolves as a plain local
 # directory, so a pod only sees a merged note once something writes it to that pod's filesystem
 # (gap DEP-1). `sync` is that something: an init container fills the tree before the pod serves

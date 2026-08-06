@@ -1328,3 +1328,42 @@ Rules:
    happened at all.
 3. A test written as a future regression target earns its name only after you have watched it fail
    for the right reason. Mutate, run, restore — three commands.
+
+## A layering rule can decide where code lives better than taste can (2026-08-06, mounted file share)
+
+Adding a share crawler needed the PDF/DOCX/XLSX/PPTX parsers that already existed in
+`agent/attachments.py`. `tests/test_layering.py` forbids `ingest -> agent`, so the obvious moves
+were both wrong: importing anyway (forbidden), or writing a second parser set (the duplication
+CLAUDE.md forbids). The third option — move the parsers *down* into `ingest/documents/parse.py` and
+have `attachments.py` import them — turned out to be the correct architecture on its own merits:
+reading a PDF is an ingest concern that an upload happens to use, not the other way round. The
+layering test did not obstruct the design; it named a misplacement nobody had noticed.
+
+**Rule:** when a layering rule blocks a reuse, do not reach for a copy or an exception. Ask which
+side is misplaced — the rule usually knows, and the answer is normally "move the shared thing down
+to the layer that owns the concept".
+
+## A counter that inflates is worse than no counter (2026-08-06, mounted file share)
+
+A bounded crawl resumed from "the last accepted file". Everything examined-and-skipped between that
+and where the chunk stopped was re-examined by the next chunk and tallied again, so a drain's
+"skipped: .doc × N" numbers grew with the number of chunks. Nothing failed. The numbers were simply
+read as a measurement of the share, and they were a measurement of the batch size. The cursor is now
+the last entry *examined*, which costs nothing and makes the tally exact.
+
+**Rule:** when a bounded/resumable pass reports counters, the resume point must be the last item
+*examined*, not the last item *kept* — otherwise every skip between them is double-counted, silently,
+on the success path. And when a counter is added, add the test that drives the loop in chunks of one
+and compares the total against a single-pass run.
+
+## A "mark" and its "sweep" must read the same clock (2026-08-06, mounted file share)
+
+Deleting index rows for files gone from the share is a mark-and-sweep: each crawl restamps what it
+saw, and the sweep removes rows older than the run's start. The mark was a database `now()`; the
+start time was about to come from the Temporal workflow. A database running a minute behind the
+worker would then make freshly-marked rows look older than the run that marked them, and the sweep
+would delete files nobody had touched. The fix was one method — the index reports its own clock.
+
+**Rule:** a comparison between two timestamps is only meaningful if both came from the same clock.
+When one side is written by the database (`now()`, `DEFAULT now()`), the other side must be read
+from the database too — never from the process doing the comparing.

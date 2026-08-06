@@ -70,6 +70,11 @@ _BAD_DATA_TYPES = [
     # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
     # layer and reaches the same conclusion, and the fix is a rebuild.
     "VendoredDatasetError",
+    # A mounted document share that cannot be read as declared (`chemclaw.ingest.documents`): a
+    # malformed binding, or a mount point that is not a directory. Both are the same on the next
+    # attempt — a volume that failed to mount does not mount itself because Temporal asked twice —
+    # and retrying only delays the log line naming which one it is.
+    "DocumentShareError",
     # `AuthorizationError` (`chemclaw.agent.authz`) and its subclasses are NOT `ChemclawError`/
     # `ValueError` — an authorization refusal is a policy decision, not bad data, and reparenting it
     # would make `chemclaw.agent.tool_authz.surface_domain_errors` swallow it ahead of

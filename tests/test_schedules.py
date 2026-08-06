@@ -127,6 +127,30 @@ def test_reindex_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyP
     assert len({p.schedule_id for p in plan}) == len(plan)
 
 
+def test_document_sync_schedule_is_added_only_when_a_share_is_mounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crawl is planned only where an enabled source actually carries a share to crawl.
+
+    Asked of the enabled sources rather than of a `document_sync_enabled` flag beside them:
+    `CHEMCLAW_DATA_SOURCES` is the enable switch (D-018), and a second setting could only restate
+    it or contradict it.
+    """
+    from chemclaw.durable import schedules as schedules_module
+    from chemclaw.durable.document_sync import DocumentShareSyncWorkflow
+
+    monkeypatch.setattr(schedules_module, "share_sources", dict)
+    assert DocumentShareSyncWorkflow not in {p.workflow for p in planned_schedules()}
+
+    monkeypatch.setattr(schedules_module, "share_sources", lambda: {"sharedrive": object()})
+    monkeypatch.setattr(settings, "document_sync_schedule_minutes", 90)
+    plan = planned_schedules()
+    crawl = next(p for p in plan if p.workflow is DocumentShareSyncWorkflow)
+    assert crawl.schedule_id == "document-sync"
+    assert crawl.interval == timedelta(minutes=90)
+    assert len({p.schedule_id for p in plan}) == len(plan)
+
+
 def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every plannable id is registered in the prune namespace, else prune could miss it."""
     monkeypatch.setattr(settings, "eval_drift_enabled", True)

@@ -32,6 +32,7 @@ from chemclaw.durable import artifact_eviction as _artifact_eviction  # noqa: F4
 from chemclaw.durable import audit_verify as _audit_verify  # noqa: F401
 from chemclaw.durable import connector_job as _connector_job  # noqa: F401
 from chemclaw.durable import digest as _digest  # noqa: F401
+from chemclaw.durable import document_sync as _document_sync  # noqa: F401
 from chemclaw.durable import eln_sync as _eln_sync  # noqa: F401
 from chemclaw.durable import eval_drift as _eval_drift  # noqa: F401
 from chemclaw.durable import interaction_approval as _interaction_approval  # noqa: F401

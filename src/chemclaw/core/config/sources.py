@@ -48,6 +48,24 @@ class SourcesSettings(BaseSettings):
     # the corpus is installed into the image at build time, reviewed once in a pull request like
     # any other pinned dependency, and read from disk at runtime. D-089's "no external data
     # sources" is about a runtime dependency on somebody else's service, and there is none here.
+    # --- Mounted document shares (D-2026-08-06-a-share-is-mounted-not-called) ---
+    # Which share is mounted where, what to index and who may read it is the *binding* in that
+    # source's `datasource.yaml`; only the machinery's own bounds are config, because they are
+    # about this deployment's Temporal and embedding budget rather than about any one share.
+    #
+    # How many candidate documents one activity attempt may consider. The bound that lets a share
+    # of any size make durable forward progress instead of wedging one over-window attempt: the
+    # workflow loops with the crawl cursor until the pass reports no more.
+    document_sync_batch_size: int = 500
+    document_sync_timeout_seconds: float = 900.0
+    document_sync_heartbeat_timeout_seconds: float = 120.0
+    # How many chunks one workflow run drains before continuing as new. Event history is bounded,
+    # and a first full crawl of a TB share is thousands of chunks — far past what one run may hold.
+    document_sync_max_iterations: int = 100
+    # Every N minutes. Six hours by default: a file share is not an ELN, its documents change over
+    # days, and an unchanged crawl still costs a full `scandir` pass over every path.
+    document_sync_schedule_minutes: int = 360
+
     vendored_dataset_dir: str = "data/vendored"
     # Check `records.csv` against the checksum in its manifest on load. On by default: the whole
     # value of vendoring is that the shipped data is provably what was reviewed, and a corpus that

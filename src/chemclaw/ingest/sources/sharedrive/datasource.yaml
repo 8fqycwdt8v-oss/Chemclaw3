@@ -1,0 +1,70 @@
+# A classical SMB/CIFS file share, mounted read-only and indexed as cited evidence.
+#
+# **This file is the share's layout.** Nothing in `chemclaw.ingest.documents` names a folder, an
+# extension list or a project code — a site's directory tree exists before this code and changes
+# without asking, so it lives in data (D-2026-08-06-a-share-is-mounted-not-called, the same
+# argument as D-2026-08-04-the-schema-is-a-file one layer over).
+#
+# Attaching a real share is editing this file — or, better, mounting a folder holding your own copy
+# of it and putting that folder first in `CHEMCLAW_DATA_SOURCES_DIR`, so the deployment's layout is
+# not a change to this repository at all. The values below describe the fixture share in
+# `tests/test_document_share.py`, so they are exercised on every run and cannot rot.
+#
+# Not enabled by default: `CHEMCLAW_DATA_SOURCES` is the enable switch, and a deployment with no
+# share mounted must not start crawling `/mnt/sharedrive`.
+name: sharedrive
+description: >-
+  A departmental SMB file share mounted read-only: reports, decks, spreadsheets and PDFs, chunked
+  and indexed so they answer questions with a citation to the file and page they came from. Not
+  knowledge — nothing here enters the graph, and nothing here is ever written back to the share.
+
+# Retrieve-only, and deliberately so. The `ingest:` half of this seam is reaction-shaped
+# (`ElnAdapter.map_to_ord`), and a PowerPoint is not a reaction. Indexing is done by
+# `chemclaw.durable.document_sync`, a scheduled background job — exactly as `vector` and `lexical`
+# are retrieve-only manifests whose index `durable/note_index.py` maintains.
+retrieve: chemclaw.ingest.documents.retriever:ShareDocumentRetriever
+
+config:
+  binding:
+    # The read-only mount point. A path, not a UNC and not a URL: the share is mounted by the
+    # platform (a CIFS PersistentVolume), so this system needs no SMB client and no credential of
+    # its own, and takes on no new network egress (D-089).
+    mount: /mnt/sharedrive
+
+    # The entitlement the AD group grants. Matched against the turn's roles, which carry Entra app
+    # roles — and, with `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`, group object-ids as well. So
+    # either tenant wiring works: assign the AD group to an app role, or emit the `groups` claim
+    # and name the group's object-id here. A caller without it gets nothing from this source.
+    required_roles: [chemclaw.sharedrive.reader]
+
+    # One entry per subtree worth indexing. Naming subtrees rather than the whole mount is what
+    # makes a staged rollout possible: start with one folder, measure the embedding cost, add more.
+    roots:
+      - path: Projects
+        tags: [project-work]
+        # `Projects/<PROJECT>/2024/report.pdf` -> tag `<PROJECT>`, lowercased. The commonest thing
+        # a classical share encodes, and usually the only place it is written down at all.
+        tag_from_path:
+          segment: 0
+      - path: SOPs
+        tags: [sop]
+
+    # Office lock files, scratch and archive folders. Excluding is cheaper than parsing, and an
+    # archive nobody consults only dilutes retrieval.
+    exclude:
+      - "~$*"
+      - "**/Archive/**"
+      - "*.tmp"
+
+    # Narrowing this is a legitimate cost control on a large share ("PDFs and decks first").
+    # Anything not listed is counted per extension and reported, never silently dropped.
+    extensions: [.pdf, .docx, .xlsx, .pptx, .csv, .tsv, .md, .txt]
+
+    # 50 MB. A share holds files no document reader should be handed — a scanned archive, a
+    # database export named `.csv`.
+    max_file_bytes: 52428800
+
+    # Big enough that a chunk carries an argument rather than a sentence; small enough that the
+    # citation points somewhere a reader can actually check.
+    chunk_chars: 1800
+    chunk_overlap_chars: 200

@@ -50,6 +50,7 @@ spec:
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
+            {{- include "chemclaw.documentShareMount" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
       {{- /* The clone before the publish — see `deployment-service.yaml`. */}}
       initContainers:
@@ -58,3 +59,4 @@ spec:
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}
         {{- include "chemclaw.noteRepoVolume" . | nindent 8 }}
+        {{- include "chemclaw.documentShareVolume" . | nindent 8 }}

@@ -261,6 +261,38 @@ def test_the_migration_credential_is_mounted_on_the_hook_job_and_nowhere_else() 
             )
 
 
+def test_the_document_share_is_read_only_and_only_on_the_worker_that_crawls_it() -> None:
+    """The share is mounted, never called — and never written to.
+
+    Two claims the chart has to make true rather than merely intend. `readOnly` on both the volume
+    and the mount is what makes "this system never writes to a site's file share" enforced by the
+    kubelet instead of by a promise in a docstring. And only the background worker gets it: the
+    front door answers from the index, so a mount there would be attack surface bought for nothing.
+
+    No entry appears under `secrets` because there is none to add — the CIFS mount credential
+    belongs to the PersistentVolume and is read by the CSI driver, which is the whole point of
+    mounting the share instead of speaking SMB from Python.
+    """
+    share = _VALUES["documentShare"]
+    assert share["enabled"] is False, "a share nobody declared must not be crawled by default"
+
+    helpers = (_CHART / "templates" / "_helpers.tpl").read_text()
+    for helper in ("chemclaw.documentShareMount", "chemclaw.documentShareVolume"):
+        _, _, body = helpers.partition(f'define "{helper}"')
+        assert body, f"no {helper} helper"
+        assert "readOnly: true" in body.split("{{- end -}}")[0], helper
+
+    for template in sorted((_CHART / "templates").glob("*.yaml")):
+        rendered = template.read_text()
+        if template.name == "deployment-workers.yaml":
+            assert 'include "chemclaw.documentShareMount"' in rendered
+            assert 'include "chemclaw.documentShareVolume"' in rendered
+        else:
+            assert "documentShare" not in rendered, (
+                f"{template.name} mounts the file share; only the background worker crawls it"
+            )
+
+
 def test_the_hook_job_reconciles_grants_after_it_migrates() -> None:
     """The grants name tables the migrations create, so the order is not optional.
 

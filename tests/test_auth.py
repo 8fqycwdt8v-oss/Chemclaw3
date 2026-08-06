@@ -71,6 +71,37 @@ def test_valid_token_yields_principal(rsa_key: Any) -> None:
     assert principal.roles == frozenset({"bench"})
 
 
+def test_group_claims_join_the_role_set_only_when_configured(
+    rsa_key: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An AD security group is an entitlement, so it belongs in the one entitlement set.
+
+    Off by default: a deployment whose tenant assigns the AD group to an app role already receives
+    it as a `roles` value and must not also start matching raw group object-ids.
+    """
+    claims = {"oid": "u-9", "roles": ["bench"], "groups": ["7f1c-group-oid"]}
+    assert validate_token(_sign(rsa_key, claims)).roles == frozenset({"bench"})
+
+    monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
+    principal = validate_token(_sign(rsa_key, claims))
+    assert principal.roles == frozenset({"bench", "7f1c-group-oid"})
+
+
+def test_a_group_claim_overage_is_reported_rather_than_read_as_no_groups(
+    rsa_key: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Entra replaces `groups` with `_claim_names` past ~150 memberships.
+
+    Treating that as an empty membership would quietly deny exactly the users with the most
+    access, and the denial would look identical to a correct one. It is logged instead.
+    """
+    monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
+    token = _sign(rsa_key, {"oid": "u-10", "roles": [], "_claim_names": {"groups": "src1"}})
+    with caplog.at_level("WARNING"):
+        assert validate_token(token).roles == frozenset()
+    assert "overage" in caplog.text
+
+
 def test_wrong_audience_is_rejected(rsa_key: Any) -> None:
     """A token minted for a different resource is rejected (the confused-deputy guard)."""
     token = _sign(rsa_key, {"oid": "u-1", "aud": "api://someone-else"})

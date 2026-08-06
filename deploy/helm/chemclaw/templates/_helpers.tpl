@@ -397,6 +397,26 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
   emptyDir: {}
 {{- end -}}
 
+{{- /* The mounted document share, read-only and on the background worker alone. `readOnly` is not
+       decoration: this system never writes to a site's file share, and the mount is where that is
+       made true rather than merely intended. */ -}}
+{{- define "chemclaw.documentShareMount" -}}
+{{- if .Values.documentShare.enabled }}
+- name: document-share
+  mountPath: {{ .Values.documentShare.mountPath }}
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- define "chemclaw.documentShareVolume" -}}
+{{- if .Values.documentShare.enabled }}
+- name: document-share
+  persistentVolumeClaim:
+    claimName: {{ .Values.documentShare.claimName }}
+    readOnly: true
+{{- end }}
+{{- end -}}
+
 {{- define "chemclaw.tlsMount" -}}
 {{- if .Values.secrets.temporalTls.enabled }}
 - name: temporal-tls
