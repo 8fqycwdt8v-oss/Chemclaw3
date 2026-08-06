@@ -29,8 +29,32 @@ from tests.pg import migrated_db_or_skip
 
 
 def test_only_spent_operational_rows_are_prunable() -> None:
-    """The prunable set is closed and small — a new table is a deliberate addition, not a sweep."""
-    assert set(_PRUNABLE) == {"session_events", "session_messages"}
+    """The prunable set is closed — a new table is a deliberate addition, never a sweep.
+
+    Three tables joined it when the "eight unlisted tables" review row was worked off, and the
+    point of that row was that "unlisted" must stop reading as neither decided nor deferred: four
+    of the eight are refused by name in the module docstring and asserted below, and
+    `session_owners` is pruned by *emptiness* rather than by age, so it is not in this map either.
+    """
+    assert set(_PRUNABLE) == {
+        "session_events",
+        "session_messages",
+        "session_turns",
+        "turn_costs",
+        "note_proposals",
+    }
+
+
+def test_the_four_record_tables_are_refused_by_name() -> None:
+    """Each of the four is a *record*, and a record is what a retention policy keeps.
+
+    `predictions`/`measurements` are the evidence every calibration constant was fitted from;
+    `plan_approvals` is the human sign-off the whole PR-gate exists to capture (D-005);
+    `bo_suggestions` is a campaign's evaluation record, which D-157 created this table to stop
+    expiring with Temporal's history.
+    """
+    for table in ("predictions", "measurements", "plan_approvals", "bo_suggestions"):
+        assert table not in _PRUNABLE
 
 
 def test_the_hash_chained_audit_trail_is_never_pruned() -> None:
@@ -343,3 +367,103 @@ def test_one_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
     assert outcome.sessions_deferred > 0, (
         "the pass stopped at its cap and reported nothing left, which reads as a bounded table"
     )
+
+
+# --- The eight unlisted tables, decided -------------------------------------------------------
+
+
+def test_a_pruned_session_stops_being_listed_and_its_owner_row_goes() -> None:
+    """The two halves of "a pruned session keeps its listable identity", end to end.
+
+    The owner row outlived the last message, so `GET /sessions` rendered a sidebar entry that
+    opened an empty conversation. The listing filters on remaining history immediately — the moment
+    the last message goes, not the next time the sweep runs — and the retention pass then collects
+    the row, so the table does not grow behind the filter.
+    """
+    from agent_framework import Message
+
+    from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
+    from chemclaw.core import db
+
+    async def _run() -> tuple[list[str], list[str], int]:
+        await migrated_db_or_skip()
+        owners, history = SessionOwnerStore(), PostgresHistoryProvider()
+        session_id = "sess-retention-orphan"
+        await owners.record(session_id, "owner-retention-test")
+        await history.save_messages(session_id, [Message(role="user", contents=["hi"])])
+        with_history = [s for s, _ in await owners.list_for_owner("owner-retention-test")]
+
+        # The state retention leaves behind: history gone, owner row still there. Aged past the
+        # window so the pass may collect it — `created_at` defaults to now(), which is exactly the
+        # race the age bound guards.
+        await history.rollback_to(session_id, 0)
+        async with db.bounded() as conn:
+            await conn.execute(
+                "UPDATE session_owners SET created_at = now() - interval '30 days' "
+                "WHERE session_id = %s",
+                (session_id,),
+            )
+            await conn.commit()
+        without_history = [s for s, _ in await owners.list_for_owner("owner-retention-test")]
+
+        collected = await _prune_orphaned_owners_for_test()
+        return with_history, without_history, collected
+
+    listed, after_prune, collected = asyncio.run(_run())
+    assert listed == ["sess-retention-orphan"], "a session with history was not listed"
+    assert after_prune == [], "an empty session is still offered as something to return to"
+    assert collected >= 1, "the orphaned owner row was not collected"
+
+
+async def _prune_orphaned_owners_for_test() -> int:
+    """Run the owner collector with a real window, since the default is off."""
+    from chemclaw.core import db
+    from chemclaw.durable.retention import _prune_orphaned_owners
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "retention_session_messages_days", 7)
+        async with db.bounded() as conn:
+            return await _prune_orphaned_owners(conn)
+
+
+def test_a_live_session_keeps_its_owner_row() -> None:
+    """The race the age bound exists for: an owner row is written *before* the first message.
+
+    Emptiness alone would delete a live session's ownership in the gap between those two writes,
+    which is a chemist losing the session they just opened.
+    """
+    from chemclaw.agent.session_store import SessionOwnerStore
+
+    async def _run() -> tuple[bool, ...]:
+        await migrated_db_or_skip()
+        owners = SessionOwnerStore()
+        await owners.record("sess-retention-fresh", "owner-retention-fresh")
+        await _prune_orphaned_owners_for_test()
+        found, _, _ = await owners.lookup("sess-retention-fresh")
+        return (found,)
+
+    (found,) = asyncio.run(_run())
+    assert found, "a session opened seconds ago lost its ownership to the retention pass"
+
+
+def test_a_pending_proposal_is_never_pruned() -> None:
+    """`note_proposals` prunes decided rows only — a pending one is the PR-gate's live queue.
+
+    Two guards, and the age one fires first: `decided_at` is NULL for a pending row, so the
+    interval comparison is NULL and the row is not selected even before the state check.
+    """
+    column, disposable = _PRUNABLE["note_proposals"]
+    assert column == "decided_at"
+    assert "pending" in disposable
+
+
+def test_a_turn_claim_is_dated_by_when_it_ended() -> None:
+    """A lease is disposable when it *expired*, which is not when it was taken."""
+    assert _PRUNABLE["session_turns"][0] == "expires_at"
+
+
+def test_the_new_windows_are_off_until_a_policy_is_stated() -> None:
+    """Same rule as the first two: a deployment states its policy; code supplies no default."""
+    assert settings.retention_session_turns_days == 0
+    assert settings.retention_turn_costs_days == 0
+    assert settings.retention_note_proposals_days == 0

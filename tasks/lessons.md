@@ -1598,3 +1598,28 @@ Rules:
    verification I performed.
 2. **Do it at the start of a session, not in the middle.** Every package before this one was
    verified against a smaller suite than was available.
+
+## Two guards caught what I would have shipped, and both were about *pairs* (2026-08-06)
+
+Adding three tables to the retention sweep passed every test I wrote and then failed two I had not
+thought about:
+
+- `test_env_example_documents_every_field` — three new settings undocumented.
+- `test_the_grant_matches_the_writes_the_code_actually_performs` — the sweep would have issued
+  `DELETE` on three tables the runtime role has no `DELETE` on, and would have failed with
+  `InsufficientPrivilege` in exactly the split-principal deployment the grant exists for. It then
+  failed a *second* time, in the other direction, when I over-granted `UPDATE` on `session_owners`
+  that nothing performs.
+
+Both guards encode the same idea: a change here has a partner elsewhere, and the partner is not
+where I was looking. A retention decision is also a grant decision. A setting is also a documented
+knob.
+
+Rules:
+1. **When adding a capability that writes or deletes, check the grant in the same edit.** The pair
+   is `_PRUNABLE`/`_window_days` in `durable/retention.py` and
+   `infra/sql/grants/app_privileges.sql`.
+2. **A new `Settings` field is not done until `.env.example` names it.** DA-1's parity test is the
+   check; writing the line at the same time is cheaper than being told.
+3. **Run the full gate before writing the ADR, not after.** Both of these would have made the ADR's
+   "Consequences" section wrong, and I would have written it confidently.

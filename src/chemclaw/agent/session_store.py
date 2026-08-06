@@ -117,9 +117,19 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # Newest first: a session list is read as "what was I just working on", and the caller pages from
 # the top. `owner IS NOT DISTINCT FROM %s` rather than `=` so the shared dev principal (a real NULL
 # owner) matches itself instead of dropping every row to SQL's three-valued logic.
+# `EXISTS` on the history, because an owner row outlives the conversation it names. Retention
+# prunes `session_messages` per session (D-145) and left the owner row, so "what was I working on"
+# listed sessions that open empty. Filtered here rather than only in the retention pass because the
+# listing must be right the moment the last message goes, not the next time the sweep runs; the
+# pass then collects the rows so they do not accumulate behind this filter.
+#
+# `EXISTS` rather than a join or a count: it stops at the first row, and the question is
+# "any history at all", not "how much".
 _OWNER_LIST = (
-    "SELECT session_id, created_at FROM session_owners "
-    "WHERE owner IS NOT DISTINCT FROM %s ORDER BY created_at DESC, session_id DESC LIMIT %s"
+    "SELECT o.session_id, o.created_at FROM session_owners o "
+    "WHERE o.owner IS NOT DISTINCT FROM %s "
+    "AND EXISTS (SELECT 1 FROM session_messages m WHERE m.session_id = o.session_id) "
+    "ORDER BY o.created_at DESC, o.session_id DESC LIMIT %s"
 )
 
 

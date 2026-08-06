@@ -408,6 +408,24 @@ class ConnectorManifest(BaseModel):
     # instead of a silently-shipped skill (`scripts.validate_connectors`).
     skills: list[str] = Field(default_factory=list)
     profiles: list[str] = Field(default_factory=list)
+    # Setting-name **prefixes** whose current values are part of this bundle's job identity
+    # (DARK-4). Every `Settings` field starting with one of these is read at launch and hashed into
+    # `job_workflow_id`, so changing one makes a re-launch a *new* run instead of rejoining the
+    # completed prior one.
+    #
+    # It exists because a durable job's idempotency key hashed `[connector, job, payload]` only, and
+    # a bundle's numbers depend on more than its payload: change `xtb_method` and the calculation
+    # store correctly misses and recomputes, while `start_workflow` rejoins the finished workflow
+    # and hands back numbers the old method produced.
+    #
+    # **Prefixes rather than a list of settings, and declared rather than derived.** Core cannot
+    # ask a bundle which settings change its answers — that would mean importing the bundle's
+    # calculators into the chat process, which is the one thing D-118 forbids. A prefix is one line
+    # per bundle, it cannot drift as the bundle gains settings, and it errs in the safe direction:
+    # a resource knob under the same prefix also changes the id, which costs one workflow
+    # re-execution whose activities all hit the calculation cache and return the same numbers
+    # immediately (D-011). The opposite error returns wrong numbers silently.
+    identity_settings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _contributes_capability(self) -> Self:

@@ -252,14 +252,55 @@ def _docstring(job: JobSpec) -> str:
     return "\n".join(lines)
 
 
+def identity_settings(connector: str) -> dict[str, Any]:
+    """The current values of every setting the connector declares part of its job identity.
+
+    Read from the live `Settings` at launch, so the *values* are derived even though the prefixes
+    are declared — see `ConnectorManifest.identity_settings` for why core cannot derive the
+    prefixes too.
+
+    An unknown connector yields `{}` rather than raising: `job_workflow_id` is also called by tests
+    and operator scripts with fixture bundle names, and a lookup failure there must not become a
+    launch failure. `make connector-validate` is what catches a prefix that matches nothing.
+    """
+    from chemclaw.connectors.registry import discovered
+
+    try:
+        manifest = discovered().get(connector)
+    except Exception:  # noqa: BLE001 - a broken bundle tree must not break id derivation
+        return {}
+    if manifest is None or not manifest[1].identity_settings:
+        return {}
+    prefixes = tuple(manifest[1].identity_settings)
+    return {
+        name: getattr(settings, name)
+        for name in sorted(type(settings).model_fields)
+        if name.startswith(prefixes)
+    }
+
+
 def job_workflow_id(connector: str, job: str, payload: dict[str, Any]) -> str:
     """The deterministic id of one connector job run — the idempotency key (D-011).
 
     Public because it is the *contract*, not an implementation detail: a duplicate launch must
     resolve to this id, and Stage B's migration test asserts the ids the four bespoke adapters
     produced are reproduced exactly, so no in-flight workflow history is orphaned.
+
+    **The key covers the bundle's versioned inputs, not only the payload** (DARK-4). It hashed
+    `[connector, job, payload]`, and a bundle's numbers depend on more than its payload: change
+    `xtb_method` and the calculation store correctly misses and recomputes, while `start_workflow`
+    raised `WorkflowAlreadyStartedError`, rejoined the **completed** prior run, and returned numbers
+    the old method produced. `science/calc/store.py` has always taken the opposite and correct
+    position for the same computations, with `calc_version` in its key.
+
+    A bundle that declares no `identity_settings` gets a byte-identical id to before, so nothing
+    in flight is orphaned by this and every fixture bundle in the suite is unaffected.
     """
-    return f"{connector}-{job}-{stable_hash([connector, job, payload])}"
+    identity = identity_settings(connector)
+    parts: list[Any] = [connector, job, payload]
+    if identity:
+        parts.append(identity)
+    return f"{connector}-{job}-{stable_hash(parts)}"
 
 
 def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, Any]:

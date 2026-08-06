@@ -66,6 +66,18 @@ class MemorySettings(BaseSettings):
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
+    # The three tables the "eight unlisted" review row added. Each got a disposal *decision*
+    # rather than being swept up by a wildcard — see `durable/retention.py` for the four that were
+    # decided the other way and are refused by name.
+    #
+    # `session_turns` is a lease: a row whose `expires_at` is long past is dead state that only the
+    # next claim on that session id would ever overwrite, and a session nobody returns to keeps its
+    # row forever. `turn_costs` is an operational spend ledger read over a window of days, so
+    # anything older than the longest admission window is unreadable by design. `note_proposals`
+    # prunes only *decided* rows: a pending proposal is the PR-gate's live queue.
+    retention_session_turns_days: int = Field(default=0, ge=0)
+    retention_turn_costs_days: int = Field(default=0, ge=0)
+    retention_note_proposals_days: int = Field(default=0, ge=0)
     # How many expired sessions one conversation-prune pass may work
     # (D-2026-08-05-a-sweep-that-commits-once). The conversation prune costs three round trips per
     # session — it cannot be one `DELETE`, because whether an expired row may go depends on rows

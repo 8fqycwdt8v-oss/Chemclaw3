@@ -246,9 +246,16 @@ def test_session_owner_lists_only_its_own_sessions_newest_first() -> None:
     async def _run() -> None:
         await migrated_db_or_skip()
         store = SessionOwnerStore()
-        await store.record("sess-list-a", "owner-list-test")
-        await store.record("sess-list-b", "owner-list-test")
-        await store.record("sess-list-other", "someone-else")
+        history = PostgresHistoryProvider()
+        for session_id, owner in (
+            ("sess-list-a", "owner-list-test"),
+            ("sess-list-b", "owner-list-test"),
+            ("sess-list-other", "someone-else"),
+        ):
+            await store.record(session_id, owner)
+            # A turn each, because the listing is now filtered on remaining history: an owner row
+            # that outlives its conversation answers "what was I working on" with an empty session.
+            await history.save_messages(session_id, [Message(role="user", contents=["hi"])])
 
         listed = await store.list_for_owner("owner-list-test")
         assert {session_id for session_id, _ in listed} == {"sess-list-a", "sess-list-b"}
@@ -273,6 +280,9 @@ def test_session_owner_lists_the_null_owner_sessions() -> None:
         await migrated_db_or_skip()
         store = SessionOwnerStore()
         await store.record("sess-list-null", None)
+        await PostgresHistoryProvider().save_messages(
+            "sess-list-null", [Message(role="user", contents=["hi"])]
+        )
         listed = await store.list_for_owner(None)
         assert "sess-list-null" in {session_id for session_id, _ in listed}
 

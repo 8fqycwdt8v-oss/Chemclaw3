@@ -291,3 +291,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-06-the-method-decides-which-solvents-exist](D-2026-08-06-the-method-decides-which-solvents-exist.md) | The method decides which solvents exist, and it can be asked |
 | [D-2026-08-06-the-warehouse-boundary-and-a-probe-that-measured-the-wrong-call](D-2026-08-06-the-warehouse-boundary-and-a-probe-that-measured-the-wrong-call.md) | The warehouse boundary, and a probe that measured the wrong call |
 | [D-2026-08-06-two-backends-of-one-protocol-and-fourteen-copies-of-one-line](D-2026-08-06-two-backends-of-one-protocol-and-fourteen-copies-of-one-line.md) | Two backends of one Protocol, and fourteen copies of one line |
+| [D-2026-08-06-what-a-job-is-and-what-a-record-is](D-2026-08-06-what-a-job-is-and-what-a-record-is.md) | What a job is, and what a record is |

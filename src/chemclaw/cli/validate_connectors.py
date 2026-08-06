@@ -172,6 +172,23 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
     return problems
 
 
+def _identity_settings_problems(manifest: ConnectorManifest) -> list[str]:
+    """Check that every declared identity prefix matches at least one `Settings` field (DARK-4).
+
+    A prefix that matches nothing is the failure this guards: it reads as "this bundle's method is
+    part of its job identity" and contributes nothing to the id, so the exact defect
+    `identity_settings` exists to close comes back with the declaration apparently in place. Only a
+    typo or a renamed setting can produce it, and both are silent otherwise.
+    """
+    fields = tuple(type(settings).model_fields)
+    return [
+        f"connector {manifest.name!r}: identity_settings prefix {prefix!r} matches no setting — "
+        "it contributes nothing to the job id, so a change under it would rejoin the prior run"
+        for prefix in manifest.identity_settings
+        if not any(name.startswith(prefix) for name in fields)
+    ]
+
+
 def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
     """Check that every key in `connector_urls` names a discovered bundle (rule 5).
 
@@ -205,6 +222,7 @@ def validate_connectors() -> list[str]:
         problems.extend(_bundle_content_problems(bundle, manifest))
         problems.extend(_tool_surface_problems(manifest))
         problems.extend(_job_problems(manifest))
+        problems.extend(_identity_settings_problems(manifest))
     # Check that connector_urls configuration is valid (rule 5).
     problems.extend(_connector_urls_problems(discovered_names))
     try:

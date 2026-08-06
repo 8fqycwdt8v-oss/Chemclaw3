@@ -294,45 +294,43 @@ failed under mutation with a `TypeError` from calling `None`. It is a real round
 `jsonb` column now, which the local Postgres from WP-9 made possible. Record:
 `D-2026-08-06-two-backends-of-one-protocol-and-fourteen-copies-of-one-line`.
 
-### WP-11 · Durability: what a job is, and what survives it
+### WP-11 · Durability: what a job is, and what survives it — **partially landed**
 *Backlog: DARK-4 [M]; a failed run leaves no record [M]; `request_development_report` writes no
 record [S]; the SIGKILL 600 s coupling [M]; Temporal namespace retention [S]; eight tables retention
 neither prunes nor refuses [M]; a pruned session keeps its listable identity [L]; REV-7 [M].*
 
-- [ ] **DARK-4** — `job_workflow_id` hashes `[connector, job, payload]` only, so changing
-      `xtb_method` correctly misses the calculation cache and then rejoins the *completed* prior run,
-      returning numbers from the old method. `science/calc/store.py` takes the opposite and correct
-      position (`calc_version` is in the key). Decide what "the version of a job" is — proposal: the
-      bundle's declared job version plus the versions of the calculators it dispatches, derived, not
-      hand-maintained.
-- [ ] **A failed run leaves no record.** Three decisions the row names, taken in the ADR: the status a
-      row carries (failed-after-rounds ≠ never-started), where the write happens (a workflow-level
-      handler, since the failure is an exception rather than a return), and whether a later success
-      supersedes the failed row or joins it — proposal: joins, because "what have we tried that did
-      not work" is the question the table exists for.
-- [ ] `request_development_report` does not run through `ConnectorJobWorkflow` (D-115 kept it in
-      core), so lift the record write into a helper both call.
-- [ ] **The 600 s heartbeat coupling.** One setting must be longer than a CREST search's slowest
-      legitimate gap *and* is the only dead-worker signal, so every calc job pays the CREST-sized
-      detection window. Per-job values: long for the two `expensive: true` searches, short for the
-      rest. On OpenShift this is ten minutes of dead time per eviction.
-- [ ] **Namespace retention** is unset, so a deployment inherits the server's default and the runbook
-      cannot say how long history is kept. One Helm value plus a stated policy.
-- [ ] **Retention's eight unlisted tables** — `session_owners`, `session_turns`, `turn_costs`,
-      `predictions`, `measurements`, `note_proposals`, `plan_approvals`, `bo_suggestions`. A
-      disposal decision each — pruned, or refused with its reason. Not a sweep that picks them up by
-      default; "unlisted" must stop reading as neither decided nor deferred.
-- [ ] **A pruned session keeps its listable identity** — the owner row outlives the last message, so
-      "what was I working on" returns an empty conversation. Filter the listing on remaining history.
-- [ ] **REV-7** — a push-back event lost between claim and delivery is lost permanently, and both
-      cheap fixes are refuted in the row. Build the visibility-timeout redelivery: claim with a lease
-      and a delivery deadline, confirm on delivery, re-offer on expiry — keeping COR-4's single-claim
-      property. Needs a **per-stream** holder id (`_WORKER_ID` is per-process, so two streams in one
-      pod steal each other's leases) and a confirm shielded against cancellation (D-130's trap). Own
-      ADR; it is an operator-facing contract change.
+- [x] **DARK-4** — a manifest declares setting-name **prefixes** and the launcher hashes their
+      current values, so the values are derived and only the prefixes are declared. Core cannot ask
+      a bundle which settings change its answers without importing its calculators into the chat
+      process (D-118), which is the whole reason it is a declaration. Prefixes also catch resource
+      knobs that change no number: the cheap error, because it costs one workflow re-execution whose
+      activities all hit the calculation cache (D-011). The two layers do different jobs — the
+      workflow id dedups *launches*, the store dedups *computation* — and that is what makes
+      strictness here nearly free. `deployment_revision` in the key was rejected: it re-runs
+      everything on every deploy and duplicates work across a rolling one.
+- [x] **Retention's eight unlisted tables** — three pruned with their own windows, four **refused by
+      name** because each is a *record* (the calibration evidence, the human sign-off, a campaign's
+      evaluation record — the last being exactly what D-157 created its table to stop expiring), and
+      `session_owners` turned out to be a ninth *shape*: pruned by emptiness, not by age.
+- [x] **A pruned session keeps its listable identity** — it needed **both** of the row's two
+      options, not either: the listing filters on remaining history so it is right the moment the
+      last message goes, and the pass collects the orphaned rows so the table does not grow behind
+      that filter. The collector's age bound is a race guard, not a policy.
 
-**Acceptance**: a version bump recomputes rather than rejoining; a killed worker's job resumes inside
-the per-job window; a lost delivery is re-offered; every table is either pruned or refused by name.
+**Not landed, and why** — each stated rather than left as an omission:
+
+- [ ] **A failed run leaves no record**, and **`request_development_report` writes no record**. Both
+      are the same helper, and both are workable offline; they are simply the next thing.
+- [ ] **The 600 s heartbeat coupling** — per-job heartbeat values. Workable offline; next after the
+      two above.
+- [ ] **Temporal namespace retention** and **REV-7**. Both need a live broker to verify — the
+      Temporal test server download is blocked from this environment, so the 23 broker-backed tests
+      skip — and writing an admin call I cannot execute is the shape this repo's DEFERRED register
+      exists to refuse. REV-7 is also an operator-facing contract change the row itself says wants
+      its own ADR.
+
+**Acceptance** (for what landed): met, each mutation-proven. Record:
+`D-2026-08-06-what-a-job-is-and-what-a-record-is`.
 
 ### WP-12 · Data correctness at the ingest and identity boundaries
 *Backlog: one non-UTF-8 ORD export aborts the batch [M]; two ELN sources with one entry id collapse

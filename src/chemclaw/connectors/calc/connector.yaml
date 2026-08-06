@@ -78,6 +78,21 @@ endpoint:
 skills:
   - calculation-selection
 
+# Every setting under these prefixes is part of a job's identity (DARK-4): change one and a
+# re-launch recomputes instead of rejoining the completed prior run and handing back numbers the
+# old method produced. Prefixes rather than a list, because a new `xtb_*` knob is covered the day
+# it is added rather than the day someone remembers this line.
+#
+# `xtb_` also covers resource knobs (timeouts, thread counts) that do not change a number. That is
+# deliberate and it is the cheap direction: a changed timeout costs one workflow re-execution whose
+# every activity hits the calculation cache and returns the same values immediately (D-011). The
+# opposite error returns wrong numbers silently.
+identity_settings:
+  - xtb_
+  - crest_
+  - pka_
+  - solubility_
+
 # The expensive half of this capability. Each is the *same* tool a chemist used to call inline —
 # same name, same arguments — now started as a durable run the launcher waits a moment for. Cheap
 # requests still answer inside the turn; only the ones that genuinely take minutes come back as a

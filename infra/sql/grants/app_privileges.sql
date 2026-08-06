@@ -53,28 +53,40 @@ BEGIN
     -- could hide the one alteration the chain by itself cannot see.
     EXECUTE format('GRANT INSERT ON audit_events, audit_anchors TO %I', app_role);
 
-    -- Insert and upsert, no delete. These include the three tables `durable/retention.py`
-    -- explicitly refuses to prune, each for a stated reason (the cache is bounded by cost policy
-    -- rather than by a clock, D-011; a job record is the durable evaluation record D-157 exists to
-    -- keep). Withholding DELETE makes those refusals enforced rather than merely intended.
+    -- Insert and upsert, no delete. These include the tables `durable/retention.py` explicitly
+    -- refuses to prune, each for a stated reason (the cache is bounded by cost policy rather than
+    -- by a clock, D-011; a job record is the durable evaluation record D-157 exists to keep; the
+    -- calibration ledger is the evidence every constant was fitted from; `plan_approvals` is the
+    -- human sign-off and `bo_suggestions` a campaign's evaluation record —
+    -- D-2026-08-06-what-a-job-is-and-what-a-record-is). Withholding DELETE makes those refusals
+    -- enforced rather than merely intended, which is why `bo_suggestions` moved up here: it was
+    -- among the eight tables retention neither pruned nor refused, and is now refused by name.
     EXECUTE format(
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
-        'bo_campaigns, measurements, predictions, note_proposals, observations, '
-        'plan_approvals, note_index, sync_cursors, turn_costs, '
+        'bo_campaigns, measurements, predictions, observations, '
+        'plan_approvals, note_index, sync_cursors, '
         'molecule_fingerprints, reaction_fingerprints TO %I', app_role);
-    -- Insert only: these three are written once and never revised. `session_owners` upserts with
-    -- `DO NOTHING` (first writer wins), which needs no UPDATE — unlike every table above, whose
-    -- `DO UPDATE` does.
-    EXECUTE format('GRANT INSERT ON bo_suggestions, session_owners TO %I', app_role);
+    -- Insert only: written once and never revised. `bo_suggestions` is append-only by construction
+    -- (a campaign appends candidates; nothing revises one), and it is a record retention refuses to
+    -- prune, so no DELETE either.
+    EXECUTE format('GRANT INSERT ON bo_suggestions TO %I', app_role);
 
     -- Full DML, because the application genuinely deletes from these: the retention sweep prunes
-    -- conversation history and spent mailbox rows, artifact eviction reclaims cold blobs, a turn
-    -- claim is released, a subscription is removed, a preference is unset.
+    -- conversation history, spent mailbox rows, dead turn leases, the spend ledger, decided note
+    -- proposals and the owner rows of sessions whose history is gone; artifact eviction reclaims
+    -- cold blobs; a turn claim is released, a subscription is removed, a preference is unset.
+    --
+    -- `session_owners` and `note_proposals` upsert with `DO NOTHING`/`DO UPDATE` and now also get
+    -- DELETE, because retention collects them — the grant and the sweep are one decision, and
+    -- `tests/test_database_privileges.py` is what stops them being made separately.
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
-        'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs TO %I', app_role);
+        'session_messages, session_events, session_turns, turn_costs, '
+        'note_proposals, subscriptions, user_preferences, artifact_blobs TO %I', app_role);
+    -- `session_owners` upserts with `DO NOTHING` (first writer wins), so it needs no UPDATE, and
+    -- retention collects the rows of sessions whose history is gone, so it does need DELETE.
+    EXECUTE format('GRANT INSERT, DELETE ON session_owners TO %I', app_role);
 
     -- Sequences for every table the role may INSERT into (BIGSERIAL needs USAGE on its sequence).
     -- All of them rather than a list: a sequence confers no read of any table's rows, and an

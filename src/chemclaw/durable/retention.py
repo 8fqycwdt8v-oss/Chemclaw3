@@ -34,6 +34,24 @@ a records story with no disposal story is incomplete.
   restore the failure this system just removed, one retention window later. Its disposal story is
   the same *archive-then-record* design `audit_events` needs, and it belongs in the same ADR.
 
+**The four tables refused by the "eight unlisted" review** — listed so that "absent" stops reading
+as neither decided nor deferred. Three of the eight are pruned (`session_turns`, `turn_costs`,
+`note_proposals`, above), `session_owners` is pruned by *emptiness* rather than by age (below), and
+these four are refused:
+
+- `predictions` and `measurements` are the **calibration ledger** — the evidence every pKa and
+  solubility constant in `core/config/calculators.py` was fitted from. Ageing them out would leave
+  the constants in place with nothing behind them, so the deployment could no longer answer "why is
+  the slope 0.28733". Their disposal story is the same archive-then-record design `audit_events`
+  needs.
+- `plan_approvals` records that a **human signed off** on a plan, which is the GxP line this whole
+  system is arranged around (D-005). A record of a decision is exactly what a retention policy must
+  keep, not what it may dispose of on a clock.
+- `bo_suggestions` is a campaign's **evaluation record** — every candidate it proposed and every
+  observation it took. D-157's argument applies unchanged: the table exists because that record used
+  to expire with Temporal's history and take the campaign's whole evidence with it, and an age
+  cutoff would restore that failure one window later.
+
 - `calculation_results` is **refused** for a different reason: D-011 ("never compute twice") is a
   correctness *and* cost guarantee, and evicting a cached result silently converts a cache hit into
   a recomputation — potentially an HPC run. A cache is bounded by cost policy, not by a retention
@@ -75,7 +93,33 @@ from chemclaw.durable.publish import BAD_DATA_RETRY
 _PRUNABLE: dict[str, tuple[str, str]] = {
     "session_events": ("created_at", "consumed_at IS NOT NULL"),
     "session_messages": ("created_at", "TRUE"),
+    # A turn claim is a *lease*. Its `expires_at` has passed by seconds in normal operation, and
+    # only the next claim on that same session id ever overwrites the row — so a session nobody
+    # returns to keeps its dead lease forever. Dated by `expires_at` rather than `claimed_at`
+    # because that is the column that says "this is over".
+    "session_turns": ("expires_at", "TRUE"),
+    # The spend ledger. Read over a window of days by the front door's admission check, so a row
+    # older than the longest such window is already unreadable by design.
+    "turn_costs": ("recorded_at", "TRUE"),
+    # Only *decided* proposals. A pending one is the PR-gate's live queue, and `decided_at` is NULL
+    # for it — which makes the age predicate false on its own, so the state check is the second of
+    # two guards rather than the only one.
+    "note_proposals": ("decided_at", "state <> 'pending'"),
 }
+
+# Owner rows whose session has no history left, and which are old enough that no in-flight session
+# can be caught by the race. A session's owner row is written before its first message, so a
+# join on emptiness alone would delete a live session's ownership between those two writes; the
+# age bound is what makes it safe rather than merely unlikely.
+#
+# Not in `_PRUNABLE` because it is not an age cutoff on this table's own rows: the question is
+# about a *different* table, and expressing it as one would have meant a wildcard predicate column
+# that the map's "explicit and closed" property exists to refuse.
+_ORPHANED_OWNERS = (
+    "DELETE FROM session_owners o "
+    "WHERE o.created_at < now() - make_interval(days => %s) "
+    "AND NOT EXISTS (SELECT 1 FROM session_messages m WHERE m.session_id = o.session_id)"
+)
 
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
 # expired row are visited, so a deployment whose sessions are all recent pays one indexed scan.
@@ -118,6 +162,9 @@ def _window_days(table: str) -> int:
     return {
         "session_events": settings.retention_session_events_days,
         "session_messages": settings.retention_session_messages_days,
+        "session_turns": settings.retention_session_turns_days,
+        "turn_costs": settings.retention_turn_costs_days,
+        "note_proposals": settings.retention_note_proposals_days,
     }[table]
 
 
@@ -169,7 +216,35 @@ async def prune_expired_rows() -> RetentionOutcome:
                 )
                 outcome.deleted[table] = cur.rowcount
             await conn.commit()
+        outcome.deleted["session_owners"] = await _prune_orphaned_owners(conn)
     return outcome
+
+
+async def _prune_orphaned_owners(conn: AsyncConnection[TupleRow]) -> int:
+    """Delete owner rows for sessions whose history is gone; return how many.
+
+    Bounded by *emptiness*, not by age on its own row, which is why this is not in `_PRUNABLE`.
+    An owner row outliving the last message is a session that answers "what was I working on" with
+    an empty conversation. The listing filters those out immediately
+    (`SessionOwnerStore.list_for`); this is what stops the rows accumulating behind the filter.
+
+    Runs after the loop above, deliberately: `session_messages` is pruned in it, so an owner row
+    orphaned by *this* pass is collected in the same pass rather than waiting a day.
+
+    Shares `retention_session_messages_days` rather than taking a window of its own, because the
+    question it asks is entirely about that table: a row is disposable exactly when the history it
+    names is. The age bound is a race guard, not a policy. An owner row is written before the
+    session's first message, so emptiness alone would delete a live session's ownership in the gap
+    between those two writes.
+    """
+    days = settings.retention_session_messages_days
+    if days <= 0:
+        return 0
+    async with conn.cursor() as cur:
+        await cur.execute(_ORPHANED_OWNERS, (days,))
+        deleted = cur.rowcount
+    await conn.commit()
+    return deleted
 
 
 async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) -> tuple[int, int]:

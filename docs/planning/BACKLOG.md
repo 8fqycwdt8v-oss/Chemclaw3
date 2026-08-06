@@ -1209,7 +1209,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       concurrent turns at a handful of tool calls each is well under one percent utilisation — so
       this is a number to know before scaling the fleet an order of magnitude, not work to do now.
       Measured during the 2026-08-05 database review.
-- [ ] **Eight tables retention neither prunes nor refuses** — [M]. `durable/retention.py` names
+- [x] **Eight tables retention neither prunes nor refuses** — [M]. Closed by D-2026-08-06-what-a-job-is-and-what-a-record-is: three pruned with their own windows (`session_turns` by `expires_at`, `turn_costs` by `recorded_at`, `note_proposals` decided-only), four **refused by name** because each is a *record* — `predictions`/`measurements` are the evidence every calibration constant was fitted from, `plan_approvals` is the human sign-off, and `bo_suggestions` is a campaign's evaluation record, which is the exact thing D-157 created the table to stop expiring. `session_owners` turned out to be a ninth *shape*: pruned by emptiness rather than by age, so it is not in the `(column, predicate)` map at all. `durable/retention.py` names
       two prunable tables and *refuses* three with stated reasons (`audit_events`, `job_records`,
       `calculation_results`), which is the right shape. The rest are simply unlisted:
       `session_owners`, `session_turns`, `turn_costs`, `predictions`, `measurements`,
@@ -1218,7 +1218,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       Wants: a disposal decision per table — pruned, or refused with its reason — not a sweep that
       picks them up by default. `infra/sql/README.md` is the current inventory. (2026-08-05
       database review.)
-- [ ] **A pruned session keeps its listable identity** — [L]. Retention prunes `session_messages`
+- [x] **A pruned session keeps its listable identity** — [L]. Closed by the same ADR, and it needed **both** of the row's two options rather than either: the listing filters on remaining history so it is right the moment the last message goes, and the retention pass collects the orphaned owner rows so the table does not grow behind that filter. The collector's age bound is a race guard, not a policy — an owner row is written *before* the session's first message, so emptiness alone would delete a live session's ownership in the gap between those two writes. Retention prunes `session_messages`
       and leaves the `session_owners` row, so `SessionOwnerStore.list_for_owner` still returns the
       session and opening it shows an empty conversation. Not a correctness bug — the id is
       genuinely still owned — but the listing means "what was I working on", and an entry with
@@ -1523,7 +1523,7 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `run_agent_step` were registered on no worker, a tool step's `list[Content]` result could not
   cross the activity boundary, and an agent step could not run under `harness_enabled` at all.
 - [x] ~~**DARK-3 — mid-turn resume claims other jobs' completions and drops them.**~~ — **fixed on main by D-153** while this pass was running. `await_job_results` no longer consumes the push-back mailbox at all: each job is awaited on its own Temporal handle, so there is no destructive claim to steal another job's completion with. Recorded rather than deleted because the review found it independently against the pre-D-153 tree.
-- [ ] **DARK-4 [Med] — the durable job idempotency key omits every versioned input.**
+- [x] **DARK-4 [Med] — the durable job idempotency key omits every versioned input.** Closed by D-2026-08-06-what-a-job-is-and-what-a-record-is: a manifest declares setting-name *prefixes* and the launcher hashes their current values, so the values are derived and only the prefixes are declared — core cannot ask a bundle which settings change its answers without importing its calculators into the chat process (D-118). Prefixes also catch resource knobs that change no number, which is the cheap error: it costs one workflow re-execution whose activities all hit the calculation cache. `deployment_revision` in the key was rejected — it re-runs everything on every deploy and duplicates work across a rolling one.
   `job_workflow_id` hashes `[connector, job, payload]` only. Change `xtb_method` or a calibration
   constant and the calculation store correctly misses and recomputes, while `start_workflow` raises
   `WorkflowAlreadyStartedError`, rejoins the *completed* prior run, and returns numbers produced by
