@@ -312,9 +312,17 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
         _consider(_dsn_password(value))
     for env_name in (
         _KNOWLEDGE_REPO_TOKEN_ENV,
+        # The fleet's shared connector credential, named by config rather than held as a field —
+        # so it is invisible to `_SECRET_SETTINGS` above, which matches settings whose *value* is
+        # the secret. Read here rather than in the filter's `__init__` because, unlike the
+        # per-connector bearer tokens beside it, resolving this name needs no `connectors` import:
+        # it is one `Settings` field, and reading it per call keeps a rotated token covered.
+        settings.connector_token_env,
         *connector_token_envs,
         *sorted(_RUNTIME_SECRET_ENVS),
     ):
+        if not env_name:
+            continue  # the deployment names no such credential
         value = os.environ.get(env_name, "")
         if len(value) >= _MIN_REDACTABLE:
             values.add(value)

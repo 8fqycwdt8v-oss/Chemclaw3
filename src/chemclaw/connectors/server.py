@@ -37,7 +37,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from chemclaw.connectors.caller import bind_caller, reset_caller
@@ -58,7 +58,34 @@ logger = logging.getLogger(__name__)
 # The two routes a credential is not required on: the kubelet's probe and the Prometheus scrape.
 # Neither serves a tool, reads an identity header or writes a row, and both are called by callers
 # that hold no credential — so requiring one would cost a liveness signal and buy nothing.
-_UNAUTHENTICATED_ROUTES = frozenset({"/healthz", "/metrics"})
+_UNAUTHENTICATED_ROUTES = frozenset({"healthz", "metrics"})
+
+
+def is_unauthenticated_route(path: str) -> bool:
+    """Whether `path` is the probe or the scrape, under either mounting.
+
+    Matched on the **last segment**, not the whole path, because a connector app is served at the
+    root in a cluster (`server_entry`) and mounted under `/<name>` by the dev composite
+    (`cli.connectors_dev`). An exact-path check passes in production and silently 401s every
+    kubelet probe the day someone runs the composite with a credential configured — a failure that
+    would read as "the connectors are down".
+
+    Permissive in the harmless direction only: the paths this widens to (`/<mount>/healthz`) exist
+    only where an app is mounted, and no MCP endpoint ends in either name, so nothing that serves a
+    tool can borrow the exemption.
+    """
+    return path.rstrip("/").rsplit("/", 1)[-1] in _UNAUTHENTICATED_ROUTES
+
+
+def connector_credential() -> str:
+    """The fleet credential this process expects, or empty when the variable is unset.
+
+    Read from the environment per call rather than captured at startup, so rotating the mounted
+    secret takes effect without a restart — `manifest.BearerAuth`'s rule, applied to the server side
+    of the same credential. Shared by the middleware that enforces it and the health route that
+    reports its absence, so the two cannot disagree about whether this pod can serve.
+    """
+    return os.environ.get(settings.connector_token_env, "")
 
 
 class CallerLogMiddleware(BaseHTTPMiddleware):
@@ -148,17 +175,18 @@ class RequireConnectorCredential(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         """Serve the request, or refuse it with 401 when its credential is absent or wrong."""
-        if request.url.path in _UNAUTHENTICATED_ROUTES:
+        if is_unauthenticated_route(request.url.path):
             return await call_next(request)
-        expected = os.environ.get(settings.connector_token_env, "")
+        expected = connector_credential()
         if not expected:
             # The variable this deployment named is unset on the *server*, while the client is
             # sending a token it believes in. Refusing is the only safe reading: serving would be an
             # open connector in a deployment that asked for a closed one, which is precisely the
-            # state this class exists to make unreachable.
+            # state this class exists to make unreachable. `/healthz` reports it too, so the pod
+            # leaves rotation rather than answering "ok" while refusing every call it is sent.
             logger.error(
-                "connector %s: CHEMCLAW_CONNECTOR_TOKEN_ENV names %r, which is unset in this "
-                "process — refusing every request rather than serving unauthenticated",
+                "connector %s: the connector credential variable %r is unset in this process — "
+                "refusing every request rather than serving unauthenticated",
                 self._connector,
                 settings.connector_token_env,
             )
@@ -168,6 +196,18 @@ class RequireConnectorCredential(BaseHTTPMiddleware):
         # `compare_digest` on the token, and only after the scheme matches: a plain `==` on a
         # credential leaks its prefix through timing, and this one is fleet-wide.
         if scheme.lower() != "bearer" or not secrets.compare_digest(token, expected):
+            # Logged here rather than left to `CallerLogMiddleware`, which sits *inside* this
+            # one and therefore never runs for a refused request — so without this line an
+            # unauthenticated caller probing the port would leave no trace at all, on the one
+            # process family whose whole surface is capability. The claimed actor is included
+            # because "someone unauthenticated claimed to be X" is what an operator needs to see;
+            # it comes from outside the boundary, which is why it is logged and never believed.
+            logger.warning(
+                "connector %s: refused an unauthenticated request to %s (claimed actor %s)",
+                self._connector,
+                request.url.path,
+                request.headers.get(HEADER_ACTOR) or "-",
+            )
             return Response(status_code=401, content="unauthorized")
         return await call_next(request)
 
@@ -289,15 +329,35 @@ def connector_app(
         app.add_middleware(BodySizeLimit, max_bytes=settings.connector_max_request_bytes)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
+    async def healthz() -> JSONResponse:
         """Liveness/readiness for the core startup probe (`chemclaw.connectors.health`).
 
         One route for both, and honestly so rather than by omission: uvicorn accepts connections
         only after the lifespan above has completed, so this route answering *is* the evidence
         that the MCP session manager is running and the Postgres pool is open. A separate
         `/readyz` here could only assert the same fact a second time.
+
+        **A pod whose credential is missing is not healthy**, and saying so here is the difference
+        between a visible misconfiguration and an invisible one. `RequireConnectorCredential`
+        refuses every tool call with 503 when the variable the deployment named is unset in this
+        process; a route that answered "ok" anyway would leave the pod in rotation, reporting
+        healthy while serving nothing, and the front door's `/readyz` — which reads exactly this
+        route — would agree with it. Reported rather than crashed on purpose: mounting the Secret
+        fixes it without a restart, and a CrashLoop would bury the line that says what is wrong.
         """
-        return {"status": "ok", "connector": name}
+        if settings.connector_token_env and not connector_credential():
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "credential-unavailable",
+                    "connector": name,
+                    "detail": (
+                        f"this deployment requires the connector credential in "
+                        f"${settings.connector_token_env}, which is unset in this process"
+                    ),
+                },
+            )
+        return JSONResponse(content={"status": "ok", "connector": name})
 
     @app.get("/metrics")
     async def metrics() -> Response:

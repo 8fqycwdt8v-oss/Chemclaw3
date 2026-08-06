@@ -13,6 +13,7 @@ with nothing to present, startup refuses rather than serving.
 """
 
 import asyncio
+import logging
 import threading
 from collections.abc import Iterator
 
@@ -313,3 +314,59 @@ def test_the_fleet_credential_is_registered_for_log_redaction(
     monkeypatch.setenv(_TOKEN_ENV, _TOKEN)
     auth_for(NoAuth(), "alpha")
     assert _TOKEN not in redact_secrets(f"connect failed with Authorization: Bearer {_TOKEN}")
+
+
+def test_the_probe_is_exempt_under_the_dev_composite_mounting(credentialled: None) -> None:
+    """The exemption follows the app, not one spelling of its path.
+
+    Found reviewing the fix rather than writing it. A connector app serves at the root in a cluster
+    (`server_entry`) and is mounted under `/<name>` by the dev composite, so an exact-path exemption
+    passes every production test and 401s every kubelet probe the day someone runs the composite
+    with a credential configured — which reads as "the connectors are down", not as "the check is
+    wrong".
+    """
+    from chemclaw.connectors.server import is_unauthenticated_route
+
+    for path in ("/healthz", "/metrics", "/calc/healthz", "/calc/metrics", "/healthz/"):
+        assert is_unauthenticated_route(path), path
+    # Nothing that serves a tool can borrow the exemption.
+    for path in ("/mcp", "/calc/mcp", "/", "/healthzz"):
+        assert not is_unauthenticated_route(path), path
+
+
+def test_a_refused_request_is_logged(credentialled: None, caplog: pytest.LogCaptureFixture) -> None:
+    """An unauthenticated probe of the port must leave a trace, and nearly did not.
+
+    `CallerLogMiddleware` sits *inside* the credential check, so it never runs for a refused
+    request: without a line here, someone sweeping a connector's port would appear nowhere in its
+    log — on the one process family whose whole surface is capability. The claimed actor is included
+    because "someone unauthenticated claimed to be X" is what an operator needs; it is logged and
+    never believed.
+    """
+    recorded: list[tuple[str, str]] = []
+    port = _free_port()
+    with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.server"):
+        with _Server(_probe_app("auth-probe-logged", recorded), port):
+            _post_mcp(port, token=None)
+    assert "refused an unauthenticated request" in caplog.text
+    assert "someone-elses-oid" in caplog.text, "the claimed actor is not in the refusal line"
+
+
+def test_a_pod_without_its_secret_reports_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connector that refuses every call must not answer "ok" to the probe.
+
+    The third review finding. The middleware already 503s every tool call when the variable the
+    chart named is unset in this process — but `/healthz` answered `{"status": "ok"}` regardless, so
+    the pod stayed in rotation and the front door's `/readyz`, which reads exactly this route,
+    agreed that it was healthy. A connector that can serve nothing is not healthy, and this is the
+    one place that can say so.
+    """
+    monkeypatch.setattr("chemclaw.core.config.settings.connector_token_env", _TOKEN_ENV)
+    monkeypatch.delenv(_TOKEN_ENV, raising=False)
+    recorded: list[tuple[str, str]] = []
+    port = _free_port()
+    with _Server(_probe_app("auth-probe-unhealthy", recorded), port):
+        response = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=5)
+    assert response.status_code == 503
+    assert response.json()["status"] == "credential-unavailable"
+    assert _TOKEN_ENV in response.json()["detail"]

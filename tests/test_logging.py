@@ -500,6 +500,27 @@ def test_a_connector_bearer_token_is_redacted(monkeypatch: pytest.MonkeyPatch) -
     assert token not in record.getMessage()
 
 
+def test_the_fleet_connector_credential_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The credential named by config rather than held as one, which the inventory cannot see.
+
+    `_SECRET_SETTINGS` matches settings whose *value* is the secret; `connector_token_env`'s value
+    is a variable **name**, so the fleet credential sat outside every arm of the inventory — the
+    per-connector arm beside it only enumerates manifest-declared `BearerAuth.token_env`, and no
+    shipped manifest declares one. Found reviewing the change that introduced it rather than by a
+    failing test, which is why this exists.
+    """
+    from chemclaw.core.logging import SecretRedactingFilter
+
+    token_env = "CHEMCLAW_TEST_FLEET_CONNECTOR_TOKEN"
+    token = "fleet-connector-token-0123456789abcdef"
+    monkeypatch.setattr("chemclaw.core.config.settings.connector_token_env", token_env)
+    monkeypatch.setenv(token_env, token)
+
+    record = _record("connector call failed: %s", token)
+    SecretRedactingFilter().filter(record)
+    assert token not in record.getMessage()
+
+
 def test_every_named_secret_is_a_real_settings_field() -> None:
     """The credential inventory names fields that exist, so a rename cannot silently disarm it.
 

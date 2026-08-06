@@ -124,6 +124,40 @@ itself, so it passed for as long as nothing else did. The new test drives the *s
 which is the repository's own recorded lesson about a test supplying what the system was supposed to
 supply.
 
+### Three defects the review of this change found, none of which a test had caught
+
+Recorded because each is a shape worth recognising rather than an incident: all three are the *new
+control* failing in a way that reads as the system working.
+
+1. **The probe exemption matched one spelling of its own path.** `/healthz` and `/metrics` were
+   exact-matched, and a connector app is served at the root in a cluster but mounted under `/<name>`
+   by the dev composite (`cli.connectors_dev`). Every production test passes; the day someone runs
+   the composite with a credential configured, every kubelet probe 401s and reads as "the connectors
+   are down". Matched on the last path segment now, which is permissive only toward paths that exist
+   solely under a mount — no MCP endpoint ends in either name.
+
+2. **A refused request was logged nowhere.** `CallerLogMiddleware` sits *inside* the credential
+   check and so never runs for a 401, and the middleware itself returned a bare response. An
+   unauthenticated caller sweeping a connector's port left no trace at all — on the one process
+   family whose entire surface is capability. It now logs at WARNING with the claimed actor, which
+   is the "someone unauthenticated claimed to be X" line an operator wants: from outside the
+   boundary, therefore logged and never believed.
+
+3. **A pod that could serve nothing reported itself healthy.** With the variable named but unset,
+   the middleware correctly 503s every call while `/healthz` still answered `{"status": "ok"}` — so
+   the pod stayed in rotation and the front door's `/readyz`, which reads exactly that route, agreed.
+   The route now reports `credential-unavailable` with the variable's name. Reported rather than
+   crashed: mounting the Secret fixes it without a restart, and a CrashLoop would bury the line that
+   says what is wrong.
+
+### The credential also had to join the redaction inventory
+
+`core.logging`'s `_SECRET_SETTINGS` matches settings whose *value* is the secret, and the arm beside
+it enumerates manifest-declared `BearerAuth.token_env` names. This credential is neither: its value
+is a variable **name**, and no shipped manifest declares a bearer. So the fleet token sat outside
+every arm of the inventory the moment it was introduced. It is read there now, per call, so a
+rotated token stays covered.
+
 ### What the credential does and does not establish
 
 It authenticates the *process* — that the caller is core, holding the fleet's token — not the end
