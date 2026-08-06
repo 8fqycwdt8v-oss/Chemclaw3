@@ -152,21 +152,25 @@ behind six replicas — so content framed by one pod was replayed by another as 
 *Backlog: "ELN free text becomes real knowledge-graph edges" [M]; "A report note wikilinks non-note
 evidence ids" [M]; "DARK-10 the PR-gate's checkout window exposes unreviewed notes" [Low].*
 
-- [ ] `ingest/eln/note.py:27` — a chemist forges `contradicts`/`supersedes` relations into a PR-gated
-      note by writing them into an ELN field. The gate reviews the note, not the edges it asserts.
-      Escape or reject relation syntax in ingested free text; the relation vocabulary is
-      `kg/relations.py` and already enforced at `kg-validate`, so the fix is at the ingest boundary.
-- [ ] `retrieval/harness.py:160` — a report note wikilinks non-note evidence ids, producing an
-      unmergeable report and a fabricated relation type. Resolve ids to notes or render them as
-      plain text.
-- [ ] DARK-10 — the submitter's `checkout -B note/<id>` runs in the same tree readers resolve, so a
-      concurrent turn can retrieve an unreviewed note as authoritative evidence. The permanent leak
-      is fixed; the transient window needs the submitter to work where readers do not look. Ship the
-      second checkout (or a bare repo plus a temporary index) — this is the last of the three and the
-      only one still open.
+- [x] Escaped once at the composition point, which is sound because the mapper emits **no**
+      wikilinks of its own — an invariant its docstring always claimed and a test now asserts, so a
+      future link tells the escaping to move per-field. Escaped, not stripped: the reviewer is the
+      control and must see the attempt.
+- [x] Plain text for a non-note source, by the **reader's** rule: link a target exactly when
+      `cited_ids` returns it unchanged. Two shipped retrievers (`warehouse`, `vendored_dataset`)
+      return colon-bearing ids, so this fired on real reports — and the reader's rule is measurably
+      more precise than "no colons", which would also refuse `[[:x]]` and `[[rel:]]`, dangling
+      citations rather than forged relations.
+- [x] **Already closed; the row was stale.** `kg/git_submitter.py` has submitted in a private
+      `git worktree` since 2026-08-05
+      (D-2026-08-05-three-searches-that-disagreed-about-one-note). Confirmed against the tree
+      rather than re-implemented.
 
-**Acceptance**: an ELN note asserting `[[supersedes:...]]` in free text produces no edge; a report
-with a non-note evidence id merges; a reader cannot resolve a note mid-submission.
+**Acceptance**: met on all three, each mutation-checked **at the call site** — the first version of
+the report test called `_citation` directly and passed with the call site reverted, the third
+occurrence of that shape this session. The forgery test is also parametrized over the five ELN
+fields that *measurably* reach the body; the first version covered two that do not, and passed while
+proving nothing. Record: `D-2026-08-06-a-wikilink-is-an-edge-not-a-word`.
 
 ### WP-7 · The warehouse's own trust boundary
 *Backlog: "`vector.server_embed_function` reaches the SQL text unchecked" [L]; "A warehouse row key

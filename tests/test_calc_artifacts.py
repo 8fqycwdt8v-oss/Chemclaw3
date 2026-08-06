@@ -30,6 +30,7 @@ def _payload(framed: str) -> str:
     inner = framed.split("\n", 1)[1]
     return inner.rsplit("\n", 1)[0]
 
+
 _CALC_KEY = "xtb.thermo@gfn2-v1:0123456789abcdef:fedcba9876543210"
 
 _XYZ = "3\nwater\nO 0.0 0.0 0.0\nH 0.0 0.0 0.96\nH 0.93 0.0 -0.24\n"

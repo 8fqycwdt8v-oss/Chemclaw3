@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, cited_ids
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 
 # Each section declares which memory layer it draws on, so the report keeps evidenced history
@@ -73,6 +73,31 @@ class Claim(BaseModel):
 
     text: str = Field(min_length=1)
     citations: list[str]
+
+
+def _citation(source_note_id: str) -> str:
+    """Render a chunk's source as a wikilink when it *is* a note id, and as plain text otherwise.
+
+    Not every retriever returns one. `ingest/eln/warehouse/retriever` yields `<source>:<row key>`
+    and `ingest/sources/vendored_dataset` yields `vendored:<dataset>:<index>` — both shipped, both
+    correct as provenance and neither a note. Wrapping those in `[[…]]` produced two failures at
+    once: the colon makes the reader parse the prefix as a **relation**, so `[[eln-snowflake:12]]`
+    becomes a `eln-snowflake` edge to a note called `12`, and `kg-validate` then refuses the report
+    for an unknown relation type — a draft nobody can merge, naming an edge nobody wrote.
+
+    The predicate is the *reader's*, deliberately: a target is safe to link exactly when the
+    citation parser gives it back unchanged. Inventing a slug pattern here would be a second
+    definition of "note id" to drift against `chemclaw.kg.note`, and this one cannot — if the link
+    syntax ever grows a new form, the writer follows the reader for free.
+
+    A non-note source stays visible rather than being dropped: it is what the section rests on, and
+    a reader who cannot see it cannot check it.
+    """
+    return (
+        f"[[{source_note_id}]]"
+        if cited_ids(f"[[{source_note_id}]]") == [source_note_id]
+        else f"source {source_note_id}"
+    )
 
 
 def _report_id(title: str) -> str:
@@ -157,7 +182,7 @@ def report_note(report: Report) -> Note:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue
         for chunk in section.evidence:
-            provenance = [f"[[{chunk.source_note_id}]]", f"via {chunk.retriever}"]
+            provenance = [_citation(chunk.source_note_id), f"via {chunk.retriever}"]
             if chunk.created_by == "agent":
                 # "How much of this was AI-drafted?" — a distilled agent note and a human-merged
                 # one are indistinguishable in the body text, and only one of them was signed off

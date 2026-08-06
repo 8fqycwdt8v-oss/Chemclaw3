@@ -21,10 +21,43 @@ from chemclaw.ingest.eln.ord import (
 )
 from chemclaw.kg.note import Note, note_id_for_reaction
 
+# What a forged wikilink looks like on the way in, and what it becomes. `[[` is the only sequence
+# that opens one (`chemclaw.kg.note`), so escaping the opener is enough — the closing `]]` is inert
+# on its own. A zero-width space would be invisible in the rendered note and is exactly the kind of
+# trick the framing module already has to defang; a visible escape says what happened to a reviewer
+# reading the PR, which is the person this note is for.
+_WIKILINK_OPENER = "[["
+_ESCAPED_OPENER = "\\[\\["
+
+
+def _without_forged_links(body: str) -> str:
+    """Neutralize every wikilink in a body composed entirely from ELN record text.
+
+    **A whole-body escape is sound here for one reason, and it is worth stating because it would be
+    wrong almost anywhere else**: this mapper emits no wikilinks of its own. Its module docstring
+    has said so since it was written — "It carries no `[[wikilink]]` (a dangling link would fail
+    `chemclaw.kg.validate` on the very PR this opens)" — so every `[[` in the composed body arrived
+    from the record, and there is nothing legitimate to preserve.
+
+    That invariant is asserted rather than trusted (`test_eln_note_forgery`), because it is what
+    makes the single escape correct instead of destructive. If a future change gives this mapper a
+    real wikilink to emit, that test fails and says so — at which point the escaping has to move to
+    the individual ELN-sourced fields, one call per field, which is the more fragile design this
+    avoids while it can.
+
+    **Why it matters that these are *edges*.** The PR-gate shows a reviewer the note; a reviewer
+    reads prose and confirms the chemistry. `[[supersedes:reaction-eln-0001]]` buried in a
+    procedure paragraph is not prose — it is a graph edge that retires another team's result, and
+    it takes effect on merge whether or not anyone recognised it as a claim. Measured before the
+    fix: a `procedure_text` of "[[supersedes:reaction-eln-0001]] and [[contradicts:playbook-
+    degassing]]" produced exactly those two ids from `cited_ids` on the mapped note.
+    """
+    return body.replace(_WIKILINK_OPENER, _ESCAPED_OPENER)
+
 
 def note_from_ord_reaction(reaction: OrdReaction) -> Note:
     """Map an `OrdReaction` to an agent-authored `reaction` note (idempotent id)."""
-    body = (
+    body = _without_forged_links(
         f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
         f"{_hypothesis_block(reaction)}"
         f"{_conditions_block(reaction)}"

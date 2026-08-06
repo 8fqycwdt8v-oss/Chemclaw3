@@ -56,11 +56,20 @@ and was reproduced; none is a reading.
 
 **Data plane and knowledge integrity**
 
-- [ ] **[M] ELN free text becomes real knowledge-graph edges** (`ingest/eln/note.py:27`). A chemist
-      can forge `contradicts`/`supersedes` relations into a PR-gated reaction note by writing them
-      into an ELN field — the gate reviews the note, not the edges it asserts.
-- [ ] **[M] A report note wikilinks non-note evidence ids** (`retrieval/harness.py:160`), producing
-      an unmergeable report and a fabricated relation type.
+- [x] **[M] ELN free text becomes real knowledge-graph edges** — closed by
+      D-2026-08-06-a-wikilink-is-an-edge-not-a-word. Escaped once at the composition point rather
+      than per field, which is sound because the mapper emits no wikilinks of its own — an
+      invariant its docstring has always claimed and a test now asserts, so if that ever changes
+      the escaping is told to move. Escaped rather than stripped: the reviewer is the control, so
+      they must see what was attempted.
+- [x] **[M] A report note wikilinks non-note evidence ids** — closed by the same ADR, and the
+      shipped scope is wider than the row implies: *two* live retrievers return non-note ids
+      (`warehouse` gives `<source>:<row key>`, `vendored_dataset` gives `vendored:<dataset>:<index>`),
+      so any report drawing on either was refused by `kg-validate` for a relation nobody wrote. The
+      rule is the **reader's** — link a target exactly when `cited_ids` returns it unchanged —
+      because a hand-written "no colons" rule is measurably cruder: it would also refuse `[[:x]]`
+      and `[[rel:]]`, which are dangling citations rather than forged relations and want a different
+      answer.
 - [ ] **[M] Two enabled ELN sources with the same entry id silently collapse** onto one note and
       one fingerprint row (`ingest/eln/ingest.py:51`), contradicting the manifest's stated
       per-source guarantee.
@@ -1510,7 +1519,11 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `report_measurement` answered "Recorded". Migration 030 keeps the measurement on its own, and a
   later prediction of the same thing reconciles against it on write, so measure-then-predict works
   as well as the reverse.
-- [ ] **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers.**
+- [x] **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers** —
+      **already closed and the row was stale.** `kg/git_submitter.py` submits in a private
+      `git worktree` under `.git/` and never switches the tree readers resolve, which landed
+      2026-08-05 in D-2026-08-05-three-searches-that-disagreed-about-one-note. Confirmed against
+      the tree rather than re-implemented (D-2026-08-06-a-wikilink-is-an-edge-not-a-word).
   `knowledge_path` is the same tree the submitter runs `checkout -B note/<id>` against, so a
   concurrent turn can retrieve an agent-proposed, unreviewed note as authoritative evidence. The
   remaining window is transient and spans a commit, a fetch and a push.
