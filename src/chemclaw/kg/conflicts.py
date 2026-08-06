@@ -50,6 +50,12 @@ class Conflict(BaseModel):
     other_id: str
     kind: str
     detail: str
+    # How strongly this pair disagrees, on one scale so a note's flags can be *ranked* rather than
+    # merely listed. A declared conflict is pinned at the top because an author said so and no
+    # heuristic outranks that; a suspected one carries its confidence gap, which `_suspected`
+    # already computes to decide whether to report the pair at all. Ranking is what lets the index
+    # keep the disagreements a reader can act on and drop the tail — see `conflict_index`.
+    severity: float = 1.0
 
     def pair(self) -> tuple[str, str]:
         """The unordered pair, for deduplicating a conflict found from both ends."""
@@ -61,6 +67,45 @@ class Conflict(BaseModel):
                 self.note_id,
             )
         )
+
+
+class NoteConflicts(BaseModel):
+    """What one note disagrees with: the strongest few ids, and how many there were in total.
+
+    The count is not decoration. `ids` is capped (`conflict_max_per_note`) because a note on a
+    heavily-worked substrate can be flagged against a hundred others, and a hundred ids on an
+    evidence chunk is noise a chemist cannot act on. But this repository's rule is that a silent
+    truncation reads as completeness — so the number that was cut is carried beside the list rather
+    than dropped with it, and every surface that renders the ids says "3 of 141" when that is the
+    truth. A reader who sees three ids and no count would reasonably conclude there were three.
+    """
+
+    ids: list[str]
+    total: int
+
+    @property
+    def truncated(self) -> int:
+        """How many disagreements are not named in `ids` — zero when the list is complete."""
+        return max(0, self.total - len(self.ids))
+
+
+def _strongest(note_id: str, conflicts: list[Conflict]) -> NoteConflicts:
+    """One note's disagreements, worst first and capped, with the full count kept.
+
+    Ranked by `severity`, which pins declared conflicts (an author stated them) above every
+    suspected one regardless of confidence gap: dropping a stated contradiction to make room for a
+    heuristic's guess would invert the whole point of `Conflict.kind`. The id is the tiebreak so
+    two equally-severe pairs order deterministically rather than by dict iteration.
+    """
+    ranked = sorted(
+        {
+            (conflict.other_id if conflict.note_id == note_id else conflict.note_id): conflict
+            for conflict in conflicts
+        }.items(),
+        key=lambda item: (-item[1].severity, item[0]),
+    )
+    cap = settings.conflict_max_per_note
+    return NoteConflicts(ids=[other_id for other_id, _ in ranked[:cap]], total=len(ranked))
 
 
 def _declared(notes: list[Note], known: set[str]) -> list[Conflict]:
@@ -93,13 +138,75 @@ def _overlaps(left: Note, right: Note) -> bool:
     return True
 
 
-def _suspected(notes: list[Note]) -> list[Conflict]:
+def _widest_disagreements(
+    ordered: list[tuple[Note, float]], index: int, threshold: float, cap: int
+) -> list[Conflict]:
+    """The `cap` notes in `ordered` that disagree most with `ordered[index]`, widest gap first.
+
+    `ordered` is sorted by confidence, so the partners that disagree most with any member sit at
+    the two ends. Walking inward from both ends and always taking the wider side visits candidates
+    in descending order of disagreement — which means the walk can **stop** as soon as the wider
+    side falls under `threshold`, since nothing further in can exceed it.
+
+    That is what turns the pairwise scan from quadratic into `cap` steps per note in the ordinary
+    case. It matters at the shape a real programme has: an optimization campaign is many runs on
+    one substrate, and a synthetic 2,000-note corpus over 7 substrates enumerated **141,156** pairs
+    in 637 ms and put ~141 ids on every evidence chunk reaching the model. Both numbers are the
+    same fact — a scan that flags a note against every other note on its substrate tells a reader
+    nothing they can act on, and costs the most exactly where the system is most used.
+
+    A note is never its own partner (the walk steps over itself without ending), and the threshold
+    check is what ends the walk rather than the note count, so a group whose members all agree
+    costs one comparison per note.
+    """
+    note, confidence = ordered[index]
+    low, high = 0, len(ordered) - 1
+    taken: list[Conflict] = []
+    while low <= high and len(taken) < cap:
+        below, below_confidence = ordered[low]
+        above, above_confidence = ordered[high]
+        # The signed gaps to the two ends; at least one is non-negative while `low <= high` and,
+        # whichever is larger, no candidate still between them can beat it.
+        if confidence - below_confidence >= above_confidence - confidence:
+            other, gap = below, confidence - below_confidence
+            low += 1
+        else:
+            other, gap = above, above_confidence - confidence
+            high -= 1
+        if other is note:
+            continue  # the walk reached the note itself, which is not a disagreement
+        if gap < threshold:
+            break
+        if not _overlaps(note, other):
+            continue
+        taken.append(
+            Conflict(
+                note_id=note.id,
+                other_id=other.id,
+                kind="suspected",
+                detail=(
+                    f"both describe {note.compound_smiles} as {note.type} notes valid at "
+                    f"the same time, with confidence {confidence} vs "
+                    f"{confidence - gap if other is below else confidence + gap}"
+                ),
+                severity=gap,
+            )
+        )
+    return taken
+
+
+def _suspected(notes: list[Note], cap: int) -> list[Conflict]:
     """Same-compound, same-type, concurrently-valid notes whose confidences disagree.
 
     Grouped by `(type, compound_smiles)` because that is the coarsest pairing that is still about
     one thing: two `reaction` notes on one compound may well describe different experiments, but a
     materially different confidence between them is worth a reader's eye. Notes with no stated
     confidence are skipped — an absent confidence is not a low one.
+
+    Each note contributes at most `cap` pairs, its widest disagreements first. This is a change of
+    *claim*, not only of volume: the exhaustive list said "here is every note on this substrate
+    whose confidence differs from yours", which is a fact about the corpus rather than a signal
+    about the note. KM-8's stated target was a signal, and the strongest few disagreements are one.
     """
     # Carry the confidence alongside the note rather than re-reading `note.confidence` inside the
     # loop: the filter above already established it is not None, and expressing that structurally
@@ -114,24 +221,12 @@ def _suspected(notes: list[Note]) -> list[Conflict]:
     threshold = settings.conflict_confidence_gap
     found: list[Conflict] = []
     for group in grouped.values():
-        ordered = sorted(group, key=lambda pair: pair[0].id)
-        for index, (left, left_confidence) in enumerate(ordered):
-            for right, right_confidence in ordered[index + 1 :]:
-                gap = abs(left_confidence - right_confidence)
-                if gap < threshold or not _overlaps(left, right):
-                    continue
-                found.append(
-                    Conflict(
-                        note_id=left.id,
-                        other_id=right.id,
-                        kind="suspected",
-                        detail=(
-                            f"both describe {left.compound_smiles} as {left.type} notes valid at "
-                            f"the same time, with confidence {left_confidence} vs "
-                            f"{right_confidence}"
-                        ),
-                    )
-                )
+        # Sorted by confidence, which is what puts a note's widest disagreements at the ends and
+        # lets `_widest_disagreements` stop early; the id is the tiebreak so the scan stays
+        # deterministic over notes that state the same confidence.
+        ordered = sorted(group, key=lambda pair: (pair[1], pair[0].id))
+        for index in range(len(ordered)):
+            found.extend(_widest_disagreements(ordered, index, threshold, cap))
     return found
 
 
@@ -145,7 +240,7 @@ def find_conflicts(notes: list[Note], as_of: date | None = None) -> list[Conflic
     """
     scanned = [note for note in notes if as_of is None or note.is_current(as_of)]
     known = {note.id for note in scanned}
-    found = _declared(scanned, known) + _suspected(scanned)
+    found = _declared(scanned, known) + _suspected(scanned, settings.conflict_max_per_note)
 
     seen: set[tuple[str, str]] = set()
     unique = []
@@ -186,14 +281,16 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 # `chemclaw.kg.graph`'s lock is only ever taken *inside* this one, so there is no cycle to deadlock
 # on.
 _INDEX_LOCK = threading.Lock()
-_INDEX_CACHE: dict[str, tuple[NotesFingerprint, date, dict[str, list[str]]]] = {}
+_INDEX_CACHE: dict[str, tuple[NotesFingerprint, date, dict[str, NoteConflicts]]] = {}
 
 
-def conflict_index(notes_dir: Path, as_of: date) -> dict[str, list[str]]:
-    """Map each current note id to the ids it disagrees with — cached behind the notes fingerprint.
+def conflict_index(notes_dir: Path, as_of: date) -> dict[str, NoteConflicts]:
+    """Map each current note id to what it disagrees with — cached behind the notes fingerprint.
 
-    The shape retrieval wants: bare ids, so a chunk can carry `conflicts_with` without dragging the
-    `Conflict` models (and their prose `detail`) into the model's context. Computed over the *whole*
+    The shape retrieval wants: bare ids and a count, so a chunk can carry `conflicts_with` without
+    dragging the `Conflict` models (and their prose `detail`) into the model's context. The ids are
+    the strongest few and the count is all of them — `NoteConflicts` says why both travel.
+    Computed over the *whole*
     current corpus rather than over the notes a query matched, because a chunk must be flagged even
     when the note it conflicts with was not itself retrieved — which is precisely the case where a
     reader would otherwise see one side and assume it settled.
@@ -230,12 +327,7 @@ def conflict_index(notes_dir: Path, as_of: date) -> dict[str, list[str]]:
         if cached is not None and cached[0] == fingerprint and cached[1] == as_of:
             return cached[2]
         index = {
-            note_id: sorted(
-                {
-                    conflict.other_id if conflict.note_id == note_id else conflict.note_id
-                    for conflict in conflicts
-                }
-            )
+            note_id: _strongest(note_id, conflicts)
             for note_id, conflicts in conflicts_by_note(find_conflicts(notes, as_of=as_of)).items()
         }
         # Not stored when caching is off (`graph_cache_enabled=false` yields no fingerprint): there

@@ -274,12 +274,13 @@ def test_the_conflict_index_is_computed_once_per_corpus_state(
     first = conflicts_module.conflict_index(tmp_path, today)
     second = conflicts_module.conflict_index(tmp_path, today)
     assert scans["count"] == 1, "a second sweep over an unchanged corpus must reuse the answer"
-    assert first == second == {"a": ["b"], "b": ["a"]}
+    assert first == second
+    assert {note_id: flags.ids for note_id, flags in first.items()} == {"a": ["b"], "b": ["a"]}
 
     _write(tmp_path, "c", smiles="CCO", confidence=0.9)
     third = conflicts_module.conflict_index(tmp_path, today)
     assert scans["count"] == 2, "a changed corpus must bust it — a stale flag is worse than none"
-    assert third["b"] == ["a", "c"]
+    assert sorted(third["b"].ids) == ["a", "c"]
 
 
 def test_the_conflict_index_is_recomputed_for_a_different_day(
@@ -304,7 +305,10 @@ def test_the_conflict_index_is_recomputed_for_a_different_day(
 
     while_valid = conflicts_module.conflict_index(tmp_path, date(2026, 1, 15))
     after_expiry = conflicts_module.conflict_index(tmp_path, date(2026, 2, 15))
-    assert while_valid == {"a": ["b"], "b": ["a"]}
+    assert {note_id: flags.ids for note_id, flags in while_valid.items()} == {
+        "a": ["b"],
+        "b": ["a"],
+    }
     assert after_expiry == {}, "a retired note is out of current evidence, so it flags nothing"
 
 
@@ -332,3 +336,126 @@ def test_the_conflicting_relations_are_all_real_relations() -> None:
     passing.
     """
     assert conflicts_module._CONFLICTING_RELATIONS <= KNOWN_RELATIONS
+
+
+def _crowd(count: int, *, confidence_of: object = None) -> list[Note]:
+    """`count` notes on one substrate whose confidences span the whole range.
+
+    The shape a real programme has, and the one the exhaustive scan choked on: an optimization
+    campaign is many runs on one substrate, so every note pairs with every other.
+    """
+    return [
+        _note(f"n{i:03d}", compound_smiles="CCO", confidence=round(0.02 + i * (0.96 / count), 2))
+        for i in range(count)
+    ]
+
+
+def test_a_note_is_flagged_against_its_widest_disagreements_not_against_everything() -> None:
+    """The narrowing, stated as the claim it changes rather than as a number.
+
+    An exhaustive pairwise scan tells a reader "here is every note on this substrate whose
+    confidence differs from yours" — a fact about the corpus, not a signal about the note. On a
+    programme-shaped 2,000-note corpus over 7 substrates that was 141,156 pairs and ~141 ids on
+    every evidence chunk reaching the model. KM-8 asked for a signal; the strongest few are one.
+    """
+    notes = _crowd(40)
+    by_note = conflicts_by_note(find_conflicts(notes))
+    # The most confident note disagrees with every hedging one, so it is the worst case.
+    widest = conflicts_module._strongest("n039", by_note["n039"])
+    assert len(widest.ids) == settings.conflict_max_per_note
+    assert widest.ids == ["n000", "n001", "n002"], "the widest gaps, worst first"
+    assert widest.total > len(widest.ids), "and there were more"
+
+
+def test_the_flag_carries_how_many_were_left_out() -> None:
+    """A truncated list with nothing saying so reads as a complete one — the repo's standing rule.
+
+    Without the count a reader shown three ids concludes there were three, which is a stronger and
+    wronger statement than the exhaustive list ever made.
+    """
+    by_note = conflicts_by_note(find_conflicts(_crowd(40)))
+    flags = conflicts_module._strongest("n039", by_note["n039"])
+    assert flags.truncated == flags.total - len(flags.ids) > 0
+    stated = [_note("a", relations=[Relation(rel="contradicts", to="b")]), _note("b")]
+    complete = conflicts_module._strongest("a", conflicts_by_note(find_conflicts(stated))["a"])
+    assert complete.truncated == 0, "an untruncated flag must not claim a hidden remainder"
+
+
+def test_a_declared_conflict_outranks_a_suspected_one_for_the_places() -> None:
+    """`Conflict.kind` is load-bearing: an author's statement is not evicted by a heuristic's guess.
+
+    This is the property that lets the cap apply at all. Ranking by gap alone would let three
+    hedging notes push a stated contradiction off a note's flag entirely.
+    """
+    notes = _crowd(40)
+    notes[39] = _note(
+        "n039",
+        compound_smiles="CCO",
+        confidence=0.98,
+        relations=[Relation(rel="contradicts", to="n020")],
+    )
+    by_note = conflicts_by_note(find_conflicts(notes))
+    flags = conflicts_module._strongest("n039", by_note["n039"])
+    assert flags.ids[0] == "n020", "the stated contradiction, ahead of every wider confidence gap"
+
+
+def test_the_scan_stops_at_the_threshold_rather_than_enumerating_every_pair() -> None:
+    """The cost and the noise are the same fact, so fixing one must fix the other.
+
+    Measured on the corpus shape the finding named: 141,156 pairs and 637 ms before, and the walk
+    that takes each note's widest disagreements first can stop as soon as the wider end falls under
+    the threshold. The assertion is against the pair count rather than a wall-clock number, which
+    is the part that is a property of the algorithm rather than of the machine.
+    """
+    notes = [
+        _note(
+            f"n{i:04d}",
+            compound_smiles=f"C{'C' * (i % 7)}O",
+            confidence=round(0.05 + (i % 20) * 0.05, 2),
+        )
+        for i in range(2000)
+    ]
+    found = find_conflicts(notes)
+    assert len(found) < 10_000, (
+        f"{len(found)} pairs — the exhaustive scan produced 141,156 on this corpus, and a list "
+        "that long is a fact about the corpus rather than a signal about any note"
+    )
+
+
+def test_notes_that_all_agree_cost_nothing_and_flag_nothing() -> None:
+    """The early stop must not invent a disagreement where the whole group is within the gap."""
+    same = [_note(f"s{i}", compound_smiles="CCO", confidence=0.8) for i in range(50)]
+    assert find_conflicts(same) == []
+
+
+def test_the_walk_stops_at_the_first_agreeing_candidate_instead_of_reading_the_whole_group() -> (
+    None
+):
+    """The early stop is the half that makes the scan cheap, and it is invisible in the output.
+
+    Bounding what each note *emits* already bounds the flags a reader sees; it does not bound the
+    work, because a group of 500 notes that all agree still has 500 candidates to reject. The walk
+    takes the widest-disagreeing end first, so the moment that end is inside the threshold nothing
+    further in can beat it and the rest of the group need never be read — which is why replacing
+    the `break` with a `continue` changes no assertion about conflicts at all.
+
+    So this asserts the reads rather than the results, by handing the walk a sequence that counts
+    them. Two per note (the two ends) is the whole cost of a group that agrees.
+    """
+
+    class _Counting(list):  # type: ignore[type-arg]
+        reads = 0
+
+        def __getitem__(self, index):  # type: ignore[no-untyped-def]
+            type(self).reads += 1
+            return super().__getitem__(index)
+
+    ordered = _Counting(
+        (_note(f"s{i}", compound_smiles="CCO", confidence=0.8), 0.8) for i in range(500)
+    )
+    _Counting.reads = 0
+    assert conflicts_module._widest_disagreements(ordered, 0, 0.3, 3) == []
+    assert _Counting.reads <= 6, (
+        f"read {_Counting.reads} of 500 candidates to reject a group that agrees — the walk must "
+        "stop at the first end inside the threshold, not scan past it"
+    )

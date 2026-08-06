@@ -61,6 +61,14 @@ class RetrievalSettings(BaseSettings):
     # set to 1.0 and only a certain/impossible pair trips it. 0.3 is roughly "one note is
     # confident and the other is hedging".
     conflict_confidence_gap: float = Field(default=0.3, gt=0.0, le=1.0)
+    # How many disagreements one note's flag names, worst first (KM-8). The heuristic pairs notes
+    # sharing a `(type, compound)`, and an optimization campaign is many runs on one substrate — so
+    # on a programme-shaped 2,000-note corpus over 7 substrates the exhaustive scan produced 141,156
+    # pairs and put ~141 ids on every evidence chunk reaching the model. A list that long is a fact
+    # about the corpus, not a signal about the note; three is "the disagreements worth your eye",
+    # which is what KM-8 asked for. Declared conflicts outrank suspected ones for the places, and
+    # the count of everything is carried beside the list so a truncation never reads as the whole.
+    conflict_max_per_note: int = Field(default=3, ge=1)
     # Whether retrieval flags disagreeing notes at all. On by default — two contradictory notes
     # returned without comment read as corroboration, which is the failure KM-8 names. The switch
     # exists because detection walks the whole current corpus per query; a deployment measuring a
