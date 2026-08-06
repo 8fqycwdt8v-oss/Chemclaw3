@@ -154,11 +154,36 @@ class SnowflakeWarehouse:
         return "?"
 
     async def _connect(self) -> Any:
-        """Open the connection once, or raise `ConnectionError` so the caller can retry."""
+        """Open the connection once, classifying a failure as retryable or not.
+
+        **Every client error used to become a `ConnectionError`**, which this package's own split
+        says means "the warehouse is unreachable, retrying may work" (`driver.WarehouseQueryError`
+        documents the other half). A wrong password, an unknown account identifier and a role the
+        user does not hold are none of those: they fail identically on every attempt, so the sync
+        burned its whole Temporal retry budget before an operator saw a message that then said
+        "cannot connect" about a credential problem.
+
+        The split follows the DB-API 2.0 hierarchy the client implements (PEP 249):
+        `InterfaceError` is a fault in the client or how it was called, and `ProgrammingError` is a
+        request the server understood and refused — which is where authentication and authorization
+        failures land. Both are configuration, so both raise `WarehouseQueryError`, which
+        `durable.publish` already marks non-retryable by class name. Everything else — the
+        operational family, timeouts, transport — keeps `ConnectionError`.
+
+        **What is not verified here, stated rather than implied**: the mapping from Snowflake's own
+        error codes onto those classes. That needs a real tenant, and until one exists this is the
+        documented contract rather than a measured one. It is strictly better than the previous
+        behaviour either way — every one of these was retryable before, including a typo'd password.
+        """
         if self._connection is None:
             client = _client()
             try:
                 self._connection = await asyncio.to_thread(client.connect, **self._options)
+            except (client.errors.InterfaceError, client.errors.ProgrammingError) as exc:
+                raise WarehouseQueryError(
+                    f"the warehouse refused this connection: {exc}. Check the account identifier, "
+                    "the credentials and the role the binding names — retrying will not change it"
+                ) from exc
             except client.errors.Error as exc:
                 raise ConnectionError(f"cannot connect to the warehouse: {exc}") from exc
         return self._connection

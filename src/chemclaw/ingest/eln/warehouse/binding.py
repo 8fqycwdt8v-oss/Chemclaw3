@@ -506,6 +506,17 @@ class VectorBinding(BaseModel):
             _check_identifier(column, "vector filter column")
         if self.embedding == "server" and not self.server_embed_function:
             raise BindingError("embedding 'server' needs a server_embed_function to call")
+        if self.server_embed_function:
+            # The one value this module interpolated into SQL without checking it, which made
+            # `sql.py`'s own header — "Every value is bound; only checked identifiers are written" —
+            # false. A function name is a dotted identifier
+            # (`SNOWFLAKE.CORTEX.EMBED_TEXT_768`), so it fits the same rule as every relation and
+            # column here rather than needing one of its own.
+            #
+            # Distinct from the documented `where:` trust boundary, which is *deliberately* raw SQL
+            # an operator writes. The difference is that `where:` announces itself as such and this
+            # announced itself as an identifier.
+            _check_identifier(self.server_embed_function, "vector server_embed_function")
         if self.embedding == "local" and (self.server_embed_function or self.server_embed_model):
             raise BindingError(
                 "server_embed_function/server_embed_model are only used when embedding is "

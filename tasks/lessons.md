@@ -1486,3 +1486,38 @@ The generalization, which the first entry stated too narrowly:
    `test_durable_tools` asserts the rationale survives the round trip, `test_framing_coverage`
    asserts it is framed. Restating the framing claim in both would make one of them lie the next
    time the treatment changes.
+
+## `.resolve()` is lexical; `is_file()` asks the OS (2026-08-06)
+
+Reproducing the warehouse path-traversal finding (WP-7), I measured with `Path.resolve()` and wrote
+the result into a code comment, an ADR draft and three test docstrings:
+
+```
+'../../../../etc/passwd' -> /var/lib/chemclaw/note-repo/etc/passwd.md   escaped=True
+```
+
+The code does not call `.resolve()`. It calls `.is_file()`, and the OS **will not walk `..` through
+a path component that does not exist**. `knowledge/reaction/reaction-../../x.md` needs a real
+directory named `reaction-..`; there is none, so that key escapes nothing.
+
+The finding is still real, and measuring the right primitive is what showed its actual shape: with a
+directory under `knowledge/reaction/` for the traversal to stand on, `is_file()` returns **True** for
+a file outside the tree. So the reachable form is conditional, which is exactly why the row is [L] —
+notes are files, so the stepping stone is not normally there.
+
+It also made two tests unfalsifiable on the way. The first asserted `False` against paths that do
+not exist, where "refused" and "not found" are the same answer. The second created a probe file at
+the `.resolve()` target — a location the real traversal never reaches — and still passed with the
+guard mutated out.
+
+Rules:
+1. **Measure with the primitive the code calls.** `resolve()` vs `is_file()`, `==` vs `is`,
+   `in` vs `startswith` — adjacent functions answer adjacent questions, and a probe built from the
+   wrong one produces a confident, wrong write-up. This is the same failure as the earlier
+   deduplication and molecule-size probes, on a new subject.
+2. **A security test must construct the state where the attack works.** If the exploit needs a
+   stepping stone, create it and assert it exists *before* asserting the refusal — otherwise the
+   test passes for the wrong reason and mutation is the only thing that will tell you.
+3. **When a corrected measurement narrows a finding, say so in the artifact.** The comment, the test
+   and the record all now state the condition, so the next reader inherits the true shape rather
+   than my first one.

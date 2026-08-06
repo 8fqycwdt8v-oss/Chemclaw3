@@ -71,6 +71,24 @@ def note_id_for_reaction(record_id: str) -> str:
     return f"reaction-{record_id}"
 
 
+def is_note_slug(value: str) -> bool:
+    """Whether `value` is a plain slug — the traversal barrier, as a question rather than a raise.
+
+    `Note` enforces this on `id` and `type` at the model, which is where every *write* passes. A
+    reader that builds a path without constructing a `Note` bypasses that barrier, and one did: the
+    warehouse retriever asks "has this row already been ingested?" by `stat`-ing a path built from a
+    raw warehouse key. Measured on `is_file()` rather than on `.resolve()` — the OS will not walk
+    `..` through a component that does not exist, so the escape needs a real directory to stand on,
+    and with one it reaches a file outside the knowledge tree. The consequence is an existence probe
+    rather than a read, because the caller only stats.
+
+    Exposed as a predicate because that caller wants an *answer*, not an exception: a hostile key on
+    one row must not fail a chemist's whole query, and "no note could ever have that id" is exactly
+    the honest answer to the question being asked.
+    """
+    return bool(_SLUG.match(value))
+
+
 def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
@@ -79,7 +97,19 @@ def note_relative_path(note_type: str, note_id: str) -> str:
     `chemclaw.kg.graph.note_file_fingerprints`, which reads a note's id back out of `path.stem`,
     and the warehouse retriever, which spelled the layout *and* the literal type `"reaction"` into
     a `stat` call. A layout that lives in four places is a layout one of them will get wrong.
+
+    **It refuses a non-slug segment**, which is a second barrier below `Note`'s own and not a
+    duplicate of it. `Note` protects everything that constructs a note; this protects everything
+    that constructs a *path*, and the warehouse retriever was the caller that did the second
+    without the first. The question this function answers — where does a note live — has no answer
+    for an id no note could have, so raising is the honest return rather than a defensive one.
     """
+    for segment, what in ((note_type, "note type"), (note_id, "note id")):
+        if not is_note_slug(segment):
+            raise ValueError(
+                f"{what} {segment!r} is not a plain slug, so it names no note; a path built from "
+                "it would resolve outside the knowledge tree"
+            )
     return f"{note_type}/{note_id}.md"
 
 

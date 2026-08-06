@@ -38,7 +38,7 @@ from chemclaw.ingest.eln.warehouse.binding import (
 from chemclaw.ingest.eln.warehouse.connect import open_warehouse
 from chemclaw.ingest.eln.warehouse.driver import Warehouse, WarehouseQueryError
 from chemclaw.ingest.eln.warehouse.expr import as_text
-from chemclaw.kg.note import note_id_for_reaction, note_relative_path
+from chemclaw.kg.note import is_note_slug, note_id_for_reaction, note_relative_path
 from chemclaw.retrieval.evidence import EvidenceChunk
 
 logger = logging.getLogger(__name__)
@@ -181,5 +181,21 @@ def _is_merged_note(key: str) -> bool:
     Deliberately not cached: a merge lands between two queries, and a stale answer would keep
     surfacing a reaction a reviewer had just signed off on — the exact duplication this prevents.
     """
-    note = Path(settings.knowledge_path) / note_relative_path("reaction", note_id_for_reaction(key))
+    note_id = note_id_for_reaction(key)
+    if not is_note_slug(note_id):
+        # A key the graph could never have stored under, so the answer is "no" — not an exception
+        # that fails a chemist's whole query over one bad row, and not a `stat` of wherever the key
+        # points.
+        #
+        # **Measured on `is_file()`, which is what this calls, and the distinction matters**: a
+        # first pass measured with `.resolve()` and reported an escape that `is_file()` does not
+        # perform, because `.resolve()` walks `..` lexically while the OS refuses to walk it through
+        # a component that does not exist. The reachable form needs a real directory under
+        # `knowledge/reaction/` to stand on — and with one, `is_file()` returns True for a file
+        # outside the knowledge tree. That is why the finding is [L]: notes are files, so the
+        # stepping stone is not normally there, and it is a `stat` either way. What it buys an
+        # attacker is an existence probe, and the quieter half — making a real reaction look
+        # already-ingested so it vanishes from retrieval.
+        return False
+    note = Path(settings.knowledge_path) / note_relative_path("reaction", note_id)
     return note.is_file()

@@ -73,11 +73,20 @@ and was reproduced; none is a reading.
 - [ ] **[M] Two enabled ELN sources with the same entry id silently collapse** onto one note and
       one fingerprint row (`ingest/eln/ingest.py:51`), contradicting the manifest's stated
       per-source guarantee.
-- [ ] **[L] `vector.server_embed_function` reaches the SQL text unchecked**
-      (`ingest/eln/warehouse/binding.py:462`), so the module's "only checked identifiers are
-      written" invariant is false. Distinct from the documented `where:` trust boundary.
-- [ ] **[L] A warehouse row key is interpolated into a filesystem path** with no slug validation
-      (`ingest/eln/warehouse/retriever.py:184`).
+- [x] **[L] `vector.server_embed_function` reaches the SQL text unchecked** — closed by
+      D-2026-08-06-the-warehouse-boundary-and-a-probe-that-measured-the-wrong-call. It takes the
+      same `_check_identifier` every relation and column takes, since a function name is a dotted
+      identifier. `where:` stays raw, deliberately: it announces itself as SQL an operator writes,
+      and this announced itself as an identifier.
+- [x] **[L] A warehouse row key is interpolated into a filesystem path** — closed by the same ADR,
+      and **the first two measurements of it were wrong in a way worth recording**. `.resolve()`
+      showed an escape that `is_file()` — what the code calls — does not perform, because the OS
+      will not walk `..` through a component that does not exist. Measured on the right primitive,
+      the escape is real but *conditional*: with a directory under `knowledge/reaction/` to stand
+      on, `is_file()` returns True for a file outside the tree. Hence [L] — notes are files, so the
+      stepping stone is not normally there. The barrier now also guards `note_relative_path` (the
+      choke point every path passes) with `is_note_slug` for the caller that wants an answer rather
+      than an exception.
 
 **The store seam** — measured by the Q-A lane rather than assumed. The ten `Protocol + InMemory +
 Postgres` triads are *not* one abstraction waiting to be extracted; what is genuinely shared is the
@@ -122,9 +131,13 @@ for rather than a decomposition proposal.
 (`tasks/lessons.md`), so each of these was proven by neutering the control and watching the test
 still pass.
 
-- [ ] **[M] `SnowflakeWarehouse._connect` classifies every client error as retryable
-      `ConnectionError`** (`ingest/eln/warehouse/snowflake.py:162`), and no test executes any
-      function body in the module.
+- [x] **[M] `SnowflakeWarehouse._connect` classifies every client error as retryable
+      `ConnectionError`** — closed by the same ADR. Split along the DB-API 2.0 hierarchy the client
+      implements: `InterfaceError`/`ProgrammingError` (where authentication and authorization land)
+      become the non-retryable `WarehouseQueryError`; the operational family keeps `ConnectionError`.
+      **Unverified and said so**: the mapping from Snowflake's own error codes onto those classes
+      needs a tenant. Strictly better either way — a typo'd password was retryable before. The
+      module also has its first executed tests, driven through the `_client()` seam with a fake.
 - [ ] **[L] `tests/test_connector_isolation.py`'s first-party half is vacuous**
       (`tests/test_connector_isolation.py:85`): `name.split(".")[0] in ("calc",)` can never match a
       `chemclaw.science.calc.*` module, so the check has always passed on an empty set.
