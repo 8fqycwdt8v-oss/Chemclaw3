@@ -145,6 +145,12 @@ reindex:  ## Incrementally rebuild the derived note index — only notes changed
 reindex-full:  ## Full note-index rebuild, ignoring stored fingerprints (recovery only).
 	uv run python -m chemclaw.retrieval.vector_index --full
 
+share-estimate:  ## Cost a mounted document share before indexing it (reads nothing). SHARE=<source>
+	uv run python -m chemclaw.cli.sync_share $(SHARE) --dry-run
+
+share-sync:  ## Crawl a mounted document share into the document index now. SHARE=<source>
+	uv run python -m chemclaw.cli.sync_share $(SHARE)
+
 up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
 	docker compose -f infra/docker-compose.yml up -d
 

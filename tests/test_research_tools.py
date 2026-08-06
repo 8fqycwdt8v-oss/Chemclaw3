@@ -6,6 +6,7 @@ knowledge dir and an in-memory reaction store (no database, no git).
 """
 
 import asyncio
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -160,3 +161,50 @@ def test_sweep_ranks_by_confidence_before_truncating(
     chunks = asyncio.run(gather_evidence("yield"))
 
     assert {c.source_note_id for c in chunks} == {"reaction-high", "reaction-mid"}
+
+
+def test_a_mounted_share_is_not_starved_by_a_larger_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sixth source must survive the cap, and the only honest check is to count its chunks.
+
+    `D-2026-08-01-a-cap-that-starves-a-source` is the reason: a flat union truncated in config
+    order gave the lexical leg **zero** chunks in every default-mode answer, silently, on the
+    success path. A file share is exactly the shape that regresses it — a graph of thirty notes
+    matching a common word will out-produce it every time — so this counts per source rather than
+    asserting the round-robin is still there.
+    """
+    from chemclaw.ingest.documents.binding import load_binding
+    from chemclaw.ingest.documents.index import InMemoryDocumentIndex
+    from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
+    from chemclaw.ingest.documents.sync import sync_share
+
+    for i in range(30):
+        (tmp_path / f"n{i}.md").write_text(
+            f"---\nid: reaction-{i}\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+        )
+    mount = tmp_path / "share" / "Docs"
+    mount.mkdir(parents=True)
+    for i in range(5):
+        (mount / f"doc{i}.md").write_text(f"Report {i}: the yield was measured.", encoding="utf-8")
+
+    binding = {
+        "mount": str(tmp_path / "share"),
+        "roots": [{"path": "Docs"}],
+        "extensions": [".md"],
+    }
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share("sharedrive", load_binding(binding), index))
+    share = ShareDocumentRetriever(binding=binding, name="sharedrive", index=index)
+
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 10)
+    graph = research_tools._text_retrievers()
+    monkeypatch.setattr(research_tools, "_text_retrievers", lambda: [*graph, share])
+
+    chunks = asyncio.run(gather_evidence("yield"))
+
+    # Measured, not asserted in the abstract: round-robin gives each source half the budget, so a
+    # graph six times the size of the share does not consume it. A flat cap in config order would
+    # read `{"graph": 10}` here.
+    assert Counter(chunk.retriever for chunk in chunks) == {"graph": 5, "sharedrive": 5}

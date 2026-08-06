@@ -70,11 +70,14 @@ BEGIN
 
     -- Full DML, because the application genuinely deletes from these: the retention sweep prunes
     -- conversation history and spent mailbox rows, artifact eviction reclaims cold blobs, a turn
-    -- claim is released, a subscription is removed, a preference is unset.
+    -- claim is released, a subscription is removed, a preference is unset. The two document tables
+    -- join them because the share index is derived from a filesystem it does not own: a file
+    -- deleted from the share has to leave the index, or a chemist keeps being cited a document
+    -- nobody can open.
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs TO %I', app_role);
+        'artifact_blobs, document_files, document_chunks TO %I', app_role);
 
     -- Sequences for every table the role may INSERT into (BIGSERIAL needs USAGE on its sequence).
     -- All of them rather than a list: a sequence confers no read of any table's rows, and an

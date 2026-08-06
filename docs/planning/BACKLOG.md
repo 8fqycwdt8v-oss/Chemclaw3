@@ -3,6 +3,43 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the mounted-document-share build (2026-08-06)
+
+Record: `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`. The share is crawled,
+indexed, entitlement-gated and tested offline; these are the edges that build could not close.
+
+- [ ] **A gated share contributes nothing to a scheduled report, and does so silently** — [M].
+      `durable/report_workflow.py` calls `active_retrieve_sources()` inside a Temporal workflow,
+      where no identity contextvar is set, so `ShareDocumentRetriever` correctly declines: it cannot
+      check an entitlement against an actor that is not there. That is right by construction and
+      invisible in the output — a report simply comes back without the share's evidence and says
+      nothing about why. The fix is to propagate the report's `requested_by` (which the workflow
+      already carries) into `identity_context` for the duration of the gather, which needs a
+      decision first: a report is *authored* by a user but *run* by the service, and stamping the
+      requester's roles onto a background run widens what that run can read.
+      *Trigger:* the first deployment that enables a gated share and also runs scheduled reports.
+
+- [ ] **Nothing has been run against a real SMB mount** — [S]. Every test builds a POSIX directory
+      tree, which is what the code sees, but a CIFS mount differs where it matters most for this
+      job: `st_mtime_ns` granularity (the whole fingerprint diff rests on it), how a dropped mount
+      presents to `scandir` (the prune guard rests on that), and `scandir` latency at 500k entries.
+      *Trigger:* a cluster with the PVC attached. Verify with `make share-estimate` first.
+
+- [ ] **A refused file is re-read on every crawl** — [S]. A scanned PDF or an unreadable document
+      gets no `document_files` row, so its fingerprint is not stored and the next crawl opens it
+      again. Deliberate: recording it would make it look unchanged forever and `skipped_scan` would
+      read zero on every run after the first, losing the number that says how much of the share is
+      invisible. The cost is one read (and, for a scan, one `pypdf` pass) per refused file per
+      cycle — no embedding. Closing it properly means a refusal status on the row plus a way to
+      report the population from the index rather than from the pass.
+      *Trigger:* a real share whose refused population makes the crawl's read volume material —
+      `make share-estimate` gives the count before it ever runs.
+
+- [ ] **HNSW recall under a filtered document search is unmeasured** — [S]. `search_dense` orders by
+      `<=>` with a `LIMIT` and an `EXISTS` predicate on `document_files`; pgvector applies the HNSW
+      index first and filters after, so a narrow `tag` over a large corpus can under-return. Harmless
+      at fixture scale and unmeasured at a million chunks. *Trigger:* a real corpus is indexed —
+      then compare a filtered top-k against the same query with the index disabled.
 ## Open — Left by the whole-codebase security sweep (2026-08-06)
 
 Eleven disjoint review lanes, every finding re-checked by a second agent required to execute a

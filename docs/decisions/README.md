@@ -276,6 +276,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-06-a-gate-that-names-nothing](D-2026-08-06-a-gate-that-names-nothing.md) | A gate that names nothing |
 | [D-2026-08-06-a-pair-rule-is-a-cross-product](D-2026-08-06-a-pair-rule-is-a-cross-product.md) | A pair rule is a cross-product, and the list is the caller's |
 | [D-2026-08-06-a-redactor-that-only-reads-the-message](D-2026-08-06-a-redactor-that-only-reads-the-message.md) | A redactor that only reads the message |
+| [D-2026-08-06-a-share-is-mounted-not-called](D-2026-08-06-a-share-is-mounted-not-called.md) | A classical file share becomes a corpus, and its AD group becomes an entitlement |
 | [D-2026-08-06-a-swallowed-write-reported-as-a-store](D-2026-08-06-a-swallowed-write-reported-as-a-store.md) | A swallowed write, reported as a store |
 | [D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice](D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice.md) | A tool cannot say it has nothing twice |
 | [D-2026-08-06-an-envelope-that-only-survives-its-own-process](D-2026-08-06-an-envelope-that-only-survives-its-own-process.md) | An envelope that only survives its own process |

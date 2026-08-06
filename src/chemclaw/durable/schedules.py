@@ -43,6 +43,7 @@ from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
 from chemclaw.durable.audit_verify import AuditChainVerifyWorkflow
 from chemclaw.durable.digest import DigestWorkflow
+from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
 from chemclaw.durable.memory_jobs import (
@@ -83,6 +84,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "digest",
         "artifact-eviction",
         "observations",
+        "document-sync",
     }
 )
 
@@ -111,6 +113,13 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.note_reindex_enabled:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
+    # A document share earns a Schedule only where one is actually enabled. Asked of the manifests
+    # rather than of a second setting: `CHEMCLAW_DATA_SOURCES` is the enable switch (D-018), and a
+    # `document_sync_enabled` flag beside it could only ever say something the source list already
+    # says, or say it wrongly.
+    if share_sources():
+        share_every = timedelta(minutes=settings.document_sync_schedule_minutes)
+        schedules.append(PlannedSchedule("document-sync", DocumentShareSyncWorkflow, share_every))
     # The integrity check only earns a Schedule where a durable audit sink exists to verify
     # (gap SCH-5); an offline/dev deployment has no chain and would alert on an empty table.
     if settings.audit_verify_enabled:

@@ -118,6 +118,12 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # the source ships disabled, so a cluster reaches a warehouse only by naming it in
         # `CHEMCLAW_DATA_SOURCES`.
         "eln-snowflake",
+        # A mounted SMB/CIFS file share, and *not* an escalation of D-089 at all: it reaches no
+        # host. The share is a read-only volume the platform mounts, so the code sees a POSIX path
+        # exactly as `eln-json` sees a drop directory — no client, no credential in this repository,
+        # no network peer, which is why the host-literal scan above needed no new allowance for it.
+        # It is the deployment's own file server, and it ships disabled.
+        "sharedrive",
     }
 
 
