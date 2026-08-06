@@ -65,7 +65,8 @@ jobs:
     # losing every already-paid evaluation. And single-objective: the objective registry maps a name
     # to one scalar-returning callable, so a trade-off belongs on the inline tool. Both checked at
     # launch because that is the only replay-safe place (see `JobSpec.precondition`).
-    precondition: chemclaw.science.bo.problem:require_campaign_startable
+    preconditions:
+      - chemclaw.science.bo.problem:require_campaign_startable
     expensive: true
     publish_to_graph: true
 

@@ -52,17 +52,23 @@ def unmatched_call_ids(messages: Sequence[Message]) -> set[str]:
 def unmatched_result_ids(messages: Sequence[Message]) -> set[str]:
     """Return the `call_id`s of function *results* that no function call accounts for.
 
-    The mirror of `unmatched_call_ids`, and the asymmetry between them is the whole reason this
-    exists. `unmatched_call_ids` reports unanswered calls and `strip_call_ids` removes them, so an
-    orphaned call is detected and healed on every read. Nothing detects an orphaned **result**: the
-    repair filters on `type == "function_call"` only, so a `tool_result` whose `tool_use` is gone is
-    invisible to it — and the API rejects that thread exactly as hard as the converse. A stranded
-    result is therefore a bricked session with *no* self-heal path.
+    The mirror of `unmatched_call_ids`. The API rejects a thread with a `tool_result` whose
+    `tool_use` is gone exactly as hard as the converse, so a stranded result bricks a session the
+    same way an unanswered call does.
 
-    Deliberately **not** wired into the read-time repair (D-145). Stripping a stranded result would
-    silently destroy evidence and, worse, would mask a bug in whatever produced it. Its job is to be
-    the assertion: any code that deletes conversation rows must prove it never leaves one of these,
-    rather than rely on something cleaning up afterwards.
+    **Two jobs, and the second was added later.** It is the assertion first: any code that deletes
+    conversation rows must prove it never leaves one of these, rather than rely on something
+    cleaning up afterwards — which is what `droppable_rows` uses it for, and what D-145 built it
+    for. It now *also* feeds the read-time repair, so a session bricked before that rule existed
+    heals itself instead of needing a database edit
+    (D-2026-08-06-a-turn-that-does-not-finish-cleanly).
+
+    D-145 deliberately left the repair half out, on the argument that healing would mask a
+    regression in `droppable_rows` rather than surface it. That argument is answered rather than
+    overruled: the repair is counted (`chemclaw_history_stranded_results_total`) and logged at
+    WARNING with the session id, so a non-zero rate is the alarm the silence used to be. The
+    trade it was weighed against is that until then, *every* session split by the old age-based
+    retention stayed unusable forever with no automatic recovery.
     """
     called = {
         content.call_id
@@ -167,8 +173,12 @@ def calls_without_adjacent_results(messages: Sequence[Message]) -> set[str]:
     return missing
 
 
-def strip_call_ids(message: Message, call_ids: set[str]) -> Message | None:
-    """Return `message` without the calls in `call_ids`, or `None` if nothing is left of it.
+def strip_orphans(
+    message: Message,
+    call_ids: AbstractSet[str],
+    result_ids: AbstractSet[str] = frozenset(),
+) -> Message | None:
+    """Return `message` without the named orphaned calls and results, or `None` if nothing remains.
 
     Returns the *same object* when there is nothing to strip, so a caller can use identity to tell
     "untouched" from "rewritten" — which a storage layer needs in order to update only the rows
@@ -178,11 +188,17 @@ def strip_call_ids(message: Message, call_ids: set[str]) -> Message | None:
     carries prose *and* a tool call, and discarding the prose would silently rewrite what the
     assistant said. A message left with no content at all yields `None`, since an empty message is
     itself a malformed block.
+
+    One function over both halves rather than a mirrored pair, because the rule is one rule: a
+    `function_call` and its `function_result` are an indivisible unit, and whichever half survives
+    alone is equally fatal to the thread. `result_ids` defaults to empty for the caller that only
+    has calls to strip.
     """
     contents = [
         content
         for content in message.contents
         if not (content.type == _CALL and content.call_id in call_ids)
+        and not (content.type == _RESULT and content.call_id in result_ids)
     ]
     if len(contents) == len(message.contents):
         return message
@@ -200,5 +216,5 @@ def strip_unmatched_calls(messages: Sequence[Message]) -> list[Message]:
     orphans = unmatched_call_ids(messages)
     if not orphans:
         return list(messages)  # the overwhelmingly common case: no copying, no allocation churn
-    stripped = (strip_call_ids(message, orphans) for message in messages)
+    stripped = (strip_orphans(message, orphans) for message in messages)
     return [message for message in stripped if message is not None]

@@ -54,18 +54,17 @@ would add an entry that can never be hit by anything the per-species entries mis
 """
 
 import asyncio
-from collections import Counter
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from rdkit import Chem
 
 from chemclaw.core.config import settings
+from chemclaw.science.calc.balance import check_balance
 from chemclaw.science.calc.conformers import ConformerSpec, run_cached_ensemble
 from chemclaw.science.calc.progress import Progress, no_progress
 from chemclaw.science.calc.store import ResultStore
 from chemclaw.science.calc.structure import structure_from_smiles
-from chemclaw.science.calc.xtb_engine import HARTREE_TO_KCAL, parse_molecule
+from chemclaw.science.calc.xtb_engine import HARTREE_TO_KCAL
 from chemclaw.science.calc.xtb_opt import OptSpec, run_cached_optimization
 from chemclaw.science.calc.xtb_thermo import ThermoSpec, relax_to_minimum
 
@@ -167,50 +166,6 @@ class SolventComparisonResult(BaseModel):
     spread_kcal: float
     uncertainty_kcal: float
     warnings: list[str] = Field(default_factory=list)
-
-
-def _composition(smiles: str) -> tuple[Counter[str], int]:
-    """Element counts (hydrogens explicit) and formal charge of one species."""
-    mol = parse_molecule(smiles)
-    counts: Counter[str] = Counter(atom.GetSymbol() for atom in mol.GetAtoms())
-    return counts, Chem.GetFormalCharge(mol)
-
-
-def check_balance(reactants: list[str], products: list[str]) -> None:
-    """Raise unless the equation conserves atoms and charge (gate G4).
-
-    Named the failure, not just detected: the message says which element is short and
-    by how much, because the usual cause is a forgotten water or proton and that is
-    immediately fixable once stated.
-    """
-    if not reactants or not products:
-        raise ValueError("a reaction needs at least one reactant and one product")
-    left: Counter[str] = Counter()
-    right: Counter[str] = Counter()
-    left_charge = right_charge = 0
-    for smiles in reactants:
-        counts, charge = _composition(smiles)
-        left += counts
-        left_charge += charge
-    for smiles in products:
-        counts, charge = _composition(smiles)
-        right += counts
-        right_charge += charge
-    if left != right:
-        difference = {
-            element: left[element] - right[element]
-            for element in sorted(set(left) | set(right))
-            if left[element] != right[element]
-        }
-        raise ValueError(
-            "reaction is not atom-balanced (reactants minus products): "
-            + ", ".join(f"{element} {count:+d}" for element, count in difference.items())
-        )
-    if left_charge != right_charge:
-        raise ValueError(
-            f"reaction is not charge-balanced: reactants {left_charge:+d}, "
-            f"products {right_charge:+d}"
-        )
 
 
 def _checked_symmetry_numbers(

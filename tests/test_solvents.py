@@ -187,8 +187,8 @@ def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> 
                 continue
             checked += 1
             assert (
-                job.precondition == "chemclaw.science.calc.solvents:require_supported_solvents"
-            ), f"job {job.name!r} takes a solvent but declares precondition {job.precondition!r}"
+                "chemclaw.science.calc.solvents:require_supported_solvents" in job.preconditions
+            ), f"job {job.name!r} takes a solvent but declares preconditions {job.preconditions!r}"
     assert checked == 5, f"expected the five solvent-taking calc jobs, swept {checked}"
 
 
@@ -205,9 +205,12 @@ def test_the_launcher_refuses_the_screen_before_it_starts_any_durable_work() -> 
 
     (_, manifest) = discovered()["calc"]
     (job,) = [spec for spec in manifest.jobs if spec.name == "compare_solvents"]
+    # Balanced deliberately: `compare_solvents` now declares the atom/charge rule beside the
+    # solvent one (VIBE-1a), and this fixture's equation lost a proton — it refused for the wrong
+    # reason the moment the second rule was wired, which is the first thing the new check found.
     params = {
         "reactants": ["CC(=O)O"],
-        "products": ["CC(=O)[O-]"],
+        "products": ["CC(=O)[O-]", "[H+]"],
         "solvents": ["water", "2-methyltetrahydrofuran"],
     }
     with pytest.raises(ValueError, match="2-methyltetrahydrofuran"):

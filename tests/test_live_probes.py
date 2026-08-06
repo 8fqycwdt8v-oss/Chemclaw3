@@ -525,3 +525,60 @@ def test_a_probe_that_needed_a_job_and_called_no_job_tool_is_still_flagged() -> 
 
     assert "du-03" in report
     assert "ran none" in report
+
+
+def test_a_degraded_capability_is_not_a_loud_failure() -> None:
+    """The finding: the per-turn Temporal probe made `failed_loudly` unconditionally true.
+
+    `capability_degraded` is announced before the first token on any deployment without a broker —
+    every offline run, every local one — and it counted as "this turn broke visibly". The harness's
+    headline signal is `not answered and not failed_loudly`, so the silent death this whole module
+    exists to find could no longer be reported by it.
+
+    Tolerable while only an unreachable connector raised the event; the correction is the rule the
+    field's own docstring already stated. Degradation is announced *and* recorded separately —
+    `outcome.degraded` still names it — but it is the system working, not the turn failing.
+    """
+    outcome = _run(
+        _probe(),
+        {"type": "capability_degraded", "connectors": ["durable job execution"]},
+        {"type": "tool_call", "tool": "gather_evidence", "arguments": "{}"},
+    )
+    assert outcome.degraded == ["durable job execution"], "the degradation stopped being recorded"
+    assert outcome.answered is False
+    assert outcome.failed_loudly is False, (
+        "a degraded capability is being scored as a visible failure, which is what made the "
+        "silent-death signal unable to fire"
+    )
+
+
+def test_a_degraded_turn_that_also_fails_a_tool_is_still_loud() -> None:
+    """The other direction: dropping `degraded` from the rule must not mute a real failure.
+
+    Every probe in an offline run carries the degradation event, so a fix that read it as "not
+    loud, therefore nothing here is loud" would silence the tool failures beside it.
+    """
+    outcome = _run(
+        _probe(),
+        {"type": "capability_degraded", "connectors": ["durable job execution"]},
+        {"type": "tool_failed", "tool": "compute_reaction_energy", "message": "worker unreachable"},
+    )
+    assert outcome.failed_loudly is True
+
+
+def test_the_silent_death_is_reportable_on_a_deployment_with_no_broker() -> None:
+    """The property the harness is *for*, asserted end to end on the shape that broke it.
+
+    This is the probe an offline run actually produces: the durable subsystem is announced
+    unreachable, the model calls a tool, and then the turn dies without an answer and without an
+    error. Before the fix this outcome was indistinguishable from a healthy turn that answered,
+    because both scored `failed_loudly=True`.
+    """
+    outcome = _run(
+        _probe(),
+        {"type": "capability_degraded", "connectors": ["durable job execution"]},
+        {"type": "tool_call", "tool": "find_notes", "arguments": "{}"},
+        {"type": "tool_result", "tool": "find_notes", "preview": "2 notes", "note_ids": []},
+    )
+    silent = not outcome.answered and not outcome.failed_loudly
+    assert silent, "the run cannot report a silent death on any deployment without a broker"

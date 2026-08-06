@@ -230,27 +230,42 @@ Only visible because the tests ran beside another agent's build. Record:
 the work it wraps when the activity is cancelled [L]; `evals.live`'s `failed_loudly` is
 unconditionally true [M]; heal sessions bricked by a stranded `tool_result`; VIBE-1(a).*
 
-- [ ] `api/runner.py:318` — the stream has no `aclose()` and no GC finalizer on any non-exhausting
-      exit, so its cleanup hooks never run at all.
-- [ ] `api/runner.py:780` — an approval prompt raised during a resume never reaches the stream.
-- [ ] `agent/job_results.py:83` — a failed job is dropped from the mid-turn resume while the
-      function's docstring says it is not. Fix the code, not the docstring.
-- [ ] `durable/heartbeat.py:48` — calc's CREST runs and bo's surrogate fits keep burning CPU after
-      `cancel_job`. Cancel the wrapped work with the beat.
-- [ ] `evals/live.py:317` — the per-turn Temporal probe makes the harness's headline "failed
-      silently" signal unable to fire. A metric that cannot report its own subject is worse than
-      absent, which is this repo's most-recorded defect family.
-- [ ] Heal sessions already bricked by a stranded `tool_result` (D-145 left this deliberately, to
-      avoid masking a `droppable_rows` regression). It is a new destructive read-path behaviour, so
-      it gets the ADR argument the row asks for: repair, count the repairs, and alert on a non-zero
-      rate so the regression it would mask stays visible.
-- [ ] VIBE-1(a): run the atom/charge balance check as a `JobSpec.precondition` before launch, so the
-      actionable message reaches the model through `surface_domain_errors` and five pointless
-      Temporal retries do not happen. VIBE-1(b) — relaying arbitrary workflow failure text — stays
-      open as the policy decision it is.
+One shape under all seven: **the happy path was tested and the exit was not.**
 
-**Acceptance**: each of the seven has a test that fails on the unfixed tree; `failed_loudly` fires on
-a scripted silent failure.
+- [x] `_closing` wraps both `agent.run` sites. Measured on `ResponseStream`: the cleanup hooks never
+      run *at all* (not on GC, not at loop shutdown), while the underlying generator **is** finalized
+      by asyncio's GC hook ~250 ms later and only once nothing references it — which is the wrong
+      guarantee for the object holding the model's HTTP response open. `run_turn` is typed
+      `AsyncGenerator` now, because a caller that stops early must close it.
+- [x] The resume emits `ApprovalRequestEvent` too. Not a missing UI element: the turn continued as
+      though the chemist had been asked, so it is the plan gate silently not applying.
+- [x] `handle.result()` *raises* for a workflow that failed, was cancelled, timed out or was
+      terminated, and `return_exceptions=True` swallowed it. The catch asks `job_status` rather than
+      composing a word, so the four stay apart and the resume agrees with `get_durable_job_status`.
+- [x] `beating()` cancels its task in a `finally`. **Necessary and measurably not sufficient**: a
+      `to_thread` (both `bo` propose activities) cancels the future while the thread runs the fit to
+      completion; calc's subprocess burn is bounded by `run_isolated`'s timeout and process-group
+      kill. The remainder is in `DEFERRED.md` with its trigger, not claimed here.
+- [x] `degraded` no longer feeds `failed_loudly` — the rule the field's docstring already stated. A
+      `capability_degraded` event is the system *working*, and it fires on every deployment without
+      a broker, so the silent-death signal could not fire at all.
+- [x] Healed **with** the alarm D-145 asked for rather than without it: one `strip_orphans` over both
+      halves, a counter declared to alert on any non-zero rate, and a WARNING naming the session.
+      Every producer is guarded, so the counter should sit at zero forever.
+- [x] VIBE-1(a): `check_balance` **moved** to a leaf so the chat process can resolve it without
+      `tblite`, and `reaction.py` imports it back — one definition, so launch and workflow cannot
+      disagree. It needed `JobSpec.precondition` to become `preconditions: list[str]`: the two
+      equation jobs already declared the solvent rule, and one slot forces a combining function per
+      *combination*. VIBE-1(b) stays open as the policy decision it is.
+
+**Acceptance**: met, each mutation-proven. **The verification changed shape this package**: pgvector
+0.8 was built from source and Postgres started locally, so the 107 previously-skipped Postgres tests
+now run — the full gate is **3628 passed, 36 skipped**, against 3486 passed / 143 skipped before.
+The stranded-result heal is exactly one of those tests, so it would otherwise have shipped unrun.
+Two smaller findings on the way: `beating()`'s first tests passed under mutation because
+`asyncio.run` cancels pending tasks at loop shutdown, so they measured the loop closing rather than
+the fix; and wiring the balance rule immediately found an unbalanced equation in this repo's own
+`compare_solvents` test fixture. Record: `D-2026-08-06-a-turn-that-does-not-finish-cleanly`.
 
 ### WP-10 · The store seam's divergences
 *Backlog: the four store rows [M/L/L/L].*

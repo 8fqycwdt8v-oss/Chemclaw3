@@ -113,19 +113,22 @@ def test_empty_history_is_handled() -> None:
 # --- D-145: disposing of a row means disposing of the rows it is paired with -------------------
 
 
-def test_a_stranded_result_is_invisible_to_the_repair() -> None:
+def test_the_two_detectors_answer_about_different_halves() -> None:
     """The asymmetry that makes `droppable_rows` necessary, stated as a test.
 
-    `unmatched_call_ids` reports unanswered *calls* and `strip_call_ids` removes them, so an
-    orphaned call heals itself on the next read. A `tool_result` whose `tool_use` is gone is
-    reported by neither and removed by neither — and the API rejects that thread just as hard. So a
-    stranded result is a bricked session with no self-heal path, which is why nothing may create
-    one.
+    `unmatched_call_ids` reports unanswered *calls*; a `tool_result` whose `tool_use` is gone is
+    invisible to it and only `unmatched_result_ids` sees it — and the API rejects that thread just
+    as hard. Keeping the two detectors apart is what lets the deleters assert "I stranded nothing"
+    (`droppable_rows`) separately from the read path healing what is already stranded.
+
+    The heal itself moved to the read path in
+    D-2026-08-06-a-turn-that-does-not-finish-cleanly, with a counter beside it — see
+    `tests/test_stranded_result_heal.py`. Before that, a stranded result was a bricked session with
+    no self-heal path at all, which is why nothing may create one in the first place.
     """
     stranded = [Message(role="tool", contents=[_result("c1")])]
-    assert unmatched_call_ids(stranded) == set(), "the repair can see a stranded result after all"
-    assert strip_unmatched_calls(stranded) == stranded, "the repair removed it after all"
-    # Only the mirror sees it, and it exists to be asserted on rather than to heal anything.
+    assert unmatched_call_ids(stranded) == set(), "the call detector answered about a result"
+    assert strip_unmatched_calls(stranded) == stranded, "the call-only strip removed a result"
     assert unmatched_result_ids(stranded) == {"c1"}
 
 

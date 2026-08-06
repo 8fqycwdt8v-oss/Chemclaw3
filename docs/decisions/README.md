@@ -282,6 +282,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-06-a-secret-that-masks-itself-when-you-forget](D-2026-08-06-a-secret-that-masks-itself-when-you-forget.md) | A secret that masks itself when you forget |
 | [D-2026-08-06-a-swallowed-write-reported-as-a-store](D-2026-08-06-a-swallowed-write-reported-as-a-store.md) | A swallowed write, reported as a store |
 | [D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice](D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice.md) | A tool cannot say it has nothing twice |
+| [D-2026-08-06-a-turn-that-does-not-finish-cleanly](D-2026-08-06-a-turn-that-does-not-finish-cleanly.md) | A turn that does not finish cleanly |
 | [D-2026-08-06-a-wikilink-is-an-edge-not-a-word](D-2026-08-06-a-wikilink-is-an-edge-not-a-word.md) | A wikilink is an edge, not a word |
 | [D-2026-08-06-a-write-gate-that-reads-the-wrong-declaration](D-2026-08-06-a-write-gate-that-reads-the-wrong-declaration.md) | A write gate that reads the wrong declaration |
 | [D-2026-08-06-an-envelope-that-only-survives-its-own-process](D-2026-08-06-an-envelope-that-only-survives-its-own-process.md) | An envelope that only survives its own process |

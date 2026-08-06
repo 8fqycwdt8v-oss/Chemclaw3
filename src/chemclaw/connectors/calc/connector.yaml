@@ -119,7 +119,9 @@ jobs:
     # job with tblite's own "String value for epsilon was not found among database of solvents".
     # Checking at launch turns that into a message the chemist can act on in the same turn. Every
     # job below that takes a solvent declares the same rule; see the module for the measured set.
-    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    preconditions:
+      - chemclaw.science.calc.solvents:require_supported_solvents
+      - chemclaw.science.calc.balance:require_balanced_equation
 
   - name: compare_solvents
     workflow: CalcJobWorkflow
@@ -137,7 +139,9 @@ jobs:
       12 for benzene. Omit it and no reaction reports a ΔG, so the screen falls back to ranking by
       electronic energy — which ignores solvation entropy, the part a solvent screen is about.
     params_model: chemclaw.connectors.calc.specs:SolventScreenJobSpec
-    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    preconditions:
+      - chemclaw.science.calc.solvents:require_supported_solvents
+      - chemclaw.science.calc.balance:require_balanced_equation
 
   - name: scan_coordinate
     workflow: CalcJobWorkflow
@@ -150,7 +154,8 @@ jobs:
       The barrier it reports is an upper bound on the *ground-state* profile and is not a transition
       state.
     params_model: chemclaw.connectors.calc.specs:ScanJobSpec
-    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    preconditions:
+      - chemclaw.science.calc.solvents:require_supported_solvents
 
   - name: sample_conformers
     workflow: CalcJobWorkflow
@@ -162,7 +167,8 @@ jobs:
       the search is unavailable rather than silently returning a single conformer. Effort trades
       wall-clock for coverage; a search is never cheap, so expect a job id.
     params_model: chemclaw.connectors.calc.specs:EnsembleJobSpec
-    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    preconditions:
+      - chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
     # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. So it carries
     # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
@@ -183,7 +189,8 @@ jobs:
       assuming one, then reports the interaction energy of the best. Semiempirical and in continuum
       solvent, so treat it as a ranking between candidate partners, not an absolute binding energy.
     params_model: chemclaw.connectors.calc.specs:ComplexJobSpec
-    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    preconditions:
+      - chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
     # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. So it carries
     # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed

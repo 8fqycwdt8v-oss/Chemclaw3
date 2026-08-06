@@ -23,8 +23,8 @@ import copy
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
-from contextlib import AsyncExitStack
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from agent_framework import AgentSession
@@ -130,7 +130,7 @@ async def run_turn(
     connectors: Sequence[Any] | None = None,
     history: Any | None = None,
     profile: str | None = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
     Args:
@@ -164,6 +164,12 @@ async def run_turn(
     Yields:
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
+
+    Typed as an `AsyncGenerator` rather than an `AsyncIterator` because the difference is a
+    contract, not a detail: a caller that stops early **must** close this, and closing is what
+    releases the agent's own stream and rolls the turn's state back. FastAPI does it; so does
+    `contextlib.aclosing`. Under the weaker type that obligation was invisible to a caller and to
+    mypy.
     """
     turn_started = time.perf_counter()
     # Whether this turn's approval is spendable, asked exactly as `build_agent` asks whether to
@@ -320,30 +326,33 @@ async def run_turn(
                 unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
             if unreachable:
                 yield CapabilityDegradedEvent(connectors=unreachable)
-            stream = agent.run(
-                user_message, stream=True, session=session, tools=turn_connectors or None
-            )
             tool_trace = ToolCallTrace()
-            async for update in stream:
-                turn_usage.add(usage_tokens(update))
-                # Drain *before* this update's own content: a tool that ran while the model was
-                # producing this update ran before the text it then produced, so emitting the
-                # signal first is the truthful transcript order (RCH-4/RCH-5).
-                for signal in drain():
-                    if isinstance(signal, JobSignal):
-                        started_jobs.append(signal.job_id)
-                    yield _signal_event(signal)
-                text = getattr(update, "text", "") or ""
-                if text:
-                    answer_parts.append(text)
-                    yield TokenEvent(text=text)
-                for call in tool_trace.feed(update):
-                    yield call
-                for request in getattr(update, "user_input_requests", None) or []:
-                    yield ApprovalRequestEvent(prompt=approval_prompt(request))
-                plan_event = await plan.changed(session)
-                if plan_event is not None:
-                    yield plan_event
+            # `_closing`, because every exit from this loop that is not "exhausted" abandons the
+            # stream — and a cancelled turn, a disconnected client and a raising consumer are all
+            # that shape. See the helper for the measurement.
+            async with _closing(
+                agent.run(user_message, stream=True, session=session, tools=turn_connectors or None)
+            ) as stream:
+                async for update in stream:
+                    turn_usage.add(usage_tokens(update))
+                    # Drain *before* this update's own content: a tool that ran while the model was
+                    # producing this update ran before the text it then produced, so emitting the
+                    # signal first is the truthful transcript order (RCH-4/RCH-5).
+                    for signal in drain():
+                        if isinstance(signal, JobSignal):
+                            started_jobs.append(signal.job_id)
+                        yield _signal_event(signal)
+                    text = getattr(update, "text", "") or ""
+                    if text:
+                        answer_parts.append(text)
+                        yield TokenEvent(text=text)
+                    for call in tool_trace.feed(update):
+                        yield call
+                    for request in getattr(update, "user_input_requests", None) or []:
+                        yield ApprovalRequestEvent(prompt=approval_prompt(request))
+                    plan_event = await plan.changed(session)
+                    if plan_event is not None:
+                        yield plan_event
             # The stream is exhausted, so `agent.run` has returned and the history provider has
             # committed this turn's rows as a complete, paired exchange. From here on a teardown
             # has nothing half-written to discard — set the fact the rollback gate reads at the
@@ -783,17 +792,68 @@ async def _resume(
         "The durable job(s) you started have completed. Their results follow as data; continue "
         "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
     )
-    async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
-        turn_usage.add(usage_tokens(update))
-        for signal in drain():
-            yield _signal_event(signal)
-        text = getattr(update, "text", "") or ""
-        if text:
-            yield TokenEvent(text=text)
-        for call in tool_trace.feed(update):
-            yield call
+    async with _closing(
+        agent.run(message, stream=True, session=session, tools=connectors or None)
+    ) as stream:
+        async for update in stream:
+            turn_usage.add(usage_tokens(update))
+            for signal in drain():
+                yield _signal_event(signal)
+            text = getattr(update, "text", "") or ""
+            if text:
+                yield TokenEvent(text=text)
+            for call in tool_trace.feed(update):
+                yield call
+            # The resume is a second `agent.run`, so it can raise an approval prompt exactly like
+            # the first — and this loop dropped it, so a plan the model wanted signed off during a
+            # resume was never put to the chemist. The turn then continued as if it had been
+            # asked, which is the shape of the gate silently not applying.
+            for request in getattr(update, "user_input_requests", None) or []:
+                yield ApprovalRequestEvent(prompt=approval_prompt(request))
     for call in tool_trace.flush():
         yield call
+
+
+@asynccontextmanager
+async def _closing(stream: Any) -> AsyncIterator[Any]:
+    """Run `agent.run(stream=True)` so that leaving the loop early still releases the stream.
+
+    **The gap, measured rather than reasoned about.** MAF's `ResponseStream` runs its cleanup hooks
+    and finalizer from `__anext__`, on exactly two paths: the source raising `StopAsyncIteration`
+    (exhausted) and the source raising anything else. It exposes **no `aclose()` and no
+    `__aexit__`**, and it is a plain object rather than an async generator, so Python's own
+    async-generator finalization does not apply to it either. Every other way out of the loop — a
+    `break`, an exception in the *consumer*, the client disconnecting and FastAPI closing this
+    generator, a turn cancellation — abandons it:
+
+        async for x in ResponseStream(source(), cleanup_hooks=[...]):
+            break
+        # source's `finally` has not run; the cleanup hooks never run at all,
+        # not on GC and not at loop shutdown.
+
+    The underlying async generator *is* eventually finalized by asyncio's GC hook — 250 ms later in
+    the probe, and only once nothing references it. That is the leg that matters today, because it
+    is the one holding the HTTP response to the model open; deferring it to a garbage collection is
+    how a connection pool runs out under load while every request looks finished.
+
+    So this closes the underlying iterator deterministically and runs the cleanup hooks upstream
+    would have run. Both are private attributes, which is the honest cost of the gap: they are read
+    defensively, and the day `ResponseStream` grows an `aclose()` this becomes a one-line delegation
+    and then nothing.
+
+    Not merged into `AsyncExitStack`: the stream is created inside the loop's own scope and must be
+    released *before* the exit stack unwinds the connectors its tools are still holding.
+    """
+    try:
+        yield stream
+    finally:
+        iterator = getattr(stream, "_iterator", None)
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            await aclose()
+        run_cleanup = getattr(stream, "_run_cleanup_hooks", None)
+        if run_cleanup is not None:
+            await run_cleanup()
 
 
 def _signal_event(signal: Signal) -> Event:

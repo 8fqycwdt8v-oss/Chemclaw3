@@ -107,15 +107,31 @@ for rather than a decomposition proposal.
 
 - [ ] **[M] One non-UTF-8 ORD export aborts the entire ELN sync batch**
       (`ingest/eln/ord_adapter.py:110`), contradicting the adapter's skip-and-continue contract.
-- [ ] **[M] `evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true**
+- [x] **[M] `evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true**
       (`evals/live.py:317`), so the harness's headline "failed silently" signal can never fire.
-- [ ] **[L] `run_turn` abandons the agent's `ResponseStream` on every non-exhausting exit**
+      Closed by D-2026-08-06-a-turn-that-does-not-finish-cleanly: `degraded` no longer feeds
+      `failed_loudly`, which is the rule the field's own docstring already stated. A
+      `capability_degraded` event is the system *working* — it announces a short tool surface
+      before the first token — and it is still recorded, separately, in `outcome.degraded`.
+- [x] **[L] `run_turn` abandons the agent's `ResponseStream` on every non-exhausting exit**
       (`api/runner.py:318`); it has no `aclose()` and no GC finalizer, so its cleanup hooks never
-      run at all.
-- [ ] **[L] The mid-turn resume drops `user_input_requests`** (`api/runner.py:780`), so an approval
-      prompt raised during a resume never reaches the stream.
-- [ ] **[L] A failed durable job is dropped from the mid-turn resume**
-      (`agent/job_results.py:83`), and the function's own docstring says it is not.
+      run at all. Closed by D-2026-08-06-a-turn-that-does-not-finish-cleanly. Two corrections from
+      measuring it: the cleanup hooks never run *at all* — not on GC and not at loop shutdown —
+      but the underlying async generator **is** finalized by asyncio's GC hook, ~250 ms later and
+      only once nothing references it, which is the wrong guarantee for the object holding the
+      HTTP response to the model open. `run_turn` is now typed `AsyncGenerator`, because a caller
+      that stops early must close it and the weaker type hid that obligation.
+- [x] **[L] The mid-turn resume drops `user_input_requests`** (`api/runner.py:780`), so an approval
+      prompt raised during a resume never reaches the stream. Closed by
+      D-2026-08-06-a-turn-that-does-not-finish-cleanly. The consequence is not a missing UI
+      element: the turn continues as though the chemist had been asked, so it is the plan gate
+      silently not applying.
+- [x] **[L] A failed durable job is dropped from the mid-turn resume**
+      (`agent/job_results.py:83`), and the function's own docstring says it is not. Closed by
+      D-2026-08-06-a-turn-that-does-not-finish-cleanly: `handle.result()` *raises* for a workflow
+      that failed, was cancelled, timed out or was terminated, and `return_exceptions=True`
+      swallowed the raise. The catch asks `job_status` rather than composing a word, so those four
+      stay apart and the resume agrees with `get_durable_job_status` about the same run.
 
 **Error handling and suppression**
 
@@ -123,9 +139,15 @@ for rather than a decomposition proposal.
       including 15 `BLE001` markers that read as "this broad except was linted and accepted" when
       nothing linted it. Either enable the rules or delete the comments; today they are a claim no
       gate checks.
-- [ ] **[L] `beating()` abandons the work it wraps when the activity is cancelled**
+- [x] **[L] `beating()` abandons the work it wraps when the activity is cancelled**
       (`durable/heartbeat.py:48`) — calc's CREST runs and bo's surrogate fits keep burning CPU
-      after `cancel_job`.
+      after `cancel_job`. Closed by D-2026-08-06-a-turn-that-does-not-finish-cleanly: `asyncio.wait`
+      does not cancel what it waits on, so the task was orphaned with nobody to retrieve its
+      exception either. **Necessary and, measurably, not sufficient** — cancelling a `to_thread`
+      (both `bo` propose activities) cancels the future while the pooled thread runs to completion,
+      and calc's subprocess burn is bounded by `run_isolated`'s own timeout and process-group kill
+      rather than by the cancel. The remainder is a property of `to_thread`, and is in
+      `DEFERRED.md` rather than claimed here.
 
 **Tests that cannot fail** — this repository's own most-recorded defect family
 (`tasks/lessons.md`), so each of these was proven by neutering the control and watching the test
@@ -1610,11 +1632,19 @@ supposed to supply*.
       actionable message — "reaction is not atom-balanced (reactants minus products): C +2, H +4,
       O +2" (`calc/reaction.py:178`) — stayed in the worker log, so the model could not repair its
       own input. Two parts, and they are separable: (a) the balance/charge check is a
-      *precondition* in the sense `JobSpec.precondition` means, so running it before launch would
+      *precondition* in the sense `JobSpec.preconditions` means, so running it before launch would
       both relay the message through `surface_domain_errors` today and stop the five pointless
       Temporal retries; (b) relaying a workflow's failure text in general is a policy decision
       about what is safe to surface — the question `surface_domain_errors` answers by naming
       known-safe types — and wants deciding, not patching. Do (a) first; it may be enough.
+
+      **(a) is done** (D-2026-08-06-a-turn-that-does-not-finish-cleanly). It needed the manifest
+      field to become a *list*: the two equation-carrying jobs already declared the solvent rule,
+      and one slot forces a combining function per combination. `check_balance` moved to a leaf
+      (`science/calc/balance.py`) so the chat process can resolve it without importing `tblite`,
+      and `reaction.py` imports it back, so the launch check and the workflow enforce one
+      definition. Wiring it immediately found an unbalanced equation in this repo's own
+      `compare_solvents` test fixture. **(b) stays open** as the policy decision it is.
 - [ ] **VIBE-2 — `resolve_compound` knows solvents and bases, not substrates.**
       `chemclaw/reagents.py` holds 87 spellings, almost all reagents. Every substrate in the
       corpus misses (`4-bromoanisole`, `phenylboronic acid`, `salicylic acid`,
@@ -1883,13 +1913,14 @@ claim about the world is to run it.
       `docs/guides/harness-konzept.md`, and the cap applies in both modes, not only execute.
       `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
       calls `plan_only` "the pre-execution GxP gate" (REV-1).
-- [ ] **Heal sessions already bricked by a stranded `tool_result`.** `get_messages`'s repair
-      strips orphaned *calls* and cannot see an orphaned *result* (D-145), so any session the old
-      age-based retention split is unusable forever with no automatic recovery. Adding the mirror
-      strip to the read repair would fix them — deliberately **not** shipped with D-145, because
-      doing so would mask a regression in `droppable_rows` rather than surface it. Needs its own
-      argument: it is a new destructive behaviour on the read path, and it destroys evidence of how
-      the split happened.
+- [x] **Heal sessions already bricked by a stranded `tool_result`.** Closed by
+      D-2026-08-06-a-turn-that-does-not-finish-cleanly. `get_messages`'s repair stripped orphaned
+      *calls* and could not see an orphaned *result* (D-145), so any session the old age-based
+      retention split was unusable forever with no automatic recovery. D-145's objection is
+      answered rather than overruled: the heal ships **with** the alarm it wanted — a counter
+      (`chemclaw_history_stranded_results_total`, declared to alert on any non-zero rate) and a
+      WARNING naming the session — so a regression in `droppable_rows` is louder than the silence
+      was. One `strip_orphans` over both halves, because a call and its result are one rule.
 
 ## Storage & knowledge substrate (docs/archive/audit/13-storage-and-knowledge-audit.md)
 

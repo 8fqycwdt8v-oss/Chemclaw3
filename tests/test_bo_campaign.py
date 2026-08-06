@@ -490,8 +490,8 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
 
     _, manifest = discovered()["bo"]
     job = next(job for job in manifest.jobs if job.name == "start_optimization_campaign")
-    assert job.precondition is not None
-    resolve_precondition(job.precondition)(
+    assert job.preconditions, "the manifest declares no precondition at all"
+    resolve_precondition(job.preconditions[0])(
         CampaignSpec(
             problem=OptimizationProblem(
                 parameters=[ContinuousParameter(name="t", lower=0.0, upper=1.0)],

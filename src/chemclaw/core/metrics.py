@@ -220,6 +220,16 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_history_rows_compacted_total": (
         "Stored conversation rows removed by durable compaction after a turn."
     ),
+    # **A counter that should stay at zero forever, which is the point of it.** Every deleter of
+    # conversation rows goes through `droppable_rows`, so nothing can leave a `tool_result` whose
+    # `tool_use` is gone. The read path heals one anyway, because sessions split by the old
+    # age-based retention are otherwise bricked permanently — and D-145 declined that heal on the
+    # grounds that a silent repair masks a regression in the guard. This is what stops it being
+    # silent: a non-zero rate means a deleter stopped going through `droppable_rows`.
+    "chemclaw_history_stranded_results_total": (
+        "Tool results with no matching call, found and repaired on read. Alert on any non-zero "
+        "rate: every row deleter is guarded, so one appearing means the guard was bypassed."
+    ),
 }
 
 # Latency histograms. Two, not more: a turn is the unit a chemist waits on, and a tool call is the

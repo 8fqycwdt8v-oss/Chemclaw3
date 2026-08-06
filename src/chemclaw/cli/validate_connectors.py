@@ -27,6 +27,8 @@ import inspect
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from chemclaw.connectors.jobs import _params_model, build_job_tool, resolve_precondition
 from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
 from chemclaw.connectors.registry import ConnectorError, discovered, enabled, job_tools
@@ -88,7 +90,7 @@ def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
 
 
 def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
-    """Check that a declared `precondition` can accept the params model it will be handed.
+    """Check that every declared precondition can accept the params model it will be handed.
 
     `resolve_precondition` proves the reference imports and is callable, and stops there — so
     `connectors/bo/connector.yaml` could name `require_rounds_within_ceiling(n_rounds: int)` while
@@ -100,12 +102,29 @@ def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
     Binding the signature catches an arity mismatch; comparing the annotation catches the shape.
     An unannotated or `Any` parameter is accepted — the contract is stated in prose for those, and
     a validator that demanded annotations would be inventing a rule the manifest does not make.
+
+    Every entry is checked and every problem is reported, rather than stopping at the first: a
+    manifest author fixing one reference should not have to re-run to discover the next.
     """
-    if job.precondition is None:
+    if not job.preconditions:
         return []
     try:
-        check = resolve_precondition(job.precondition)
         model = _params_model(connector, job)
+    except ValueError:
+        return []  # already reported by the build above; do not say it twice
+    return [
+        problem
+        for reference in job.preconditions
+        for problem in _one_precondition_problems(connector, job, reference, model)
+    ]
+
+
+def _one_precondition_problems(
+    connector: str, job: JobSpec, reference: str, model: type[BaseModel]
+) -> list[str]:
+    """The signature check for a single declared precondition — see `_precondition_problems`."""
+    try:
+        check = resolve_precondition(reference)
     except ValueError:
         return []  # already reported by the build above; do not say it twice
     try:
@@ -113,7 +132,7 @@ def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
         signature.bind(model.model_construct())
     except TypeError as exc:
         return [
-            f"connector {connector!r}: job {job.name!r} precondition {job.precondition!r} "
+            f"connector {connector!r}: job {job.name!r} precondition {reference!r} "
             f"cannot be called with the job's params object: {exc}"
         ]
     (parameter,) = signature.parameters.values()
@@ -121,7 +140,7 @@ def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
     if annotation in (inspect.Parameter.empty, Any) or annotation is model:
         return []
     return [
-        f"connector {connector!r}: job {job.name!r} precondition {job.precondition!r} takes "
+        f"connector {connector!r}: job {job.name!r} precondition {reference!r} takes "
         f"{getattr(annotation, '__name__', annotation)!r}, but the launcher passes it the "
         f"validated {model.__name__!r} params object"
     ]

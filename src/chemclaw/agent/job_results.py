@@ -33,7 +33,9 @@ import asyncio
 import logging
 from typing import Any
 
-from chemclaw.agent.durable_tools import completed_job_status
+from temporalio.client import WorkflowFailureError
+
+from chemclaw.agent.durable_tools import completed_job_status, job_status
 from chemclaw.core.temporal_client import connect
 
 logger = logging.getLogger(__name__)
@@ -63,16 +65,33 @@ async def await_job_results(
         timeout_seconds: The whole wait's bound, shared across the jobs.
 
     Returns:
-        `{job_id: {"job_id": …, "status": "completed", "summary": …, "result": …}}` for the jobs
-        that finished in time. A job that failed is reported with its status rather than omitted:
-        "your calculation failed" is an answer the chemist needs inside this turn, and dropping it
-        would leave the model narrating a success that did not happen.
+        `{job_id: {"job_id": …, "status": …, "summary": …, "result": …}}` for every job that
+        *reached a terminal state* in time — completed, failed, cancelled, timed_out or
+        terminated. A job that failed is reported with its status rather than omitted: "your
+        calculation failed" is an answer the chemist needs inside this turn, and dropping it would
+        leave the model narrating a success that did not happen. A job still running is absent, and
+        the ordinary push-back path delivers it on the next turn.
     """
     collected: dict[str, dict[str, Any]] = {}
 
     async def _collect(job_id: str) -> None:
         handle = (await connect()).get_workflow_handle(job_id)
-        collected[job_id] = completed_job_status(job_id, await handle.result()).model_dump()
+        try:
+            status = completed_job_status(job_id, await handle.result())
+        except WorkflowFailureError:
+            # The docstring above has always promised this and the code never did it:
+            # `handle.result()` *raises* for a workflow that failed, was cancelled, timed out or
+            # was terminated, `return_exceptions=True` swallowed the raise, and the job was
+            # therefore dropped from the resume exactly like one that had not finished. The model
+            # then resumed with a turn that mentioned no failure at all — the outcome the docstring
+            # says must not happen, because the chemist reads silence as success.
+            #
+            # `job_status` rather than a status word composed here: it is the one place that maps a
+            # terminal Temporal status onto the word this system reports, and a second mapping is
+            # how the resume and `get_durable_job_status` would come to disagree about the same run.
+            # It also distinguishes failed from cancelled from timed_out, which the raise does not.
+            status = await job_status(job_id)
+        collected[job_id] = status.model_dump()
 
     try:
         await asyncio.wait_for(

@@ -1555,3 +1555,46 @@ Rule: when a survivor is reported, grep for its shape across the tree *before* w
 the shape repeats, the test is a sweep with an allowlist, and the allowlist gets its own test that
 fails when an entry stops being needed — an exemption that outlives its reason is how a guard rots
 into a rubber stamp.
+
+## `asyncio.run` cancels pending tasks, so an assertion after it measures loop teardown (2026-08-06)
+
+Testing that `beating()` cancels the work it wraps, I wrote:
+
+```python
+asyncio.run(_run())
+assert cancelled == ["stopped"]
+```
+
+It passed with the fix mutated out. `asyncio.run` cancels every pending task on shutdown, so the
+orphan the test was supposed to catch got cancelled by the loop closing — after `_run` returned and
+before the assert. Read there, the question is "did the process exit". Read *inside* the loop, it is
+"did `cancel_job` stop the search", which is the one being asked. Both shipped tests now return the
+observation from inside the coroutine and assert on the returned value.
+
+Same family as `.resolve()` vs `is_file()` and the `Path` probe: the measurement was taken at a
+place where a second mechanism produces the same reading.
+
+Rules:
+1. **For a test about cancellation, cleanup or ordering, assert inside the event loop.** The loop's
+   own shutdown is a second mechanism that produces the expected observation.
+2. **Mutation-check every async lifecycle test.** This one looked completely ordinary and was
+   vacuous; nothing but the mutation would have said so.
+
+## The offline sandbox's skips are a coverage hole I can usually close (2026-08-06)
+
+107 Postgres-backed tests skip in this environment, and I had been treating that as a fixed
+condition of the sandbox for two whole packages. It is not: `apt-get install postgresql-16-pgvector`
+plus `initdb`/`pg_ctl` as the `postgres` user gets a database in about a minute. (The packaged
+pgvector is 0.6.0 and a migration needs `bit_jaccard_ops` from 0.7.0, so 0.8.0 built from source —
+`postgresql-server-dev-16` after an `apt-get update`, then `make && make install`.)
+
+It mattered immediately: WP-9's stranded-result heal is a Postgres round trip, so its central test
+would have shipped unrun. The full gate went from 3486 passed / 143 skipped to **3628 / 36** — and
+those 142 newly-running tests also cover the four earlier packages in this session retroactively.
+
+Rules:
+1. **A skip is a claim about the environment, and claims get checked.** Before accepting a whole
+   class of skipped tests, spend five minutes trying to make them run. "CI has it" is not
+   verification I performed.
+2. **Do it at the start of a session, not in the middle.** Every package before this one was
+   verified against a smaller suite than was available.

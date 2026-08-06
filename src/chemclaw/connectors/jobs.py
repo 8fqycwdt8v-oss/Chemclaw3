@@ -272,7 +272,7 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     **It is one function because it was two, and one of them was empty** (D-168). The template's
     `ResolvedJob` carried the connector, workflow and queue and dropped `expensive` and
     `precondition` on the floor, so a template naming an HPC job started it for anyone entitled to
-    run the *template*, and a job's own domain guard — the one `JobSpec.precondition` documents as
+    run the *template*, and a job's own domain guard — the one `JobSpec.preconditions` documents as
     having no other replay-safe home — never ran on that path at all. Duplicating the four steps
     would have fixed today's instance and left the next launcher to rediscover it.
 
@@ -302,10 +302,11 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     # user's entitlements.
     if job.expensive:
         authorize_trigger(job.name)
-    # Then the job's own domain guard, if it declared one, for the reason `JobSpec.precondition`
-    # records: this is the only replay-safe place such a check can live.
-    if job.precondition:
-        resolve_precondition(job.precondition)(spec)
+    # Then the job's own domain guards, in declaration order, for the reason
+    # `JobSpec.preconditions` records: this is the only replay-safe place such a check can live.
+    # The first refusal wins, so a job declares its cheapest or most-likely rule first.
+    for reference in job.preconditions:
+        resolve_precondition(reference)(spec)
     payload: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
     return payload
 

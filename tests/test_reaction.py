@@ -12,8 +12,8 @@ import math
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.science.calc.balance import check_balance
 from chemclaw.science.calc.reaction import (
-    check_balance,
     compare_solvent_effects,
     compute_reaction_energy,
 )

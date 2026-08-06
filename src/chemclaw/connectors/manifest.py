@@ -41,9 +41,15 @@ Adding a transport or an auth mode is one variant plus one branch at the single 
 never a widening of one model with optional fields that only apply sometimes.
 """
 
+import re
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# The shape of every dotted `module:function` / `module:Class` reference a manifest may carry.
+# One definition, because `params_model` and each `preconditions` entry are the same kind of thing
+# and a second spelling of the pattern is how the two would come to accept different names.
+_REFERENCE = re.compile(r"^[\w.]+:[A-Za-z_]\w*$")
 
 # A job parameter's declared type, mapped to a Python annotation by `connectors.jobs`.
 # Deliberately a *closed* set: the generated pydantic model becomes the JSON schema the model
@@ -300,20 +306,39 @@ class JobSpec(BaseModel):
     # re-declaring it would be a second source of truth for a schema that already exists in
     # code. Declaring neither is a job with no arguments.
     params: list[JobParam] = Field(default_factory=list)
-    params_model: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
-    # A domain precondition checked *before* any durable work starts: a dotted `module:function`
-    # taking the validated params object and raising to refuse the launch.
+    params_model: str | None = Field(default=None, pattern=_REFERENCE.pattern)
+    # The domain preconditions checked *before* any durable work starts: dotted `module:function`
+    # references, each taking the validated params object and raising to refuse the launch. Run in
+    # declaration order, and the first refusal wins.
     #
-    # It exists because the checks a durable capability needs at creation time are not all
+    # They exist because the checks a durable capability needs at creation time are not all
     # generic. Authorization and dry-run are (`expensive`, and the ambient flag), but "this
     # campaign asks for more rounds than Temporal's event history can hold" is the BO domain's
     # own rule — and every other place to put it is replay-unsafe. A pydantic validator on the
     # params model, or a check inside the workflow, re-runs during replay against *current*
     # config, so lowering the ceiling would retroactively fail an in-flight campaign that was
     # legal when it started. Only the launch boundary is safe, and after the generic factory
-    # replaced the hand-written adapters this is the launch boundary. Declaring it is how a job
+    # replaced the hand-written adapters this is the launch boundary. Declaring one is how a job
     # keeps a guard it would otherwise silently lose.
-    precondition: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
+    #
+    # **A list, since the calc jobs needed two.** It was one string, and the reaction jobs need
+    # both "this solvent has ALPB parameters" and "this equation conserves atoms" — two unrelated
+    # rules over one spec. One slot forces a combining function per *combination*, which is a
+    # cross-product of rules that each want to be stated once; the manifest is the natural place
+    # for the composition because it is where the job is declared.
+    preconditions: list[str] = Field(
+        default_factory=list, json_schema_extra={"items": {"pattern": r"^[\w.]+:[A-Za-z_]\w*$"}}
+    )
+
+    @field_validator("preconditions")
+    @classmethod
+    def _check_precondition_references(cls, value: list[str]) -> list[str]:
+        """Each entry must be a `module:function` reference — the shape the resolver imports."""
+        for reference in value:
+            if not _REFERENCE.fullmatch(reference):
+                raise ValueError(f"precondition {reference!r} is not a 'module:function' reference")
+        return value
+
     expensive: bool = False
     publish_to_graph: bool = False
     # How long the launcher waits for the run to finish before handing back a job id instead.

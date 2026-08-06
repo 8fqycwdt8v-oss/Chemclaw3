@@ -230,7 +230,8 @@ jobs:
     workflow: CostlyWorkflow
     summary: Run the costly job.
     expensive: true
-    precondition: tests.test_template_job_step:refuse_benzene
+    preconditions:
+      - tests.test_template_job_step:refuse_benzene
     params:
       - {name: subject, type: string, description: What to run on.}
 """
@@ -302,7 +303,7 @@ def test_an_entitled_requester_passes_the_same_gate(
 def test_a_declared_precondition_runs_on_the_template_path_too(costly_bundle: str) -> None:
     """`ResolvedJob` dropped `precondition` as well, and it has no other replay-safe home.
 
-    `JobSpec.precondition` documents the launch boundary as the only place such a guard can live —
+    `JobSpec.preconditions` documents the launch boundary as the only place such a guard can live —
     a pydantic validator or a check inside the workflow re-runs on replay against *current* config.
     The template path had no launch boundary that ran it, so a job's own domain rule simply did not
     apply to any template that used it.

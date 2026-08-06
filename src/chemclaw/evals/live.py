@@ -293,10 +293,9 @@ async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
                 elif kind == "capability_degraded":
                     # The event's field is `connectors`, a list. It was read as a scalar
                     # `capability`/`name`, neither of which the event has ever carried, so every
-                    # degraded turn recorded one empty string — enough to make `failed_loudly`
-                    # true while naming nothing. Harmless while only an unreachable bundle raised
-                    # the event; the per-turn Temporal probe now raises it on any deployment
-                    # without a broker, which is every offline run.
+                    # degraded turn recorded one empty string, naming nothing. What is recorded
+                    # here no longer decides `failed_loudly` — see the derivation below for why
+                    # that coupling had to go.
                     outcome.degraded.extend(str(name) for name in event.get("connectors", []))
                 elif kind == "job_started":
                     outcome.jobs_started.append(str(event.get("job_id", event.get("job", ""))))
@@ -314,7 +313,20 @@ async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
     outcome.latency_seconds = round(time.monotonic() - started, 2)
     outcome.event_counts = counts
     outcome.answered = bool(outcome.answer.strip())
-    outcome.failed_loudly = bool(outcome.tools_failed or outcome.error_code or outcome.degraded)
+    # `degraded` is deliberately **not** here, and its being here is the defect this closes.
+    #
+    # A `capability_degraded` event is the system working: it announces, before the first token,
+    # that this turn's tool surface is short. Counting it as "the turn broke visibly" was tolerable
+    # while only an unreachable connector raised it — rare, and a real fault. Then the per-turn
+    # Temporal probe started raising it on any deployment without a broker, which is every offline
+    # run and every local one, and `failed_loudly` became unconditionally true. The harness's
+    # headline signal is `not answered and not failed_loudly`, so the one finding this whole file
+    # exists to surface — the silent death — could no longer fire at all.
+    #
+    # This is the "a metric that cannot report its own subject" family again, and the correction is
+    # the one the field's own docstring already stated: loud means a `tool_failed` or an `error`.
+    # Degradation is a separate axis and is already recorded, separately, in `outcome.degraded`.
+    outcome.failed_loudly = bool(outcome.tools_failed or outcome.error_code)
     outcome.uncited_note_ids = _score_citations(outcome.answer, returned_ids)
     outcome.verified_numbers = _verified_numbers(outcome.answer, returned_values)
     outcome.asked_clarifying_in_prose = _asked_in_prose(outcome)

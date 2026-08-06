@@ -7,7 +7,7 @@ reported the job running, and ~30 s later an activity died deep inside the durab
 2026-08-04). Nothing was wrong with the durability: the name was simply not a name the method knows,
 and the only thing that could tell the chemist so was the calculation itself.
 
-`JobSpec.precondition` exists for exactly this and runs in `chemclaw.connectors.jobs`'s
+`JobSpec.preconditions` exists for exactly this and runs in `chemclaw.connectors.jobs`'s
 `prepare_job_launch` *before* any workflow is started, so the check belongs there. But the
 precondition is resolved by importing the module that holds it, in the **chat service's** process —
 so it must not drag `tblite` in with it (D-118, `tests/test_connector_isolation.py`). Hence a module

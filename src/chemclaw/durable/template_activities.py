@@ -119,7 +119,7 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     `TemplateWorkflow._run_job_step` started the child workflow with `resolve(step.arguments,
     scope)` exactly as written. So a template naming `compute_dft_energy` started HPC work for
     anyone entitled to run its `run_<name>` tool, a job's declared domain guard — the one
-    `JobSpec.precondition` documents as having no other replay-safe home — never ran on this path,
+    `JobSpec.preconditions` documents as having no other replay-safe home — never ran on this path,
     and the launch left no GxP audit row. The module docstring above claimed the opposite.
 
     The pre-flight is `chemclaw.connectors.jobs.prepare_job_launch`, shared with the chat launcher

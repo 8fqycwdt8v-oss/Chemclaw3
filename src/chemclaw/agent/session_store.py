@@ -36,16 +36,18 @@ them before the model call — `_SELECT_WITH_ID` has no `LIMIT`. `save_messages`
 only a recent window looks safe because the read already repairs unmatched tool-call pairings — and
 it is not, because that repair *writes back*. Over a windowed read a `tool_result` whose `tool_use`
 merely fell outside the window is indistinguishable from a real orphan, so the repair would strip it
-and commit that, destroying a pairing that was intact on disk. Worse, the repair is one-directional
-(`chemclaw.agent.message_pairing`): it can heal an orphaned call and is blind to an orphaned
-*result*, which
-has no self-heal path at all. Compaction avoids the whole class by deleting only whole pairing
-components, via `droppable_rows` (D-145). `tests/test_durable_compaction_gap.py` pins both the
-absent `LIMIT` and the write-back that makes it unsafe.
+and commit that, destroying a pairing that was intact on disk — and the repair now covers **both**
+halves (D-2026-08-06-a-turn-that-does-not-finish-cleanly), so a window would destroy either one.
+That is the argument against a `LIMIT` getting stronger, not weaker: healing both directions is only
+safe precisely because the read sees the whole session, so "no partner anywhere" is a fact rather
+than an artifact of where the window fell. Compaction avoids the whole class by deleting only whole
+pairing components, via `droppable_rows` (D-145). `tests/test_durable_compaction_gap.py` pins both
+the absent `LIMIT` and the write-back that makes it unsafe.
 """
 
 import logging
 from collections.abc import AsyncIterator, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -56,7 +58,11 @@ from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.history_compaction import plan_compaction
-from chemclaw.agent.message_pairing import strip_call_ids, unmatched_call_ids
+from chemclaw.agent.message_pairing import (
+    strip_orphans,
+    unmatched_call_ids,
+    unmatched_result_ids,
+)
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
@@ -131,6 +137,32 @@ def _crossed_new_compaction_bucket(count_before: int, count_after: int, floor: i
     return count_after >= floor and max(count_before, 0) // floor != count_after // floor
 
 
+def _report_stranded_results(session_id: str, orphan_results: AbstractSet[str]) -> None:
+    """Count and announce a stranded `function_result` before the read repair removes it.
+
+    The condition on which D-145 declined to heal these at all: a silent repair would mask a
+    regression in `droppable_rows` — the one primitive every deleter of conversation rows goes
+    through — rather than surface it, and the mask would be permanent because nothing else looks.
+
+    So the heal ships with its own alarm instead of without it. Every producer of a stranded result
+    is now guarded, so this counter should sit at zero forever; a non-zero rate means a deleter
+    stopped going through the guard, and it is visible in the same place as every other metric
+    rather than only in a session a chemist happens to reopen. The WARNING names the session, which
+    is what an operator needs to find what split it.
+    """
+    record_metric(
+        lambda m: m.increment("chemclaw_history_stranded_results_total", float(len(orphan_results)))
+    )
+    log.warning(
+        "session %s carried %d stranded tool result(s) with no matching call: %s. "
+        "The history was repaired so the session is usable again, but every row deleter goes "
+        "through droppable_rows, so this should be impossible — one of them regressed",
+        session_id,
+        len(orphan_results),
+        ", ".join(sorted(orphan_results)),
+    )
+
+
 def _session_dsn() -> str:
     """Resolve the session layer's DSN: `session_store_dsn`, else the shared `postgres_dsn`.
 
@@ -183,12 +215,19 @@ class PostgresHistoryProvider(HistoryProvider):
     ) -> list[Message]:
         """Load a session's messages in insertion order (empty for an unknown/None session).
 
-        Repairs the history on the way out: a function call with no matching result is dropped,
+        Repairs the history on the way out: a tool-call pairing with only one half left is dropped,
         and the stored row is corrected. See `chemclaw.agent.message_pairing` for why this is
         enforced on
         read rather than only on write — a `SIGKILL` or pod eviction between the call and its
         result runs no cleanup handler, and the orphan it leaves behind makes every later turn on
         that session fail outright. Doing it here also heals sessions already broken in the wild.
+
+        **Both halves, since D-2026-08-06-a-turn-that-does-not-finish-cleanly.** The repair used to
+        strip an unanswered *call* only, so a stranded *result* — what the old age-based retention
+        left behind — bricked a session permanently with no self-heal path. A stranded result is
+        counted and logged, because it should never happen now that `droppable_rows` guards every
+        deleter: a non-zero rate means one of them regressed, which is exactly the signal D-145 did
+        not want a silent heal to swallow.
         """
         if not session_id:
             return []
@@ -197,16 +236,20 @@ class PostgresHistoryProvider(HistoryProvider):
                 await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
         stored = [(int(row[0]), Message.from_dict(row[1])) for row in rows]
-        orphans = unmatched_call_ids([message for _, message in stored])
-        if not orphans:
-            return [message for _, message in stored]  # the common path: no rewrite, no write
+        messages = [message for _, message in stored]
+        orphan_calls = unmatched_call_ids(messages)
+        orphan_results = unmatched_result_ids(messages)
+        if not orphan_calls and not orphan_results:
+            return messages  # the common path: no rewrite, no write
+        if orphan_results:
+            _report_stranded_results(session_id, orphan_results)
         # Decided per row rather than by diffing two lists: once a message is dropped entirely the
         # lists no longer line up, and a positional pairing would rewrite the wrong row's message.
         kept: list[Message] = []
         deletions: list[int] = []
         rewrites: list[tuple[Jsonb, int]] = []
         for row_id, message in stored:
-            repaired = strip_call_ids(message, orphans)
+            repaired = strip_orphans(message, orphan_calls, orphan_results)
             if repaired is None:
                 deletions.append(row_id)
                 continue
