@@ -3,6 +3,35 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the whole-codebase security sweep (2026-08-06)
+
+Eleven disjoint review lanes, every finding re-checked by a second agent required to execute a
+repro: 43 confirmed, 2 refuted, 3 already tracked. Records:
+`D-2026-08-06-the-caller-chooses-the-kid-not-the-workload`,
+`D-2026-08-06-a-redactor-that-only-reads-the-message`,
+`D-2026-08-06-a-pair-rule-is-a-cross-product`,
+`D-2026-08-06-a-swallowed-write-reported-as-a-store`,
+`D-2026-08-06-an-envelope-that-only-survives-its-own-process`.
+
+**Untrusted content that reaches the model unframed.** `frame_untrusted` is applied at five call
+sites; these are not among them. Deferred from the framing pass deliberately: the envelope wraps a
+prose *string*, while each of these returns a structured model, so covering them is a decision
+about which fields to wrap without corrupting the shape the model reads — a design question, not a
+mechanical fix. Ranked by how attacker-reachable the content is.
+
+- [ ] **[M] `find_past_jobs` returns other users' free-text job rationales unframed**
+      (`agent/durable_tools.py:246`). Stored cross-user injection: the `reason` a *different*
+      chemist recorded on a durable job reaches this turn's model verbatim.
+- [ ] **[M] No connector/MCP tool result is ever framed** (`connectors/*/server/tools.py`).
+      `fetch_artifact` returns arbitrary externally-produced text straight to the model. The widest
+      surface of the four, and the one whose fix most needs a shape decision — framing every tool
+      result would wrap structured payloads the model is meant to read as data.
+- [ ] **[L] `recall_observations` returns corpus-mined free text unframed**
+      (`agent/memory_tools.py:80`). `Observation.statement` is the one knowledge path with no
+      human gate at all (D-161's ungated tier).
+- [ ] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
+      (`agent/research_tools.py:181`). The provenance string is caller-influenced and travels
+      beside content that *is* framed, which is the tell that the split was accidental.
 ## Open — Authorization gaps left by the whole-codebase security sweep (2026-08-06)
 
 Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed the inert core
