@@ -31,7 +31,12 @@ from pathlib import Path
 from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
-from chemclaw.science.safety.screen import compile_smarts, parse_molecule, read_rule_table
+from chemclaw.science.safety.screen import (
+    compile_smarts,
+    parse_molecule,
+    read_rule_table,
+    require_screenable_size,
+)
 
 # The alert table ships beside this module. Not a setting, unlike `safety_rules_path`: a site
 # extends the process-safety table with its own knowledge, while a published alert set is not
@@ -143,8 +148,10 @@ def screen_genotoxic_alerts(component_smiles: list[str]) -> AlertResult:
             solvent and product whose meeting is being assessed.
 
     Raises:
-        SafetyRulesError: a component is unparseable, or the alert table is malformed.
+        SafetyRulesError: a component is unparseable, the alert table is malformed, or more than
+            `safety_max_components` components were given.
     """
+    require_screenable_size(component_smiles, what="a genotoxicity screen")
     table, patterns = _load_alerts()
     molecules = {smiles: parse_molecule(smiles) for smiles in dict.fromkeys(component_smiles)}
     alerts = [

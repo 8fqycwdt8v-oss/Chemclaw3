@@ -20,7 +20,18 @@ Why the tools are defined here rather than by importing an agent-side `@tool` fu
 of the connector seam is that a capability's process holds the capability. Importing the agent
 module would drag the tool registry, the audit middleware and the whole `agent` package into a
 server whose only job is to answer questions about SMARTS and lookup tables.
+
+**The screens run in a worker thread, and their input is bounded.** SMARTS matching is CPU-bound
+C++ that holds the GIL, and this server answers every connected chat turn on one event loop — the
+same reasoning `connectors/chem/server/tools.py` records, which this bundle was the last not to
+follow. It matters more here than there: both screens check their pair rules as a cross-product,
+so results grow with the *square* of a caller-supplied list while the request stays tiny (13 KiB
+of SMILES measured at 251,000 flags and 2.48 s of blocked loop). `safety_max_components` bounds
+the input; `asyncio.to_thread` keeps even a bounded screen off the loop that serves everyone else.
+`ich_impurity_limit` is a dictionary lookup over two small tables and needs neither.
 """
+
+import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
@@ -61,8 +72,8 @@ async def screen_hazards(smiles: list[str]) -> ScreenResult:
         explanation of the hazard, and the literature citation it rests on.
     """
     if len(smiles) == 1:
-        return screen_structure(smiles[0])
-    return screen_reaction(smiles)
+        return await asyncio.to_thread(screen_structure, smiles[0])
+    return await asyncio.to_thread(screen_reaction, smiles)
 
 
 @server.tool()
@@ -95,7 +106,7 @@ async def screen_genotoxic_alerts(smiles: list[str]) -> AlertResult:
         The matched alerts, each with the motif it names, why it is an alert, and the published
         alert set it comes from — plus a verdict that states what the result does not mean.
     """
-    return genotox.screen_genotoxic_alerts(smiles)
+    return await asyncio.to_thread(genotox.screen_genotoxic_alerts, smiles)
 
 
 @server.tool()
