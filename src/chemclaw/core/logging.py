@@ -144,6 +144,7 @@ _SECRET_SETTINGS = (
     "hpc_artifact_store_token",
     "temporal_api_key",
     "postgres_dsn",
+    "postgres_migration_dsn",
     "session_store_dsn",
     "note_webhook_secret",
     "audit_anchor_secret",
@@ -194,7 +195,34 @@ _REDACTED = "***"
 # sidecar or a remote configured outside this process holds the token, so it is nowhere in
 # `os.environ` here and the substring pass has nothing to look for. The user is kept and only the
 # secret replaced, so a redacted line still says which remote and which principal failed.
-_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]*:)[^/\s@]*@")
+#
+# Two spellings, because the password form is not the common one for a token: `scheme://user:pw@`
+# carries a principal *and* a secret, while `scheme://token@` is the whole userinfo and is how a
+# PAT reaches a git remote (`https://ghp_...@github.com/org/repo.git`). Only the first was matched,
+# so the more common credential form passed through verbatim. The user is still kept in the
+# two-part form, so a redacted line says which remote and which principal failed; in the one-part
+# form there is no principal to keep and the whole of it is the credential.
+_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s:@]*)(?::([^/\s@]*))?@")
+
+
+def _redact_userinfo(match: "re.Match[str]") -> str:
+    """Replace a URL's credential, keeping the scheme and (where there is one) the user."""
+    scheme, first, second = match.group(1), match.group(2), match.group(3)
+    if second is None:
+        return f"{scheme}{_REDACTED}@"
+    return f"{scheme}{first}:{_REDACTED}@"
+
+
+def _is_shipped_default(name: str, value: str) -> bool:
+    """Whether `value` is the default this repository commits for setting `name`.
+
+    A value anyone can read in `core/config/` is not a credential, and redacting it does nothing
+    but corrupt logs. The dev Postgres password is the literal string `chemclaw`, so treating it
+    as a secret replaced the product's own name with `***` in every dev and CI log line that
+    happened to contain it — including messages that had nothing to do with the database.
+    """
+    field = type(settings).model_fields.get(name)
+    return field is not None and field.default == value
 
 
 def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
@@ -218,7 +246,7 @@ def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     # which `tests/test_filtering_a_record_never_imports_anything` forbids for the reason recorded
     # there: an import from inside a filter re-entered the filter under Temporal's sandbox and
     # wedged the worker. The test caught this the first time it ran.
-    return _URL_USERINFO.sub(lambda match: f"{match.group(1)}{_REDACTED}@", redacted)
+    return _URL_USERINFO.sub(_redact_userinfo, redacted)
 
 
 def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -236,7 +264,11 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
     values = set()
     for name in _SECRET_SETTINGS:
         value = getattr(settings, name, "")
-        if isinstance(value, str) and len(value) >= _MIN_REDACTABLE:
+        if (
+            isinstance(value, str)
+            and len(value) >= _MIN_REDACTABLE
+            and not _is_shipped_default(name, value)
+        ):
             values.add(value)
             # A DSN's password is also worth matching on its own: libpq accepts several spellings
             # and a connection error may quote only the credential rather than the whole string.
@@ -255,6 +287,11 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
         if len(value) >= _MIN_REDACTABLE:
             values.add(value)
     return tuple(sorted(values, key=len, reverse=True))
+
+
+# Renders `exc_info` for `SecretRedactingFilter`. Module scope so the logging path constructs
+# nothing per record; a bare `Formatter` because only its `formatException` is used.
+_EXC_RENDERER = logging.Formatter()
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -307,7 +344,20 @@ class SecretRedactingFilter(logging.Filter):
             )
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Redact in place and always keep the record."""
+        """Redact in place and always keep the record.
+
+        All three places a record carries text, not just the message. The traceback is the one
+        that mattered: `logger.exception(...)` / `exc_info=True` renders the exception at *format*
+        time, so a filter that only rewrote the message left every credential in the inventory
+        readable in the very log lines a failure produces — measured leaking both an API key and a
+        DSN password verbatim. That is also the worst case, because an exception is exactly when a
+        connection string or an auth header ends up inside the error text.
+
+        `exc_info` is rendered here rather than left to the formatter, because redaction cannot be
+        applied to a string that does not exist yet. `logging.Formatter.format` reuses a populated
+        `exc_text` instead of re-rendering, so ours is what is emitted — including under a
+        deployment's own formatter, which is the same reason this is a filter and not a formatter.
+        """
         message = record.getMessage()
         redacted = redact_secrets(message, self._connector_token_envs)
         if redacted != message:
@@ -315,6 +365,15 @@ class SecretRedactingFilter(logging.Filter):
             # let a formatter re-render the original.
             record.msg = redacted
             record.args = None
+        if record.exc_info is not None and record.exc_text is None:
+            # `_EXC_RENDERER` is built once at module scope: constructing a `Formatter` here would
+            # be per-record work, and `formatException` reaches `traceback`, which `logging` has
+            # already imported — so nothing on this path imports anything (see `ContextFilter`).
+            record.exc_text = _EXC_RENDERER.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = redact_secrets(record.exc_text, self._connector_token_envs)
+        if record.stack_info:
+            record.stack_info = redact_secrets(record.stack_info, self._connector_token_envs)
         return True
 
 

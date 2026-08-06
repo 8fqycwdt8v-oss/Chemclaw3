@@ -43,6 +43,7 @@ from chemclaw.connectors.identity import (
 from chemclaw.core import db
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
+from chemclaw.core.logging import configure_logging
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.tracing import continue_trace
 
@@ -170,6 +171,16 @@ def connector_app(
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
     """
+    # Every other process role calls this at its entrypoint; a connector server had no entrypoint
+    # of its own to call it from — `deploy/entrypoint.sh` execs `uvicorn <bundle>.server.app:app`
+    # directly, so the module *is* the entrypoint. The result was that the one process family
+    # holding per-connector bearer tokens ran with none of the redaction, no correlation id and no
+    # actor on any line. Here rather than in each bundle's `app.py`, because this is the single
+    # point all seven go through and a per-bundle call is one a new bundle can forget.
+    #
+    # Import-time by necessity and safely: uvicorn applies its own logging config in
+    # `Config.__init__` and imports the app afterwards, so this runs last and wins.
+    configure_logging()
     _sanitize_tool_errors(server, name=name)
     mcp_app = server.streamable_http_app()
 

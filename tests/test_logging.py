@@ -192,6 +192,111 @@ def test_a_secret_passed_as_an_argument_is_caught_too(_secrets: None) -> None:
     assert _DSN not in logging.Formatter("%(message)s").format(record)
 
 
+def _emitted(record: logging.LogRecord) -> str:
+    """Everything a handler would write for `record`: message, traceback and stack alike.
+
+    `_rendered` above returns only `getMessage()`, which is exactly the blind spot this group of
+    tests exists for — a credential can be in the message, in the exception, or in a stack dump,
+    and only the first was ever redacted.
+    """
+    from chemclaw.core.logging import SecretRedactingFilter
+
+    SecretRedactingFilter().filter(record)
+    return logging.Formatter("%(message)s").format(record)
+
+
+def _record_with_exception(message: str, exc: BaseException) -> logging.LogRecord:
+    """A record as `logger.exception(message)` would produce it inside an `except` block."""
+    return logging.LogRecord(
+        "chemclaw.test",
+        logging.ERROR,
+        __file__,
+        1,
+        message,
+        (),
+        (type(exc), exc, exc.__traceback__),
+    )
+
+
+def test_a_credential_inside_an_exception_never_reaches_the_stream(_secrets: None) -> None:
+    """The finding: the filter rewrote the message and never touched the traceback.
+
+    `logger.exception(...)` / `exc_info=True` renders the exception at *format* time, so every
+    credential in the inventory was readable in the log lines a failure produces — which is the
+    worst case, because a failure is exactly when a DSN or an auth header ends up in the error
+    text. Measured leaking both an API key and a DSN password verbatim before the fix.
+    """
+    try:
+        raise RuntimeError(f"auth failed for {_KEY} against {_DSN}")
+    except RuntimeError as exc:
+        emitted = _emitted(_record_with_exception("upstream call failed", exc))
+    assert _KEY not in emitted
+    assert _DSN not in emitted
+    assert "sup3rs3cret-password" not in emitted
+    # Still a usable diagnostic: the redaction must not eat the traceback itself.
+    assert "RuntimeError" in emitted
+
+
+def test_a_credential_in_a_stack_dump_never_reaches_the_stream(_secrets: None) -> None:
+    """`logger.error(..., stack_info=True)` renders a stack the filter also has to cover."""
+    record = _record("state dump")
+    record.stack_info = f"Stack (most recent call last):\n  connecting to {_DSN}"
+    _emitted(record)
+    assert _DSN not in (record.stack_info or "")
+
+
+def test_a_token_carried_as_the_whole_userinfo_is_redacted(_secrets: None) -> None:
+    """`scheme://token@host` — how a PAT reaches a git remote — was passing through verbatim.
+
+    Only `scheme://user:password@host` was matched, so the *more common* credential form for a
+    token was the one that escaped. The host is kept, because a redacted line still has to say
+    which remote failed.
+    """
+    url = "https://ghp_abcdefghijklmnop@github.com/org/repo.git"
+    emitted = _rendered(_record("push failed: %s", url))
+    assert "ghp_abcdefghijklmnop" not in emitted
+    assert "github.com/org/repo.git" in emitted
+
+
+def test_the_user_is_still_kept_when_the_url_carries_both(_secrets: None) -> None:
+    """The two-part form keeps its principal: a redacted line names who failed, not just where."""
+    emitted = _rendered(_record("connecting: %s", "postgresql://svc_user:hunter2pass@db:5432/x"))
+    assert "hunter2pass" not in emitted
+    assert "svc_user" in emitted
+    assert "db:5432" in emitted
+
+
+def test_an_at_sign_in_a_path_is_not_mistaken_for_a_credential(_secrets: None) -> None:
+    """Widening the pattern must not start mangling ordinary URLs."""
+    assert _rendered(_record("fetched %s", "https://example.com/@handle")) == (
+        "fetched https://example.com/@handle"
+    )
+
+
+def test_a_shipped_default_is_not_treated_as_a_credential() -> None:
+    """A value committed to this repository is not a secret, and redacting it only corrupts logs.
+
+    The dev Postgres default is `postgresql://chemclaw:chemclaw@localhost:5432/chemclaw`, whose
+    password is the literal string `chemclaw` — long enough to pass the length floor. Treating it
+    as a credential replaced the product's own name with `***` in every dev and CI log line that
+    mentioned it, including lines with nothing to do with the database.
+    """
+    from chemclaw.core.config import settings as live
+
+    default = type(live).model_fields["postgres_dsn"].default
+    assert "chemclaw:chemclaw" in default  # the collision this guards is real, not hypothetical
+    assert _rendered(_record("the chemclaw service started")) == "the chemclaw service started"
+
+
+def test_the_migration_dsn_is_in_the_inventory() -> None:
+    """The schema-owning credential — the one that can rewrite `audit_events` — was not listed.
+
+    `postgres_dsn` was, and the two are different roles by design (`infra/sql/grants`): the
+    migration DSN is strictly the more privileged of the pair.
+    """
+    assert "postgres_migration_dsn" in _SECRET_SETTINGS
+
+
 def test_redaction_leaves_ordinary_text_alone(_secrets: None) -> None:
     """A redactor that mangles normal lines is one an operator turns off."""
     assert _rendered(_record("computed pKa 15.9 for CCO")) == "computed pKa 15.9 for CCO"

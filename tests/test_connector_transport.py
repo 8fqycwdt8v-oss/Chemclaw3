@@ -18,6 +18,7 @@ and is covered in CI (`test_molfp_postgres.py`, `test_rxnfp_postgres.py`) agains
 """
 
 import asyncio
+import logging
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -469,6 +470,33 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
         message = asyncio.run(_call())
     assert secret not in message
     assert "an internal error occurred" in message
+
+
+def test_building_a_connector_app_configures_this_process_logging() -> None:
+    """A connector server process must get the redaction every other process role already has.
+
+    `deploy/entrypoint.sh` execs `uvicorn <bundle>.server.app:app` directly, so a connector server
+    has no entrypoint of its own — and nothing called `configure_logging()`. The one process
+    family that holds per-connector bearer tokens was therefore running with no secret redaction,
+    no correlation id and no actor on any line.
+
+    Asserted on `connector_app` rather than on each bundle's `app.py`, because that is the single
+    point all seven bundles go through: a per-bundle call is one an eighth bundle can forget.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.core.logging import ContextFilter, SecretRedactingFilter
+
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    try:
+        root.handlers.clear()
+        connector_app(FastMCP("logging-probe"), name="logging-probe")
+        installed = {type(f).__name__ for handler in root.handlers for f in handler.filters}
+    finally:
+        root.handlers[:] = saved
+    assert SecretRedactingFilter.__name__ in installed
+    assert ContextFilter.__name__ in installed
 
 
 def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
