@@ -2089,12 +2089,17 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
 
       Two real things survive it, both smaller than the retracted claim:
 
-- [ ] **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
-      `_auto_invoke_function` returns the parse error before reaching the middleware pipeline, so
-      "the model asked for `find_notes` with arguments it could not satisfy" leaves no trace in
-      `audit_events`. Authorization not running is harmless (nothing executed); the *audit* gap is
-      not, for a GxP trail whose purpose is to answer "what did the agent attempt". Upstream
-      behaviour in `agent_framework._tools`, so the fix is either a wrapper or an upstream change.
+- [x] **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
+      Closed by D-2026-08-06-a-refusal-is-an-attempt-worth-recording: a wrapper on
+      `_auto_invoke_function` records a `rejected` event for any call that reached no middleware,
+      carrying the raw arguments the model sent. `_auto_invoke_function` returns the parse error
+      before reaching the middleware pipeline, so "the model asked for `find_notes` with arguments it
+      could not satisfy" left no trace in `audit_events`. Authorization not running is harmless
+      (nothing executed); the *audit* gap is not, for a GxP trail whose purpose is to answer "what
+      did the agent attempt". Two corrections to the row: there is a **second** early return it does
+      not name — a tool name in no map, which returns earlier still and is the more interesting fact
+      about the model's behaviour — and the discriminator is not a message match but a `ContextVar`
+      the middleware sets, so a third upstream refusal path is covered the day it appears.
 
 - [x] **LOAD-1 Re-state the load-test tool claim.** Closed by the re-run with the stub fixed (150/150, 2.08 turns/s, 100 tool bodies actually executing, cross-checked against `audit_events`). The runs reported "100 tool calls" and "the
       tool path genuinely exercised". Both are wrong for the same reason: those calls were

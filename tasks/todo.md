@@ -177,31 +177,48 @@ proving nothing. Record: `D-2026-08-06-a-wikilink-is-an-edge-not-a-word`.
 is interpolated into a filesystem path" [L]; "`SnowflakeWarehouse._connect` classifies every client
 error as retryable" [M] and executes no function body under test.*
 
-- [ ] `ingest/eln/warehouse/binding.py:462` — the module's "only checked identifiers are written"
-      invariant is false. Check it like every other identifier; this is distinct from the documented
-      `where:` trust boundary, which stays documented.
-- [ ] `ingest/eln/warehouse/retriever.py:184` — a row key is interpolated into a filesystem path with
-      no slug validation. Path traversal from warehouse data.
-- [ ] `warehouse/snowflake.py:162` — every client error becomes a retryable `ConnectionError`, so a
-      credential error retries forever. Classify against the driver's error taxonomy, and get the
-      module's first executed test with a fake driver (the engine was already proven against one).
+- [x] `server_embed_function` now takes `_check_identifier`, the same rule every other identifier in
+      a binding takes — a function name *is* a dotted identifier, so it needed no rule of its own.
+      The `where:` clause stays raw: it announces itself as operator-written SQL, which is exactly
+      what `server_embed_function` did not.
+- [x] The slug rule moved to `note_relative_path`, the choke point the PR-gate and every reader
+      share, and is exposed as `is_note_slug` for the retriever, which wants an answer rather than
+      an exception (one hostile row must not fail a chemist's whole query).
+- [x] `InterfaceError`/`ProgrammingError` → non-retryable `WarehouseQueryError`; the operational
+      family keeps `ConnectionError`. `tests/test_warehouse_boundary.py` is the module's first
+      executed coverage, driven through the `_client()` seam with a fake exposing the DB-API
+      hierarchy.
 
-**Acceptance**: a hostile `server_embed_function` and a `../` row key are both refused; an auth
-failure fails on the first attempt.
+**Acceptance**: met. **The traversal measurement was wrong twice and the correction is the finding.**
+I measured with `Path.resolve()` — lexical — and wrote the escape into a comment, an ADR draft and
+three docstrings. The code calls `is_file()`, and the OS will not walk `..` through a component that
+does not exist. Re-measured on the primitive the code actually calls: the escape is real but
+*conditional* on an intermediate directory existing, which is why the row is [L]. Two tests were
+unfalsifiable on the way and mutation caught both. Record:
+`D-2026-08-06-the-warehouse-boundary-and-a-probe-that-measured-the-wrong-call`.
 
 ### WP-8 · The audit trail records what was attempted
 *Backlog: "AUDIT-2 a tool call rejected for bad arguments is neither audited nor
 authorization-checked"; the `PostgresAuditSink.record` `statement_timeout=None` mutation survivor.*
 
-- [ ] `_auto_invoke_function` returns the parse error *before* the middleware pipeline, so "the agent
-      asked for `find_notes` with arguments it could not satisfy" leaves no trace. Authorization not
-      running is harmless (nothing executed); the audit gap is not, for a trail whose purpose is
-      "what did the agent attempt". Upstream behaviour, so this is a wrapper — the same shape as the
-      MAF workarounds already in `DEFERRED.md`, and it ends with deleting the wrapper.
-- [ ] Nothing asserts the audit insert carries a `statement_timeout`; kill the named survivor.
+- [x] A wrapper on the dispatcher records a `rejected` event for any call that reached no
+      middleware, carrying the **raw** arguments (the validated form does not exist — that is what
+      "rejected" means). Two corrections to the row: there is a **second** early return it does not
+      name — a tool name in no map, which returns earlier still — and the discriminator is a
+      `ContextVar` the middleware sets, not a match on MAF's refusal message, so a third upstream
+      path is covered the day it appears rather than the day someone notices.
+- [x] Killed as a **sweep**, not as one test: an AST guard asserts every `db.connection`/`pool`
+      call in `src/` bounds its statements. 29 call sites had the same shape and the same absence
+      of a test; four must run unbounded and are an allowlist with a reason per entry, plus a third
+      test that fails when an entry stops being needed.
 
-**Acceptance**: a bad-argument call appears in `audit_events`; `make mutants` no longer reports the
-timeout survivor.
+**Acceptance**: met. Mutation-proven in both directions — removing the recording fails six tests,
+recording *unconditionally* fails three (a tool that raises did run, so the middleware owns that
+row), and stripping the timeout kwarg fails the sweep. **The first version bound sink, actor and
+correlation id at install time** like the middleware does; the patch is process-global and permanent
+while an agent is not, so the first `build_agent` would have owned every later agent's rejections.
+Only visible because the tests ran beside another agent's build. Record:
+`D-2026-08-06-a-refusal-is-an-attempt-worth-recording`.
 
 ---
 

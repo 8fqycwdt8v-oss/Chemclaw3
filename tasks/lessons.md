@@ -1521,3 +1521,37 @@ Rules:
 3. **When a corrected measurement narrows a finding, say so in the artifact.** The comment, the test
    and the record all now state the condition, so the next reader inherits the true shape rather
    than my first one.
+
+## `git checkout <file>` is a delete, and I ran it on unstaged work (2026-08-06)
+
+Mutation-checking a new guard test, I edited `tests/test_db.py` to make an assertion fail, confirmed
+it failed, and reverted with `git checkout tests/test_db.py`. The file was tracked but my ~100 new
+lines were **unstaged**, so the checkout did not undo my one-line mutation — it restored the file to
+`HEAD` and deleted the whole test block. I only noticed because the follow-up `git diff --stat`
+printed nothing, which I had expected to mean "clean revert" and actually meant "identical to HEAD".
+
+I had done this correctly ten minutes earlier on `src/chemclaw/agent/audit_store.py`: copy to the
+scratchpad, mutate, run, copy back. Then I reached for the shorter command on the next file.
+
+Rules:
+1. **Never `git checkout`/`git restore` a file that carries uncommitted work.** The mutation-check
+   loop is: copy the file to the scratchpad, edit, run, copy back. It works whether or not the file
+   is tracked, staged, or new — the git command works only in the one case I was not in.
+2. **Assert the pattern matched before mutating, and diff after restoring.** The `assert old in s`
+   guard was already habit (it caught a no-op "mutation" earlier this session); the missing half was
+   checking that the *restore* put back what I removed rather than what `HEAD` had.
+3. **Commit before a mutation check when the work is already worth keeping.** A commit makes every
+   revert command safe, which is cheaper than remembering which ones are.
+
+## A mutation survivor names one call site and usually describes a class (2026-08-06)
+
+The backlog named one survivor: `PostgresAuditSink.record` could drop its `statement_timeout` and
+every test still passed. Writing a test for that one store would have closed the row and left the
+defect. The real question is "how many other Postgres calls have the same shape and the same absence
+of a test", and the AST sweep answered it: **29**, plus four that must run unbounded for reasons
+worth writing down.
+
+Rule: when a survivor is reported, grep for its shape across the tree *before* writing the test. If
+the shape repeats, the test is a sweep with an allowlist, and the allowlist gets its own test that
+fails when an entry stops being needed — an exemption that outlives its reason is how a guard rots
+into a rubber stamp.

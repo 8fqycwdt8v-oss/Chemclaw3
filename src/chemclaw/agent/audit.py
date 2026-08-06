@@ -32,7 +32,8 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from contextvars import ContextVar
+from typing import Any, Protocol, runtime_checkable
 
 from agent_framework import FunctionInvocationContext, function_middleware
 from pydantic import BaseModel
@@ -185,6 +186,10 @@ def make_audit_middleware(
         call_next: Callable[[], Awaitable[None]],
     ) -> None:
         """Record one audit event per tool invocation (observe-only)."""
+        # Tells the dispatch wrapper that this call reached the middleware at all. See
+        # `_REACHED_MIDDLEWARE` and `install_rejected_call_audit` for why the wrapper
+        # cannot answer that question for itself.
+        _REACHED_MIDDLEWARE.set(True)
         name = context.function.name
         args = _truncate(context.arguments)
         # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
@@ -325,3 +330,126 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
                 "actor": event.actor,
             },
         )
+
+
+# Whether the audit middleware ran for the call currently being dispatched.
+#
+# Set by the middleware, read by `install_rejected_call_audit` right after it awaits
+# MAF's dispatch. A `ContextVar` rather than an attribute because it has to be per *call*: an
+# `await` runs in the caller's context, so a value set inside the middleware is visible to the
+# wrapper that awaited it, while `asyncio.gather` copies the context per task, so two parallel tool
+# calls cannot see each other's marker. Both halves measured before this was built.
+_REACHED_MIDDLEWARE: ContextVar[bool] = ContextVar(
+    "chemclaw_tool_reached_middleware", default=False
+)
+
+# The outcome recorded for a call the model made and the framework refused before running anything.
+# Its own value rather than reusing `error`: nothing executed, so there is no failure to report —
+# what happened is that the *attempt* was malformed, and a trail that cannot tell those apart cannot
+# answer "what did the agent try" without also implying it ran.
+REJECTED_OUTCOME = "rejected"
+
+
+def install_rejected_call_audit() -> Callable[[], None]:
+    """Record the tool calls MAF refuses before any middleware runs. Returns an undo.
+
+    **The gap.** `agent_framework._tools._auto_invoke_function` returns early on two paths — a name
+    that is in no tool map, and arguments that fail schema validation — and both return *before*
+    the function-middleware pipeline. So "the model asked for `find_notes` with arguments it could
+    not satisfy" left no row at all. Authorization not running there is harmless, because nothing
+    executed; the *audit* gap is not, for a trail whose stated purpose is to answer what the agent
+    attempted.
+
+    **Why a wrapper on the dispatcher rather than a check in the runner.** The runner sees the
+    turn's messages afterwards and could spot a `function_result` carrying an exception — but it
+    cannot tell one MAF composed from one a tool raised, and the second is already audited by the
+    middleware. Double-recording every failed tool call to catch the refused ones is a worse trail
+    than the gap. The dispatcher is the one place both facts are known.
+
+    **Why the marker, and not a string match.** MAF's two refusal messages are recognisable
+    (`"Error: Argument parsing failed."`), and matching them would break silently the day upstream
+    rewords one or adds a third early return. `_REACHED_MIDDLEWARE` asks the question that actually
+    matters — did anything audit this call — so a new refusal path is covered the day it appears
+    rather than the day someone notices.
+
+    It ends with being deleted, like every other upstream workaround in `DEFERRED.md`: if MAF ever
+    runs its middleware for refused calls, this becomes a double-record and the marker says so.
+
+    **It takes no sink, actor or correlation id, and that is a correction rather than a
+    simplification.** The first version bound all three at install time, like the middleware does —
+    and the patch is *process-global and permanent* while the middleware is per-agent, so the first
+    `build_agent` to run would have owned every rejection recorded by every later agent in the
+    process. Benign in production, where there is one sink; not benign as a design, and the tests
+    that run beside another agent's build are what showed it. Everything is resolved per call
+    instead: the ambient identity a turn stamps, and the one configured sink.
+
+    Returns:
+        A callable that restores MAF's original dispatcher — for tests, and for a process that
+        wants the patch scoped rather than permanent.
+    """
+    from agent_framework import _tools as maf_tools
+
+    revision = settings.deployment_revision
+    original = maf_tools._auto_invoke_function  # noqa: SLF001 - the only dispatch choke point
+    if getattr(original, "_chemclaw_rejection_audit", False):
+        # Already installed. `build_agent` runs once per profile per process, so a second patch
+        # over the first would wrap our own wrapper and record every refusal twice — and the
+        # doubling would be invisible, because both rows would be correct.
+        return lambda: None
+
+    async def _dispatch(function_call_content: Any, *args: Any, **kwargs: Any) -> Any:
+        """Dispatch through MAF, recording the call if nothing else did."""
+        _REACHED_MIDDLEWARE.set(False)
+        result = await original(function_call_content, *args, **kwargs)
+        if _REACHED_MIDDLEWARE.get():
+            return result  # the middleware recorded it, in full, with its latency
+        name = getattr(function_call_content, "name", "") or "<unknown>"
+        detail = str(getattr(result, "exception", "") or getattr(result, "result", ""))
+        await _emit_shielded(
+            default_audit_sink(),
+            AuditEvent(
+                correlation_id=get_current_correlation_id() or "",
+                session_id=get_current_session_id() or "",
+                actor=get_current_actor() or settings.service_actor_id,
+                tool=name,
+                # The *raw* arguments the model sent, which is the whole point: they are what was
+                # rejected, so the validated form does not exist and recording nothing would leave
+                # the trail unable to say what the attempt looked like.
+                arguments=_truncate(_raw_arguments(function_call_content)),
+                outcome=REJECTED_OUTCOME,
+                detail=_truncate(detail),
+                # No latency: nothing ran. Zero is the honest number, and it is distinguishable
+                # from a fast tool by the outcome beside it.
+                latency_ms=0.0,
+                revision=revision,
+            ),
+        )
+        logger.warning(
+            "tool call refused before execution: %s (%s)",
+            name,
+            _truncate(detail),
+        )
+        return result
+
+    _dispatch._chemclaw_rejection_audit = True  # type: ignore[attr-defined]
+    maf_tools._auto_invoke_function = _dispatch  # noqa: SLF001 - see the docstring
+
+    def _restore() -> None:
+        """Put MAF's own dispatcher back."""
+        maf_tools._auto_invoke_function = original  # noqa: SLF001 - see the docstring
+
+    return _restore
+
+
+def _raw_arguments(function_call_content: Any) -> dict[str, Any]:
+    """The arguments as the model sent them, however MAF happens to carry them.
+
+    Defensive because this reads a vendored content object on a path that only ever runs for an
+    already-malformed call: a second failure here would replace a recorded refusal with an
+    exception inside the audit trail, which is the one place that must not add failures.
+    """
+    try:
+        parsed = function_call_content.parse_arguments()
+    except Exception:  # noqa: BLE001 - the arguments are malformed by definition on this path
+        return {"<unparseable>": str(getattr(function_call_content, "arguments", ""))[:200]}
+    return dict(parsed or {})

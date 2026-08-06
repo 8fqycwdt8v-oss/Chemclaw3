@@ -151,3 +151,112 @@ def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
     asyncio.run(_run())
     assert db._POOLING is False
     assert db._POOLS == {}
+
+
+# --- Every query path is bounded ------------------------------------------------------------
+#
+# The mutation survivor this closes: `PostgresAuditSink.record` passes
+# `statement_timeout_seconds=settings.pg_statement_timeout_seconds` to `db.connection`, and
+# replacing it with `None` survived — nothing asserted the bound existed. Postgres tests skip
+# offline, so the one place the property is *always* checkable is the source.
+#
+# Written as a sweep rather than one test per store on purpose. The defect is not "the audit sink
+# forgot"; it is that a store can forget, silently, and only a live hung query would say so. Nine
+# more call sites had exactly the same shape and exactly the same absence of a test.
+
+_UNBOUNDED_BY_DESIGN = {
+    # A migration must not have a statement timeout: an index build may legitimately run long, and
+    # `core/migrate.py` says so in the comment above this very call. Asserted separately by
+    # `tests/test_migrations.py::test_the_run_still_takes_no_statement_timeout`, which is the
+    # opposite assertion — that is why the allowlist names it rather than the sweep skipping the
+    # file.
+    "src/chemclaw/core/migrate.py",
+    # Grants are DDL applied by the same operator step as migrations, on the same connection shape.
+    "src/chemclaw/core/grants.py",
+    # Operator-run live measurement scripts, not a request path. A bound here would cut the
+    # measurement rather than protect a chemist.
+    "src/chemclaw/cli/live_jobs.py",
+    "src/chemclaw/cli/live_storm.py",
+}
+
+_DB_ENTRY_POINTS = {"connection", "pool", "connect"}
+
+
+def _db_calls() -> list[tuple[str, int, bool]]:
+    """Every call into `chemclaw.core.db`'s connection helpers, and whether it bounds statements.
+
+    Resolves the import alias per file, so `db.connection(...)`, `connection(...)` imported by
+    name and `connect as db_connect` are all found — three spellings that are all in the tree.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    found: list[tuple[str, int, bool]] = []
+    for path in sorted((root / "src" / "chemclaw").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "chemclaw.core.db":
+                for alias in node.names:
+                    imported[alias.asname or alias.name] = alias.name
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            target = None
+            if isinstance(func, ast.Attribute):
+                if isinstance(func.value, ast.Name) and func.value.id == "db":
+                    target = func.attr
+            elif isinstance(func, ast.Name):
+                target = imported.get(func.id)
+            if target not in _DB_ENTRY_POINTS:
+                continue
+            bounded = any(kw.arg == "statement_timeout_seconds" for kw in node.keywords)
+            found.append((str(path.relative_to(root)), node.lineno, bounded))
+    return found
+
+
+def test_the_sweep_finds_the_call_sites_it_claims_to_guard() -> None:
+    """The guard below is vacuous if the AST walk finds nothing — so measure the walk first.
+
+    Every guard-by-source test has this failure mode: a rename upstream turns it into a test that
+    passes because it examined an empty list. The floor is deliberately well below the current
+    count (29 bounded, 4 allowlisted) so ordinary growth does not touch it, and well above zero.
+    """
+    calls = _db_calls()
+    assert len(calls) > 20, f"the AST walk found only {len(calls)} db calls — it stopped matching"
+    assert any(path.endswith("audit_store.py") for path, _, _ in calls), (
+        "the call this guard was written for is not being found"
+    )
+
+
+def test_every_query_path_bounds_its_statements() -> None:
+    """A Postgres call from a request path carries the configured statement timeout.
+
+    Without it a hung query burns the enclosing Temporal activity or HTTP request rather than
+    failing — which is the failure mode the setting exists to prevent, and the one no test could
+    see because it only appears against a live database under load.
+    """
+    unbounded = [
+        f"{path}:{line}"
+        for path, line, bounded in _db_calls()
+        if not bounded and path not in _UNBOUNDED_BY_DESIGN
+    ]
+    assert not unbounded, (
+        "these Postgres calls set no statement timeout, so a hung query has no bound: "
+        + ", ".join(unbounded)
+        + " — pass statement_timeout_seconds=settings.pg_statement_timeout_seconds, or add the "
+        "file to _UNBOUNDED_BY_DESIGN with the reason it must run unbounded."
+    )
+
+
+def test_the_allowlist_names_only_files_that_still_need_it() -> None:
+    """An allowlist that outlives its reason is how a guard rots into a rubber stamp.
+
+    Each entry must still contain an unbounded call; a file that has since been fixed, or deleted,
+    fails here instead of quietly exempting whatever is written there next.
+    """
+    unbounded_files = {path for path, _, bounded in _db_calls() if not bounded}
+    stale = _UNBOUNDED_BY_DESIGN - unbounded_files
+    assert not stale, f"allowlisted but no longer unbounded (drop the entry): {sorted(stale)}"

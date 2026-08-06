@@ -49,7 +49,11 @@ from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
 from chemclaw.agent import preferences as _preferences  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
-from chemclaw.agent.audit import AuditSink, make_audit_middleware
+from chemclaw.agent.audit import (
+    AuditSink,
+    install_rejected_call_audit,
+    make_audit_middleware,
+)
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
@@ -299,6 +303,15 @@ def build_agent(
         actor=actor,
         sink=audit_sink,
     )
+    # The audit middleware cannot see the calls MAF refuses before running any middleware — a tool
+    # name that is in no map, and arguments that fail schema validation. Those are exactly the
+    # "what did the agent attempt" rows a GxP trail exists to hold, so a wrapper on the dispatcher
+    # records them (AUDIT-2). Installed here rather than at import: it patches a vendored function,
+    # and the one place that is honest about is beside the middleware it completes.
+    #
+    # Idempotent, and it has to be: `build_agent` runs once per profile per process, and a second
+    # patch over the first would record every refusal twice.
+    install_rejected_call_audit()
     # Five function middlewares over every tool call, outermost first: `surface_authorization_
     # denials` and `surface_domain_errors` turn the known-safe exception types (an authorization
     # refusal; chemclaw's own `ChemclawError` bad-input contract and its `SubsystemUnavailableError`
