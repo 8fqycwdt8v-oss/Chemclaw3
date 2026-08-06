@@ -1,4 +1,9 @@
-"""Apply the SQL migrations in `infra/sql/` to the configured database.
+"""Apply the SQL migrations in `infra/sql/` to every database this deployment stores in.
+
+**Plural, since `migration_targets`.** `session_store_dsn` lets the six session-layer stores point
+at a different database from the calculation one, and this applied the schema to the calculation
+database only — so a split deployment ran `make db-migrate`, was told it succeeded, and had no
+`session_messages` table at all.
 
 Ordered `.sql` files applied in filename order, each tracked in a `schema_migrations`
 ledger so a file runs exactly once and an already-applied file that later changes is
@@ -54,6 +59,8 @@ an artefact of the QM cache having been the first thing to need a table.
 import asyncio
 import hashlib
 from pathlib import Path
+
+from psycopg.conninfo import conninfo_to_dict
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
@@ -144,6 +151,53 @@ def migration_dsn() -> str:
     return settings.postgres_migration_dsn or settings.postgres_dsn
 
 
+def _server_and_database(dsn: str) -> tuple[str, str, str]:
+    """`(host, port, dbname)` for `dsn` — what decides whether two DSNs name the same database.
+
+    Compared on those three rather than on the string, because the same database is routinely
+    written two ways: the session DSN differs from the runtime one by its *credential* in a
+    split-role deployment, and that is not a second database to migrate.
+    """
+    parsed = conninfo_to_dict(dsn)
+    return (str(parsed.get("host", "")), str(parsed.get("port", "")), str(parsed.get("dbname", "")))
+
+
+def migration_targets() -> list[str]:
+    """Every database the schema must exist in, each as the DSN to apply it with.
+
+    **The gap this closes.** `session_store_dsn` lets the session layer point at a different
+    database than the calculation one, and six stores follow it — the message history, the session
+    owners, the turn claims, the push-back mailbox, the preferences and `turn_costs`. `migrate()`
+    ran against `migration_dsn()` alone, so on a split deployment `make db-migrate` reported success
+    having created none of those tables, and the front door failed on its first turn.
+
+    The whole file set is applied to each target rather than a per-database subset. That leaves
+    unused tables in both, which is the honest cost of a monolithic migration set and is strictly
+    better than a hand-maintained "which tables belong where" map that a new migration would
+    silently fall out of.
+
+    Raises:
+        MigrationError: A split *database* combined with a split *credential*. There is one
+            migrator DSN and it names the calculation database, so nothing here can own the schema
+            in the session one — an operator must point them at the same database or migrate the
+            session database with its own tooling. Refusing is the point: applying the runtime
+            credential's DDL would fail obscurely at the first `CREATE TABLE`, and doing nothing is
+            what this function exists to stop.
+    """
+    base = migration_dsn()
+    session = settings.session_store_dsn
+    if not session or _server_and_database(session) == _server_and_database(settings.postgres_dsn):
+        return [base]
+    if settings.postgres_migration_dsn:
+        raise MigrationError(
+            "session_store_dsn names a different database from postgres_dsn, and "
+            "postgres_migration_dsn names a migrator for the latter only — there is no credential "
+            "that can own the schema in the session database. Point session_store_dsn at the same "
+            "database, or migrate it with its own migrator and leave session_store_dsn unset here"
+        )
+    return [base, session]
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -205,6 +259,17 @@ async def migrate(dsn: str | None = None) -> list[str]:
     return applied
 
 
+async def migrate_all() -> dict[str, list[str]]:
+    """Migrate every database `migration_targets()` names; return what each one applied.
+
+    What `make db-migrate` runs, so "the configured database" means every database this deployment
+    actually stores in rather than only the calculation one.
+    """
+    return {target: await migrate(target) for target in migration_targets()}
+
+
 if __name__ == "__main__":
-    names = asyncio.run(migrate())
-    print(f"applied migrations: {', '.join(names) or '(none — already up to date)'}")
+    for target, names in asyncio.run(migrate_all()).items():
+        host, port, database = _server_and_database(target)
+        where = f"{database}@{host}:{port}" if host else database
+        print(f"applied migrations to {where}: {', '.join(names) or '(none — already up to date)'}")

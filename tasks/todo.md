@@ -273,19 +273,26 @@ the fix; and wiring the balance rule immediately found an unbalanced equation in
 The Q-A lane's measured verdict stands — the ten triads are *not* one abstraction waiting to be
 extracted. This package takes only what it found: the plumbing, and the divergences it hid.
 
-- [ ] `agent/turn_cost_store.py:60` — the `session_store_dsn` split means two stores use a database
-      `make db-migrate` never touches. Either migrate it or refuse the split at startup.
-- [ ] `science/calc/store.py:250` — `InMemoryStore.find` raises `TypeError` on a timezone-aware
-      `created_at` where Postgres does not. Two backends of one Protocol disagreeing is the bug the
-      Protocol exists to prevent.
-- [ ] `science/calc/postgres_store.py:116` — only one of three jsonb writers rejects non-finite
-      floats. A `NaN` in the other two is a row nobody can read back.
-- [ ] `science/calc/postgres_store.py:74` — the connect helper is hand-rolled 14 times, five
-      docstrings byte-identical and four claiming "one place, DRY". One helper; the DRY claim becomes
-      true rather than merely written.
+- [x] `migration_targets` resolves every database the deployment stores in; `make db-migrate`
+      applies to each. **Six** stores follow `session_store_dsn`, not two. Targets compare on
+      host/port/dbname, so a split *credential* is not a second database; a split database *with* a
+      split credential is refused, because no configured credential can own the schema there.
+- [x] A naive datetime means UTC in the in-memory store, because that is what `timestamptz` does on
+      the durable side. The `since`/`until` filters had the same clash and it arrives from caller
+      input, so both were reachable.
+- [x] `db.jsonb()` in the module that owns the connection; all three writers of *computed* payloads
+      use it. The session stores deliberately do not — message text cannot carry a `NaN`.
+- [x] `db.bounded()`, defaulting to `postgres_dsn`, replaced twenty-nine call sites and fourteen
+      private `_connect` helpers; three were then thin enough to inline away.
 
-**Acceptance**: one round-trip test runs against both backends and passes identically, including the
-tz-aware and non-finite cases.
+**Acceptance**: met, all four mutation-proven. Two things worth recording. The
+`statement_timeout` sweep from WP-8 **caught its own refactor** — every collapsed call stopped
+matching, and the floor assertion failed instead of the sweep quietly passing over nothing, which is
+precisely why that assertion exists. And the first `jsonb` test asserted through `Jsonb(...).dumps`,
+which is `None` unless a dumper was passed — so it passed whenever the guard was *present* and
+failed under mutation with a `TypeError` from calling `None`. It is a real round trip through a
+`jsonb` column now, which the local Postgres from WP-9 made possible. Record:
+`D-2026-08-06-two-backends-of-one-protocol-and-fourteen-copies-of-one-line`.
 
 ### WP-11 · Durability: what a job is, and what survives it
 *Backlog: DARK-4 [M]; a failed run leaves no record [M]; `request_development_report` writes no

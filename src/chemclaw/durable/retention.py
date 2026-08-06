@@ -56,7 +56,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.agent.message_pairing import droppable_rows
     from chemclaw.core.config import settings
-    from chemclaw.core.db import connection
+    from chemclaw.core.db import bounded
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -144,10 +144,7 @@ async def prune_expired_rows() -> RetentionOutcome:
     cannot disagree about what "expired" means.
     """
     outcome = RetentionOutcome(deleted={}, skipped=[])
-    async with connection(
-        settings.postgres_dsn,
-        statement_timeout_seconds=settings.pg_statement_timeout_seconds,
-    ) as conn:
+    async with bounded(settings.postgres_dsn) as conn:
         for table, (column, disposable) in _PRUNABLE.items():
             days = _window_days(table)
             if days <= 0:

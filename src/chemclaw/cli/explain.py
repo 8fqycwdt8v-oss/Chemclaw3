@@ -21,7 +21,7 @@ import sys
 from typing import NamedTuple
 
 from chemclaw.core.config import settings
-from chemclaw.core.db import connection
+from chemclaw.core.db import bounded
 
 # One turn's words, in order. `created_at` disambiguates rows written before `correlation_id`
 # existed (they carry '' and collapse into a single "unattributed" group).
@@ -107,9 +107,7 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
     calls: dict[str, list[ToolCall]] = {}
     jobs: dict[str, list[Job]] = {}
 
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with bounded(target) as conn:
         cursor = await conn.execute(_MESSAGES, (session_id,))
         for correlation_id, message, _created in await cursor.fetchall():
             if correlation_id not in turns:

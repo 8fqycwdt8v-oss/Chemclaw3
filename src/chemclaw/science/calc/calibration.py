@@ -168,9 +168,7 @@ async def record_prediction(record: PredictionRecord) -> None:
     if not settings.calibration_enabled:
         return
     try:
-        async with db.connection(
-            settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.bounded(settings.postgres_dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     _UPSERT_PREDICTION,
@@ -244,9 +242,7 @@ async def record_observation(
     """
     if not settings.calibration_enabled:
         return None
-    async with db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.bounded(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 _UPSERT_MEASUREMENT,
@@ -308,9 +304,7 @@ async def reconciled_for(calc_type: str, calc_version: str) -> list[Residual]:
     if not settings.calibration_enabled:
         return []
     try:
-        async with db.connection(
-            settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.bounded(settings.postgres_dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_RECONCILED, (calc_type, calc_version))
                 rows = await cur.fetchall()

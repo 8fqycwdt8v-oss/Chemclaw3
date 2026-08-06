@@ -58,7 +58,7 @@ ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin
 
-db-migrate:  ## Apply infra/sql migrations to the configured database.
+db-migrate:  ## Apply infra/sql migrations to every configured database.
 	uv run python -m chemclaw.core.migrate
 
 db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on every deploy).

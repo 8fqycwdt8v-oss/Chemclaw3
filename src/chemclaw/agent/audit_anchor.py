@@ -39,7 +39,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from chemclaw.core.config import settings
-from chemclaw.core.db import connection
+from chemclaw.core.db import bounded
 
 logger = logging.getLogger(__name__)
 
@@ -193,9 +193,7 @@ async def take_anchor(
     if not settings.audit_anchor_secret:
         return None
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with bounded(target) as conn:
         cursor = await conn.execute(_TAKE)
         totals = await cursor.fetchone()
         cursor = await conn.execute(_TIP)
@@ -250,9 +248,7 @@ async def latest_anchor(dsn: str | None = None) -> Anchor | None:
     if not settings.audit_anchor_secret:
         return None
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with bounded(target) as conn:
         cursor = await conn.execute(_LATEST)
         row = await cursor.fetchone()
     if row is None:

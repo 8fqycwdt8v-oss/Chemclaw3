@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel, model_validator
@@ -247,8 +247,35 @@ class InMemoryStore:
         """
         matched = [stored for stored in self._data.values() if _matches(stored, query)]
         matched.reverse()  # newest first, since dict order is insertion order
-        matched.sort(key=lambda s: s.created_at or datetime.max, reverse=True)
+        matched.sort(key=lambda s: _utc(s.created_at) or _UTC_MAX, reverse=True)
         return matched[: query.limit]
+
+
+# The far end of time, in the timezone every comparison in this module happens in. A row with no
+# `created_at` sorts to the front under `reverse=True`, which is the in-memory store's existing
+# "insertion order stands in for time" behaviour and is unreachable on the Postgres backend, where
+# the column has a default.
+_UTC_MAX = datetime.max.replace(tzinfo=UTC)
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """A datetime made comparable: naive means UTC, as Postgres reads one into `timestamptz`.
+
+    **Two backends of one Protocol disagreeing is the bug the Protocol exists to prevent.**
+    `InMemoryStore.find` compared a stored `created_at` against a naive sentinel and a caller's
+    naive `since`/`until`, so a timezone-aware `created_at` — which is what
+    `datetime.now(UTC)` produces, and what Postgres returns for every row — raised
+    `TypeError: can't compare offset-naive and offset-aware datetimes` on a query the Postgres
+    backend answered without complaint.
+
+    Normalizing rather than rejecting, because `timestamptz` is what the durable backend actually
+    does: it converts on the way in and hands back an aware value, so a naive input has always
+    meant UTC on that side. Treating it any other way here would make the two backends disagree in
+    a second, quieter direction.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
 
 
 def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
@@ -264,9 +291,11 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
         return False
     if query.smiles is not None and key.input_hash != molecule_hash(query.smiles):
         return False
-    if query.since is not None and (stored.created_at is None or stored.created_at < query.since):
+    created_at = _utc(stored.created_at)
+    since, until = _utc(query.since), _utc(query.until)
+    if since is not None and (created_at is None or created_at < since):
         return False
-    if query.until is not None and (stored.created_at is None or stored.created_at > query.until):
+    if until is not None and (created_at is None or created_at > until):
         return False
     return True
 

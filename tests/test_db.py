@@ -163,6 +163,12 @@ def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
 # Written as a sweep rather than one test per store on purpose. The defect is not "the audit sink
 # forgot"; it is that a store can forget, silently, and only a live hung query would say so. Nine
 # more call sites had exactly the same shape and exactly the same absence of a test.
+#
+# **The sweep is what caught the DRY fix, which is the shape it was written for.** Collapsing those
+# twenty-nine copies into `db.bounded()` made every one of them stop matching `db.connection(...,
+# statement_timeout_seconds=...)`, and this failed rather than quietly sweeping an empty list —
+# which is exactly what `test_the_sweep_finds_the_call_sites_it_claims_to_guard` exists to make
+# happen. `bounded` is now the bounded spelling and the raw entry points still need the argument.
 
 _UNBOUNDED_BY_DESIGN = {
     # A migration must not have a statement timeout: an index build may legitimately run long, and
@@ -179,14 +185,18 @@ _UNBOUNDED_BY_DESIGN = {
     "src/chemclaw/cli/live_storm.py",
 }
 
+# The raw entry points: each must be handed a statement timeout explicitly.
 _DB_ENTRY_POINTS = {"connection", "pool", "connect"}
+# The bounded spelling, which carries `pg_statement_timeout_seconds` by construction. Swept too, so
+# a file that switched to it still counts toward the floor below rather than disappearing from it.
+_BOUNDED_ENTRY_POINT = "bounded"
 
 
 def _db_calls() -> list[tuple[str, int, bool]]:
     """Every call into `chemclaw.core.db`'s connection helpers, and whether it bounds statements.
 
-    Resolves the import alias per file, so `db.connection(...)`, `connection(...)` imported by
-    name and `connect as db_connect` are all found — three spellings that are all in the tree.
+    Resolves the import alias per file, so `db.bounded(...)`, `bounded(...)` imported by name and
+    `connect as db_connect` are all found — three spellings that are all in the tree.
     """
     import ast
     from pathlib import Path
@@ -210,10 +220,13 @@ def _db_calls() -> list[tuple[str, int, bool]]:
                     target = func.attr
             elif isinstance(func, ast.Name):
                 target = imported.get(func.id)
+            if target == _BOUNDED_ENTRY_POINT:
+                found.append((str(path.relative_to(root)), node.lineno, True))
+                continue
             if target not in _DB_ENTRY_POINTS:
                 continue
-            bounded = any(kw.arg == "statement_timeout_seconds" for kw in node.keywords)
-            found.append((str(path.relative_to(root)), node.lineno, bounded))
+            is_bounded = any(kw.arg == "statement_timeout_seconds" for kw in node.keywords)
+            found.append((str(path.relative_to(root)), node.lineno, is_bounded))
     return found
 
 
@@ -222,7 +235,7 @@ def test_the_sweep_finds_the_call_sites_it_claims_to_guard() -> None:
 
     Every guard-by-source test has this failure mode: a rename upstream turns it into a test that
     passes because it examined an empty list. The floor is deliberately well below the current
-    count (29 bounded, 4 allowlisted) so ordinary growth does not touch it, and well above zero.
+    count (37 bounded, 4 allowlisted) so ordinary growth does not touch it, and well above zero.
     """
     calls = _db_calls()
     assert len(calls) > 20, f"the AST walk found only {len(calls)} db calls — it stopped matching"

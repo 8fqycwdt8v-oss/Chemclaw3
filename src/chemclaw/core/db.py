@@ -26,13 +26,17 @@ the statement timeout rides on the connection's `options`, so two call sites ask
 different timeouts must not share connections.
 """
 
+import json
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from functools import partial
+from typing import Any
 
 import psycopg
 from psycopg import conninfo
 from psycopg.rows import TupleRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
 from chemclaw.core.config import settings
@@ -174,6 +178,55 @@ async def connection(
         # Both are `psycopg.OperationalError` subclasses raised only by the checkout itself, so
         # catching them here cannot swallow an error from the caller's block.
         raise ConnectionError(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
+
+
+def bounded(
+    dsn: str | None = None,
+) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
+    """A connection carrying the deployment's per-statement timeout — what a request path wants.
+
+    **This is the fourteenth copy, written once.** `connection(dsn,
+    statement_timeout_seconds=settings.pg_statement_timeout_seconds)` appeared at twenty-nine call
+    sites across fifteen modules, wrapped in a private `_connect` helper in fourteen of them — five
+    with byte-identical docstrings, and four of those docstrings saying *"one place, DRY"* about a
+    line that existed in thirteen other places. The duplication was not free: nothing stopped one
+    store from omitting the timeout, and `tests/test_db.py`'s sweep exists because one of them
+    could.
+
+    `dsn` defaults to `settings.postgres_dsn`, so a store on the shared database passes nothing and
+    one on a split DSN passes its own — which is the only thing those fourteen helpers actually
+    varied in.
+    """
+    return connection(
+        dsn if dsn is not None else settings.postgres_dsn,
+        statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+    )
+
+
+# Non-finite floats are not JSON. `partial` rather than a lambda so psycopg's dumper cache keys on
+# a stable object.
+_STRICT_JSON = partial(json.dumps, allow_nan=False)
+
+
+def jsonb(value: Any) -> Jsonb:
+    """Wrap a value for a `jsonb` column, refusing non-finite floats here rather than at the wall.
+
+    `json.dumps` emits bare `NaN`/`Infinity` by default. Those are not JSON, Postgres `jsonb`
+    rejects them — but only after the statement reaches the server, as an
+    `InvalidTextRepresentation` — and a caller that logs and continues turns that into silent data
+    loss. `allow_nan=False` raises a `ValueError` in this process, with a stack naming the writer.
+
+    **One of three writers of computed payloads had this and two did not.** The BO campaign store
+    learned it the expensive way: a degenerate GP posterior produced a `NaN`, the insert was
+    swallowed at WARNING, and the campaign read back with no observations at all. The calculation
+    cache (`science/calc/postgres_store`) and the durable job record write exactly the same kind of
+    payload — numbers a calculator produced — so they had the same hole and no reason to have
+    learned it separately. Hence one function, in the module that owns the connection.
+
+    Deliberately *not* applied to the session stores: they persist MAF messages, which carry text
+    rather than computed numbers, and a strictness they cannot violate is noise.
+    """
+    return Jsonb(value, dumps=_STRICT_JSON)
 
 
 def bind_pool_metrics() -> None:

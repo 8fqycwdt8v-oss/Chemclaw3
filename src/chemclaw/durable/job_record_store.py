@@ -11,15 +11,7 @@ failed job legitimately produces a second, better result for the same id — so 
 run" must have exactly one row in all three cases.
 """
 
-from contextlib import AbstractAsyncContextManager
-from typing import Any
-
-import psycopg
-from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
-
 from chemclaw.core import db
-from chemclaw.core.config import settings
 from chemclaw.durable.job_record import JobRecord, JobRecordSummary
 
 _COLUMNS = (
@@ -67,19 +59,12 @@ _SEARCH = """
 """
 
 
-def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
-    """The configured connection, with the shared statement timeout (one place, DRY)."""
-    return db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    )
-
-
 class PostgresJobRecordSink:
     """Writes each finished job's record to `job_records`, one connection per record."""
 
     async def record(self, record: JobRecord) -> None:
         """Insert the record, replacing any existing row for the same job id."""
-        async with _connect() as conn:
+        async with db.bounded() as conn:
             await conn.execute(
                 _UPSERT,
                 (
@@ -92,9 +77,9 @@ class PostgresJobRecordSink:
                     record.correlation_id,
                     # psycopg adapts a mapping to `jsonb` only through its `Jsonb` wrapper — a bare
                     # dict is rejected by the adapter, not silently stringified.
-                    _json(record.payload),
+                    db.jsonb(record.payload),
                     record.summary,
-                    _json(record.result),
+                    db.jsonb(record.result),
                     record.note_id,
                     record.runtime_seconds,
                 ),
@@ -104,7 +89,7 @@ class PostgresJobRecordSink:
 
 async def read_job_record(job_id: str) -> JobRecord | None:
     """The full record for one job, or None when the table has no row for it."""
-    async with _connect() as conn:
+    async with db.bounded() as conn:
         cursor = await conn.execute(_SELECT_ONE, (job_id,))
         row = await cursor.fetchone()
     if row is None:
@@ -131,7 +116,7 @@ async def read_job_record_summaries(
 ) -> list[JobRecordSummary]:
     """Past runs matching the (optional) text and connector filters, newest first."""
     pattern = f"%{text}%"
-    async with _connect() as conn:
+    async with db.bounded() as conn:
         cursor = await conn.execute(
             _SEARCH, (connector, connector, text, pattern, pattern, pattern, limit)
         )
@@ -148,8 +133,3 @@ async def read_job_record_summaries(
         )
         for row in rows
     ]
-
-
-def _json(value: dict[str, Any]) -> Jsonb:
-    """Wrap a mapping for a `jsonb` column (psycopg needs the explicit adapter)."""
-    return Jsonb(value)

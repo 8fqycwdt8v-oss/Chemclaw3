@@ -46,7 +46,7 @@ from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.audit_anchor import Anchor, compare, latest_anchor
 from chemclaw.agent.audit_store import CHAIN_VERSION, chain_hash
 from chemclaw.core.config import settings
-from chemclaw.core.db import connection
+from chemclaw.core.db import bounded
 
 
 class ChainRow(NamedTuple):
@@ -191,9 +191,7 @@ async def verify_chain(dsn: str | None = None, *, anchor: Anchor | None = None) 
     check = ChainCheck()
     after = 0
     page_size = settings.audit_verify_page_rows
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with bounded(target) as conn:
         while True:
             cursor = await conn.execute(_SELECT_PAGE, (after, page_size))
             records = await cursor.fetchall()

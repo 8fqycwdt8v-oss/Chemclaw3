@@ -15,13 +15,11 @@ supersedes it (see `_UPSERT`).
 """
 
 import json
-from contextlib import AbstractAsyncContextManager
 
 import psycopg
 from psycopg.rows import DictRow, TupleRow, dict_row
 
 from chemclaw.core import db
-from chemclaw.core.config import settings
 from chemclaw.kg.proposal import NoteProposal, ProposalState
 from chemclaw.kg.submission import NoteFile
 
@@ -100,13 +98,6 @@ _MARK_MERGED = """
 """
 
 
-def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
-    """The configured connection, with the shared statement timeout (one place, DRY)."""
-    return db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    )
-
-
 def _rows(conn: psycopg.AsyncConnection[TupleRow]) -> psycopg.AsyncCursor[DictRow]:
     """A cursor whose rows are keyed by column name, for the length of one statement.
 
@@ -153,7 +144,7 @@ class PostgresProposalStore:
 
     async def upsert(self, proposal: NoteProposal) -> int:
         """Insert the proposal (or refresh an unchanged re-proposal); return the row id."""
-        async with _connect() as conn:
+        async with db.bounded() as conn:
             cursor = _rows(conn)
             await cursor.execute(
                 _UPSERT,
@@ -178,7 +169,7 @@ class PostgresProposalStore:
 
     async def read(self, proposal_id: int) -> NoteProposal | None:
         """One proposal in full, or None when there is no such row."""
-        async with _connect() as conn:
+        async with db.bounded() as conn:
             cursor = _rows(conn)
             await cursor.execute(_SELECT_ONE, (proposal_id,))
             row = await cursor.fetchone()
@@ -190,7 +181,7 @@ class PostgresProposalStore:
         """Proposals newest-first, filtered by state and proposer, paged by `before_id`."""
         wanted = state.value if state is not None else ""
         cursor_id = before_id or 0
-        async with _connect() as conn:
+        async with db.bounded() as conn:
             cursor = _rows(conn)
             await cursor.execute(
                 _SELECT_MANY, (wanted, wanted, actor, actor, cursor_id, cursor_id, limit)
@@ -202,7 +193,7 @@ class PostgresProposalStore:
         self, proposal_id: int, state: ProposalState, decided_by: str, reason: str
     ) -> NoteProposal | None:
         """Record a decision on an open proposal; None when absent or already decided."""
-        async with _connect() as conn:
+        async with db.bounded() as conn:
             cursor = _rows(conn)
             await cursor.execute(_DECIDE, (state.value, decided_by, reason, proposal_id))
             row = await cursor.fetchone()
@@ -211,7 +202,7 @@ class PostgresProposalStore:
 
     async def mark_merged(self, note_ids: list[str], decided_by: str) -> int:
         """Close every open proposal for the named notes as merged; return how many moved."""
-        async with _connect() as conn:
+        async with db.bounded() as conn:
             cursor = await conn.execute(_MARK_MERGED, (decided_by, note_ids))
             moved = cursor.rowcount
             await conn.commit()

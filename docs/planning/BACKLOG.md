@@ -92,15 +92,29 @@ and was reproduced; none is a reading.
 Postgres` triads are *not* one abstraction waiting to be extracted; what is genuinely shared is the
 connect/execute plumbing, and the divergences below are the real prize.
 
-- [ ] **[M] Two of the ten stores read/write a database the migrator never touches**
-      (`agent/turn_cost_store.py:60`, the `session_store_dsn` split).
-- [ ] **[L] `InMemoryStore.find` raises `TypeError`** on any row with a timezone-aware
+- [x] **[M] Two of the ten stores read/write a database the migrator never touches**
+      (`agent/turn_cost_store.py:60`, the `session_store_dsn` split). Closed by
+      D-2026-08-06-two-backends-of-one-protocol-and-fourteen-copies-of-one-line: `migration_targets`
+      resolves every database the deployment stores in and `make db-migrate` applies to each.
+      **Six** stores follow that DSN, not two — the message history, the session owners, the turn
+      claims, the push-back mailbox, the preferences and `turn_costs`. Targets compare on
+      host/port/dbname, so a split *credential* on one database is not a second target; a split
+      database *with* a split credential is refused, because no configured credential can own the
+      schema there.
+- [x] **[L] `InMemoryStore.find` raises `TypeError`** on any row with a timezone-aware
       `created_at` (`science/calc/store.py:250`) — the in-memory and Postgres halves disagree.
-- [ ] **[L] Only one of the three jsonb writers rejects non-finite floats**
-      (`science/calc/postgres_store.py:116`).
-- [ ] **[L] The Postgres connect helper is hand-rolled 14 times**
+      Closed by the same ADR. A naive datetime means UTC here because that is what `timestamptz`
+      does on the durable side; the `since`/`until` filters had the same clash, from caller input.
+- [x] **[L] Only one of the three jsonb writers rejects non-finite floats**
+      (`science/calc/postgres_store.py:116`). Closed by the same ADR: the rule is `db.jsonb()`, in
+      the module that owns the connection, and all three writers of *computed* payloads use it. The
+      session stores deliberately do not — they write message text, and a rule nothing can violate
+      reads as protection where there is no threat.
+- [x] **[L] The Postgres connect helper is hand-rolled 14 times**
       (`science/calc/postgres_store.py:74`), including five byte-identical docstrings and four that
-      say "one place, DRY".
+      say "one place, DRY". Closed by the same ADR: `db.bounded()`, defaulting to `postgres_dsn`,
+      which is the only thing those fourteen varied in — three were then thin enough to inline away.
+      The `statement_timeout` sweep caught its own refactor, which is the shape it was written for.
 
 **Complexity hotspots** — the defects the complexity was hiding, which is what the lane was asked
 for rather than a decomposition proposal.
