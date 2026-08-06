@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+from functools import lru_cache
 from typing import Any
 
 from chemclaw.core.config import settings
@@ -214,16 +215,45 @@ def _redact_userinfo(match: "re.Match[str]") -> str:
     return f"{scheme}{first}:{_REDACTED}@"
 
 
-def _is_shipped_default(name: str, value: str) -> bool:
-    """Whether `value` is the default this repository commits for setting `name`.
+def _dsn_password(value: str) -> str:
+    """The password inside a `scheme://user:password@host` DSN, or `""`.
+
+    Extracted so the redaction inventory and the published-defaults set below agree by
+    construction: they must decide the same thing about the same string, and two spellings of
+    "the password part" is exactly how they would stop.
+    """
+    if "://" not in value or "@" not in value:
+        return ""
+    userinfo = value.split("://", 1)[1].split("@", 1)[0]
+    return userinfo.split(":", 1)[1] if ":" in userinfo else ""
+
+
+@lru_cache(maxsize=1)
+def _published_values() -> frozenset[str]:
+    """Every secret-shaped value this repository *commits* — and therefore does not have to hide.
 
     A value anyone can read in `core/config/` is not a credential, and redacting it does nothing
-    but corrupt logs. The dev Postgres password is the literal string `chemclaw`, so treating it
-    as a secret replaced the product's own name with `***` in every dev and CI log line that
-    happened to contain it — including messages that had nothing to do with the database.
+    but corrupt logs. The dev Postgres DSN's password is the literal string `chemclaw`, so
+    treating it as a secret replaced the product's own name with `***` in every dev and CI log
+    line that happened to contain it — including messages with nothing to do with the database.
+
+    **The derived values matter as much as the defaults themselves**, which is the half a first
+    attempt missed. `tests/conftest.py` repoints `postgres_dsn` at an isolated schema, so in CI
+    the DSN is *not* the shipped default and is redacted correctly — while the password inside it
+    still is `chemclaw`. Comparing only whole values passed locally, where no Postgres means no
+    repointing, and failed in CI. So the defaults' passwords are published too.
+
+    Cached: `model_fields` defaults are fixed at import and cannot change at runtime.
     """
-    field = type(settings).model_fields.get(name)
-    return field is not None and field.default == value
+    published: set[str] = set()
+    for name in _SECRET_SETTINGS:
+        field = type(settings).model_fields.get(name)
+        default = getattr(field, "default", None)
+        if isinstance(default, str) and default:
+            published.add(default)
+            if password := _dsn_password(default):
+                published.add(password)
+    return frozenset(published)
 
 
 def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
@@ -263,22 +293,23 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
     values below: none of these are expected to rotate mid-process, but nothing here assumes it.
     """
     values = set()
+    published = _published_values()
+
+    def _consider(candidate: str) -> None:
+        """Add `candidate` unless it is too short to match safely, or published in this repo."""
+        if len(candidate) >= _MIN_REDACTABLE and candidate not in published:
+            values.add(candidate)
+
     for name in _SECRET_SETTINGS:
         value = getattr(settings, name, "")
-        if (
-            isinstance(value, str)
-            and len(value) >= _MIN_REDACTABLE
-            and not _is_shipped_default(name, value)
-        ):
-            values.add(value)
-            # A DSN's password is also worth matching on its own: libpq accepts several spellings
-            # and a connection error may quote only the credential rather than the whole string.
-            if "://" in value and "@" in value:
-                userinfo = value.split("://", 1)[1].split("@", 1)[0]
-                if ":" in userinfo:
-                    password = userinfo.split(":", 1)[1]
-                    if len(password) >= _MIN_REDACTABLE:
-                        values.add(password)
+        if not isinstance(value, str):
+            continue
+        _consider(value)
+        # A DSN's password is also worth matching on its own: libpq accepts several spellings and a
+        # connection error may quote only the credential rather than the whole string. Considered
+        # independently of the DSN, because the two can differ in whether they are published: a
+        # schema-scoped test DSN is not the shipped default, but the password inside it still is.
+        _consider(_dsn_password(value))
     for env_name in (
         _KNOWLEDGE_REPO_TOKEN_ENV,
         *connector_token_envs,

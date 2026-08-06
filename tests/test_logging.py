@@ -288,6 +288,25 @@ def test_a_shipped_default_is_not_treated_as_a_credential() -> None:
     assert _rendered(_record("the chemclaw service started")) == "the chemclaw service started"
 
 
+def test_a_published_password_stays_published_when_the_dsn_is_repointed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The derived half: a *modified* DSN is a secret, but the shipped password inside it is not.
+
+    This is the case a first attempt missed and only CI could see. `tests/conftest.py` repoints
+    `postgres_dsn` at an isolated schema, so under CI the DSN is not the shipped default and is
+    redacted correctly — while the password inside it is still the literal `chemclaw`, which then
+    replaced the product's own name with `***` in unrelated lines. Locally there is no Postgres,
+    nothing repoints, and comparing whole values passed.
+
+    So both must hold at once: the repointed DSN is hidden, and the published password is not.
+    """
+    repointed = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw?options=-csearch_path%3Dt1"
+    monkeypatch.setattr("chemclaw.core.config.settings.postgres_dsn", repointed)
+    assert repointed not in _rendered(_record("connecting to %s", repointed))
+    assert _rendered(_record("the chemclaw service started")) == "the chemclaw service started"
+
+
 def test_the_migration_dsn_is_in_the_inventory() -> None:
     """The schema-owning credential — the one that can rewrite `audit_events` — was not listed.
 

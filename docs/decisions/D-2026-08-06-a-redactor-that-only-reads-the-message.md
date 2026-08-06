@@ -52,7 +52,16 @@ line that happened to contain it, including lines with nothing to do with the da
 The fix is not a longer default password, which would ripple through `docker-compose.yml`,
 `ci.yml`, `.env.example` and `bootstrap.sh` to protect a value that is public anyway. It is the
 general statement: a value committed to `core/config/` is readable by anyone and redacting it buys
-nothing, so shipped defaults are skipped. That covers the next such collision as well as this one.
+nothing, so published values are skipped. That covers the next such collision as well as this one.
+
+**The first attempt compared whole values only, and CI is what caught it.** `tests/conftest.py`
+repoints `postgres_dsn` at an isolated schema, so under CI the DSN is *not* the shipped default —
+it is redacted, correctly — while the password inside it is still the literal `chemclaw`. Locally
+there is no Postgres, nothing repoints, and the whole-value comparison passed. So the published set
+holds the defaults **and the passwords derived from them**, and `_dsn_password` is shared between
+the inventory and the published set so the two cannot disagree about what "the password part"
+means. The environment difference is the whole reason the repo's rule is that CI is the arbiter and
+a local green is not the gate.
 
 ### 4. `postgres_migration_dsn` was not in the inventory
 
