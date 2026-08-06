@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
@@ -72,7 +73,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryProposalStore:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """The real app with the webhook secret set; the dev principal is a reviewer."""
-    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", _SECRET)
+    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", SecretStr(_SECRET))
     monkeypatch.setattr("chemclaw.api.app.request_note_reindex", _fake_reindex)
     return TestClient(create_app(agent_factory=lambda _profile: object()))
 
@@ -506,7 +507,7 @@ def test_without_a_secret_a_reindex_still_works_but_decides_nothing(
     An operator forcing a reindex by hand is a real workflow, and requiring them to compute an HMAC
     for it would be a regression dressed as hardening.
     """
-    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", SecretStr(""))
     proposal_id = _run(store.upsert(_proposal()))
 
     assert client.post("/events/knowledge-merged").status_code == 202

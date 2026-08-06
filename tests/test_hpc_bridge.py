@@ -8,6 +8,7 @@ shared HPC service identity and logs every mapping (the sole audit link back to 
 import logging
 
 import pytest
+from pydantic import SecretStr
 
 from chemclaw.agent.identity.hpc_bridge import map_to_hpc_identity
 from chemclaw.core.config import settings
@@ -71,7 +72,7 @@ def test_temporal_plaintext_in_dev(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_temporal_api_key_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
     """A configured Temporal Cloud API key rides in the connect options."""
-    monkeypatch.setattr(settings, "temporal_api_key", "cloud-key")
+    monkeypatch.setattr(settings, "temporal_api_key", SecretStr("cloud-key"))
     assert connect_options()["api_key"] == "cloud-key"
 
 

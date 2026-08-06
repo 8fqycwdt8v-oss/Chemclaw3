@@ -18,6 +18,7 @@ the *reasoning*, and none of it needs a server.
 """
 
 import pytest
+from pydantic import SecretStr
 
 from chemclaw.agent.audit_anchor import (
     ANCHOR_LOG_MARKER,
@@ -34,7 +35,7 @@ _SECRET = "anchor-secret"
 @pytest.fixture(autouse=True)
 def _with_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """Anchoring is off without a secret, so every test here configures one."""
-    monkeypatch.setattr("chemclaw.core.config.settings.audit_anchor_secret", _SECRET)
+    monkeypatch.setattr("chemclaw.core.config.settings.audit_anchor_secret", SecretStr(_SECRET))
 
 
 def _anchor(**overrides: object) -> Anchor:
@@ -115,7 +116,7 @@ def test_no_secret_means_no_verification_rather_than_silent_acceptance(
 ) -> None:
     """With anchoring off, an anchor is not evidence — and must not be treated as if it were."""
     anchor = _anchor()
-    monkeypatch.setattr("chemclaw.core.config.settings.audit_anchor_secret", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.audit_anchor_secret", SecretStr(""))
     assert not signature_ok(anchor)
 
 
@@ -131,7 +132,7 @@ def test_an_anchor_signed_under_the_empty_key_is_not_evidence(
     would accept it, and a deployment that had deliberately not enabled this control would start
     trusting anchors supplied by whoever wrote them.
     """
-    monkeypatch.setattr("chemclaw.core.config.settings.audit_anchor_secret", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.audit_anchor_secret", SecretStr(""))
     unsecured = Anchor(taken_at="2026-08-01 00:00:00+00:00", row_count=0, max_event_id=0)
     forged = unsecured.model_copy(update={"signature": sign(unsecured)})
     assert not signature_ok(forged), (

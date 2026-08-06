@@ -1424,3 +1424,38 @@ Rules:
 3. **A flat curve is a result that needs the same scrutiny as a steep one.** Probe 1 said "no
    defect" and was wrong; a negative result from a broken probe is indistinguishable from a
    negative result.
+
+## A type change to a config field fans out past the files it touches (2026-08-06)
+
+Converting six credential settings to `SecretStr` (WP-4 of the hardening plan). I ran the suites for
+every file I edited — config sections, the four readers, the chart tests, the new guard file — plus
+`ruff`, `ruff format` and `mypy --strict`. All green. The full gate then failed **24 tests in five
+files I had not touched**.
+
+Twenty-three were one cause: a test doing `monkeypatch.setattr(settings, "note_webhook_secret",
+"a-string")`. The field is now a `SecretStr`, so the production code calls `.get_secret_value()` and
+the patched `str` has no such attribute. The twenty-fourth was a docstring I wrote naming
+`identity/obo.py`, which `test_docstring_paths.py` resolves against the tree — the real path is
+`agent/identity/obo.py`.
+
+**Why targeted testing structurally could not see it.** The blast radius of a *type* change is not
+the set of files that read the field; it is the set of places that **construct or patch** a value
+for it. Those live in tests, in fixtures, and in any code that builds a `Settings` by hand — none of
+which appear in the diff, and none of which `mypy` checks, because `monkeypatch.setattr` takes
+`Any`.
+
+Rules:
+1. **After changing a field's type, grep the whole repo for the field *name* before trusting a
+   targeted run** — not the modules that read it. `grep -rn '"<field>"' tests/` finds the patchers
+   that no diff and no type checker will.
+2. **`mypy --strict` is not a fan-out check.** It found three of four production sinks here (an
+   f-string, an `Any` dict and an `lru_cache` callee are all invisible to it) and zero of the
+   twenty-three test call sites.
+3. The standing rule stands and this is another instance of it: **the full gate is the arbiter; a
+   targeted green is not the gate.** Budget the seven minutes.
+
+Considered and not taken: `validate_assignment=True` on `Settings`, which would coerce a patched
+`str` into a `SecretStr` and make all twenty-three impossible. It is a behaviour change for every
+field and every patch in the suite — including tests that deliberately assign invalid values to
+exercise a validator — so it trades a broad, unmeasured risk for test ergonomics. The explicit
+`SecretStr(...)` in the tests is also more honest: it says what the app can actually hold.

@@ -10,6 +10,7 @@ import asyncio
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from chemclaw.connectors.qm.hpc import nextflow
 from chemclaw.connectors.qm.specs import HpcJobHandle, QMJobInput, qm_job_key
@@ -21,7 +22,7 @@ def _launcher_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the adapter at a fake launcher + artifact store with a token."""
     monkeypatch.setattr(settings, "hpc_launch_interface", "nextflow")
     monkeypatch.setattr(settings, "hpc_api_base_url", "https://tower.test/api")
-    monkeypatch.setattr(settings, "hpc_api_token", "tower-token")
+    monkeypatch.setattr(settings, "hpc_api_token", SecretStr("tower-token"))
     monkeypatch.setattr(settings, "hpc_pipeline_name", "qm-pipeline")
     monkeypatch.setattr(settings, "hpc_pipeline_version", "1.4.0")
     monkeypatch.setattr(settings, "hpc_artifact_store_url", "https://blobs.test")
@@ -169,7 +170,7 @@ def test_artifact_store_uses_its_own_token(
     _launcher_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A configured artifact-store token is sent to the store — never the launcher's."""
-    monkeypatch.setattr(settings, "hpc_artifact_store_token", "blob-token")
+    monkeypatch.setattr(settings, "hpc_artifact_store_token", SecretStr("blob-token"))
     store = _RecordingStore()
     _fetch(store)
     assert store.auth_headers == ["Bearer blob-token"]

@@ -72,9 +72,10 @@ class EntraSettings(BaseSettings):
     # the token/OBO HTTP calls.
     #
     # **Nothing in `src/` calls it yet: this flag turns on a mechanism, not a behaviour.**
-    # `WorkloadTokenProvider` has no production caller and its only importer (`identity/obo.py`) has
-    # none either — both consumers are the same tenant-blocked pair: the connector `entra_workload`
-    # /`entra_obo` auth modes, and per-user warehouse reads. Enabling it therefore changes nothing
+    # `WorkloadTokenProvider` has no production caller, and its only importer
+    # (`agent/identity/obo.py`) has none either — both consumers are the same tenant-blocked
+    # pair: the connector `entra_workload`/`entra_obo` auth modes, and per-user warehouse reads.
+    # Enabling it therefore changes nothing
     # today, in either direction. It is left enabled in the chart because the *pod-side* half is
     # real — the ServiceAccount annotation and the projected token it depends on have to be in place
     # before the first caller lands — but the documents that presented federation as the reason few
