@@ -207,7 +207,7 @@ async def record_observation(
     *,
     subject: str = "",
     unit: str = "",
-) -> int:
+) -> int | None:
     """Store a measured value, reconcile any matching predictions, and return how many it scored.
 
     **The measurement is kept either way**, which it was not before (DARK-9). This was a bare
@@ -220,27 +220,42 @@ async def record_observation(
     it no longer means "and so it is gone". A later prediction of the same thing reconciles against
     the stored measurement on write, so the measure-then-predict order works as well as the
     reverse.
+
+    **`None` is not zero, and the difference is the whole contract.** Zero means the value was
+    stored and nothing had predicted it; `None` means it was not stored at all, because the ledger
+    is disabled. Collapsing the two is what let `report_measurement` tell a chemist their
+    measurement was "kept" while `calibration_enabled` was False — which is the **default**, so the
+    tool said it every time.
+
+    **This one does not swallow, unlike `record_prediction` above.** That asymmetry is deliberate.
+    A prediction row is advice *about* work that already happened, so losing it must never cost the
+    calculation — logging and continuing is right there. A measurement is the entire deliverable of
+    the call: there is no primary result to protect, and swallowing turns the tool's only job into
+    a false claim of success (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). A write
+    failure raises, and the caller says so.
+
+    Returns:
+        How many predictions the measurement reconciled, or `None` if the ledger is disabled and
+        nothing was stored.
+
+    Raises:
+        Exception: whatever the database raises. The connector's error sanitizer turns it into a
+            caller-safe message; what matters is that it is not reported as a success.
     """
     if not settings.calibration_enabled:
-        return 0
-    try:
-        async with db.connection(
-            settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    _UPSERT_MEASUREMENT,
-                    (calc_type, input_hash, subject or input_hash, observed_value, unit, source),
-                )
-                await cur.execute(
-                    _RECORD_OBSERVATION, (observed_value, source, calc_type, input_hash)
-                )
-                matched = cur.rowcount
-            await conn.commit()
-        return int(matched)
-    except Exception:
-        logger.warning("could not record observation for %s", calc_type, exc_info=True)
-        return 0
+        return None
+    async with db.connection(
+        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+    ) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                _UPSERT_MEASUREMENT,
+                (calc_type, input_hash, subject or input_hash, observed_value, unit, source),
+            )
+            await cur.execute(_RECORD_OBSERVATION, (observed_value, source, calc_type, input_hash))
+            matched = cur.rowcount
+        await conn.commit()
+    return int(matched)
 
 
 def summarize(
