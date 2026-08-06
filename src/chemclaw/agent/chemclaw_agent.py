@@ -67,6 +67,7 @@ from chemclaw.agent.plan_gate import (
     gate_applies,
 )
 from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.skill_access import (
     EnabledSkillsSource,
     RoleScopedSkillsSource,
@@ -322,6 +323,11 @@ def build_agent(
         # unconditionally because `is_dry_run()` is False off the request path, so this is a no-op
         # on every turn nobody asked to rehearse.
         refuse_writes_on_dry_run,
+        # Beside it, and for the same three reasons: recorded by audit, surfaced to the model by
+        # `surface_domain_errors`, and a no-op off the request path (no counter, no limit). It
+        # stops a turn re-asking a tool the identical question it already answered — measured at
+        # `find_past_jobs` x7-8 in one turn, which cost the turn rather than the answer.
+        refuse_repeated_calls,
         announce_tool_failures,
     ]
     # A sixth, conditionally: the harness's pre-execution approval (D-167). It goes *inside* audit,
