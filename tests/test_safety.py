@@ -28,6 +28,7 @@ from chemclaw.science.safety.ich import impurity_limit
 from chemclaw.science.safety.notes import hazard_problems, structures_in
 from chemclaw.science.safety.screen import (
     SafetyRulesError,
+    ScreenResult,
     at_least,
     screen_reaction,
     screen_structure,
@@ -255,6 +256,84 @@ def test_tool_screens_one_molecule_and_a_reaction() -> None:
     assert [flag.rule_id for flag in single.flags] == ["peroxide"]
     reaction = asyncio.run(screen_hazards(["[K+].[O-][Mn](=O)(=O)=O", "[Li+].[AlH4-]"]))
     assert [flag.rule_id for flag in reaction.flags] == ["oxidizer-with-reductant"]
+
+
+def _distinct_pair_matching(n: int, left: str, right: str) -> list[str]:
+    """`n` distinct SMILES of constant size, half matching each side of a pair rule.
+
+    Constant size matters and is the reason for the atom-map labels: generating variety by growing
+    a chain makes the *total atom count* quadratic too, so a timing curve measures the input rather
+    than the code. This measures the code.
+    """
+    half = n // 2
+    return [left.format(i=i + 1) for i in range(half)] + [
+        right.format(i=i + 1) for i in range(n - half)
+    ]
+
+
+def test_a_reaction_screen_refuses_more_components_than_it_can_screen() -> None:
+    """Pair rules are a cross-product, so an oversized list is refused before any matching.
+
+    The measured defect: 13 KiB of SMILES produced 251,000 flags and blocked the serving
+    connector's event loop for 2.48 s. `connector_max_request_bytes` is no bound on it, because
+    the amplification is in the *response*. Raise `safety_max_components` and this fails.
+    """
+    oversized = _distinct_pair_matching(
+        settings.safety_max_components + 1, "[NH2:{i}]N", "[OH:{i}]O"
+    )
+    with pytest.raises(SafetyRulesError, match="at most"):
+        screen_reaction(oversized)
+
+
+def test_a_genotoxicity_screen_refuses_the_same_way() -> None:
+    """The sibling screen has the identical cross-product shape and had the identical hole.
+
+    Only `screen_hazards` was reported; `screen_genotoxic_alerts` was measured at 640 components
+    producing 102,400 alerts in 933 ms. One bound, both callers — a screen that refused in one
+    place and not the other would just move the defect.
+    """
+    oversized = _distinct_pair_matching(
+        settings.safety_max_components + 1, "C[NH:{i}]C", "[O:{i}]=NO"
+    )
+    with pytest.raises(SafetyRulesError, match="at most"):
+        screen_genotoxic_alerts(oversized)
+
+
+def test_the_bound_admits_a_real_reaction_unchanged() -> None:
+    """A limit that refused real chemistry would be worse than the defect it closes.
+
+    The largest shipped ELN entry has well under a dozen species; this pins that a component list
+    at the limit still screens, and still finds the pair flag it should.
+    """
+    at_limit = ["[K+].[O-][Mn](=O)(=O)=O", "[Li+].[AlH4-]"] + [
+        f"[CH4:{i + 1}]" for i in range(settings.safety_max_components - 2)
+    ]
+    assert len(at_limit) == settings.safety_max_components
+    assert [flag.rule_id for flag in screen_reaction(at_limit).flags] == ["oxidizer-with-reductant"]
+
+
+def test_the_screens_do_not_run_on_the_event_loop() -> None:
+    """SMARTS matching is CPU-bound C++ holding the GIL; this server runs every turn on one loop.
+
+    The bound above caps the work, but a bounded screen still must not be done *on* the loop —
+    the reasoning `connectors/chem/server/tools.py` records, and which this bundle was the last
+    not to follow. Asserts the work happens off the loop rather than timing it, because a timing
+    assertion on a shared runner is a flake.
+    """
+    ran_on_loop: list[bool] = []
+
+    def _probe(component_smiles: list[str]) -> ScreenResult:
+        try:
+            asyncio.get_running_loop()
+            ran_on_loop.append(True)
+        except RuntimeError:
+            ran_on_loop.append(False)
+        return screen_reaction(component_smiles)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("chemclaw.connectors.safety.server.tools.screen_reaction", _probe)
+        asyncio.run(screen_hazards(["[K+].[O-][Mn](=O)(=O)=O", "[Li+].[AlH4-]"]))
+    assert ran_on_loop == [False]
 
 
 def test_tool_is_advertised_to_the_agent() -> None:
