@@ -21,7 +21,7 @@ from datetime import date
 from itertools import zip_longest
 from typing import Any
 
-from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.framing import frame_untrusted, safe_identifier
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.sources.registry import active_retrieve_sources
@@ -176,9 +176,20 @@ async def gather_evidence(
         ranked = _interleave_dedup(ranked_lists)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
+    #
+    # `source` is neutralized in the same breath, and the split between the two treatments is the
+    # point rather than an inconsistency. It travels *beside* framed content as a bare string, so
+    # an unhandled one is the one field of this result the model reads as ordinary text — and on an
+    # ELN note its value is `eln-json:<entry id>:<operator>`, both segments straight from the
+    # export and therefore chosen by whoever wrote the entry. It is a provenance label rather than
+    # a sentence, so it gets the stronger treatment: reduced to a charset an instruction cannot
+    # survive, instead of wrapped in an envelope that would triple the cost of a label.
     return [
         chunk.model_copy(
-            update={"content": frame_untrusted(chunk.content, note_id=chunk.source_note_id)}
+            update={
+                "content": frame_untrusted(chunk.content, note_id=chunk.source_note_id),
+                "source": safe_identifier(chunk.source),
+            }
         )
         for chunk in ranked[: settings.gather_evidence_max_chunks]
     ]

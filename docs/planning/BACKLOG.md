@@ -19,19 +19,33 @@ prose *string*, while each of these returns a structured model, so covering them
 about which fields to wrap without corrupting the shape the model reads — a design question, not a
 mechanical fix. Ranked by how attacker-reachable the content is.
 
-- [ ] **[M] `find_past_jobs` returns other users' free-text job rationales unframed**
-      (`agent/durable_tools.py:246`). Stored cross-user injection: the `reason` a *different*
-      chemist recorded on a durable job reaches this turn's model verbatim.
-- [ ] **[M] No connector/MCP tool result is ever framed** (`connectors/*/server/tools.py`).
-      `fetch_artifact` returns arbitrary externally-produced text straight to the model. The widest
-      surface of the four, and the one whose fix most needs a shape decision — framing every tool
-      result would wrap structured payloads the model is meant to read as data.
-- [ ] **[L] `recall_observations` returns corpus-mined free text unframed**
-      (`agent/memory_tools.py:80`). `Observation.statement` is the one knowledge path with no
-      human gate at all (D-161's ungated tier).
-- [ ] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
-      (`agent/research_tools.py:181`). The provenance string is caller-influenced and travels
-      beside content that *is* framed, which is the tell that the split was accidental.
+All four are closed by D-2026-08-06-a-mitigation-shipped-and-left-switched-off, and the shape
+decision the section describes turned out to be smaller than stated: every one of the five existing
+call sites already frames *a named free-text field of a structured result*, so three of these are
+that pattern applied to one more field each. **The lane's real find was underneath them** — the
+envelope tag was per-process in every shipped deployment, because the chart never set
+`framing_envelope_secret` while running postgres sessions behind six replicas. Content framed by one
+pod was replayed by another as ordinary text, and `framing.py` claimed a `Settings` warning that did
+not exist. Both fixed.
+
+- [x] **[M] `find_past_jobs` returns other users' free-text job rationales unframed** — framed.
+      `summary` deliberately is not, and that is pinned: it is written by the bundle's own code, and
+      a marker applied to our own output dilutes what the envelope means.
+- [x] **[M] No connector/MCP tool result is ever framed** — **one tool, not a surface.** Measured
+      against what each bundle returns: `fetch_artifact` is a file a pipeline wrote; everything else
+      is a number, a key or a name the bundle computed, and ELN text already arrives framed because
+      it reaches the model as a *note*. Framed in the connector, since core sees a connector result
+      through a generic MCP boundary and cannot know which field of an arbitrary payload is
+      untrusted — which is legitimate only because the tag is now deployment-stable. A manifest
+      declaration (the shape `endpoint.privileged` took) is the right answer at a *second* such
+      tool; that is the recorded trigger.
+- [x] **[L] `recall_observations` returns corpus-mined free text unframed** — framed. The ungated
+      tier had the least review and the most direct reading, which inverted the ordering the gate
+      exists to create.
+- [x] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`** — closed by
+      *reducing* rather than framing. A provenance label only has to be recognisable, so stripping
+      it to an identifier's charset removes the capability instead of marking it — the treatment
+      `frame_untrusted` already applies to the envelope's own `id`, against the same threat.
 ## Open — Quality findings left by the whole-codebase security sweep (2026-08-06)
 
 Eleven disjoint review lanes, each finding re-checked by a second agent required to **execute** a

@@ -36,6 +36,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
+from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
@@ -243,7 +244,21 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
         The matching runs, newest first: what ran, why, what came out in one line, and the note it
         proposed (if any).
     """
-    return await search_job_records(text, connector)
+    # The `rationale` is framed because of *whose* words it is: a sentence another chemist typed,
+    # on another turn, reaching this turn's model verbatim. That is stored cross-user injection —
+    # the same shape as a note body, which is framed at both of its read sites, and the reason this
+    # tool's own docstring advertises "including ones from other people's conversations" is exactly
+    # the reason it needs it.
+    #
+    # `summary` is deliberately left alone: it is written by the bundle's own code from the job's
+    # typed result ("best point 87.4% at 90 °C"), not by a person, so framing it would wrap our own
+    # output and teach the model that the envelope means less than it does.
+    return [
+        record.model_copy(
+            update={"rationale": frame_untrusted(record.rationale, note_id=record.job_id)}
+        )
+        for record in await search_job_records(text, connector)
+    ]
 
 
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:

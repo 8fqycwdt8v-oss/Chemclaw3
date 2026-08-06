@@ -113,6 +113,29 @@ def _defang(content: str) -> str:
 _ID_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
 
 
+def safe_identifier(value: str) -> str:
+    """Reduce a caller-influenced *identifier* to a charset that cannot carry an instruction.
+
+    The counterpart to `frame_untrusted`, for the other kind of untrusted value. An envelope is
+    right for a *sentence* — a note body, a chemist's recorded reason, a mined observation — where
+    the text has to reach the model intact and be read as data. It is the wrong tool for a
+    provenance label: wrapping `eln-json:e-1041:jdoe` in a two-line envelope triples its cost and
+    still leaves it a string the model could read as prose.
+
+    An identifier only has to be recognisable, so the stronger move is available: strip it to the
+    charset an identifier needs and an instruction cannot survive. `frame_untrusted` has always
+    applied exactly this to the envelope's own `id` attribute, for the same reason and against the
+    same threat; this makes it reusable by the callers that hand the model a bare provenance field
+    beside framed content (`EvidenceChunk.source`, whose value on an ELN note carries the entry id
+    and operator name straight from the export).
+
+    Empty in, empty out — an absent provenance is a real state, and inventing "unknown" here would
+    put a word where the model should see nothing. `frame_untrusted` substitutes one because an
+    envelope must always name a source.
+    """
+    return _ID_UNSAFE.sub("_", value)
+
+
 def frame_untrusted(content: str, *, note_id: str) -> str:
     """Wrap retrieved `content` from source `note_id` in a data envelope for the model.
 

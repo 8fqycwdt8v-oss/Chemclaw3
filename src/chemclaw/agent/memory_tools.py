@@ -12,6 +12,7 @@ moment of ranking, which is the distinction the human gate exists to preserve. K
 distinct call is what makes the separation structural rather than a naming convention.
 """
 
+from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_proposal
@@ -77,4 +78,18 @@ async def recall_observations(limit: int = 0) -> list[Observation]:
     """
     if not settings.observations_enabled:
         return []
-    return await open_observations(limit or None)
+    # The one knowledge path with no human gate at all (D-161's ungated tier): a statement here was
+    # mined from the corpus by a durable job and reaches the model without anyone having reviewed
+    # it. Every *other* route from that corpus into context is framed — a note body at both of its
+    # read sites, a chunk in `gather_evidence` — so leaving this one bare inverted the intended
+    # ordering, giving the least-reviewed text the most direct reading.
+    return [
+        observation.model_copy(
+            update={
+                "statement": frame_untrusted(
+                    observation.statement, note_id=observation.id or observation.scope
+                )
+            }
+        )
+        for observation in await open_observations(limit or None)
+    ]

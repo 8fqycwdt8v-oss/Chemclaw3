@@ -124,21 +124,29 @@ narrowing needs addresses this chart must not invent. Record:
 The deferral was deliberate and its reason is the design work: `frame_untrusted` wraps a prose
 *string*, while each of these returns a structured model. This package makes that decision once.
 
-- [ ] Decide the shape: frame the *free-text fields* of a structured result, leaving numeric and
-      enumerated fields as data the model is meant to read. Write it as one helper over a field
-      allowlist per model, so a new field is framed by declaration.
-- [ ] `agent/durable_tools.py:246` — `find_past_jobs` returns another chemist's free-text `reason`
-      verbatim. Stored cross-user injection; highest attacker reach of the four.
-- [ ] `connectors/*/server/tools.py` — no connector result is ever framed; `fetch_artifact` returns
-      arbitrary external text. The widest surface, and the one the field allowlist exists for.
-- [ ] `agent/memory_tools.py:80` — `Observation.statement` is the one knowledge path with no human
-      gate at all (D-161's ungated tier).
-- [ ] `agent/research_tools.py:181` — `gather_evidence` frames `chunk.content` and not the same
-      note's caller-influenced `source`.
+- [x] **The decision was already made and unnoticed**: all five existing call sites frame a named
+      free-text field of a structured result, so three of the four rows are that pattern applied
+      once more. No allowlist helper — that would be an abstraction over a pattern of five explicit
+      lines. Two treatments instead, chosen by *shape*: an envelope for a sentence, a charset
+      reduction (`safe_identifier`) for an identifier.
+- [x] `find_past_jobs` frames `rationale`; `summary` deliberately stays bare (our own output) and
+      that half is pinned too.
+- [x] **One tool, not a surface** — measured against what each bundle returns. `fetch_artifact` is
+      framed in the connector; the rest are numbers, keys and names the bundle computed. A manifest
+      declaration is the right answer at a *second* such tool, and that trigger is recorded.
+- [x] `recall_observations` frames `Observation.statement`.
+- [x] `gather_evidence` reduces `chunk.source` rather than framing it — a label loses nothing by
+      being restricted to an identifier's charset, and the reduction removes the capability.
 
-**Acceptance**: an injected instruction in each of the four fields arrives inside the envelope; a
-test asserts the structured fields are *not* wrapped, because over-framing corrupts what the model
-reads and is the failure mode of the naive fix.
+**Acceptance**: met, each **through its own tool** — the first version of two of these tests called
+`frame_untrusted` directly and passed against the unframed tool, which is the defect family this
+whole package is about, caught by running the mutation rather than by reading it.
+
+**Beyond the four rows**, and the larger find: the envelope tag was per-process in every shipped
+deployment, because the chart never set `framing_envelope_secret` while running postgres sessions
+behind six replicas — so content framed by one pod was replayed by another as ordinary text.
+`framing.py` also claimed a `Settings` warning that did not exist. Both fixed. Record:
+`D-2026-08-06-a-mitigation-shipped-and-left-switched-off`.
 
 ### WP-6 · The two injection paths into stored knowledge
 *Backlog: "ELN free text becomes real knowledge-graph edges" [M]; "A report note wikilinks non-note

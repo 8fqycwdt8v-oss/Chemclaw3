@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 from rdkit import Chem
 
+from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.chem import canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
@@ -379,7 +380,18 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
         name=ref.name,
         media_type=ref.media_type,
         byte_size=ref.byte_size,
-        text=text[:limit],
+        # The one connector result framed as untrusted, and the only one that earns it: this is a
+        # file a pipeline wrote on a cluster, reaching the model verbatim. Everything else this
+        # bundle returns is a number, a key or a name it computed itself, and wrapping those would
+        # teach the model that the envelope marks "output" rather than "text nobody here authored".
+        #
+        # Framed *here* rather than in core, which is the choice worth recording: core receives a
+        # connector result through a generic MCP boundary and cannot know which field of an
+        # arbitrary payload is untrusted, so the knowledge has to live with the tool that produced
+        # it. That works because the envelope tag is a property of the *deployment*
+        # (`framing_envelope_secret`, mounted on every pod) rather than of a process — which is
+        # exactly the reason D-2026-08-06 made it one, and why the chart now sets it.
+        text=frame_untrusted(text[:limit], note_id=ref.as_str()),
         truncated=len(text) > limit,
     )
 

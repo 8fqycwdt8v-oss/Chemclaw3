@@ -422,6 +422,19 @@ secrets:
     # only remaining behaviour was to fetch unauthenticated. Absent is still legal and still means
     # exactly that; what was missing was any way to say otherwise.
     hpcArtifactStoreToken: "CHEMCLAW_HPC_ARTIFACT_STORE_TOKEN"
+    # The suffix on the `<retrieved-note-…>` envelope that marks untrusted retrieved content as
+    # data rather than instructions. A secret because the whole mechanism rests on content authors
+    # being unable to *guess* the tag: whoever knows it can close the envelope early from inside a
+    # note body or an ELN field, which is the injection this exists to stop.
+    #
+    # D-2026-08-06 made the tag deployment-stable precisely because a durable session outlives the
+    # process that framed it — and then the chart never set it, so the shipped configuration
+    # (`CHEMCLAW_SESSION_STORE: postgres`, up to six front-door replicas) ran per-process tags.
+    # Measured: two processes without it produce `retrieved-note-166f67d3…` and
+    # `retrieved-note-b4991f2c…`; with it, the same tag. Content framed by one pod was replayed by
+    # another as ordinary text, which is exactly what the mechanism exists to prevent — the fix
+    # shipped and stayed switched off.
+    framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the

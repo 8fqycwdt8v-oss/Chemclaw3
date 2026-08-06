@@ -47,6 +47,7 @@ bound: **config says which and where; a manifest says what.** If a proposed fiel
 the internals of one attached thing, it belongs in that thing's manifest, not here.
 """
 
+import logging
 from typing import Self
 
 from pydantic import model_validator
@@ -243,6 +244,25 @@ class Settings(
             raise ValueError(
                 "budget_enabled=true with every cap at 0 (unlimited) guards nothing; set at least "
                 "one budget_max_* cap or disable budgets"
+            )
+        if self.session_store == "postgres" and not self.framing_envelope_secret:
+            # A *warning*, not a refusal, and the asymmetry is deliberate: every rule above is a
+            # configuration that cannot work, while this one works and degrades. The mitigation is
+            # still on for content framed by the process reading it; what lapses is older material
+            # — history written by another replica or before a restart, which the agent
+            # instructions then tell the model to read as ordinary content rather than as data.
+            # Refusing to boot over it would take a running deployment down for a weakening.
+            #
+            # It is here because `agent/framing.py` has claimed since D-2026-08-06 that "`Settings`
+            # warns when durable sessions are configured without it" — and nothing did. A security
+            # mechanism whose own documentation describes a guard that does not exist is the shape
+            # this repository keeps finding; this is that sentence becoming true.
+            logging.getLogger(__name__).warning(
+                "SECURITY: session_store=postgres without CHEMCLAW_FRAMING_ENVELOPE_SECRET — the "
+                "untrusted-content envelope tag is per-process, so retrieved content framed by "
+                "another replica or before a restart is replayed to the model as ordinary text "
+                "rather than as data. Set it to any deployment-wide value (it is hashed, never "
+                "sent to the model) to keep one tag across every pod and restart."
             )
         writes_note_index = self.note_reindex_enabled or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)

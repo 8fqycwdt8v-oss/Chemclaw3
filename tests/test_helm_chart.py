@@ -256,6 +256,14 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     polarity is the four-key one — absent, the front door refuses to start against a non-loopback
     connector rather than degrading quietly.
 
+    The framing envelope secret is the ninth, and it is a secret for the same reason a nonce is:
+    the untrusted-content envelope stops an ELN field or a note body from closing it early only
+    while its author cannot *guess* the tag. D-2026-08-06 made the tag deployment-stable because a
+    durable session outlives the process that framed it, and then nothing set it — so the shipped
+    configuration (postgres sessions, up to six replicas) ran per-process tags and content framed
+    by one pod was replayed by another as ordinary text. Absent still degrades rather than breaks,
+    which is why `Settings` warns instead of refusing.
+
     The artifact-store token is the eighth, and it is the one whose *absence* had no expression at
     all. `nextflow._artifact_headers` already refuses to send the launcher credential to a store on
     a different origin — that token can launch and cancel pipelines — so a cross-origin store was
@@ -271,6 +279,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_AUDIT_ANCHOR_SECRET",
         "CHEMCLAW_CONNECTOR_TOKEN",
         "CHEMCLAW_HPC_ARTIFACT_STORE_TOKEN",
+        "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
     }
 
 
