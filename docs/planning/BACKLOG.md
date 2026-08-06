@@ -32,6 +32,30 @@ mechanical fix. Ranked by how attacker-reachable the content is.
 - [ ] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
       (`agent/research_tools.py:181`). The provenance string is caller-influenced and travels
       beside content that *is* framed, which is the tell that the split was accidental.
+## Open — Authorization gaps left by the whole-codebase security sweep (2026-08-06)
+
+Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed the inert core
+trigger gate and added the guard that would have caught it. These are what the same lane found and
+did not fix.
+
+- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution**
+      (`connectors/server.py:84`). `CallerLogMiddleware` documents the identity headers as
+      advisory, but a bundle's activity stamps them into `bo_campaigns`/`bo_suggestions`, so
+      anything that can reach the pod can forge who ran an experiment. The root fix is connector
+      authentication (already tracked above); the narrower one is to attribute from the workflow
+      payload's `requested_by`, which is set from the validated principal, rather than from a
+      header.
+- [ ] **[L] The built-in write gate never consults the connector-declared `state_changing` set**
+      (`agent/authz.py`). `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained list while every manifest
+      already partitions its tools into `state_changing`/`read_only`; deriving the gate from the
+      declaration is the same move `expensive_actions()` and `side_effecting_tools()` already make.
+      `report_measurement` is the live example — any authenticated user may write the shared
+      calibration ledger.
+- [ ] **[L] `map_to_hpc_identity` has no caller** (`agent/identity/hpc_bridge.py:18`). The §7.2
+      oid → HPC-identity mapping log never fires on the real Nextflow path, so the audit link
+      between a chemist and a cluster job is declared and never written. Either wire it or delete
+      it — a declared-but-unwired control is exactly the shape
+      `D-2026-08-05-a-declaration-outliving-what-it-describes` is about.
 
 ## Open — Left by the agentic-engine / harness / deep-research review (2026-08-05)
 

@@ -273,6 +273,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-05-the-connection-budget-is-a-fleet-number](D-2026-08-05-the-connection-budget-is-a-fleet-number.md) | The connection budget is a fleet number, and the pool's witness belongs to the pool |
 | [D-2026-08-05-three-searches-that-disagreed-about-one-note](D-2026-08-05-three-searches-that-disagreed-about-one-note.md) | Three searches that disagreed about one note, and a gate that borrowed the tree it guards |
 | [D-2026-08-06-a-flag-is-a-signal-not-an-inventory](D-2026-08-06-a-flag-is-a-signal-not-an-inventory.md) | A flag is a signal, not an inventory |
+| [D-2026-08-06-a-gate-that-names-nothing](D-2026-08-06-a-gate-that-names-nothing.md) | A gate that names nothing |
 | [D-2026-08-06-a-pair-rule-is-a-cross-product](D-2026-08-06-a-pair-rule-is-a-cross-product.md) | A pair rule is a cross-product, and the list is the caller's |
 | [D-2026-08-06-a-redactor-that-only-reads-the-message](D-2026-08-06-a-redactor-that-only-reads-the-message.md) | A redactor that only reads the message |
 | [D-2026-08-06-a-swallowed-write-reported-as-a-store](D-2026-08-06-a-swallowed-write-reported-as-a-store.md) | A swallowed write, reported as a store |
