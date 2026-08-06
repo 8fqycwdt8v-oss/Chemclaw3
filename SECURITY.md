@@ -8,15 +8,15 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 ## What is enforced
 
 - **Front-door authentication (Entra OIDC).** Every non-health request to the run service carries an
-  Entra-issued token that `service/auth.py::validate_token` verifies: RS256 signature against the
+  Entra-issued token that `api/auth.py::validate_token` verifies: RS256 signature against the
   tenant JWKS, **audience** (`entra_audience` — the confused-deputy guard, since the front door is
   both an OAuth client and a protected resource), issuer, and a required `exp`. The claims become a
   `Principal` (`oid`/`upn`/roles) that attributes and authorizes every backend action.
 - **The reject-if-absent rule.** Every *user-triggered* durable workflow is user-specific:
-  `agents/authz.py::require_actor` returns the turn's Entra `oid` and, under enforcement, **rejects a
+  `agent/authz.py::require_actor` returns the turn's Entra `oid` and, under enforcement, **rejects a
   trigger with no authenticated user** before any durable work starts. The `oid` is stamped into the
   workflow payload (`requested_by`), never inferred later.
-- **One authorization gate for expensive actions.** `agents/authz.py::authorize_trigger(action)` is
+- **One authorization gate for expensive actions.** `agent/authz.py::authorize_trigger(action)` is
   the single place a costly HPC/BO trigger is checked: a job a connector manifest declares
   `expensive: true`, or an action named in `entra_expensive_actions`, runs only for a caller holding
   one of `entra_privileged_roles` — and an empty role set refuses everyone rather than admitting
@@ -24,7 +24,7 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   outside a bundle. This holds even when the harness plans
   autonomously — an autonomously-planned todo cannot launch a job outside the requesting user's
   entitlements.
-- **Role-scoped skills.** `agents/skill_access.py::RoleScopedSkillsSource` hides a gated skill
+- **Role-scoped skills.** `agent/skill_access.py::RoleScopedSkillsSource` hides a gated skill
   (`skill_role_gates`: skill → allowed roles) from a caller holding none of its roles (D-052).
 - **Ambient identity, one carrier.** The runner stamps the validated identity into
   `src/chemclaw/core/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
@@ -56,15 +56,22 @@ did what to which inputs" record — but it has data-handling consequences:
 - **Client-facing surfaces do not leak it.** Turn errors return a generic, session-keyed message
   (the detail is logged server-side only), token-validation failures return a generic 401, and
   upstream response bodies are bounded before they reach a log — so the trail is the *deliberate*
-  place user content is retained, not an accidental one.
+  place user content is retained, not an accidental one. An **unreachable tenant JWKS answers 503**,
+  not 401: it is our outage rather than the caller's bad credential, and reporting it as a rejected
+  token both misinforms the user and files a dependency failure under "someone is probing us".
 
 ## Front-door hardening
 
 The browser-facing run service sets `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
 `X-Frame-Options: DENY`, and HSTS (config-gated by `service_security_headers`, default on); bounds
 each chat message (`service_max_message_chars`) and the live-session cache
-(`service_max_live_sessions`); and warns loudly at startup if it runs unauthenticated
-(`entra_required=false`) on a non-loopback bind. See `docs/archive/audit/` for the audit that added these.
+(`service_max_live_sessions`); and **refuses to start** if it would run unauthenticated
+(`entra_required=false`) on a non-loopback bind — `service_allow_insecure=true` is the explicit,
+named opt-out. That combination used to warn and boot, which left a network-exposed deployment with
+every authorization gate open one missed log line away (SEC-2). It does not serve an OpenAPI schema,
+Swagger or ReDoc page: all three are plain routes no dependency can gate, and the schema alone
+documents every route, parameter and model the service has.
+See `docs/archive/audit/` for the audit that added these.
 
 ## The enforcement switch
 

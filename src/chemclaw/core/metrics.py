@@ -179,6 +179,13 @@ _COUNTERS: dict[str, str] = {
         "Running turns whose session claim was taken over by another worker (D-121): the lease "
         "lapsed while the turn was still going, so two workers may have run on one session."
     ),
+    # A live run looped `find_past_jobs` seven times in one turn, and the only trace was a turn
+    # three times slower than the archived comparison. This is what a deployment alerts on when
+    # the loop comes back — the refusal itself is invisible, since the turn still answers.
+    "chemclaw_repeated_tool_calls_total": (
+        "Tool calls refused because the turn had already made the identical one "
+        "`max_identical_tool_calls` times, labelled by tool."
+    ),
     # A guard that switches itself off is worse than one that fails loudly, and this one did
     # exactly that 32 times in a 126-second load test while nothing but a WARNING said so.
     "chemclaw_rollback_watermark_unavailable_total": (
@@ -259,6 +266,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # same-process double-submit (impossible with the LRU's single-session cardinality guarantee,
     # but tracked for debugging). `durable` is a cross-replica race on the shared turn claim.
     "chemclaw_turns_conflict_total": ("scope",),
+    # Bounded by the registered tool surface, which is configuration (the enabled connectors and
+    # profile) rather than anything a caller can name.
+    "chemclaw_repeated_tool_calls_total": ("tool",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes

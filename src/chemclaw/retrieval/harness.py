@@ -173,9 +173,14 @@ def report_note(report: Report) -> Note:
                 # The conflicting ids stay plain text, not `[[wikilinks]]`: the report *warns
                 # about* those notes, it does not rest on them, and linking would add them to the
                 # report's own citations — the same reason `_excerpt` strips a note's links.
+                # Named as the *strongest* when there are more, because a reader shown three ids
+                # and no count would reasonably conclude there were three (`conflict_max_per_note`).
+                hidden = chunk.conflicts_total - len(chunk.conflicts_with)
+                scope = f" (the {len(chunk.conflicts_with)} strongest of "
+                scope = f"{scope}{chunk.conflicts_total})" if hidden > 0 else ""
                 lines.append(
-                    f"  - **Conflicts with {', '.join(chunk.conflicts_with)}** — these notes "
-                    "disagree; do not read this and a conflicting note as two independent "
+                    f"  - **Conflicts with {', '.join(chunk.conflicts_with)}**{scope} — these "
+                    "notes disagree; do not read this and a conflicting note as two independent "
                     "confirmations."
                 )
         lines.append("")

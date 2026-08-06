@@ -15,7 +15,7 @@ from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
-from chemclaw.kg.conflicts import conflict_index
+from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import WIKILINK, Note, note_id_for_reaction, split_link
 from chemclaw.kg.search import query_terms, term_coverage
@@ -96,8 +96,8 @@ def _in_window(note: Note, since: date | None, until: date | None) -> bool:
     return not (until is not None and note.valid_from > until)
 
 
-async def _conflict_index(directory: Path) -> dict[str, list[str]]:
-    """Map each note id to the ids it is known or suspected to disagree with (KM-8).
+async def _conflict_index(directory: Path) -> dict[str, NoteConflicts]:
+    """Map each note id to what it is known or suspected to disagree with (KM-8).
 
     The whole computation goes to a worker thread, not only the note load: the scan over the corpus
     is the expensive half (measured at 1,525 ms on a 2,000-note programme-shaped corpus), and it
@@ -160,9 +160,7 @@ class GraphRetriever:
                 if note.confidence is not None
                 else settings.retrieval_default_confidence
             )
-            scored.append(
-                (coverage, _chunk_for(note, self.name, score, conflicts.get(note.id, [])))
-            )
+            scored.append((coverage, _chunk_for(note, self.name, score, conflicts.get(note.id))))
         complete = [pair for pair in scored if pair[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
         # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
@@ -283,7 +281,7 @@ class FingerprintReactionRetriever:
 
 
 def _chunk_for(
-    note: Note, retriever_name: str, score: float, conflicts: list[str]
+    note: Note, retriever_name: str, score: float, conflicts: NoteConflicts | None
 ) -> EvidenceChunk:
     """Build one evidence chunk from a note, carrying its provenance (D-160).
 
@@ -296,7 +294,8 @@ def _chunk_for(
         source_note_id=note.id,
         retriever=retriever_name,
         score=score,
-        conflicts_with=conflicts,
+        conflicts_with=conflicts.ids if conflicts else [],
+        conflicts_total=conflicts.total if conflicts else 0,
         created_by=note.created_by,
         source=note.source or "",
         confidence=note.confidence,
@@ -307,7 +306,7 @@ def _chunks_from_hits(
     hits: list[IndexHit],
     notes: dict[str, Note],
     retriever_name: str,
-    conflicts: dict[str, list[str]] | None = None,
+    conflicts: dict[str, NoteConflicts] | None = None,
 ) -> list[EvidenceChunk]:
     """Map index hits to cited evidence chunks, dropping any hit whose note no longer loads.
 
@@ -327,7 +326,7 @@ def _chunks_from_hits(
                 note,
                 retriever_name,
                 min(max(hit.score, 0.0), 1.0),
-                (conflicts or {}).get(note.id, []),
+                (conflicts or {}).get(note.id),
             )
         )
     return chunks

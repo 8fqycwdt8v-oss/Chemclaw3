@@ -9,13 +9,15 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import chemclaw.durable.memory_jobs as memory_jobs
-from chemclaw.connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
+from chemclaw.connectors.bo import activities as _bo_activities  # noqa: F401 — registers below
 from chemclaw.connectors.bo.knowledge import note_from_campaign_result
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
+from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobWorkflow
 from chemclaw.durable.job_record import record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
+from chemclaw.durable.registry import registered_activities
 from chemclaw.science.bo.problem import (
     CampaignResult,
     CampaignSpec,
@@ -28,7 +30,11 @@ from chemclaw.science.bo.problem import (
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
-_BO_ACTIVITIES: Sequence[Callable[..., Any]] = [propose_initial, propose_next, evaluate_candidates]
+# Taken from the registry rather than written out, for the reason the registry exists: a
+# hand-maintained list re-creates the "written, imported, absent from the worker's list, never
+# runs" failure one level down. This one caught it — the campaign gained a record-writing activity,
+# and a list spelled before that existed left the workflow task redelivering forever.
+_BO_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities(bundle_queue("bo"))
 
 _PROBLEM = OptimizationProblem(
     parameters=[

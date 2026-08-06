@@ -15,6 +15,7 @@ from agent_framework import AgentSession
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 import chemclaw.api.auth as auth
 from chemclaw.api.app import create_app
@@ -150,27 +151,153 @@ def test_token_validation_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     assert on_loop == [False]  # validation ran in a thread, not on the serving loop
 
 
+class _FakeJwk:
+    """The two attributes of a `PyJWK` that key resolution actually reads."""
+
+    def __init__(self, key_id: str, key: str) -> None:
+        self.key_id = key_id
+        self.key = key
+
+
+class _CountingJwksClient:
+    """A `PyJWKClient` stand-in that counts fetches, so amplification is measurable, not argued.
+
+    Mirrors the real contract this module depends on: `get_signing_keys()` serves a cached set,
+    and `get_signing_key(kid)` is the call that re-fetches when the `kid` is absent. Each is
+    counted separately because the whole finding is about which one an anonymous caller can drive.
+    """
+
+    def __init__(self, endpoint: str, *, timeout: float) -> None:
+        self.endpoint = endpoint
+        self.timeout = timeout
+        self.cached_fetches = 0
+        self.forced_refreshes = 0
+        self.connection_error = False
+
+    def get_signing_keys(self, refresh: bool = False) -> list[_FakeJwk]:
+        if self.connection_error:
+            raise PyJWKClientConnectionError("cannot reach the tenant")
+        self.cached_fetches += 1
+        return [_FakeJwk("known-kid", "the-key")]
+
+    def get_signing_key(self, kid: str) -> _FakeJwk:
+        self.forced_refreshes += 1
+        raise PyJWKClientError(f'Unable to find a signing key that matches: "{kid}"')
+
+
+def _install_counting_client(monkeypatch: pytest.MonkeyPatch) -> _CountingJwksClient:
+    """Point the real `_signing_key` at a counting client with a clean cooldown ledger."""
+    monkeypatch.setattr(settings, "entra_tenant_id", "tid-1")
+    monkeypatch.setattr(auth, "PyJWKClient", _CountingJwksClient)
+    monkeypatch.setattr(auth, "_jwks_clients", {})
+    monkeypatch.setattr(auth, "_last_forced_refresh", {})
+    client = _CountingJwksClient(settings.entra_jwks_endpoint, timeout=1.0)
+    monkeypatch.setitem(auth._jwks_clients, settings.entra_jwks_endpoint, client)
+    return client
+
+
+def _token_with_kid(rsa_key: Any, kid: str) -> str:
+    """A well-formed RS256 token carrying `kid` in its header — the attacker-controlled field."""
+    pem = rsa_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return jwt.encode(
+        {"oid": "u-1", "exp": int(time.time()) + 3600}, pem, algorithm="RS256", headers={"kid": kid}
+    )
+
+
 def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """The JWKS client is bounded by `entra_http_timeout_seconds`, not PyJWT's 30s default."""
-    from types import SimpleNamespace
-
     captured: dict[str, object] = {}
 
-    class _FakeJwksClient:
+    class _RecordingClient(_CountingJwksClient):
         def __init__(self, endpoint: str, *, timeout: float) -> None:
+            super().__init__(endpoint, timeout=timeout)
             captured["endpoint"] = endpoint
             captured["timeout"] = timeout
 
-        def get_signing_key_from_jwt(self, token: str) -> SimpleNamespace:
-            return SimpleNamespace(key="the-key")
-
     monkeypatch.setattr(settings, "entra_tenant_id", "tid-1")
     monkeypatch.setattr(settings, "entra_http_timeout_seconds", 7.5)
-    monkeypatch.setattr(auth, "PyJWKClient", _FakeJwksClient)
+    monkeypatch.setattr(auth, "PyJWKClient", _RecordingClient)
     monkeypatch.setattr(auth, "_jwks_clients", {})
-    assert _REAL_SIGNING_KEY("tok") == "the-key"
+    monkeypatch.setattr(auth, "_last_forced_refresh", {})
+    rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    assert _REAL_SIGNING_KEY(_token_with_kid(rsa_key, "known-kid")) == "the-key"
     assert captured["timeout"] == 7.5
     assert captured["endpoint"] == settings.entra_jwks_endpoint
+
+
+def test_an_unknown_kid_is_an_auth_error_not_an_unhandled_crash(
+    monkeypatch: pytest.MonkeyPatch, rsa_key: Any
+) -> None:
+    """A `kid` absent from the JWKS must raise `AuthError` (a 401), never escape as a 500.
+
+    `PyJWKClientError` is not a subclass of `jwt.InvalidTokenError`, so it used to slip past both
+    `validate_token`'s handler and `require_principal`'s — turning an anonymous, malformed-token
+    request into an unhandled exception. Remove the `PyJWKClientError` handler in
+    `auth._signing_key` and this fails with that error instead.
+    """
+    _install_counting_client(monkeypatch)
+    with pytest.raises(AuthError, match="no signing key matches"):
+        _REAL_SIGNING_KEY(_token_with_kid(rsa_key, "attacker-chosen-kid"))
+
+
+def test_an_unreachable_identity_provider_is_not_reported_as_a_bad_token(
+    monkeypatch: pytest.MonkeyPatch, rsa_key: Any
+) -> None:
+    """A JWKS outage raises `IdentityProviderUnavailable`, which the route turns into 503, not 401.
+
+    Answering 401 would tell a user with a valid token that their credential was rejected, and
+    would bury a dependency outage in a metric that reads as "someone is probing us".
+    """
+    client = _install_counting_client(monkeypatch)
+    client.connection_error = True
+    with pytest.raises(auth.IdentityProviderUnavailable, match="unreachable"):
+        _REAL_SIGNING_KEY(_token_with_kid(rsa_key, "known-kid"))
+
+
+def test_a_known_kid_costs_no_forced_refresh(monkeypatch: pytest.MonkeyPatch, rsa_key: Any) -> None:
+    """The warm path is untouched: a `kid` in the cached set never triggers a re-fetch."""
+    client = _install_counting_client(monkeypatch)
+    for _ in range(5):
+        assert _REAL_SIGNING_KEY(_token_with_kid(rsa_key, "known-kid")) == "the-key"
+    assert client.forced_refreshes == 0
+
+
+def test_an_unknown_kid_flood_forces_at_most_one_refresh_per_cooldown(
+    monkeypatch: pytest.MonkeyPatch, rsa_key: Any
+) -> None:
+    """The amplification bound, measured: 50 anonymous unknown-`kid` tokens buy one refresh.
+
+    This is the defect's real shape. PyJWT re-fetches the tenant JWKS on *every* `kid` miss, and
+    the `kid` is chosen by an unauthenticated caller, so before the cooldown 50 credential-less
+    requests meant 50 outbound requests to the IdP — each one occupying a validation worker
+    thread. Set `entra_jwks_refresh_cooldown_seconds` to 0 and this fails with 50.
+    """
+    client = _install_counting_client(monkeypatch)
+    monkeypatch.setattr(settings, "entra_jwks_refresh_cooldown_seconds", 300.0)
+    for i in range(50):
+        with pytest.raises(AuthError):
+            _REAL_SIGNING_KEY(_token_with_kid(rsa_key, f"bogus-{i}"))
+    assert client.forced_refreshes == 1
+
+
+def test_the_cooldown_still_lets_a_rotated_key_be_picked_up(
+    monkeypatch: pytest.MonkeyPatch, rsa_key: Any
+) -> None:
+    """The cooldown delays key rotation; it must not prevent it.
+
+    A zero cooldown is the degenerate case that proves the gate is a *rate* limit and not a
+    permanent refusal — every miss is allowed to refresh, exactly as PyJWT does unaided.
+    """
+    client = _install_counting_client(monkeypatch)
+    monkeypatch.setattr(settings, "entra_jwks_refresh_cooldown_seconds", 0.0)
+    for i in range(3):
+        with pytest.raises(AuthError):
+            _REAL_SIGNING_KEY(_token_with_kid(rsa_key, f"rotated-{i}"))
+    assert client.forced_refreshes == 3
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
