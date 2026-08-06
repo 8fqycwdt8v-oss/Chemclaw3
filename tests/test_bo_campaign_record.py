@@ -605,3 +605,88 @@ def test_a_programming_error_in_the_write_is_not_swallowed_as_a_database_blip() 
             )
     finally:
         monkeypatch.undo()
+
+
+# --- the durable campaign, which used to write nothing at all -------------------------------
+
+
+def test_a_durable_campaign_run_is_recorded_and_resumable(store: InMemoryCampaignStore) -> None:
+    """The gap the BO deep review found: hours of evaluation that `resume_campaign` denied existed.
+
+    Both paths mint ids from one `campaign_id_for` space, and only the inline tool ever wrote — so
+    `resume_campaign` on a campaign that had run durably reported no such campaign about work that
+    was actually done. The activity is driven directly here because it is a plain coroutine; what
+    the workflow adds on top (reading the actor off the run's memo) is pinned by
+    `tests/test_connector_job_workflow.py` for every bundle.
+    """
+    from chemclaw.connectors.bo.activities import record_campaign_run
+
+    problem = _problem()
+    history = [Observation(params={"ligand": "L1", "temperature": 70.0}, value=0.81)]
+    campaign_id = _run(
+        record_campaign_run(
+            problem,
+            [Candidate(params={"ligand": "L1", "temperature": 72.0})],
+            history,
+            "alice@example.com",
+            "corr-1",
+            "bo-start_optimization_campaign-abc",
+        )
+    )
+    assert campaign_id == campaign_id_for(problem)
+    thread = _run(read_campaign_thread(campaign_id))
+    assert thread.observations == history, "the evidence a resume seeds from"
+    assert thread.last_candidates == [Candidate(params={"ligand": "L1", "temperature": 72.0})]
+    assert thread.opened_by == "alice@example.com", (
+        "the actor is the real one off the run's memo, never a fabricated service identity"
+    )
+
+
+def test_a_retried_durable_write_does_not_append_a_second_identical_suggestion(
+    store: InMemoryCampaignStore,
+) -> None:
+    """A Temporal activity is retried by design, and history is meant to record what was proposed.
+
+    The inline path never needed this — it wrote once per turn, and a duplicate was harmless
+    because the read takes the latest. The durable path made the duplicate routine. Keyed on the
+    run id, never on the content: two genuinely identical *asks* are two history entries, which is
+    what "the sequence is the campaign's history" means.
+    """
+    from chemclaw.connectors.bo.activities import record_campaign_run
+
+    problem = _problem()
+    history = [Observation(params={"ligand": "L1", "temperature": 70.0}, value=0.81)]
+    args = (problem, [Candidate(params={"ligand": "L1", "temperature": 72.0})], history)
+    first = _run(record_campaign_run(*args, "alice@example.com", "c", "bo-job-1"))
+    _run(record_campaign_run(*args, "alice@example.com", "c", "bo-job-1"))
+    assert len(_run(store.suggestions_for(first, limit=10))) == 1
+
+    # A different run against the same campaign is a real second entry, not a retry.
+    _run(record_campaign_run(*args, "alice@example.com", "c", "bo-job-2"))
+    assert len(_run(store.suggestions_for(first, limit=10))) == 2
+
+
+def test_two_inline_suggestions_are_still_two_entries(store: InMemoryCampaignStore) -> None:
+    """The idempotency key is the *run*, so the path that has no run is left exactly as it was.
+
+    `job_id` defaults to empty for the inline tool, and the unique index is partial on `job_id <>
+    ''` for the same reason: a shared default would collapse a campaign's whole inline history into
+    one row.
+    """
+    problem = _problem()
+    campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+    _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+    assert len(_run(store.suggestions_for(campaign_id, limit=10))) == 2
+
+
+def test_a_suggestion_remembers_the_space_it_was_made_in(store: InMemoryCampaignStore) -> None:
+    """The campaign row holds the *latest* problem, which is right for it and wrong for its history.
+
+    A chemist who widens a bound is still working the same campaign, so the upsert refreshes the
+    space — and a suggestion read back afterwards was then described by bounds that never applied
+    to it. The candidates and observations were already snapshotted for exactly this reason.
+    """
+    problem = _problem()
+    campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+    (recorded,) = _run(store.suggestions_for(campaign_id, limit=1))
+    assert recorded.problem == problem.model_dump(mode="json")

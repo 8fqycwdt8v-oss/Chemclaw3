@@ -93,6 +93,16 @@ class AgentSettings(BaseSettings):
     harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
+    # How many times one turn may call a tool with the *identical* arguments before the call is
+    # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
+    # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with
+    # `load_skill` x6 and `find_notes` x5 beside it, and the only symptom was a median turn of
+    # 128-142 s against 16.9 s on the archived run. Two, not one, because a genuine re-check is a
+    # real pattern — a job polled after a wait, a note re-read after a write — and seven is not.
+    # Raise it for a deployment whose tools are cheap and whose answers move; 1 disables repeats
+    # entirely.
+    max_identical_tool_calls: int = Field(default=2, ge=1)
+
     # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*
     # capabilities, so a shared tree is its common home; a profile genuinely about one

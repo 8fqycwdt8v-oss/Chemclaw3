@@ -72,6 +72,7 @@ def test_profile_can_narrow_connectors() -> None:
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     """The invariant: narrowing a profile never removes the audit + per-tool authz middleware."""
+    from chemclaw.agent.repeat_guard import refuse_repeated_calls
     from chemclaw.agent.tool_authz import (
         announce_tool_failures,
         enforce_tool_authz,
@@ -83,10 +84,11 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         profile=AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"})),
     )
     middleware = list(agent.middleware or [])
-    # denial + domain-error surfacing + audit + authz + dry-run + failure announcing, unchanged
-    assert len(middleware) == 6
+    # denial + domain-error surfacing + audit + authz + dry-run + repeat guard + announcing
+    assert len(middleware) == 7
     assert enforce_tool_authz in middleware
     assert refuse_writes_on_dry_run in middleware
+    assert refuse_repeated_calls in middleware
     assert announce_tool_failures in middleware
 
 

@@ -37,6 +37,7 @@ from chemclaw.agent.live_session import reset_current_session, set_current_sessi
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.budget import BudgetTracker
@@ -208,6 +209,10 @@ async def run_turn(
     # proposals) — the runner only sees the model's updates, so tools hand these over out of
     # band.
     signals_token = begin_turn()
+    # Count this turn's tool calls, so the identical question asked a third time is refused rather
+    # than re-executed (`chemclaw.agent.repeat_guard`). Started here beside the signal buffer
+    # because both are per-turn ambients the middleware reads and the runner owns the lifetime of.
+    calls_token = begin_call_watch()
     # Watch the harness loop's stop decisions, so a turn stopped by the runaway cap can say so
     # instead of looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op for the
     # classic agent, which has no loop to watch.
@@ -636,6 +641,7 @@ async def run_turn(
             if value:
                 METRICS.increment(name, float(value), spend_labels)
         end_turn(signals_token)
+        end_call_watch(calls_token)
         end_loop_watch(loop_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)

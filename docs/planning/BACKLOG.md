@@ -10,8 +10,18 @@ were fixed in that pass (the two-predicate `PlanEvent`, the harness dimensions r
 places, the uncached conflict index). This is what it measured and did **not** fix, because the fix
 is a decision about what a chemist is shown rather than a diff.
 
-- [ ] **`conflicts._suspected` is O(k²) in the notes sharing a `(type, compound_smiles)`, and its
-      output stops being readable long before it stops being computable** — [M]. Measured over a
+- [x] **`conflicts._suspected` is O(k²) in the notes sharing a `(type, compound_smiles)`, and its
+      output stops being readable long before it stops being computable** — closed by taking each
+      note's **widest disagreements** (`conflict_max_per_note`, 3) rather than every pair. Sorting a
+      group by confidence puts the strongest partners at the two ends, so the walk takes the wider
+      end first and stops as soon as it falls inside the threshold. Re-measured on the same corpus:
+      141,156 → 5,937 pairs, 637 → 44 ms, 3 ids per chunk instead of ~141. Two things the narrowing
+      does not do, both pinned: a *declared* conflict is never evicted by a heuristic's guess
+      (`Conflict.severity` pins it), and the truncation is never silent — `NoteConflicts` carries
+      the full total and the report renders "(the 3 strongest of 141)". The decision the row asked
+      for turned out to be smaller than it looked: `Conflict.kind` already separated author-stated
+      from heuristic, so the cap applies to `suspected` alone and KM-8's declared-conflict promise
+      is byte-identical. The original measurement, for the record — over a
       synthetic 2,000-note corpus spread across 7 substrates — the shape a real programme has, since
       an optimization campaign is many runs on one substrate: **141,156** conflicts, 637 ms of pure
       pair enumeration, and a `conflicts_with` list of ~141 ids on every evidence chunk that reaches
@@ -27,22 +37,21 @@ is a decision about what a chemist is shown rather than a diff.
 
 ## Open — Left by the BO deep review (2026-08-05, D-2026-08-05-a-ceiling-that-does-not-hold)
 
-- [ ] **The durable campaign does not write the campaign store.** Both paths share one campaign-id
-      space, so `resume_campaign` on a campaign that ran durably reports no such campaign about work
-      that was actually done. Investigated and confirmed a gap, not a design choice — but closing it
-      needs a decision, not a fix: `record_suggestion` writes `opened_by`, and `BoCampaignWorkflow`
-      deliberately does not know the actor (core's `ConnectorJobWorkflow` owns attribution, D-093).
-      Recording from inside the workflow means either threading identity through a seam built to
-      keep it out, or writing a fabricated actor into an audited column. Decide which, then build.
-      Also the one item that could not be verified offline — it needs both a Temporal broker and
-      Postgres.
-- [ ] **`bo_suggestions` stores no snapshot of the problem it was proposed against.** The campaign
-      row carries the *latest* problem, so a suggestion read back after the space widened is
-      described by a decision space it was not made in. Cheap to add (one JSONB column); worth a
-      migration only alongside the row above, since both touch the same tables.
-- [ ] **No unique index makes a BO write idempotent.** A retried `record()` appends a second
-      identical suggestion. Harmless today (the read takes the latest) and a real duplicate once the
-      durable path writes.
+- [x] **The durable campaign does not write the campaign store** — closed, and the recorded blocker
+      was a false dilemma. The seam already carries the actor: core sets `requested_by` on the
+      child's **memo** for exactly the shared-service-identity case, and `connectors/qm/workflows.py`
+      has read the same memo in production since F5. `BoCampaignWorkflow` reads it and hands it to a
+      bundle-owned activity that reuses `record_suggestion` unchanged. Verified live against the
+      real broker and Postgres, not offline: resumed with `opened_by` off the memo and every
+      observation present.
+- [x] **`bo_suggestions` stores no snapshot of the problem it was proposed against** — closed by
+      `infra/sql/037_bo_suggestion_provenance.sql`, alongside the row above as planned.
+- [x] **No unique index makes a BO write idempotent** — closed by the same migration. Keyed on the
+      run (`job_id`, the workflow id) and never on the content: two genuinely identical asks are two
+      history entries. Partial on `job_id <> ''` so the inline path, which has no run to name, keeps
+      appending. Both store backends implement the rule, and the Postgres half — a partial unique
+      index plus an `ON CONFLICT ... WHERE` inference, exactly the kind of thing that is right in
+      prose and wrong in SQL — is asserted against a real database.
 
 ## Open — Left by the CHECKMATE deep review of the live/durable spine (2026-08-05)
 
@@ -63,27 +72,18 @@ rather than a diff.
       The plausible hypothesis going in (MAF re-entering unconnected tools into the agent's
       process-lifetime exit stack) was **refuted** by a one-line probe: flat at zero over 200 turns.
 
-- [ ] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — [S]. A holder whose lease was taken
-      over cannot detect it: `session_store.py:504` returns `None`, and `api/state.py:220` reacts
-      only to *exceptions*, which a silent takeover does not raise — so its own warning ("another
-      worker may start a turn on this session") is unreachable in exactly the scenario it describes.
-      The no-op itself is pinned (`test_concurrency_claims.py:80`); the missing signal is not.
+- [x] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — closed. It now returns whether the
+      lease was still ours, the heartbeat acts on it, and `chemclaw_turn_claims_lost_total` counts
+      the takeover a deployment could not previously see.
 
-- [ ] **The proposal webhook cannot be wired to any named git host without a translator** — [S],
-      documentation rather than code. `routes/proposals.py:38` claims `sha256=<hex>` "is the shape
-      GitHub, GitLab and Azure DevOps webhooks all produce, so an operator wires this without a
-      translation step"; the route reads `X-Chemclaw-Signature` (`:157`) and requires a
-      `{"note_ids": [...]}` body (`schemas.py:175`), while GitHub sends `X-Hub-Signature-256` with a
-      PR payload and GitLab sends `X-Gitlab-Token`, a raw secret rather than an HMAC.
-      `docs/guides/runbook.md:532` repeats the claim. Either ship the translator or say it is needed.
+- [x] **The proposal webhook cannot be wired to any named git host without a translator** — closed
+      by saying so. The route and the runbook now state that the contract is *ours* and that a
+      translator is required, naming what each host actually sends.
 
-- [ ] **`tests/test_layering.py`'s policy is package-granular, so `durable → connectors` is
-      blanket-allowed** — [S]. `connector_job.py:33`'s central claim — "this module imports nothing
-      from any connector" — is therefore machine-unguarded: importing a bundle's workflow class
-      straight into the wrapper would pass every test. It is true today (0 such imports; the edge
-      comes entirely from `durable/template_activities.py:25`), and the edge's declared reason names
-      the wrong module. A per-module exception list would express it; whether that granularity is
-      worth its maintenance is the decision.
+- [x] **`tests/test_layering.py`'s policy is package-granular, so `durable → connectors` is
+      blanket-allowed** — closed without the granularity. A single-module AST assertion
+      (`test_the_connector_job_wrapper_imports_no_connector`) pins the one claim that was
+      unguarded, and the edge's declared reason now names the module the edge actually comes from.
 
 ## Open — Found by the deeper testing pass (2026-08-04)
 
@@ -126,15 +126,15 @@ Full record with the measurements: `docs/archive/live-full-stack-2026-08-04.md`.
 at once for the first time — real broker, workers, Postgres, front door and model. Four defects
 found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). What it left open:
 
-- [ ] **`compare_solvents` accepts a solvent name that only fails deep inside the durable job** —
-      [S], and it is the root cause behind two of that ADR's three findings rather than a cosmetic
-      one. A chemist said "2-MeTHF" — among the most common process solvents there is — the model
-      passed it faithfully, and the run died ~30 s later inside an activity on
-      `String value for epsilon was not found among database of solvents`. `JobSpec.precondition`
-      exists for exactly this and runs in `prepare_job_launch` *before* any durable work starts, so
-      validating solvent names against the ALPB set would turn a 30-second durable failure into an
-      immediate, correctable message. Deliberately not done in that ADR, which is about the
-      reporting seam; this is the chemistry surface.
+- [x] **`compare_solvents` accepts a solvent name that only fails deep inside the durable job** —
+      closed. All five solvent-taking calc jobs declare
+      `science.calc.solvents:require_supported_solvents`, so an unparameterized name is refused at
+      launch with the closest supported spellings (2-MeTHF → thf/tetrahydrofuran) instead of ~30 s
+      into an activity. The name set was *measured* against tblite rather than recalled — the two
+      rejection messages are different failures ("epsilon was not found" vs "No ALPB/GBSA
+      parameters"), only the intersection runs, and a test re-derives it in both directions. It
+      also retired `xtb_engine.COMMON_SOLVENTS`, which had drifted to omit dmf, dioxane, benzene
+      and nitromethane while claiming to name what process chemistry asks about.
 
 - [ ] **du-03: 29 tool calls, no answer, and the capability never reached** — [M]. The turn now
       says so (`empty_answer`), which is the reporting half. The behavioural half is untouched: it
@@ -143,10 +143,12 @@ found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). W
       retrieval-loop problem, a prose problem, or a 38-note corpus giving it nothing to stop on is
       not yet measured — and the corpus caveat means it cannot be settled on this data alone.
 
-- [ ] **A repeated tool call returning nothing is retried unchanged** — [S]. `find_past_jobs` was
-      called 7-8 times in a single turn across three separate probes. Cheap each time, so it is a
-      turn-latency and token cost rather than a correctness issue (median turn 128-142 s here
-      against 16.9 s on the archived run), but it is the same call with the same arguments.
+- [x] **A repeated tool call returning nothing is retried unchanged** — closed by
+      `agent/repeat_guard.py`: a turn may make the identical call `max_identical_tool_calls` times
+      (2) and is then refused with a message naming the tool and what to do instead, counted by
+      `chemclaw_repeated_tool_calls_total`. It refuses rather than replaying the first result on
+      purpose — `get_durable_job_status` legitimately changes within a turn, so a cached answer
+      would pin a job at "running" for a model that was correctly re-checking.
 
 - [ ] **The full 230-probe corpus has still not been run against a live model** — [M]. This pass
       ran the four `du-*` probes and a two-probe harness slice. The wide sweep needs a corpus worth

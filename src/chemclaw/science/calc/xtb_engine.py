@@ -18,11 +18,12 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from tblite.interface import Calculator
 
+from chemclaw.science.calc.solvents import SUGGESTED_SOLVENTS
+
 # Re-exported: `calc.xtb_opt` annotates the calculator it passes between its own helpers,
 # and this module is the single place tblite is imported from (the unit boundary).
 __all__ = [
     "ANGSTROM_TO_BOHR",
-    "COMMON_SOLVENTS",
     "Calculator",
     "HARTREE_TO_KCAL",
     "engine_version",
@@ -44,25 +45,6 @@ ANGSTROM_TO_BOHR = 1.8897259886
 # this single value, so a truncated copy cannot drift from the rest (see the ADR
 # for this fix).
 HARTREE_TO_KCAL = 627.5094740631
-
-# ALPB solvents named in the error for an unrecognized one. Not the full parameter
-# set — a curated list of the solvents process chemistry actually asks about, which is
-# what a caller who mistyped one needs to see.
-COMMON_SOLVENTS = (
-    "water",
-    "methanol",
-    "ethanol",
-    "acetonitrile",
-    "acetone",
-    "thf",
-    "dmso",
-    "toluene",
-    "chcl3",
-    "ch2cl2",
-    "hexane",
-    "ether",
-    "ethylacetate",
-)
 
 # The tblite result properties any calculator here reads. Named explicitly rather than
 # taking the whole result: it also carries the density matrix and orbital coefficients,
@@ -245,9 +227,14 @@ def make_calculator(
             # database of solvents") names an implementation detail rather than the
             # mistake, and an unrecognized solvent is the easy typo on every solvated
             # call. Name the argument and give the common process solvents (G4).
+            #
+            # This is now the *second* line of defence rather than the only one: a durable
+            # calc job is refused at launch by `solvents.require_supported_solvents`, so a
+            # name reaching here came through a direct in-process call. The two share one
+            # shortlist so they cannot disagree about what the method supports.
             raise ValueError(
                 f"unknown ALPB solvent {solvent!r}; common valid names are "
-                f"{', '.join(COMMON_SOLVENTS)}"
+                f"{', '.join(SUGGESTED_SOLVENTS)}"
             ) from error
     return calc
 
