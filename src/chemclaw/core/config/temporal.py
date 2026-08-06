@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -31,7 +31,7 @@ class TemporalSettings(BaseSettings):
     temporal_tls_cert: str = ""
     temporal_tls_key: str = ""
     temporal_tls_ca: str = ""
-    temporal_api_key: str = ""
+    temporal_api_key: SecretStr = SecretStr("")
 
     # Core's own task queue: the light background jobs (sync, re-index, reports, and the
     # connector-job wrapper). A name is config so a deployment can shard or rename it without

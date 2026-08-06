@@ -255,6 +255,12 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     in-cluster call between our own pods, which is the case workload identity does not cover. Its
     polarity is the four-key one — absent, the front door refuses to start against a non-loopback
     connector rather than degrading quietly.
+
+    The artifact-store token is the eighth, and it is the one whose *absence* had no expression at
+    all. `nextflow._artifact_headers` already refuses to send the launcher credential to a store on
+    a different origin — that token can launch and cancel pipelines — so a cross-origin store was
+    fetched unauthenticated with no way for an operator to say otherwise. Absent still means exactly
+    that, which is why this shares the webhook secret's polarity rather than the four-key one.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -264,6 +270,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
         "CHEMCLAW_AUDIT_ANCHOR_SECRET",
         "CHEMCLAW_CONNECTOR_TOKEN",
+        "CHEMCLAW_HPC_ARTIFACT_STORE_TOKEN",
     }
 
 

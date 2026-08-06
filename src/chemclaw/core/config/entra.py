@@ -70,6 +70,16 @@ class EntraSettings(BaseSettings):
     # documented exception and does NOT use this path. `entra_token_refresh_leeway_seconds`
     # refreshes a cached token before it actually expires; `entra_http_timeout_seconds` bounds
     # the token/OBO HTTP calls.
+    #
+    # **Nothing in `src/` calls it yet: this flag turns on a mechanism, not a behaviour.**
+    # `WorkloadTokenProvider` has no production caller and its only importer (`identity/obo.py`) has
+    # none either — both consumers are the same tenant-blocked pair: the connector `entra_workload`
+    # /`entra_obo` auth modes, and per-user warehouse reads. Enabling it therefore changes nothing
+    # today, in either direction. It is left enabled in the chart because the *pod-side* half is
+    # real — the ServiceAccount annotation and the projected token it depends on have to be in place
+    # before the first caller lands — but the documents that presented federation as the reason few
+    # plain secrets are needed have been corrected: the plain secrets that exist are exactly those
+    # federation cannot supply, and today that is all of them.
     entra_workload_federation_enabled: bool = False
     entra_workload_client_id: str = ""
     entra_token_endpoint: str = ""

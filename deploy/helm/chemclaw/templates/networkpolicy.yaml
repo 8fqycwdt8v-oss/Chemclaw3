@@ -27,6 +27,18 @@ spec:
   policyTypes:
     - Egress
   egress:
+    {{- /* Validated before anything is emitted: an empty destination list renders `to: []`, which
+           a NetworkPolicy reads as *any* destination. That is still the shipped behaviour — this
+           chart cannot invent a deployment's Postgres CIDR — but it is no longer reachable by
+           omission. Leaving the list empty now requires `allowEgressAnywhere`, so the permissive
+           state is a value someone wrote rather than one they inherited: the same shape as the
+           front door's `service_allow_insecure` and the connector channel's own opt-out.
+
+           Above the DNS rule rather than beside the destinations, so the refusal is about the
+           whole policy and cannot land inside the rule that keeps name resolution separate. */}}
+    {{- if and (not .Values.networkPolicy.egressDestinations) (not .Values.networkPolicy.allowEgressAnywhere) }}
+      {{- fail "networkPolicy.egressDestinations is empty, which permits egress to ANY destination on the listed ports. Set it to your real peers (ipBlock / namespaceSelector entries), or set networkPolicy.allowEgressAnywhere=true to accept unrestricted egress deliberately." }}
+    {{- end }}
     {{- /* DNS to the cluster, separated from the rule below so narrowing the destinations can
            never accidentally take name resolution with it — a policy that blocks DNS fails in a
            way that looks like every dependency being down at once. */}}
@@ -113,10 +125,20 @@ spec:
           port: {{ .Values.service.port }}
 ---
 {{- end }}
-{{- /* Connectors accept traffic only from Chemclaw's own pods. This is the boundary that makes the
-       advisory X-Chemclaw-* identity headers safe: they are not authorization, so a connector must
-       not be reachable by anything that could forge them. Authorization itself stays in core
-       (`agents.tool_authz`) — this policy is the second lock, not the first. */ -}}
+{{- /* Connectors accept traffic only from Chemclaw's own pods.
+
+       This comment used to call itself "the boundary that makes the advisory X-Chemclaw-* identity
+       headers safe", and that was the finding rather than the reassurance: a NetworkPolicy was the
+       *only* thing standing between any pod on the network and a connector's whole tool surface,
+       including the actor header a bundle stamps into `bo_campaigns` as durable attribution. A
+       control nothing verified was carrying the weight of one that should have.
+
+       It is now the second lock it always described itself as. The first is the fleet credential
+       (`CHEMCLAW_CONNECTOR_TOKEN_ENV`): a connector Service refuses a request that does not present
+       it, and the front door refuses to start against a non-loopback connector that has none.
+       Authorization itself still stays in core (`agent.tool_authz`) — this policy bounds who may
+       reach the port, the credential establishes who is asking, and neither decides what they may
+       do. */ -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

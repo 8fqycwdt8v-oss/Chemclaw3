@@ -149,7 +149,10 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
     """Embed via the internal OpenAI-compatible endpoint (reuses the chat transport config)."""
     client = _openai_client(
         settings.llm_base_url,
-        settings.llm_api_key,
+        # `get_secret_value()`, and mypy cannot see that it is needed: `lru_cache` erases the
+        # wrapped signature to `Hashable` in typeshed, so passing the `SecretStr` itself
+        # type-checks and then reaches the endpoint as a masked object.
+        settings.llm_api_key.get_secret_value(),
         settings.llm_timeout_seconds,
         settings.llm_max_retries,
         settings.llm_tls_ca_bundle,

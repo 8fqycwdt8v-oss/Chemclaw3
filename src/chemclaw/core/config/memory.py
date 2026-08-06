@@ -6,7 +6,7 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -96,7 +96,7 @@ class MemorySettings(BaseSettings):
     # truncation, and cannot see a *trailing* deletion — the survivors link cleanly. A point-in-time
     # restore is a trailing deletion, so without this a documented recovery procedure silently
     # shortens the compliance trail every time it is used.
-    audit_anchor_secret: str = ""
+    audit_anchor_secret: SecretStr = SecretStr("")
     audit_verify_page_rows: int = Field(default=5000, ge=1)
     # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this
     # long for its result and continue the *same* turn with it, so "compute this, then reason

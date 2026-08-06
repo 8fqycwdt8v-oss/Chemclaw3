@@ -61,7 +61,7 @@ def _webhook_signature_ok(body: bytes, header: str) -> bool:
     secret = settings.note_webhook_secret
     if not secret or not header.startswith("sha256="):
         return False
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    expected = hmac.new(secret.get_secret_value().encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
 
 

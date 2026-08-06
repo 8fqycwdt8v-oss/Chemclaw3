@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -37,7 +37,7 @@ class LlmSettings(BaseSettings):
     llm_provider: Literal["openai_compatible", "anthropic"] = "anthropic"
     llm_base_url: str = ""
     llm_model: str = ""
-    llm_api_key: str = ""
+    llm_api_key: SecretStr = SecretStr("")
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)

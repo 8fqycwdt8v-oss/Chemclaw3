@@ -1202,3 +1202,54 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     assert referenced, "no PromQL expressions were parsed — the extraction is broken, not the rules"
     unknown = referenced - declared
     assert not unknown, f"alerts reference metrics the app never emits: {sorted(unknown)}"
+
+
+def test_every_pod_template_carries_the_workload_identity_label() -> None:
+    """The label that makes a pod's projected ServiceAccount token available, on every pod spec.
+
+    `deployment-connectors.yaml` was the one template without it, and the `qm` bundle — the one
+    that talks to HPC — is served by it. Nothing asserted the label anywhere, which is exactly how
+    a per-template omission survives: four templates had it, one did not, and the difference was
+    invisible to the suite.
+
+    Discovered from the templates rather than listed, so a sixth pod spec is covered on the day it
+    is added. Federation has no production caller yet (`deploy/README.md` says so plainly now) —
+    but the pod-side half has to be in place before the first one lands, and a missing label would
+    surface as an authentication failure nowhere near its cause.
+    """
+    label = 'azure.workload.identity/use: "true"'
+    offenders = []
+    for path in sorted((CHART / "templates").glob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        # A pod spec is a template that declares a container list under a pod template.
+        if "serviceAccountName:" not in text:
+            continue
+        if label not in text:
+            offenders.append(path.name)
+    assert not offenders, (
+        f"pod templates without the workload-identity label: {offenders}. "
+        "Their pods get no projected token, so anything that federates fails there and only there."
+    )
+
+
+def test_unrestricted_egress_must_be_stated_rather_than_inherited() -> None:
+    """`to: []` means *anywhere*, and reaching that by omission is what this removes.
+
+    The underlying gap is not closed and cannot be from here: narrowing egress needs the
+    deployment's own CIDRs, and a chart that invented a Postgres subnet would be worse than one
+    that admits it does not know. What changes is that the permissive state is now a value someone
+    wrote — greppable in review and in a diff — instead of the default reading of an empty list.
+
+    Both halves are asserted, because either alone is satisfiable by the wrong chart: the guard
+    exists in the template, *and* the shipped values answer it explicitly.
+    """
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
+    assert "allowEgressAnywhere" in policy, "the guard is gone; an empty list is permissive again"
+    assert "fail " in policy, "the guard no longer refuses to render"
+
+    values = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    network = values["networkPolicy"]
+    assert network["egressDestinations"] or network["allowEgressAnywhere"], (
+        "the shipped values would refuse to render, which is the one outcome this must not cause: "
+        "state real destinations or say `allowEgressAnywhere` out loud"
+    )

@@ -31,12 +31,22 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 - **Plain secrets are the exceptions, not the model.** Each is a credential for a system that does
   not speak Entra, and the set is `values.yaml`'s `secrets.keys` — declared there with the argument
   for each one written beside it, and pinned by `tests/test_helm_chart.py`. The Temporal mTLS certs
-  are the one that is not env: they mount as files. Everything that *can* federate does: **Workload
-  Identity Federation** (F4-T2) annotates the pod's ServiceAccount so its projected token is
-  exchanged for an Entra token, with no client secret at rest.
+  are the one that is not env: they mount as files.
   (This section said "only three" from F6-T6, then "five", while the real number reached six —
   which is the whole reason the count now lives in the chart and the test rather than in this
   sentence. It had already said so, in the sentence after the one that restated it.)
+- **Workload Identity Federation is provisioned, not yet load-bearing.** (F4-T2) The chart annotates
+  the pods' ServiceAccount so a projected token is available to exchange for an Entra token with no
+  client secret at rest, and `agent/identity/workload.py` implements that exchange. **Nothing calls
+  it.** Its only importer is the dormant on-behalf-of path, and both of its intended consumers — the
+  connector `entra_workload`/`entra_obo` auth modes, and per-user reads from the warehouse ELN — wait
+  on a real tenant.
+  This paragraph previously read "everything that *can* federate does", offered as the reason so few
+  plain secrets are needed. That had the argument backwards: the plain secrets that exist are exactly
+  the ones federation *cannot* supply — a credential for a system that does not speak Entra (the LLM
+  endpoint, the git host, the HPC launcher and its artifact store), a shared secret a git host signs
+  with, a key held out of reach of the database it protects, and the credential our own pods present
+  to each other. Federation removes none of those, today or once it is wired.
 - Populate them via `ExternalSecret`/`SealedSecret`; the chart only *names* them.
 
 #### The one Secret that is files, not env

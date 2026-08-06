@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -46,7 +46,7 @@ class HpcSettings(BaseSettings):
     # version under `nextflow` — see it for why that is a cache rule and not a connectivity one.
     hpc_launch_interface: Literal["mock", "nextflow"] = "mock"
     hpc_api_base_url: str = ""
-    hpc_api_token: str = ""
+    hpc_api_token: SecretStr = SecretStr("")
     hpc_pipeline_name: str = ""
     hpc_pipeline_version: str = ""
     hpc_artifact_store_url: str = ""
@@ -73,7 +73,7 @@ class HpcSettings(BaseSettings):
     # the launcher token must never be sent to a third host (F4 three-secret model). Empty means
     # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
     # which case the launcher token still applies.
-    hpc_artifact_store_token: str = ""
+    hpc_artifact_store_token: SecretStr = SecretStr("")
     # Persist a finished QM result in the shared calculation store (D-158). On by default, which
     # is the *un*usual choice for a new flag here and deliberate: D-011 already says every result
     # is persisted once and never recomputed, and `qm` was the one capability not doing it — so

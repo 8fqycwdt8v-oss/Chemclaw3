@@ -928,19 +928,37 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       partitioning — and once the port refuses unauthenticated callers, the exposure the row
       described is closed by the channel rather than by the list. The Entra auth modes are
       unchanged: they still need the tenant that blocks every other live Entra edge.
-- [ ] **Egress is still port-scoped by default** — [S]. D-158 made destinations declarable
-      (`networkPolicy.egressDestinations`) but left the default empty, which renders `to: []` — any
-      destination on those ports. Closing it needs the operator's real CIDRs; until a deployment
-      sets them, `tests/test_no_egress.py` remains a source-scan rather than a control.
-- [ ] **Workload identity federation is dead code the docs lean on** — [M]. `identity/workload.py`
-      has no production caller (only its test and the dormant `obo.py`), while `values.yaml` enables
-      it and `deploy/README.md` presents it as *the reason* only three plain secrets are needed.
-      Either wire it or correct the documents; also `deployment-connectors.yaml` is the one pod spec
-      missing the `azure.workload.identity/use` label, on the `qm` worker that talks to HPC.
-- [ ] **Secrets are plain `str`, never rotated** — [M]. No `SecretStr` anywhere; `llm_api_key`,
-      `hpc_api_token`, `temporal_api_key` and the DSN are one `logger.debug("%s", settings)` from a
-      log. The "three-secret model" is four in `values.yaml`, and `hpc_artifact_store_token` has no
-      chart key at all — so a cross-origin artifact store is fetched unauthenticated.
+- [ ] **Egress is still port-scoped by default** — [S], **narrowed, not closed**. Unrestricted
+      egress is no longer *inherited*: an empty `egressDestinations` now requires
+      `allowEgressAnywhere` or the chart refuses to render, naming both ways out
+      (D-2026-08-06-a-secret-that-masks-itself-when-you-forget) — the shape
+      `service_allow_insecure` and the connector opt-out already use. What remains is what the row
+      always said: narrowing needs the operator's real CIDRs, and until a deployment sets them
+      `tests/test_no_egress.py` is a source scan rather than a control. Deriving them from the
+      chart's own Service addresses was considered and rejected: the Postgres host lives in a
+      *secret*, so a derived policy would silently black-hole database traffic.
+- [x] **Workload identity federation is dead code the docs lean on** — closed by
+      D-2026-08-06-a-secret-that-masks-itself-when-you-forget, by taking the documents half: nothing
+      offline can legitimately call it (both consumers — the connector `entra_workload`/`entra_obo`
+      modes and per-user warehouse reads — wait on the same tenant), so "wire it" was never
+      available. `deploy/README.md`'s "everything that *can* federate does", offered as the reason so
+      few plain secrets are needed, had the argument backwards: the plain secrets that exist are
+      exactly the ones federation **cannot** supply, and it removes none of them once wired. The
+      missing `azure.workload.identity/use` label is added to every connector pod, and a test now
+      asserts it on every pod spec that names a ServiceAccount — nothing asserted it anywhere, which
+      is how four templates carried it and one did not.
+- [~] **Secrets are plain `str`, never rotated** — the six credential fields are `SecretStr` and
+      `hpcArtifactStoreToken` has its chart key
+      (D-2026-08-06-a-secret-that-masks-itself-when-you-forget). **The three DSNs deliberately stay
+      `str`**: they are read directly in 26 modules, which is the same duplication the store-seam row
+      records as "the connect helper is hand-rolled 14 times", so converting now means writing 26
+      `.get_secret_value()` calls to delete 25 when the helper lands. They keep the redactor's
+      coverage meanwhile. **What the measurement changed:** the row's stated hazard (a repr in a log)
+      was already covered by the redactor — what is *not* covered is every non-log path, and `repr`,
+      `str`, `model_dump` and a JSON dump each leaked. And the conversion's own failure is silent:
+      an f-string, an `Any`-typed sink and an `lru_cache`-wrapped callee all render a `SecretStr` as
+      its mask while type-checking cleanly, so `mypy` found three of four sites and an AST guard now
+      covers the shape.
 - [x] **One database credential can rewrite the audit chain** — closed by
       D-2026-08-05-append-only-by-grant-not-by-contract. `postgres_migration_dsn` splits the schema
       owner from the runtime role; `infra/sql/grants/` grants the runtime role exactly the verbs

@@ -112,7 +112,9 @@ class Anchor(BaseModel):
 def sign(anchor: Anchor) -> str:
     """The HMAC-SHA256 of `anchor`'s payload under the configured secret."""
     return hmac.new(
-        settings.audit_anchor_secret.encode(), anchor.payload().encode(), hashlib.sha256
+        settings.audit_anchor_secret.get_secret_value().encode(),
+        anchor.payload().encode(),
+        hashlib.sha256,
     ).hexdigest()
 
 

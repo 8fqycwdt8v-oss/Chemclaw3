@@ -61,7 +61,7 @@ def _openai_compatible_client(model: str | None = None) -> Any:
 
     async_client = AsyncOpenAI(
         base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key or _KEYLESS_PLACEHOLDER,
+        api_key=settings.llm_api_key.get_secret_value() or _KEYLESS_PLACEHOLDER,
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         http_client=_tls_http_client(),

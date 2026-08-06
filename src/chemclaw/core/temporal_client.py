@@ -72,7 +72,9 @@ def connect_options() -> dict[str, Any]:
     if tls is not None:
         options["tls"] = tls
     if settings.temporal_api_key:
-        options["api_key"] = settings.temporal_api_key
+        # The secret's *value*: this dict is `Any`-typed, so handing it the `SecretStr` itself would
+        # type-check and then reach the broker as a masked object.
+        options["api_key"] = settings.temporal_api_key.get_secret_value()
     return options
 
 

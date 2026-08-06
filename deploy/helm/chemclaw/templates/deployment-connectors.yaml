@@ -35,6 +35,13 @@ spec:
       labels:
         {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/component: connector-{{ $name }}
+        {{- /* The one pod spec that was missing this, and the `qm` bundle — which talks to HPC —
+               is served by it. The label is what makes the projected ServiceAccount token
+               available to the pod; without it a bundle that ever needs to federate cannot, and
+               the failure would appear as an authentication error nowhere near its cause. Applied
+               to every connector rather than to `qm` alone: which bundle needs a federated
+               credential is a property of what it talks to, not of this template. */}}
+        azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
       {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}

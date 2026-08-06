@@ -94,22 +94,29 @@ which legitimately calls index tools outside the agent's subset.
 *Backlog: "Secrets are plain `str`, never rotated" [M]; "Workload identity federation is dead code
 the docs lean on" [M]; "Egress is still port-scoped by default" [S].*
 
-- [ ] No `SecretStr` anywhere: `llm_api_key`, `hpc_api_token`, `temporal_api_key` and the DSN are one
-      `logger.debug("%s", settings)` from a log. Convert them, keeping `core/db.py::_redact` and the
-      D-2026-08-06 traceback redactor as the second layer rather than the only one.
-- [ ] `hpc_artifact_store_token` has no chart key at all, so a cross-origin artifact store is fetched
-      unauthenticated. Add the key; the "three-secret model" prose is already corrected — the count
-      lives in the test.
-- [ ] `identity/workload.py` has no production caller while `values.yaml` enables it and
-      `deploy/README.md` presents it as *the reason* only three plain secrets are needed. Decide in
-      the ADR: wire it, or correct both documents. `deployment-connectors.yaml` is missing the
-      `azure.workload.identity/use` label on the `qm` worker either way.
-- [ ] `networkPolicy.egressDestinations` defaults empty and renders `to: []` — any destination on
-      those ports. Ship a default that fails closed with a named override, so
-      `tests/test_no_egress.py` stops being a source scan.
+- [x] Six credential fields converted. **Measured first**: the redactor already covers the row's
+      stated hazard (a repr in a log), and what it cannot cover is every non-log path — `repr`,
+      `str`, `model_dump` and JSON each leaked. The conversion's own failure is silent (an f-string,
+      an `Any` sink and an `lru_cache` callee each render the mask while type-checking), so an AST
+      guard plus value-level assertions cover the shape `mypy` cannot.
+- [x] **The three DSNs deliberately deferred to WP-10**: read directly in 26 modules, which is that
+      package's own duplication — converting first writes 26 call sites to delete 25.
+- [x] `hpcArtifactStoreToken` added as the eighth secret key, argued in the test beside the others.
+- [x] Documents corrected — "wire it" was never available, since both consumers are tenant-blocked.
+      `deploy/README.md`'s claim had the argument backwards: the plain secrets that exist are exactly
+      the ones federation cannot supply. Label added to every connector pod, with a test asserting it
+      on every pod spec that names a ServiceAccount.
+- [~] **Narrowed, not closed, and the row stays open saying so.** Unrestricted egress is no longer
+      inherited — an empty list now requires `allowEgressAnywhere` or the chart refuses to render.
+      Narrowing itself needs the operator's CIDRs; deriving them from the chart's own addresses was
+      rejected because the Postgres host is in a *secret*, so a derived policy would silently
+      black-hole database traffic.
 
-**Acceptance**: a settings repr contains no secret value; a chart rendered with no
-`egressDestinations` does not permit arbitrary destinations.
+**Acceptance**: a settings repr contains no secret value (met, and asserted in four render shapes).
+The second half is **met differently than written**: a chart with no `egressDestinations` still
+permits arbitrary destinations, and now refuses to render unless the operator says so — because
+narrowing needs addresses this chart must not invent. Record:
+`D-2026-08-06-a-secret-that-masks-itself-when-you-forget`.
 
 ### WP-5 · Untrusted content that reaches the model unframed
 *Backlog: the four framing rows [M/M/L/L].*

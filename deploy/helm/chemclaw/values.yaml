@@ -415,6 +415,13 @@ secrets:
     # `bo_campaigns` (D-2026-08-06 authorization lane). Absent, the front door refuses to start
     # against a non-loopback connector unless `CHEMCLAW_SERVICE_ALLOW_INSECURE` says so out loud.
     connectorToken: "CHEMCLAW_CONNECTOR_TOKEN"
+    # The artifact store's own credential, for the case the code already handles and the chart had
+    # no key for: a store on a *different origin* than the launcher. `nextflow._artifact_headers`
+    # refuses to send the launcher token across origins — it can launch and cancel pipelines, so
+    # handing it to a third host is the leak that rule exists to prevent — and with no key here the
+    # only remaining behaviour was to fetch unauthenticated. Absent is still legal and still means
+    # exactly that; what was missing was any way to say otherwise.
+    hpcArtifactStoreToken: "CHEMCLAW_HPC_ARTIFACT_STORE_TOKEN"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the
@@ -529,6 +536,16 @@ networkPolicy:
   #   - namespaceSelector: {matchLabels: {name: temporal}}
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
   egressDestinations: []
+  # Leaving `egressDestinations` empty is permitted only by saying so here. It renders the same
+  # `to: []` it always did — the chart still cannot invent your Postgres CIDR, and this does not
+  # close the gap — but the permissive state stops being an *unremarked* default and becomes a
+  # value someone wrote, greppable in review and in a diff. Set `egressDestinations` and this is
+  # ignored; set neither and the chart refuses to render, naming both ways out.
+  #
+  # The same shape as `CHEMCLAW_SERVICE_ALLOW_INSECURE` and the connector channel's own opt-out: a
+  # deployment may have a boundary this chart cannot see, and it should have to say so out loud
+  # rather than inherit permission from an empty list.
+  allowEgressAnywhere: true
   # Namespaces allowed to reach the front door, beyond Chemclaw's own pods. The router needs it for
   # the Route to work and the monitoring stack needs it to scrape `/metrics`. This rule bounds which
   # *peers* may open a connection to the port — it does not, and cannot, bound paths, so it is not
