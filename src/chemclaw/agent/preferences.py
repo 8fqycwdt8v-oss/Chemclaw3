@@ -69,20 +69,31 @@ class PreferenceStore:
         ) as conn:
             yield conn
 
-    async def remember(self, owner: str, key: str, value: str) -> None:
-        """Set (or replace) one preference for `owner`. Idempotent by (owner, key)."""
+    async def remember(self, owner: str, key: str, value: str) -> bool:
+        """Set (or replace) one preference for `owner`. Idempotent by (owner, key).
+
+        Returns whether it was stored *as durably as this deployment is configured for* — True in
+        memory mode, where memory is the configured store, and True in Postgres mode only if the
+        row was actually written.
+
+        The caller needs that distinction because the failure is invisible from the outside: the
+        in-memory copy is updated first and always succeeds, so the chemist's *current* session
+        behaves correctly while the preference silently will not survive it. Swallowing the error
+        is still right — a lost preference must degrade personalization, not fail a turn — but
+        answering "Remembered for future sessions" afterwards is not.
+        """
         self._memory[(owner, key)] = value
         if settings.session_store != "postgres":
-            return
+            return True
         try:
             async with self._connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_UPSERT, (owner, key, value))
                 await conn.commit()
         except Exception:
-            # A preference is a convenience, never the system of record for anything: losing one
-            # must degrade personalization, not fail the chemist's turn.
             logger.warning("could not persist preference %r for %s", key, owner, exc_info=True)
+            return False
+        return True
 
     async def recall(self, owner: str) -> list[Preference]:
         """Every preference `owner` has set, key-sorted (stable for the model to read)."""
@@ -95,17 +106,31 @@ class PreferenceStore:
                 return [Preference(key=row[0], value=row[1]) for row in rows]
             except Exception:
                 logger.warning("could not read preferences for %s", owner, exc_info=True)
+                if not any(row_owner == owner for row_owner, _key in self._memory):
+                    # Falling back to memory is right when memory has something — it is this
+                    # process's own view of the same preferences. But an *empty* fallback after a
+                    # failed read is not "this chemist has no preferences", which is exactly how
+                    # an empty list reads to the model; it is "I could not find out". A wrong
+                    # answer is worse than a failed one, because the chemist then re-states
+                    # preferences that also will not persist.
+                    raise
         return [
             Preference(key=key, value=value)
             for (row_owner, key), value in sorted(self._memory.items())
             if row_owner == owner
         ]
 
-    async def forget(self, owner: str, key: str) -> None:
-        """Drop one preference — a chemist must be able to take a preference back."""
+    async def forget(self, owner: str, key: str) -> bool:
+        """Drop one preference — a chemist must be able to take a preference back.
+
+        Returns whether the deletion reached the configured store. The failure mode here is the
+        worse direction of the two: the in-memory copy is gone, so the preference *looks* removed
+        for the rest of this session and then reappears from Postgres on the next one. A chemist
+        who asked for something to be forgotten and was told it was must not find it back.
+        """
         self._memory.pop((owner, key), None)
         if settings.session_store != "postgres":
-            return
+            return True
         try:
             async with self._connection() as conn:
                 async with conn.cursor() as cur:
@@ -113,6 +138,8 @@ class PreferenceStore:
                 await conn.commit()
         except Exception:
             logger.warning("could not delete preference %r for %s", key, owner, exc_info=True)
+            return False
+        return True
 
 
 # One process-wide store, like the audit sink's default: the tools below need it without threading
@@ -141,8 +168,13 @@ async def remember_preference(key: str, value: str) -> str:
         Confirmation of what was stored.
     """
     owner = require_actor()
-    await _STORE.remember(owner, key, value)
-    return f"Remembered {key}={value!r} for this chemist."
+    if await _STORE.remember(owner, key, value):
+        return f"Remembered {key}={value!r} for this chemist."
+    return (
+        f"Remembered {key}={value!r} for THIS SESSION ONLY — it could not be saved durably, so it "
+        "will be gone once this session ends. Tell the chemist that, so they can restate it later "
+        "rather than believing it is on file."
+    )
 
 
 @tool
@@ -170,5 +202,10 @@ async def forget_preference(key: str) -> str:
         Confirmation.
     """
     owner = require_actor()
-    await _STORE.forget(owner, key)
-    return f"Forgot {key} for this chemist."
+    if await _STORE.forget(owner, key):
+        return f"Forgot {key} for this chemist."
+    return (
+        f"Dropped {key} for THIS SESSION ONLY — the deletion could not be saved, so the preference "
+        "will come back in the chemist's next session. Tell them it is not yet permanently "
+        "removed; this is the direction of failure they most need to know about."
+    )
