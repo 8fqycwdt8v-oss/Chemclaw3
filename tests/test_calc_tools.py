@@ -121,3 +121,60 @@ def test_predict_logd_tool_defaults_ph_and_reuses_pka(monkeypatch: pytest.Monkey
         assert result.uncertainty > 0
 
     asyncio.run(_run())
+
+
+def test_report_measurement_never_claims_a_store_that_did_not_happen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the ledger disabled — the **default** — the tool must not answer "Recorded".
+
+    `calibration_enabled` is False out of the box, and `record_observation` returned `0` for both
+    "disabled, stored nothing" and "stored it, nothing had predicted it". The tool read that single
+    zero as the second and told the chemist "the measurement is kept and the next prediction of it
+    will be scored against this value" — in every unconfigured deployment, on every call, while no
+    table was touched at all.
+
+    Nothing exercised this message, which is why it survived. Set `calibration_enabled` True and
+    the assertion below still holds for the right reason: the store then really happens.
+    """
+    monkeypatch.setattr(settings, "calibration_enabled", False)
+    answer = asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
+    assert "NOT recorded" in answer
+    assert "not stored" in answer
+    # The exact phrase the old branch used, which a reader acts on.
+    assert "the measurement is kept" not in answer
+
+
+def test_report_measurement_surfaces_a_failed_write_instead_of_swallowing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A database failure must reach the caller, not be logged and reported as success.
+
+    `record_prediction` swallows its errors and is right to: a prediction row is advice *about*
+    work that already happened, so losing it must not cost the calculation. `record_observation`
+    had inherited the same `except Exception` and it is wrong there — the measurement is the
+    entire deliverable of the call, so swallowing turns the tool's only job into a false success
+    (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed).
+    """
+    monkeypatch.setattr(settings, "calibration_enabled", True)
+
+    def _explode(*_args: object, **_kwargs: object) -> object:
+        raise ConnectionError("database is down")
+
+    monkeypatch.setattr("chemclaw.science.calc.calibration.db.connection", _explode)
+    with pytest.raises(ConnectionError):
+        asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
+
+
+def test_a_disabled_ledger_is_none_and_a_stored_unpredicted_value_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The contract the caller depends on: `None` is "not stored", `0` is "stored, none matched".
+
+    Pinned separately from the tool because it is the distinction the tool's honesty rests on —
+    collapsing them back to a single `0` is exactly the regression this file exists to catch.
+    """
+    from chemclaw.science.calc import calibration
+
+    monkeypatch.setattr(settings, "calibration_enabled", False)
+    assert asyncio.run(calibration.record_observation("pka", "h", 1.0, source="bench")) is None

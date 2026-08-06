@@ -21,6 +21,18 @@ class AgentSettings(BaseSettings):
     is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
     """
 
+    # Suffix for the `<retrieved-note-...>` envelope that marks untrusted retrieved content as
+    # data rather than instructions (`agent/framing.py`). Empty (the default) makes it a random
+    # per-*process* value, which is right for dev and tests and is what every deployment has had.
+    #
+    # Set it for any deployment with durable sessions. `session_store="postgres"` history outlives
+    # the process that wrote it and is replayed by other replicas, and the agent instructions say
+    # only an envelope with *exactly* the current tag marks retrieved data — so envelopes written
+    # by a previous process are read as ordinary content, and the injection mitigation silently
+    # lapses for the oldest material. A deployment-wide value keeps one tag across every pod and
+    # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
+    framing_envelope_secret: str = ""
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from its own env var
     # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers
