@@ -33,6 +33,8 @@ from collections.abc import Iterable
 from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+from starlette.routing import Route
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import require_principal
@@ -54,15 +56,38 @@ _PROBE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _api_routes(app: FastAPI) -> Iterable[APIRoute]:
-    """Every `APIRoute` the app declares — skips the mounted static files and `/openapi.json`.
+# The other surface: routes FastAPI serves that are *not* `APIRoute`s and therefore carry no
+# `dependant` for `require_principal` to sit in. They cannot be gated, so the only safe statement
+# about them is that there is exactly one and we know what it is.
+#
+# This declaration exists because excluding them silently is how `/openapi.json` stayed
+# unauthenticated: `openapi_url` defaults to a plain `Route`, the sweep below skipped it for the
+# perfectly true reason that it has no dependency tree, and the full route/parameter/model surface
+# was readable by anyone who could reach the pod. `create_app` now passes `openapi_url=None`; this
+# is what stops it — or any other ungatable route — from coming back unnoticed.
+_UNGATABLE_SURFACE: frozenset[tuple[str, str]] = frozenset({("Mount", "")})
 
-    Both are `Route`/`Mount` instances rather than `APIRoute`, so this filter excludes them for
-    free rather than by name: neither carries a `dependant` FastAPI could gate in the first place.
+
+def _api_routes(app: FastAPI) -> Iterable[APIRoute]:
+    """Every `APIRoute` the app declares — skips anything with no dependency tree to inspect.
+
+    Non-`APIRoute` entries (`Route`, `Mount`) carry no `dependant` FastAPI could gate, so this
+    filter excludes them for free rather than by name. What they are is pinned separately by
+    `test_the_ungatable_surface_is_exactly_the_static_mount`; excluding them here without pinning
+    them there is precisely the gap that left `/openapi.json` open.
     """
     for route in app.routes:
         if isinstance(route, APIRoute):
             yield route
+
+
+def _ungatable_surface(app: FastAPI) -> set[tuple[str, str]]:
+    """Every non-`APIRoute` entry as `(class name, path)` — the surface no dependency can gate."""
+    return {
+        (type(route).__name__, getattr(route, "path", ""))
+        for route in app.routes
+        if not isinstance(route, APIRoute)
+    }
 
 
 def _requires_principal(dependant: Dependant) -> bool:
@@ -122,6 +147,45 @@ def test_the_probe_allowlist_names_exactly_the_open_routes() -> None:
     in their tree, so widening it silently is itself a failure.
     """
     assert set(_unauthenticated_routes(_built_app())) == set(_PROBE_ALLOWLIST)
+
+
+def test_the_ungatable_surface_is_exactly_the_static_mount() -> None:
+    """Nothing but the static UI mount may be served outside the gateable route set.
+
+    The sweep above can only speak for routes that *have* a dependency tree. This speaks for the
+    rest: if a future change re-enables `openapi_url`, mounts a second sub-app, or adds a bare
+    `Route`, that entry appears here and this fails with its name — rather than being skipped for
+    the true-but-insufficient reason that it has nothing to gate.
+    """
+    assert _ungatable_surface(_built_app()) == set(_UNGATABLE_SURFACE)
+
+
+def test_the_openapi_schema_is_not_served() -> None:
+    """`/openapi.json` must 404: it is the concrete route this file failed to see (review finding).
+
+    Asserted through the real ASGI stack rather than by reading `app.openapi_url`, because what
+    matters is what a caller can fetch with no credential — the schema documents every route,
+    parameter and model the service has.
+    """
+    with TestClient(_built_app()) as client:
+        assert client.get("/openapi.json").status_code == 404
+
+
+def test_mutation_proof_re_enabling_the_openapi_route_fails_the_surface_check() -> None:
+    """Prove the surface check catches the exact regression it was written for.
+
+    Re-registers the schema route the way FastAPI would if `openapi_url` were set again; the check
+    must name it. Without this, the assertion above is a test that has never been seen to fail.
+    """
+    app = _built_app()
+
+    async def _schema(_request: object) -> None:  # pragma: no cover - never called
+        raise AssertionError("not invoked")
+
+    app.router.routes.append(Route("/openapi.json", endpoint=_schema, include_in_schema=False))
+    surface = _ungatable_surface(app)
+    assert ("Route", "/openapi.json") in surface
+    assert surface != set(_UNGATABLE_SURFACE)
 
 
 def _add_unguarded_route(app: FastAPI) -> None:

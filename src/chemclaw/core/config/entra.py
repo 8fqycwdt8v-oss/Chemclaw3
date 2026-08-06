@@ -76,6 +76,14 @@ class EntraSettings(BaseSettings):
     entra_sa_token_path: str = "/var/run/secrets/azure/tokens/azure-identity-token"
     entra_token_refresh_leeway_seconds: float = Field(default=300.0, gt=0)
     entra_http_timeout_seconds: float = Field(default=10.0, gt=0)
+    # How long the front door waits between JWKS re-fetches forced by a token whose `kid` is not
+    # in the cached key set. PyJWT re-fetches on *every* such miss, and the `kid` is chosen by an
+    # unauthenticated caller, so without a floor one credential-less request becomes one outbound
+    # request to the tenant IdP — an amplifier that also queues on the validation thread pool.
+    # The cost is rotation latency: a genuinely new signing key is picked up after at most this
+    # long instead of on the first token that uses it. That is bounded and configurable, and the
+    # 300 s `lifespan` of the key cache already admits staleness of its own.
+    entra_jwks_refresh_cooldown_seconds: float = Field(default=60.0, ge=0)
     # On-Behalf-Of exchange (plan F4-T4): when a backend acts for a specific user against a
     # user-scoped resource (ELN/LIMS), it swaps the user's token OBO for a downstream token so
     # the resource sees the real user, not the service. Generic and dormant — off until a
