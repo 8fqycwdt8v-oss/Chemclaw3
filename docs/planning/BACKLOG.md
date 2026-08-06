@@ -40,6 +40,154 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       index first and filters after, so a narrow `tag` over a large corpus can under-return. Harmless
       at fixture scale and unmeasured at a million chunks. *Trigger:* a real corpus is indexed —
       then compare a filtered top-k against the same query with the index disabled.
+## Open — Left by the whole-codebase security sweep (2026-08-06)
+
+Eleven disjoint review lanes, every finding re-checked by a second agent required to execute a
+repro: 43 confirmed, 2 refuted, 3 already tracked. Records:
+`D-2026-08-06-the-caller-chooses-the-kid-not-the-workload`,
+`D-2026-08-06-a-redactor-that-only-reads-the-message`,
+`D-2026-08-06-a-pair-rule-is-a-cross-product`,
+`D-2026-08-06-a-swallowed-write-reported-as-a-store`,
+`D-2026-08-06-an-envelope-that-only-survives-its-own-process`.
+
+**Untrusted content that reaches the model unframed.** `frame_untrusted` is applied at five call
+sites; these are not among them. Deferred from the framing pass deliberately: the envelope wraps a
+prose *string*, while each of these returns a structured model, so covering them is a decision
+about which fields to wrap without corrupting the shape the model reads — a design question, not a
+mechanical fix. Ranked by how attacker-reachable the content is.
+
+- [ ] **[M] `find_past_jobs` returns other users' free-text job rationales unframed**
+      (`agent/durable_tools.py:246`). Stored cross-user injection: the `reason` a *different*
+      chemist recorded on a durable job reaches this turn's model verbatim.
+- [ ] **[M] No connector/MCP tool result is ever framed** (`connectors/*/server/tools.py`).
+      `fetch_artifact` returns arbitrary externally-produced text straight to the model. The widest
+      surface of the four, and the one whose fix most needs a shape decision — framing every tool
+      result would wrap structured payloads the model is meant to read as data.
+- [ ] **[L] `recall_observations` returns corpus-mined free text unframed**
+      (`agent/memory_tools.py:80`). `Observation.statement` is the one knowledge path with no
+      human gate at all (D-161's ungated tier).
+- [ ] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
+      (`agent/research_tools.py:181`). The provenance string is caller-influenced and travels
+      beside content that *is* framed, which is the tell that the split was accidental.
+## Open — Quality findings left by the whole-codebase security sweep (2026-08-06)
+
+Eleven disjoint review lanes, each finding re-checked by a second agent required to **execute** a
+repro rather than re-read the code: **43 confirmed, 2 refuted, 3 already tracked**. Six work
+packages shipped (#135–#140, ADRs `D-2026-08-06-*`). These are the confirmed findings those
+packages did not close, at the severity the verifier corrected them to. Every one has a file:line
+and was reproduced; none is a reading.
+
+**Data plane and knowledge integrity**
+
+- [ ] **[M] ELN free text becomes real knowledge-graph edges** (`ingest/eln/note.py:27`). A chemist
+      can forge `contradicts`/`supersedes` relations into a PR-gated reaction note by writing them
+      into an ELN field — the gate reviews the note, not the edges it asserts.
+- [ ] **[M] A report note wikilinks non-note evidence ids** (`retrieval/harness.py:160`), producing
+      an unmergeable report and a fabricated relation type.
+- [ ] **[M] Two enabled ELN sources with the same entry id silently collapse** onto one note and
+      one fingerprint row (`ingest/eln/ingest.py:51`), contradicting the manifest's stated
+      per-source guarantee.
+- [ ] **[L] `vector.server_embed_function` reaches the SQL text unchecked**
+      (`ingest/eln/warehouse/binding.py:462`), so the module's "only checked identifiers are
+      written" invariant is false. Distinct from the documented `where:` trust boundary.
+- [ ] **[L] A warehouse row key is interpolated into a filesystem path** with no slug validation
+      (`ingest/eln/warehouse/retriever.py:184`).
+
+**The store seam** — measured by the Q-A lane rather than assumed. The ten `Protocol + InMemory +
+Postgres` triads are *not* one abstraction waiting to be extracted; what is genuinely shared is the
+connect/execute plumbing, and the divergences below are the real prize.
+
+- [ ] **[M] Two of the ten stores read/write a database the migrator never touches**
+      (`agent/turn_cost_store.py:60`, the `session_store_dsn` split).
+- [ ] **[L] `InMemoryStore.find` raises `TypeError`** on any row with a timezone-aware
+      `created_at` (`science/calc/store.py:250`) — the in-memory and Postgres halves disagree.
+- [ ] **[L] Only one of the three jsonb writers rejects non-finite floats**
+      (`science/calc/postgres_store.py:116`).
+- [ ] **[L] The Postgres connect helper is hand-rolled 14 times**
+      (`science/calc/postgres_store.py:74`), including five byte-identical docstrings and four that
+      say "one place, DRY".
+
+**Complexity hotspots** — the defects the complexity was hiding, which is what the lane was asked
+for rather than a decomposition proposal.
+
+- [ ] **[M] One non-UTF-8 ORD export aborts the entire ELN sync batch**
+      (`ingest/eln/ord_adapter.py:110`), contradicting the adapter's skip-and-continue contract.
+- [ ] **[M] `evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true**
+      (`evals/live.py:317`), so the harness's headline "failed silently" signal can never fire.
+- [ ] **[L] `run_turn` abandons the agent's `ResponseStream` on every non-exhausting exit**
+      (`api/runner.py:318`); it has no `aclose()` and no GC finalizer, so its cleanup hooks never
+      run at all.
+- [ ] **[L] The mid-turn resume drops `user_input_requests`** (`api/runner.py:780`), so an approval
+      prompt raised during a resume never reaches the stream.
+- [ ] **[L] A failed durable job is dropped from the mid-turn resume**
+      (`agent/job_results.py:83`), and the function's own docstring says it is not.
+
+**Error handling and suppression**
+
+- [ ] **[L] 22 of 56 `# noqa` directives suppress rules ruff never runs** (`pyproject.toml:8`) —
+      including 15 `BLE001` markers that read as "this broad except was linted and accepted" when
+      nothing linted it. Either enable the rules or delete the comments; today they are a claim no
+      gate checks.
+- [ ] **[L] `beating()` abandons the work it wraps when the activity is cancelled**
+      (`durable/heartbeat.py:48`) — calc's CREST runs and bo's surrogate fits keep burning CPU
+      after `cancel_job`.
+
+**Tests that cannot fail** — this repository's own most-recorded defect family
+(`tasks/lessons.md`), so each of these was proven by neutering the control and watching the test
+still pass.
+
+- [ ] **[M] `SnowflakeWarehouse._connect` classifies every client error as retryable
+      `ConnectionError`** (`ingest/eln/warehouse/snowflake.py:162`), and no test executes any
+      function body in the module.
+- [ ] **[L] `tests/test_connector_isolation.py`'s first-party half is vacuous**
+      (`tests/test_connector_isolation.py:85`): `name.split(".")[0] in ("calc",)` can never match a
+      `chemclaw.science.calc.*` module, so the check has always passed on an empty set.
+- [ ] **[L] `test_harness_agent_still_audits_every_tool_call` asserts only that the middleware list
+      is non-empty** (`tests/test_agent.py:279`) — it passes with the audit middleware removed.
+- [ ] **[L] `cli/verify_audit_chain.py` has 0% coverage**, and the "refuse to re-seal a broken
+      chain" control lives nowhere else.
+- [ ] **[L] Eight of the eleven binding transforms in `warehouse/expr.py` are never executed**
+      by the suite, including the two the shipped `eln-snowflake` binding uses.
+
+**Documentation that asserts what the code does not do**
+
+- [ ] **[L] `NoAuth`'s docstring asserts a manifest validator that does not exist**
+      (`connectors/manifest.py:60`).
+- [ ] **[L] `connectors/calc/activities.py`'s module docstring denies the registration mechanism
+      the file uses two lines later** and cites a queue count D-118 removed
+      (`connectors/calc/activities.py:23`).
+
+### Refuted, recorded so they are not re-found
+
+- Connector server pods lacking the front door's uvicorn transport bounds — the verifier could not
+  reproduce a reachable consequence.
+- A durable job's failure text reaching the model unsanitized on the job path — the sanitizer that
+  `connector_app` installs does cover it.
+
+## Open — Authorization gaps left by the whole-codebase security sweep (2026-08-06)
+
+Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed the inert core
+trigger gate and added the guard that would have caught it. These are what the same lane found and
+did not fix.
+
+- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution**
+      (`connectors/server.py:84`). `CallerLogMiddleware` documents the identity headers as
+      advisory, but a bundle's activity stamps them into `bo_campaigns`/`bo_suggestions`, so
+      anything that can reach the pod can forge who ran an experiment. The root fix is connector
+      authentication (already tracked above); the narrower one is to attribute from the workflow
+      payload's `requested_by`, which is set from the validated principal, rather than from a
+      header.
+- [ ] **[L] The built-in write gate never consults the connector-declared `state_changing` set**
+      (`agent/authz.py`). `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained list while every manifest
+      already partitions its tools into `state_changing`/`read_only`; deriving the gate from the
+      declaration is the same move `expensive_actions()` and `side_effecting_tools()` already make.
+      `report_measurement` is the live example — any authenticated user may write the shared
+      calibration ledger.
+- [ ] **[L] `map_to_hpc_identity` has no caller** (`agent/identity/hpc_bridge.py:18`). The §7.2
+      oid → HPC-identity mapping log never fires on the real Nextflow path, so the audit link
+      between a chemist and a cluster job is declared and never written. Either wire it or delete
+      it — a declared-but-unwired control is exactly the shape
+      `D-2026-08-05-a-declaration-outliving-what-it-describes` is about.
 
 ## Open — Left by the agentic-engine / harness / deep-research review (2026-08-05)
 
@@ -48,8 +196,18 @@ were fixed in that pass (the two-predicate `PlanEvent`, the harness dimensions r
 places, the uncached conflict index). This is what it measured and did **not** fix, because the fix
 is a decision about what a chemist is shown rather than a diff.
 
-- [ ] **`conflicts._suspected` is O(k²) in the notes sharing a `(type, compound_smiles)`, and its
-      output stops being readable long before it stops being computable** — [M]. Measured over a
+- [x] **`conflicts._suspected` is O(k²) in the notes sharing a `(type, compound_smiles)`, and its
+      output stops being readable long before it stops being computable** — closed by taking each
+      note's **widest disagreements** (`conflict_max_per_note`, 3) rather than every pair. Sorting a
+      group by confidence puts the strongest partners at the two ends, so the walk takes the wider
+      end first and stops as soon as it falls inside the threshold. Re-measured on the same corpus:
+      141,156 → 5,937 pairs, 637 → 44 ms, 3 ids per chunk instead of ~141. Two things the narrowing
+      does not do, both pinned: a *declared* conflict is never evicted by a heuristic's guess
+      (`Conflict.severity` pins it), and the truncation is never silent — `NoteConflicts` carries
+      the full total and the report renders "(the 3 strongest of 141)". The decision the row asked
+      for turned out to be smaller than it looked: `Conflict.kind` already separated author-stated
+      from heuristic, so the cap applies to `suspected` alone and KM-8's declared-conflict promise
+      is byte-identical. The original measurement, for the record — over a
       synthetic 2,000-note corpus spread across 7 substrates — the shape a real programme has, since
       an optimization campaign is many runs on one substrate: **141,156** conflicts, 637 ms of pure
       pair enumeration, and a `conflicts_with` list of ~141 ids on every evidence chunk that reaches
@@ -65,22 +223,21 @@ is a decision about what a chemist is shown rather than a diff.
 
 ## Open — Left by the BO deep review (2026-08-05, D-2026-08-05-a-ceiling-that-does-not-hold)
 
-- [ ] **The durable campaign does not write the campaign store.** Both paths share one campaign-id
-      space, so `resume_campaign` on a campaign that ran durably reports no such campaign about work
-      that was actually done. Investigated and confirmed a gap, not a design choice — but closing it
-      needs a decision, not a fix: `record_suggestion` writes `opened_by`, and `BoCampaignWorkflow`
-      deliberately does not know the actor (core's `ConnectorJobWorkflow` owns attribution, D-093).
-      Recording from inside the workflow means either threading identity through a seam built to
-      keep it out, or writing a fabricated actor into an audited column. Decide which, then build.
-      Also the one item that could not be verified offline — it needs both a Temporal broker and
-      Postgres.
-- [ ] **`bo_suggestions` stores no snapshot of the problem it was proposed against.** The campaign
-      row carries the *latest* problem, so a suggestion read back after the space widened is
-      described by a decision space it was not made in. Cheap to add (one JSONB column); worth a
-      migration only alongside the row above, since both touch the same tables.
-- [ ] **No unique index makes a BO write idempotent.** A retried `record()` appends a second
-      identical suggestion. Harmless today (the read takes the latest) and a real duplicate once the
-      durable path writes.
+- [x] **The durable campaign does not write the campaign store** — closed, and the recorded blocker
+      was a false dilemma. The seam already carries the actor: core sets `requested_by` on the
+      child's **memo** for exactly the shared-service-identity case, and `connectors/qm/workflows.py`
+      has read the same memo in production since F5. `BoCampaignWorkflow` reads it and hands it to a
+      bundle-owned activity that reuses `record_suggestion` unchanged. Verified live against the
+      real broker and Postgres, not offline: resumed with `opened_by` off the memo and every
+      observation present.
+- [x] **`bo_suggestions` stores no snapshot of the problem it was proposed against** — closed by
+      `infra/sql/037_bo_suggestion_provenance.sql`, alongside the row above as planned.
+- [x] **No unique index makes a BO write idempotent** — closed by the same migration. Keyed on the
+      run (`job_id`, the workflow id) and never on the content: two genuinely identical asks are two
+      history entries. Partial on `job_id <> ''` so the inline path, which has no run to name, keeps
+      appending. Both store backends implement the rule, and the Postgres half — a partial unique
+      index plus an `ON CONFLICT ... WHERE` inference, exactly the kind of thing that is right in
+      prose and wrong in SQL — is asserted against a real database.
 
 ## Open — Left by the CHECKMATE deep review of the live/durable spine (2026-08-05)
 
@@ -101,27 +258,18 @@ rather than a diff.
       The plausible hypothesis going in (MAF re-entering unconnected tools into the agent's
       process-lifetime exit stack) was **refuted** by a one-line probe: flat at zero over 200 turns.
 
-- [ ] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — [S]. A holder whose lease was taken
-      over cannot detect it: `session_store.py:504` returns `None`, and `api/state.py:220` reacts
-      only to *exceptions*, which a silent takeover does not raise — so its own warning ("another
-      worker may start a turn on this session") is unreachable in exactly the scenario it describes.
-      The no-op itself is pinned (`test_concurrency_claims.py:80`); the missing signal is not.
+- [x] **`SessionTurnClaims.refresh` discards `cur.rowcount`** — closed. It now returns whether the
+      lease was still ours, the heartbeat acts on it, and `chemclaw_turn_claims_lost_total` counts
+      the takeover a deployment could not previously see.
 
-- [ ] **The proposal webhook cannot be wired to any named git host without a translator** — [S],
-      documentation rather than code. `routes/proposals.py:38` claims `sha256=<hex>` "is the shape
-      GitHub, GitLab and Azure DevOps webhooks all produce, so an operator wires this without a
-      translation step"; the route reads `X-Chemclaw-Signature` (`:157`) and requires a
-      `{"note_ids": [...]}` body (`schemas.py:175`), while GitHub sends `X-Hub-Signature-256` with a
-      PR payload and GitLab sends `X-Gitlab-Token`, a raw secret rather than an HMAC.
-      `docs/guides/runbook.md:532` repeats the claim. Either ship the translator or say it is needed.
+- [x] **The proposal webhook cannot be wired to any named git host without a translator** — closed
+      by saying so. The route and the runbook now state that the contract is *ours* and that a
+      translator is required, naming what each host actually sends.
 
-- [ ] **`tests/test_layering.py`'s policy is package-granular, so `durable → connectors` is
-      blanket-allowed** — [S]. `connector_job.py:33`'s central claim — "this module imports nothing
-      from any connector" — is therefore machine-unguarded: importing a bundle's workflow class
-      straight into the wrapper would pass every test. It is true today (0 such imports; the edge
-      comes entirely from `durable/template_activities.py:25`), and the edge's declared reason names
-      the wrong module. A per-module exception list would express it; whether that granularity is
-      worth its maintenance is the decision.
+- [x] **`tests/test_layering.py`'s policy is package-granular, so `durable → connectors` is
+      blanket-allowed** — closed without the granularity. A single-module AST assertion
+      (`test_the_connector_job_wrapper_imports_no_connector`) pins the one claim that was
+      unguarded, and the edge's declared reason now names the module the edge actually comes from.
 
 ## Open — Found by the deeper testing pass (2026-08-04)
 
@@ -164,15 +312,15 @@ Full record with the measurements: `docs/archive/live-full-stack-2026-08-04.md`.
 at once for the first time — real broker, workers, Postgres, front door and model. Four defects
 found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). What it left open:
 
-- [ ] **`compare_solvents` accepts a solvent name that only fails deep inside the durable job** —
-      [S], and it is the root cause behind two of that ADR's three findings rather than a cosmetic
-      one. A chemist said "2-MeTHF" — among the most common process solvents there is — the model
-      passed it faithfully, and the run died ~30 s later inside an activity on
-      `String value for epsilon was not found among database of solvents`. `JobSpec.precondition`
-      exists for exactly this and runs in `prepare_job_launch` *before* any durable work starts, so
-      validating solvent names against the ALPB set would turn a 30-second durable failure into an
-      immediate, correctable message. Deliberately not done in that ADR, which is about the
-      reporting seam; this is the chemistry surface.
+- [x] **`compare_solvents` accepts a solvent name that only fails deep inside the durable job** —
+      closed. All five solvent-taking calc jobs declare
+      `science.calc.solvents:require_supported_solvents`, so an unparameterized name is refused at
+      launch with the closest supported spellings (2-MeTHF → thf/tetrahydrofuran) instead of ~30 s
+      into an activity. The name set was *measured* against tblite rather than recalled — the two
+      rejection messages are different failures ("epsilon was not found" vs "No ALPB/GBSA
+      parameters"), only the intersection runs, and a test re-derives it in both directions. It
+      also retired `xtb_engine.COMMON_SOLVENTS`, which had drifted to omit dmf, dioxane, benzene
+      and nitromethane while claiming to name what process chemistry asks about.
 
 - [ ] **du-03: 29 tool calls, no answer, and the capability never reached** — [M]. The turn now
       says so (`empty_answer`), which is the reporting half. The behavioural half is untouched: it
@@ -181,10 +329,12 @@ found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). W
       retrieval-loop problem, a prose problem, or a 38-note corpus giving it nothing to stop on is
       not yet measured — and the corpus caveat means it cannot be settled on this data alone.
 
-- [ ] **A repeated tool call returning nothing is retried unchanged** — [S]. `find_past_jobs` was
-      called 7-8 times in a single turn across three separate probes. Cheap each time, so it is a
-      turn-latency and token cost rather than a correctness issue (median turn 128-142 s here
-      against 16.9 s on the archived run), but it is the same call with the same arguments.
+- [x] **A repeated tool call returning nothing is retried unchanged** — closed by
+      `agent/repeat_guard.py`: a turn may make the identical call `max_identical_tool_calls` times
+      (2) and is then refused with a message naming the tool and what to do instead, counted by
+      `chemclaw_repeated_tool_calls_total`. It refuses rather than replaying the first result on
+      purpose — `get_durable_job_status` legitimately changes within a turn, so a cached answer
+      would pin a job at "running" for a model that was correctly re-checking.
 
 - [ ] **The full 230-probe corpus has still not been run against a live model** — [M]. This pass
       ran the four `du-*` probes and a two-probe harness slice. The wide sweep needs a corpus worth

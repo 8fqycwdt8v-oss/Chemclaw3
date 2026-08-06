@@ -18,6 +18,7 @@ and is covered in CI (`test_molfp_postgres.py`, `test_rxnfp_postgres.py`) agains
 """
 
 import asyncio
+import logging
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -469,6 +470,55 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
         message = asyncio.run(_call())
     assert secret not in message
     assert "an internal error occurred" in message
+
+
+def test_the_connector_server_entrypoint_configures_the_process_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector server process must get the setup every other process role already has.
+
+    `deploy/entrypoint.sh` used to exec `uvicorn <bundle>.server.app:app` straight at the app
+    object, so no module owned this role's startup and nothing called `configure_logging()` or
+    `configure_telemetry()`. The one process family that holds per-connector bearer tokens ran
+    with no secret redaction, no correlation id and no actor on any line — and with no meter
+    provider, which is the configuration `_install_noop_meter_provider` records as leaking.
+
+    Order matters as much as the call: the app is handed to uvicorn as an import *string*, so it
+    is built after logging is configured. Importing it here would put a bundle's import-time
+    logging on an unconfigured, unredacted root logger.
+    """
+    from chemclaw.connectors import server_entry
+
+    calls: list[str] = []
+    monkeypatch.setattr(server_entry, "configure_logging", lambda: calls.append("logging"))
+    monkeypatch.setattr(server_entry, "configure_telemetry", lambda: calls.append("telemetry"))
+    monkeypatch.setattr(
+        "chemclaw.connectors.server_entry.uvicorn.run",
+        lambda target, **_kw: calls.append(f"serve:{target}"),
+    )
+    server_entry.main("safety")
+    assert calls == ["logging", "telemetry", "serve:chemclaw.connectors.safety.server.app:app"]
+
+
+def test_building_a_connector_app_does_not_reconfigure_process_logging() -> None:
+    """The other half: `connector_app` must *not* do process setup, and this pins why.
+
+    Putting `configure_logging()` here was tried first and is wrong. It is
+    `logging.basicConfig(force=True)`, which removes every existing root handler — and
+    `connector_app` runs at import time in seven bundle modules that tests, the dev composite and
+    anything else import freely. It tore out pytest's own capture handler and broke two
+    audit-trail tests that have nothing to do with logging.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    root = logging.getLogger()
+    sentinel = logging.NullHandler()
+    root.addHandler(sentinel)
+    try:
+        connector_app(FastMCP("no-stomp-probe"), name="no-stomp-probe")
+        assert sentinel in root.handlers, "connector_app replaced the host's logging handlers"
+    finally:
+        root.removeHandler(sentinel)
 
 
 def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:

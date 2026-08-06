@@ -1329,6 +1329,101 @@ Rules:
 3. A test written as a future regression target earns its name only after you have watched it fail
    for the right reason. Mutate, run, restore — three commands.
 
+## R5.13 — A backlog row saying "this needs a decision" is a claim about the code, and claims get checked
+
+Two rows in this pass were filed as decisions rather than diffs, and both were wrong about the code
+they described.
+
+The BO row said recording a durable campaign meant "either threading identity through a seam built
+to keep it out, or writing a fabricated actor into an audited column". The seam was built to keep
+identity out of the **payload** — a memo is per-execution metadata beside the argument, the
+distinction is stated in `connector_job.py`'s own comment, another bundle has read that memo in
+production since F5, and a test already pinned the crossing. Three pieces of evidence, all present,
+none consulted when the row was written.
+
+The conflicts row said a per-note cap "changes what KM-8 shows a chemist, which is why it is a
+decision and not a patch". `Conflict.kind` already separated author-stated from heuristic, so the
+cap applies to `suspected` alone and the declared-conflict promise is byte-identical; and the gap
+magnitude was already computed at the line that decides whether to report a pair at all, so
+"widest first" was `max` instead of `append`.
+
+Both rows were written by careful sessions in the middle of good reviews. The failure mode is
+specific: a reviewer reasons about a seam from its *purpose* ("core owns attribution") rather than
+from its *mechanism*, reaches a genuine dilemma, and files it — and the dilemma is real only under
+the reasoned-about version.
+
+Rules:
+1. Before accepting an inherited "this is blocked on a decision", spend ten minutes finding the
+   mechanism it names and reading it. A blocker is a claim about code, and it decays like any other.
+2. When a row says a fix is impossible without one of two bad options, look for the third: the
+   thing whose docstring already describes the case. If a comment in the codebase states the exact
+   situation, that is not a coincidence — someone built for it.
+3. Grep for a production reader before concluding a mechanism cannot be used. `connectors/qm`
+   answered the BO question in one line.
+
+## A fix that passes every test written for it (2026-08-06, whole-codebase security sweep)
+
+Twice in one session a change passed every test I wrote *for that change* and broke something else,
+and both times the full suite was the only thing that said so.
+
+**`configure_logging()` in `connector_app`.** Connector servers had no secret redaction, and
+`connector_app` is the single point all seven bundles pass through — visibly the place a new bundle
+could not forget. It is `logging.basicConfig(force=True)`, which removes *every* root handler, and
+that function runs at import time in modules tests and the dev composite import freely. It tore out
+pytest's own capture handler and failed two GxP audit-trail tests that have nothing to do with
+logging. The targeted tests all passed.
+
+**"A shipped default is not a credential."** The dev Postgres password is the literal string
+`chemclaw`, so redaction was replacing the product's own name with `***`. I compared whole values
+against the field defaults. `tests/conftest.py` repoints `postgres_dsn` at an isolated schema, so
+under CI the DSN is *not* the default — redacted correctly — while the password inside it still is.
+Locally there is no Postgres, nothing repoints, and it passed. CI failed.
+
+The shape is the same both times: the change was correct about the thing it was aimed at, and wrong
+about a *context* the targeted test could not contain — an import-time side effect, and an
+environment where a fixture rewrites the input.
+
+Rules:
+1. **A test written alongside a fix shares the fix's blind spot.** It is evidence the mechanism
+   works, never evidence nothing else broke. Run the full suite before believing a fix, and read
+   which tests moved rather than only the exit code.
+2. **Ask what the function does to the *process*, not only to its arguments.** `basicConfig`,
+   `set_meter_provider`, `contextvars`, module-level caches and monkeypatched singletons are all
+   process-wide. A process-wide side effect belongs at a process boundary, never in a composition
+   helper that anything may import.
+3. **When a rule compares a value against a default, ask what rewrites that value in each
+   environment.** A conftest fixture, a chart, an env var and a local `.env` are four different
+   inputs to the same comparison, and the sandbox exercises the fewest of them. This is the
+   concrete meaning of "CI is the arbiter, a local green is not the gate".
+4. Both wrong turns produced a *better* final fix than the one I would have shipped — the connector
+   entrypoint that did not exist, and a rule covering derived values. Record the wrong turn in the
+   ADR: "the single composition point" is a trap the next reader will find equally attractive.
+
+## Two probes that measured nothing, confidently (2026-08-06)
+
+Sizing an O(n²) blowup in the safety screens took three attempts.
+
+1. **Repeated one SMILES 400 times.** `screen_reaction` starts with `dict.fromkeys(...)`, so it
+   deduplicated to two molecules. Flat timings, no growth: a clean "no defect here" result.
+2. **Generated distinct molecules by growing a chain with the index.** Beautiful quadratic curve —
+   which was the total *atom count* of my own input, since substructure matching costs scale with
+   molecule size. It would have "confirmed" the finding for entirely the wrong reason.
+3. **Distinct strings at constant molecule size** (atom-map labels: `[NH2:1]N`, `[NH2:2]N`, …).
+   This measures the code: 13 KiB of SMILES → 251,000 flags → 2.48 s of blocked event loop.
+
+Either of the first two would have produced a confident write-up — one refuting a real defect, one
+confirming it with a fabricated mechanism.
+
+Rules:
+1. **Before trusting a measurement, ask what the code does to your input before the part you are
+   timing.** Deduplication, normalization, caching and truncation all silently change what you
+   measured.
+2. **Vary exactly one thing.** If the input's size and its cardinality both grow with `n`, the curve
+   is not attributable. Constant-size distinct inputs are usually constructible — here, atom-map
+   labels give distinct SMILES strings for identical molecules.
+3. **A flat curve is a result that needs the same scrutiny as a steep one.** Probe 1 said "no
+   defect" and was wrong; a negative result from a broken probe is indistinguishable from a
+   negative result.
 ## A layering rule can decide where code lives better than taste can (2026-08-06, mounted file share)
 
 Adding a share crawler needed the PDF/DOCX/XLSX/PPTX parsers that already existed in

@@ -196,7 +196,14 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
-    app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None, lifespan=_lifespan)
+    # `openapi_url=None` for the same reason as `docs_url`/`redoc_url`: FastAPI serves the schema
+    # from a plain `Route`, not an `APIRoute`, so `require_principal` never applied to it and
+    # `tests/test_route_auth_coverage.py` could not see it — the full route/parameter/model surface
+    # was readable by anyone who could reach the pod. Nothing consumes it (the UI is static and the
+    # docs pages are already off), so it is closed rather than gated.
+    app = FastAPI(
+        title="Chemclaw", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan
+    )
     _add_security_headers(app)
     _add_body_size_limit(app)
     _add_cors(app)

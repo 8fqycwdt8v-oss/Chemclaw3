@@ -389,3 +389,26 @@ def test_graph_retriever_still_answers_a_query_that_is_only_stopwords(tmp_path: 
         assert [c.source_note_id for c in await retriever.retrieve("at", {})] == ["reaction-a"]
 
     asyncio.run(_run())
+
+
+def test_a_truncated_conflict_flag_says_how_many_it_is_not_naming() -> None:
+    """Three ids and no count read as three disagreements, which is a wronger claim than the list.
+
+    `conflicts_with` carries a note's *strongest* disagreements since the flood measured on a
+    programme-shaped corpus (~141 ids on every chunk, `conflict_max_per_note`). Truncating it
+    silently is the failure mode this repository names on sight: an incomplete list nothing marks
+    as incomplete is read as a complete one.
+    """
+    chunk = EvidenceChunk(
+        content="Yield rose to 85%.",
+        source_note_id="reaction-a",
+        retriever="g",
+        conflicts_with=["reaction-b", "reaction-c", "reaction-d"],
+        conflicts_total=141,
+    )
+    body = report_note(Report(title="R", sections=[_section(chunk)])).body
+    assert "(the 3 strongest of 141)" in body
+
+    complete = chunk.model_copy(update={"conflicts_total": 3})
+    whole = report_note(Report(title="R", sections=[_section(complete)])).body
+    assert "strongest of" not in whole, "an untruncated flag must not imply a hidden remainder"

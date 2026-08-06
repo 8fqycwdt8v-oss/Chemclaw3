@@ -75,6 +75,11 @@ _BAD_DATA_TYPES = [
     # attempt — a volume that failed to mount does not mount itself because Temporal asked twice —
     # and retrying only delays the log line naming which one it is.
     "DocumentShareError",
+    # A turn asked a tool the identical question once too often (`chemclaw.agent.repeat_guard`).
+    # It never crosses an activity boundary today — the guard is a chat-side middleware — but it is
+    # a `ChemclawError`, and the rule this list encodes is that every one of them fails fast: an
+    # identical call is identical on the retry too, so retrying is the one thing that cannot help.
+    "RepeatedCallRefusal",
     # `AuthorizationError` (`chemclaw.agent.authz`) and its subclasses are NOT `ChemclawError`/
     # `ValueError` — an authorization refusal is a policy decision, not bad data, and reparenting it
     # would make `chemclaw.agent.tool_authz.surface_domain_errors` swallow it ahead of

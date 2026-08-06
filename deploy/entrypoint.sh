@@ -52,9 +52,13 @@ case "${component}" in
     # A connector bundle's own FastAPI app (`src/chemclaw/connectors/<name>/server/app.py`). One case for every
     # connector rather than one per name: the component name carries the bundle, so adding a
     # connector needs no change to this image — which is the whole point of the connector seam.
+    # Through the bundle's own entrypoint module rather than `uvicorn <app>` directly: execing the
+    # app object meant no process role owned this one's startup, so it ran with no secret
+    # redaction, no correlation id and no meter provider. `server_entry` does that setup and then
+    # serves, exactly as `connector-worker-*` above does. Host/port come from the same settings
+    # the flags used to pass, so the environment contract is unchanged.
     name="${component#connector-}"
-    exec uvicorn "chemclaw.connectors.${name}.server.app:app" \
-      --host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}"
+    exec python -m chemclaw.connectors.server_entry "${name}"
     ;;
   *)
     echo "unknown CHEMCLAW_COMPONENT=${component}" >&2

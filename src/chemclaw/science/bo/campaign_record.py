@@ -195,6 +195,16 @@ class Suggestion(BaseModel):
     campaign_id: str = Field(min_length=1)
     candidates: list[Candidate] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    # The decision space **as it was when this was proposed**. `Campaign.problem` holds the latest
+    # one — a chemist who widens a bound is still working the same optimization — so a suggestion
+    # read back after the space changed was described by bounds that never applied to it. The
+    # candidates and observations are snapshotted for exactly this reason; the space they were
+    # drawn from is the third piece of the same statement (`infra/sql/037_*.sql`).
+    problem: dict[str, Any] = Field(default_factory=dict)
+    # The durable run that produced this, empty for the inline tool. The idempotency key: an
+    # activity is retried by design, and without it a retry appends a second identical suggestion
+    # into a history that is meant to be a record of what was actually proposed.
+    job_id: str = ""
     # The calculations the decision space's descriptors came from, so a stale xTB run traces to the
     # suggestions drawn from it — what `calc_refs` was built for (D-133) and D-158 first made real.
     calc_refs: list[str] = Field(default_factory=list)
@@ -268,7 +278,21 @@ class InMemoryCampaignStore:
         )
 
     async def _add_suggestion(self, suggestion: Suggestion) -> int:
-        """Append one proposal; return its id."""
+        """Append one proposal; return its id — or the existing id when a durable run is retried.
+
+        The same rule `bo_suggestions_job_idx` enforces in Postgres, written here rather than left
+        to the other backend: a `session_store="memory"` deployment runs the same durable campaigns
+        through the same retried activity, so an idempotency guarantee that held only against
+        Postgres would be a guarantee nothing in a dev stack could rely on. Keyed on the run, never
+        on the content — two genuinely identical asks are two history entries.
+        """
+        if suggestion.job_id:
+            for existing in self._suggestions:
+                if (existing.campaign_id, existing.job_id) == (
+                    suggestion.campaign_id,
+                    suggestion.job_id,
+                ):
+                    return existing.id
         new_id = self._next_id
         self._next_id += 1
         self._suggestions.append(
@@ -312,6 +336,7 @@ async def record_suggestion(
     observations: list[Observation],
     calc_refs: list[str],
     provenance: tuple[str, str, str],
+    job_id: str = "",
 ) -> str:
     """Persist one suggestion against the campaign its problem defines; return the campaign id.
 
@@ -323,6 +348,18 @@ async def record_suggestion(
 
     Returns the campaign id either way, because the id is a pure function of the problem: it is
     still the right handle for the agent to quote back, even on the turn where the write failed.
+
+    Args:
+        problem: The decision space, which both identifies the campaign and is snapshotted onto the
+            suggestion — the campaign row holds the *latest* space, the suggestion the one it was
+            made in.
+        candidates: The proposed point(s).
+        observations: The evidence they were derived from.
+        calc_refs: The calculation keys the descriptors came from.
+        provenance: `(actor, session_id, correlation_id)`, as `connectors.caller` yields it.
+        job_id: The durable run that produced this, empty for the inline tool. Makes the write
+            idempotent — a Temporal activity is retried by design, and the durable campaign is the
+            second writer this record has ever had.
     """
     actor, session_id, correlation_id = provenance
     campaign_id = campaign_id_for(problem)
@@ -341,6 +378,8 @@ async def record_suggestion(
                 candidates=candidates,
                 observations=observations,
                 calc_refs=calc_refs,
+                problem=problem.model_dump(mode="json"),
+                job_id=job_id,
                 actor=actor,
                 session_id=session_id,
                 correlation_id=correlation_id,

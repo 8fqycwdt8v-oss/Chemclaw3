@@ -21,6 +21,18 @@ class AgentSettings(BaseSettings):
     is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
     """
 
+    # Suffix for the `<retrieved-note-...>` envelope that marks untrusted retrieved content as
+    # data rather than instructions (`agent/framing.py`). Empty (the default) makes it a random
+    # per-*process* value, which is right for dev and tests and is what every deployment has had.
+    #
+    # Set it for any deployment with durable sessions. `session_store="postgres"` history outlives
+    # the process that wrote it and is replayed by other replicas, and the agent instructions say
+    # only an envelope with *exactly* the current tag marks retrieved data — so envelopes written
+    # by a previous process are read as ordinary content, and the injection mitigation silently
+    # lapses for the oldest material. A deployment-wide value keeps one tag across every pod and
+    # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
+    framing_envelope_secret: str = ""
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from its own env var
     # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers
@@ -92,6 +104,16 @@ class AgentSettings(BaseSettings):
     harness_enabled: bool = False
     harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
+
+    # How many times one turn may call a tool with the *identical* arguments before the call is
+    # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
+    # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with
+    # `load_skill` x6 and `find_notes` x5 beside it, and the only symptom was a median turn of
+    # 128-142 s against 16.9 s on the archived run. Two, not one, because a genuine re-check is a
+    # real pattern — a job polled after a wait, a note re-read after a write — and seven is not.
+    # Raise it for a deployment whose tools are cheap and whose answers move; 1 disables repeats
+    # entirely.
+    max_identical_tool_calls: int = Field(default=2, ge=1)
 
     # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*

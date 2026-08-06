@@ -266,3 +266,56 @@ def test_a_non_empty_role_list_still_refuses_an_account_without_it(
         authorize_tool("find_notes")  # holds the listed role → allowed
     finally:
         reset_current_identity(tokens)
+
+
+def _authorize_trigger_literals() -> dict[str, str]:
+    """Every `authorize_trigger("literal")` in `src/`, as `{action: file:line}`.
+
+    AST rather than grep, so a call spelled across two lines or nested inside a `try` is still
+    found, and so a mention in a docstring or a comment is not.
+    """
+    import ast
+    import pathlib
+
+    found: dict[str, str] = {}
+    root = pathlib.Path(__file__).resolve().parent.parent / "src" / "chemclaw"
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            if name != "authorize_trigger" or not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                found[first.value] = f"{path.relative_to(root.parent.parent)}:{node.lineno}"
+    return found
+
+
+def test_every_hardcoded_authorize_trigger_action_is_actually_gated() -> None:
+    """A gate that names an action nothing gates is decoration, and this repo has had two.
+
+    `expensive_actions()` derives its set from the enabled bundles' manifests, which is right for
+    connector jobs — `connectors/jobs.py` passes `job.name`, so a bundle added next year is gated
+    the day it is enabled. But a job launched from *core* has no manifest to declare it, and
+    `request_development_report` was exactly that: it calls `authorize_trigger`, the call returned
+    immediately on the shipped chart (`entra_required=true`, both role settings empty), and no
+    other gate covered it — `STATE_CHANGING_TOOLS` yes, `DEFAULT_WRITE_TOOL_GATES` no. Any
+    authenticated user could start an unbounded multi-section research workflow.
+
+    D-2026-08-01 fixed the same shape for manifests and left this one, because nothing checked the
+    call sites against the set. This is that check: every literal action name passed to
+    `authorize_trigger` anywhere in `src/` must resolve to something the gate actually protects.
+    Dynamic call sites (`job.name`) are skipped deliberately — the derivation covers those, and it
+    is the hardcoded ones that can silently name nothing.
+    """
+    gated = expensive_actions()
+    literals = _authorize_trigger_literals()
+    assert literals, "found no authorize_trigger call sites — the AST walk stopped working"
+    ungated = {action: where for action, where in literals.items() if action not in gated}
+    assert not ungated, (
+        "authorize_trigger names action(s) that nothing gates, so the call is inert: "
+        f"{ungated}. Declare them in CORE_EXPENSIVE_ACTIONS (core-owned) or via a manifest's "
+        "`expensive: true` (bundle-owned)."
+    )

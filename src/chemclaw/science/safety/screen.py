@@ -212,6 +212,33 @@ def parse_molecule(smiles: str) -> Chem.Mol:
     return molecule
 
 
+def require_screenable_size(component_smiles: list[str], *, what: str) -> None:
+    """Refuse a component list too large to screen, before any matching starts.
+
+    Both screens in this package check their pair rules as a *cross-product*: every component
+    matching one side against every component matching the other. So the results grow with the
+    square of the input while the request itself stays small — 13 KiB of SMILES was measured
+    producing 251,000 hazard flags and blocking the serving connector's event loop for 2.48 s, and
+    the genotoxicity screen has the same shape (640 components, 102,400 alerts, 933 ms). The
+    connector's request-size cap is no bound on this, because the amplification is in the response.
+
+    Public because both screens must refuse identically. Refused rather than truncated: a hazard
+    screen that silently dropped components would report "no rule matched" for chemistry it never
+    looked at, and every tool description in this package says an empty result means no rule
+    matched — never that something is safe.
+
+    Raises:
+        SafetyRulesError: more than `safety_max_components` components were given.
+    """
+    limit = settings.safety_max_components
+    if len(component_smiles) > limit:
+        raise SafetyRulesError(
+            f"{what} accepts at most {limit} components, got {len(component_smiles)}. "
+            "Screen a reaction's own species, not a library: pair rules are checked between "
+            "every pair, so the work grows with the square of the list."
+        )
+
+
 def _sorted(flags: list[HazardFlag]) -> list[HazardFlag]:
     """Worst severity first, then by rule id, so a result is deterministic and reads top-down."""
     return sorted(flags, key=lambda f: (-_SEVERITY_ORDER[f.severity], f.rule_id))
@@ -250,8 +277,10 @@ def screen_reaction(component_smiles: list[str]) -> ScreenResult:
         component_smiles: Every species in the reaction (reactants, reagents, solvents, products).
 
     Raises:
-        SafetyRulesError: any component is unparseable, or the rule table is missing/malformed.
+        SafetyRulesError: any component is unparseable, the rule table is missing/malformed, or
+            more than `safety_max_components` components were given.
     """
+    require_screenable_size(component_smiles, what="a hazard screen")
     table, patterns = _load_rules(settings.safety_rules_path)
     molecules = {smiles: parse_molecule(smiles) for smiles in dict.fromkeys(component_smiles)}
     flags = [flag for smiles in molecules for flag in screen_structure(smiles).flags]

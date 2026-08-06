@@ -41,7 +41,15 @@ class EvidenceChunk(BaseModel):
     # notes is right, and silently returning both is what made two contradictory notes read as
     # corroboration. Empty for the ordinary case, so a reader sees the marker only when there is
     # something to see.
+    #
+    # The *strongest* disagreements, declared ones first, not all of them: on a corpus shaped like
+    # a real programme this list ran to ~141 ids per chunk, which is a fact about the corpus rather
+    # than a signal about the note (`conflict_max_per_note`).
     conflicts_with: list[str] = Field(default_factory=list)
+    # How many disagreements there are in total, which is not always `len(conflicts_with)`. Carried
+    # because a truncated list with nothing saying so reads as a complete one — the same rule the
+    # tool-result number cap follows. Renderers say "3 of 141" when the two differ.
+    conflicts_total: int = Field(default=0, ge=0)
     # Who authored the source note, where it came from, and how sure it is (D-160). `NoteRef` has
     # exposed all three to `find_notes`/`expand_note` since KM-6; the sweep that gathers most of
     # the evidence an answer is built on carried none of them, so the model saw a claim and no way

@@ -121,7 +121,9 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
 
     Returns:
         Whether the measurement matched an existing prediction. "No prediction on file" is a normal
-        answer — say so rather than implying the measurement was scored.
+        answer — say so rather than implying the measurement was scored. If the reply says the
+        measurement was **not** recorded, report exactly that: it was not kept, and repeating the
+        call will not help.
     """
     canonical = canonical_smiles(smiles)
     matched = await record_observation(
@@ -131,6 +133,16 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
         source="chemist-reported",
         subject=canonical,
     )
+    if matched is None:
+        # Not a failure to report as an error — the deployment turned the ledger off on purpose —
+        # but emphatically not "Recorded" either. `calibration_enabled` is False by *default*, so
+        # this was the answer every unconfigured deployment gave while storing nothing at all.
+        return (
+            f"NOT recorded. The calibration ledger is disabled in this deployment, so the "
+            f"measurement for {canonical} was not stored and nothing will be scored against it. "
+            "Tell the chemist the value was not kept, and that an operator must enable "
+            "`calibration_enabled` before measurements can be reported."
+        )
     if matched:
         return f"Recorded; it reconciled {matched} prediction(s) for {canonical}."
     # This branch used to say "Recorded" and be wrong: the write was a bare UPDATE against
