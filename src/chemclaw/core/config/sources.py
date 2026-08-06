@@ -48,6 +48,12 @@ class SourcesSettings(BaseSettings):
     # the corpus is installed into the image at build time, reviewed once in a pull request like
     # any other pinned dependency, and read from disk at runtime. D-089's "no external data
     # sources" is about a runtime dependency on somebody else's service, and there is none here.
+    vendored_dataset_dir: str = "data/vendored"
+    # Check `records.csv` against the checksum in its manifest on load. On by default: the whole
+    # value of vendoring is that the shipped data is provably what was reviewed, and a corpus that
+    # silently drifted from its manifest is worth less than none.
+    vendored_dataset_verify: bool = True
+
     # --- Mounted document shares (D-2026-08-06-a-share-is-mounted-not-called) ---
     # Which share is mounted where, what to index and who may read it is the *binding* in that
     # source's `datasource.yaml`; only the machinery's own bounds are config, because they are
@@ -62,15 +68,13 @@ class SourcesSettings(BaseSettings):
     # How many chunks one workflow run drains before continuing as new. Event history is bounded,
     # and a first full crawl of a TB share is thousands of chunks — far past what one run may hold.
     document_sync_max_iterations: int = 100
+    # How many stale chunks one re-embedding pass refreshes. Its own bound because the work is
+    # unlike the crawl's: no filesystem at all, just a read of stored text, one embedding batch and
+    # an update — so it is paced by the embedding endpoint rather than by a network share.
+    document_reembed_batch_size: int = 500
     # Every N minutes. Six hours by default: a file share is not an ELN, its documents change over
     # days, and an unchanged crawl still costs a full `scandir` pass over every path.
     document_sync_schedule_minutes: int = 360
-
-    vendored_dataset_dir: str = "data/vendored"
-    # Check `records.csv` against the checksum in its manifest on load. On by default: the whole
-    # value of vendoring is that the shipped data is provably what was reviewed, and a corpus that
-    # silently drifted from its manifest is worth less than none.
-    vendored_dataset_verify: bool = True
 
     @property
     def vendored_dataset_path(self) -> Path:

@@ -16,6 +16,7 @@ The two properties worth reading the file for:
 """
 
 import asyncio
+import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,8 @@ from typing import Any
 
 import pytest
 
-from chemclaw.core.embeddings import embed_texts
+from chemclaw.core.config import settings
+from chemclaw.core.embeddings import clear_embedding_cache, embed_texts, embedding_config_key
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
@@ -31,7 +33,7 @@ from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import crawl_share
 from chemclaw.ingest.documents.index import InMemoryDocumentIndex
 from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
-from chemclaw.ingest.documents.sync import prune_share, sync_share
+from chemclaw.ingest.documents.sync import prune_share, reembed_stale, sync_share
 from tests.document_fixtures import (
     _blank_pdf_bytes,
     _docx_bytes,
@@ -370,6 +372,120 @@ def test_a_failed_root_prunes_nothing(share: dict[str, Any], tmp_path: Path) -> 
     removed = asyncio.run(prune_share(SOURCE, index, later, crawl_was_complete=False))
     assert removed == 0
     assert len(asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))) == 1
+
+
+def test_a_dimension_the_column_cannot_hold_is_refused_at_construction(
+    share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The width check the config validator cannot make, made where both numbers are known.
+
+    `note_index`'s equivalent lives in the config validator because `vector`/`lexical` are shipped
+    names it can enumerate. A share's name is chosen by the deployment, so no name set finds one —
+    the guard sits on the constructors instead. Without it a deployment starts cleanly and pgvector
+    rejects every chunk write hours later, inside a worker.
+    """
+    monkeypatch.setattr(settings, "embedding_dim", 3072)
+    with pytest.raises(DocumentShareError, match="3072.*document_chunks.*1536"):
+        ShareDocumentRetriever(binding=share, name=SOURCE, index=InMemoryDocumentIndex())
+
+
+# --- the embedding configuration is part of the vector ------------------------------------------
+
+
+def _use_model(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    """Point the deployment at a different embedding model, as an operator would."""
+    monkeypatch.setattr(settings, "embedding_model", model)
+    clear_embedding_cache()
+
+
+def test_changing_the_model_re_embeds_the_corpus_without_touching_the_share(
+    share: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The defect this closes is silent: a fingerprint does not move when the model does.
+
+    So the crawl re-embedded nothing, the table came to hold a mix of two models' vectors, and
+    every cosine between them was meaningless with no error anywhere.
+
+    **The share is deleted before the re-embed runs**, which is the point of the test: the chunk's
+    text was stored beside its vector, so refreshing it is a database-to-database operation. If
+    this ever starts needing the mount, this assertion is what says so.
+    """
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    before = asyncio.run(index.stale_chunks(embedding_config_key(), 100))
+    assert before == [], "a freshly indexed corpus carries the current configuration"
+
+    _use_model(monkeypatch, "some-better-model")
+    stale = asyncio.run(index.stale_chunks(embedding_config_key(), 100))
+    assert stale, "every stored vector is stale once the model changes"
+
+    shutil.rmtree(tmp_path / "Projects")
+    shutil.rmtree(tmp_path / "SOPs")
+
+    report = asyncio.run(reembed_stale(index, limit=100))
+
+    assert report.embedded == len(stale)
+    assert not report.has_more
+    assert asyncio.run(index.stale_chunks(embedding_config_key(), 100)) == []
+
+
+def test_a_second_re_embedding_pass_does_nothing(
+    share: dict[str, Any], counted_embeddings: list[int]
+) -> None:
+    """The pass runs at the head of every scheduled sync, so its no-op case has to be free."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    spent = sum(counted_embeddings)
+
+    report = asyncio.run(reembed_stale(index, limit=100))
+
+    assert report.embedded == 0
+    assert not report.has_more
+    assert sum(counted_embeddings) == spent  # not one further embedding call
+
+
+def test_a_bounded_re_embedding_drain_converges(
+    share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workflow loops on `has_more`, so a batch smaller than the corpus must still finish."""
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    _use_model(monkeypatch, "another-model")
+    total = len(asyncio.run(index.stale_chunks(embedding_config_key(), 1000)))
+
+    refreshed = 0
+    for _ in range(50):
+        report = asyncio.run(reembed_stale(index, limit=1))
+        refreshed += report.embedded
+        if not report.has_more:
+            break
+
+    assert refreshed == total
+    assert asyncio.run(index.stale_chunks(embedding_config_key(), 1000)) == []
+
+
+def test_a_stale_document_is_re_embedded_even_when_its_content_is_already_known(
+    share: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`known_documents` is keyed on the configuration, not merely on presence.
+
+    Otherwise a copy of an already-indexed document arriving under a new path would inherit the
+    old model's vector — one document in the corpus that nothing else is comparable to.
+    """
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    asyncio.run(sync_share(SOURCE, binding, index))
+    doc_ids = {chunk.doc_id for chunk in asyncio.run(index.stale_chunks("never-used", 100))}
+
+    _use_model(monkeypatch, "third-model")
+    assert asyncio.run(index.known_documents(doc_ids, embedding_config_key())) == set()
+
+    # A new path with content already on record: it must not be treated as "already embedded".
+    (tmp_path / "Projects" / "acme-17" / "copy.docx").write_bytes(
+        _docx_bytes(["The palladium catalyst deactivated above 80 degrees."])
+    )
+    report = asyncio.run(sync_share(SOURCE, binding, index))
+    assert report.deduplicated == 0, report
 
 
 # --- retrieval ----------------------------------------------------------------------------------

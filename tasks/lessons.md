@@ -1462,3 +1462,28 @@ would delete files nobody had touched. The fix was one method — the index repo
 **Rule:** a comparison between two timestamps is only meaningful if both came from the same clock.
 When one side is written by the database (`now()`, `DEFAULT now()`), the other side must be read
 from the database too — never from the process doing the comparing.
+
+## A cache key that is right in memory is right on disk too (2026-08-06, document re-embedding)
+
+`core/embeddings.py` keys its in-process cache on `(provider, model, dim, text)`, with a docstring
+citing D-011: a vector is only reusable for the configuration that made it. The document index then
+stored those same vectors in Postgres and recorded none of that — so changing the embedding model
+re-embedded nothing (the file fingerprint had not moved), and the table quietly held a mix of two
+models' vectors. The rule was already written down, in the same repository, one layer up. It just
+had not been carried across the boundary where the value became durable.
+
+**Rule:** when a value is cached in memory under a composite key, ask what the *persisted* copy of
+that value is keyed on. If the durable side keys on less, the extra key components name exactly the
+change that will corrupt it silently. Store them.
+
+## A remedy that needs you to already know is not a remedy (2026-08-06, document re-embedding)
+
+The cheap fix for the stale-vector defect was a `--full` flag, or a line in the runbook saying
+"drop the two tables after changing the model". Both are correct and both are useless, for the same
+reason the defect was worth fixing: it raises no error. Nobody runs a repair step for a problem that
+never announces itself, and the person changing an embedding-model setting is precisely the person
+who does not know it invalidates a corpus.
+
+**Rule:** when a defect's failure mode is silent, the fix must be automatic. A flag, a documented
+procedure or a checklist item only closes defects that announce themselves — for the silent ones it
+converts a bug into a bug plus a false sense of coverage.

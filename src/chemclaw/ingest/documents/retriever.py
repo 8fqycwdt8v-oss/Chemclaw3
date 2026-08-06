@@ -38,6 +38,7 @@ from chemclaw.ingest.documents.index import (
     DocumentHit,
     DocumentIndex,
     default_document_index,
+    require_schema_vector_width,
 )
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
@@ -75,6 +76,11 @@ class ShareDocumentRetriever:
                 importing this module opens no connection.
         """
         self._binding: DocumentShareBinding = load_binding(binding)
+        # Refused at construction, not at the first write. The registry builds this half wherever
+        # the source is enabled, so a deployment whose `embedding_dim` cannot fit the migrated
+        # column learns it from a message naming both numbers rather than from pgvector rejecting
+        # every chunk inside a worker, hours after a deploy that looked clean.
+        require_schema_vector_width()
         self.name = name or "sharedrive"
         self._index = index
 

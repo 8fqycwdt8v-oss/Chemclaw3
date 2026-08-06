@@ -37,24 +37,30 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 # the batch would only ever hit on an identical list, which is not what repeats. Bounded, because
 # an unbounded map of every text ever embedded is a slow memory leak in a long-lived retrieval
 # process.
-_CacheKey = tuple[str, str, int, str]
+_CacheKey = tuple[str, str]
 _CACHE: dict[_CacheKey, list[float]] = {}
 
 
-def _cache_key(text: str) -> _CacheKey:
-    """The identity of one embedding: the text *and the configuration that produced it*.
+def embedding_config_key() -> str:
+    """Which configuration produces a vector right now: provider, model and dimension.
 
-    Keying on the provider, model and dimension is the same lesson the calculation cache learned
-    the hard way (D-011): a vector is only reusable for the configuration that made it. Pointing a
-    deployment at a different embedding model and serving the old model's vectors would corrupt
-    every similarity comparison, silently and unrecoverably.
+    The identity half of an embedding — the same lesson the calculation cache learned the hard way
+    (D-011): **a vector is only reusable for the configuration that made it.** Pointing a
+    deployment at a different embedding model and then comparing its queries against the old
+    model's vectors corrupts every similarity, silently, and no error is ever raised.
+
+    Public because the rule has to hold *durably*, not only in memory. The in-process cache below
+    keys on it, and so does `document_chunks.embedding_key` — a stored vector whose key is not
+    this one is stale and gets re-embedded (`chemclaw.ingest.documents.sync.reembed_stale`). One
+    definition, because two spellings of "which model made this" is exactly how the memory cache
+    and the table come to disagree about the same vector.
     """
-    return (
-        settings.embedding_provider,
-        settings.embedding_model,
-        settings.embedding_dim,
-        text,
-    )
+    return f"{settings.embedding_provider}:{settings.embedding_model}:{settings.embedding_dim}"
+
+
+def _cache_key(text: str) -> _CacheKey:
+    """The identity of one embedding: the text *and the configuration that produced it*."""
+    return (embedding_config_key(), text)
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

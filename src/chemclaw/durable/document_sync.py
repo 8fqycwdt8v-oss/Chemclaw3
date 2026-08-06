@@ -21,6 +21,11 @@ presents as an empty directory, and the sweep must not read that as "everything 
 **Whose clock.** The mark is a database `now()`, so the sweep's reference is read from the
 database too — not from this worker. A database a minute behind the worker would otherwise make
 freshly-marked rows look older than the run that marked them.
+
+**Stale vectors go first.** A run drains re-embedding before it crawls, because a chunk embedded
+by a superseded model is *wrong now* — it is being compared against freshly embedded queries and
+the comparison is meaningless — whereas a document not yet crawled is merely absent. The re-embed
+pass reads stored chunk text, so it touches no share and runs even when every mount is down.
 """
 
 import asyncio
@@ -37,9 +42,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.documents.index import DocumentIndex, default_document_index
     from chemclaw.ingest.documents.sync import (
         DocumentShareSource,
+        ReembedReport,
         SyncReport,
         merge_reports,
         prune_share,
+        reembed_stale,
         sync_share,
     )
     from chemclaw.ingest.sources.registry import active_retrieve_sources
@@ -71,6 +78,13 @@ class DocumentSyncPlan(BaseModel):
     started_at: datetime
 
 
+class DocumentSyncOutcome(BaseModel):
+    """What one run did: per-share reports, and how many stale vectors it refreshed."""
+
+    shares: list[SyncReport] = Field(default_factory=list)
+    reembedded: int = 0
+
+
 class DocumentSyncState(BaseModel):
     """A run's position, carried across `continue_as_new` so a huge share drains over many runs."""
 
@@ -83,6 +97,10 @@ class DocumentSyncState(BaseModel):
     # drain, because a root that failed early is still un-crawled when the last chunk succeeds.
     degraded: bool = False
     reports: list[SyncReport] = Field(default_factory=list)
+    # Whether the re-embedding drain finished. Carried, because a corpus large enough to need
+    # `continue_as_new` mid-re-embed must not restart that drain from the top on the next run.
+    reembed_done: bool = False
+    reembedded: int = 0
 
 
 @durable_activity("background")
@@ -131,6 +149,18 @@ async def sync_document_share(source: str, after: str) -> SyncReport:
 
 @durable_activity("background")
 @activity.defn
+async def reembed_stale_documents() -> ReembedReport:
+    """Refresh one bounded batch of vectors whose embedding configuration is superseded."""
+    activity.heartbeat()
+    heartbeater = asyncio.create_task(_heartbeat_forever())
+    try:
+        return await reembed_stale(_document_index(), settings.document_reembed_batch_size)
+    finally:
+        heartbeater.cancel()
+
+
+@durable_activity("background")
+@activity.defn
 async def prune_document_share(source: str, before: datetime, complete: bool) -> int:
     """Sweep `source` rows unseen since `before` — a no-op unless the crawl actually completed."""
     return await prune_share(source, _document_index(), before, complete)
@@ -148,8 +178,8 @@ class DocumentShareSyncWorkflow:
     """
 
     @workflow.run
-    async def run(self, state: DocumentSyncState | None = None) -> list[SyncReport]:
-        """Drain each share in turn, sweep it, and return one merged report per share.
+    async def run(self, state: DocumentSyncState | None = None) -> DocumentSyncOutcome:
+        """Refresh stale vectors, then drain and sweep each share; report what happened.
 
         `state` is passed only by `continue_as_new`; a scheduled or manual run passes nothing.
         """
@@ -160,6 +190,26 @@ class DocumentShareSyncWorkflow:
             )
             state = DocumentSyncState(started_at=plan.started_at, remaining=plan.sources)
         iterations = 0
+        # Before the crawl: a vector made by a superseded model is actively wrong, and it is being
+        # compared against queries embedded by the current one. Nothing here reads a share, so it
+        # also makes progress on a run where every mount is unavailable.
+        while not state.reembed_done:
+            refresh: ReembedReport = await workflow.execute_activity(
+                reembed_stale_documents,
+                start_to_close_timeout=timeout,
+                heartbeat_timeout=timedelta(
+                    seconds=settings.document_sync_heartbeat_timeout_seconds
+                ),
+                retry_policy=BAD_DATA_RETRY,
+            )
+            state.reembedded += refresh.embedded
+            iterations += 1
+            if not refresh.has_more:
+                state.reembed_done = True
+                break
+            if iterations >= settings.document_sync_max_iterations:
+                state.reports = _merge_by_source(state.reports)
+                workflow.continue_as_new(state)
         while state.remaining:
             source = state.remaining[0]
             chunk: SyncReport = await workflow.execute_activity(
@@ -206,7 +256,9 @@ class DocumentShareSyncWorkflow:
             state.remaining.pop(0)
             state.after = ""
             state.degraded = False
-        return _merge_by_source(state.reports)
+        return DocumentSyncOutcome(
+            shares=_merge_by_source(state.reports), reembedded=state.reembedded
+        )
 
 
 def _merge_by_source(reports: list[SyncReport]) -> list[SyncReport]:

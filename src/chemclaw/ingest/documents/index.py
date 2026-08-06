@@ -29,7 +29,8 @@ from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field
 
 from chemclaw.core import db
-from chemclaw.core.config import settings
+from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
+from chemclaw.ingest.documents.binding import DocumentShareError
 
 
 class FileRecord(BaseModel):
@@ -57,6 +58,18 @@ class ChunkRecord(BaseModel):
     content: str = Field(min_length=1)
     coordinate: str = ""
     embedding: list[float]
+
+
+class StaleChunk(BaseModel):
+    """A stored chunk whose vector was made by a configuration that is no longer current.
+
+    Carries its `content`, which is why re-embedding never touches the file share: the text was
+    kept beside the vector, so a model swap is a database-to-database operation.
+    """
+
+    doc_id: str
+    ordinal: int
+    content: str
 
 
 class DocumentFilter(BaseModel):
@@ -98,12 +111,35 @@ class DocumentIndex(Protocol):
         """
         ...
 
-    async def known_documents(self, doc_ids: set[str]) -> set[str]:
-        """Which of these document ids already have chunks — the copies that need no embedding."""
+    async def known_documents(self, doc_ids: set[str], key: str) -> set[str]:
+        """Which of these documents already have chunks embedded under `key`.
+
+        Keyed on the embedding configuration, not merely on presence: a document indexed by a
+        previous model must be re-embedded even though its content is unchanged, or a copy arriving
+        under a new path would inherit a vector nothing else in the corpus is comparable to.
+        """
         ...
 
-    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord]) -> None:
-        """Insert or replace file rows by path and chunk rows by `(doc_id, ordinal)`."""
+    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
+        """Insert or replace file rows by path and chunk rows by `(doc_id, ordinal)`.
+
+        `key` is the embedding configuration these vectors were produced by
+        (`chemclaw.core.embeddings.embedding_config_key`); it is stored with them so a later run
+        can tell whether they are still comparable to a freshly embedded query.
+        """
+        ...
+
+    async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
+        """Up to `limit` chunks whose stored vector was not made by `key`.
+
+        NULL counts as stale — a row written before the key column existed is "unknown", and
+        unknown must never read as "current" (the argument `infra/sql/035` makes for its own
+        added column).
+        """
+        ...
+
+    async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
+        """Replace the vector and key of existing chunks, leaving content and coordinate alone."""
         ...
 
     async def touch(self, source: str, paths: list[str]) -> None:
@@ -148,6 +184,33 @@ class DocumentIndex(Protocol):
         ...
 
 
+def require_schema_vector_width() -> None:
+    """Refuse a deployment whose `embedding_dim` cannot fit the column it would write.
+
+    **Why here and not in the config validator.** `note_index`'s equivalent check lives there
+    because `vector`/`lexical` are *shipped* source names, so `NOTE_INDEX_SOURCES` can enumerate
+    them. A document share's name is chosen by the deployment — `sharedrive` is only the shipped
+    example, and a site mounts its own manifest folder under whatever name it likes — so no name
+    set can identify one. Answering "is a share enabled?" means importing its retrieve half, and
+    `chemclaw.core` may import no sibling (`tests/test_layering.py`).
+
+    So the guard sits on the two constructors instead, which between them cover every path that
+    can reach the column: the first query, the first crawl, and
+    `validate_datasources --construct`. It fires at first use rather than at process start — a
+    stated residual, and still a message naming both numbers instead of a pgvector type error
+    surfacing from inside a worker hours after a clean-looking deploy.
+
+    Raises:
+        DocumentShareError: `embedding_dim` disagrees with the migrated column width.
+    """
+    if settings.embedding_dim != SCHEMA_VECTOR_DIM:
+        raise DocumentShareError(
+            f"embedding_dim={settings.embedding_dim} disagrees with the document_chunks vector "
+            f"column ({SCHEMA_VECTOR_DIM}, infra/sql/037_document_index.sql); pgvector would "
+            "reject every write. Change both together, or disable the share source."
+        )
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector."""
     dot = sum(x * y for x, y in zip(a, b, strict=True))
@@ -174,6 +237,9 @@ class InMemoryDocumentIndex:
         # unusual name, so two shares can carry it and a path-only key lets one evict the other.
         self._files: dict[tuple[str, str], FileRecord] = {}
         self._chunks: dict[tuple[str, int], ChunkRecord] = {}
+        # The embedding configuration each chunk's vector was made by — the in-memory mirror of
+        # `document_chunks.embedding_key`.
+        self._keys: dict[tuple[str, int], str] = {}
 
     async def fingerprints(self, source: str, paths: list[str]) -> dict[str, str]:
         """Stored fingerprints for these paths of one source."""
@@ -184,17 +250,38 @@ class InMemoryDocumentIndex:
             if f.source == source and f.path in wanted
         }
 
-    async def known_documents(self, doc_ids: set[str]) -> set[str]:
-        """Which of these documents already have at least one chunk stored."""
-        stored = {doc_id for doc_id, _ in self._chunks}
-        return doc_ids & stored
+    async def known_documents(self, doc_ids: set[str], key: str) -> set[str]:
+        """Which of these documents have chunks embedded under the current configuration."""
+        current = {doc_id for (doc_id, _), stored in self._keys.items() if stored == key}
+        return doc_ids & current
 
-    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord]) -> None:
+    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Replace each file by path and each chunk by `(doc_id, ordinal)`."""
         for file in files:
             self._files[(file.source, file.path)] = file
         for chunk in chunks:
             self._chunks[(chunk.doc_id, chunk.ordinal)] = chunk
+            self._keys[(chunk.doc_id, chunk.ordinal)] = key
+
+    async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
+        """Chunks whose stored vector was made by a different configuration, oldest key first."""
+        stale = [
+            StaleChunk(doc_id=chunk.doc_id, ordinal=chunk.ordinal, content=chunk.content)
+            for chunk_key, chunk in sorted(self._chunks.items())
+            if self._keys.get(chunk_key) != key
+        ]
+        return stale[:limit]
+
+    async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
+        """Replace the vector and key of chunks already stored, leaving the rest of the row."""
+        for chunk in chunks:
+            existing = self._chunks.get((chunk.doc_id, chunk.ordinal))
+            if existing is None:
+                continue
+            self._chunks[(chunk.doc_id, chunk.ordinal)] = existing.model_copy(
+                update={"embedding": chunk.embedding}
+            )
+            self._keys[(chunk.doc_id, chunk.ordinal)] = key
 
     async def touch(self, source: str, paths: list[str]) -> None:
         """Restamp these paths as seen now, so the sweep does not take them."""
@@ -222,6 +309,7 @@ class InMemoryDocumentIndex:
         live = {f.doc_id for f in self._files.values()}
         for chunk_key in [key for key in self._chunks if key[0] not in live]:
             del self._chunks[chunk_key]
+            self._keys.pop(chunk_key, None)
         return len(stale)
 
     def _citation(self, doc_id: str, source: str, filters: DocumentFilter) -> str:
@@ -320,12 +408,14 @@ class PostgresDocumentIndex:
 
     Dense search is cosine distance (`<=>`) accelerated by the HNSW `vector_cosine_ops` index;
     lexical search is `ts_rank` over the GIN-indexed `tsvector`. The embedding width is
-    `settings.embedding_dim`, which must equal the table's `vector(N)` column — a mismatch makes
-    Postgres raise on insert, which is the loud failure we want.
+    `settings.embedding_dim`, which must equal the table's `vector(N)` column —
+    `require_schema_vector_width` refuses a mismatch here rather than letting pgvector reject
+    every write later.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
         """Bind to the configured DSN and the configured embedding width."""
+        require_schema_vector_width()
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         width = settings.embedding_dim
         self._upsert_file = (
@@ -338,12 +428,27 @@ class PostgresDocumentIndex:
             "modified_at = EXCLUDED.modified_at, indexed_at = now()"
         )
         self._upsert_chunk = (
-            "INSERT INTO document_chunks (doc_id, ordinal, content, coordinate, embedding, lexeme) "
+            "INSERT INTO document_chunks "
+            "(doc_id, ordinal, content, coordinate, embedding, lexeme, embedding_key) "
             f"VALUES (%(doc)s, %(ord)s, %(content)s, %(coord)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(content)s)) "
+            "to_tsvector('english', %(content)s), %(key)s) "
             "ON CONFLICT (doc_id, ordinal) DO UPDATE SET "
             "content = EXCLUDED.content, coordinate = EXCLUDED.coordinate, "
-            "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme"
+            "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
+            "embedding_key = EXCLUDED.embedding_key"
+        )
+        # Re-embedding touches the vector and its key and nothing else: the content and coordinate
+        # came from the document and did not change, and rewriting the tsvector would be work for
+        # an identical result.
+        self._store_embedding = (
+            f"UPDATE document_chunks SET embedding = %(emb)s::vector({width}), "
+            "embedding_key = %(key)s WHERE doc_id = %(doc)s AND ordinal = %(ord)s"
+        )
+        # `IS DISTINCT FROM`, not `<>`: NULL is every row written before the key column existed,
+        # and `<>` would silently pass over exactly those.
+        self._stale = (
+            "SELECT doc_id, ordinal, content FROM document_chunks "
+            "WHERE embedding_key IS DISTINCT FROM %(key)s ORDER BY doc_id, ordinal LIMIT %(k)s"
         )
         # The `> 0` floor mirrors the in-memory reference: a zero or negatively-correlated chunk is
         # not a hit. Without it pgvector returns the top-k nearest unconditionally, so a narrow
@@ -390,20 +495,21 @@ class PostgresDocumentIndex:
                 rows = await cur.fetchall()
         return {row[0]: row[1] for row in rows}
 
-    async def known_documents(self, doc_ids: set[str]) -> set[str]:
-        """Which of these documents already have chunks — asked before paying to embed one."""
+    async def known_documents(self, doc_ids: set[str], key: str) -> set[str]:
+        """Which of these documents have current-configuration chunks — asked before embedding."""
         if not doc_ids:
             return set()
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT DISTINCT doc_id FROM document_chunks WHERE doc_id = ANY(%s)",
-                    (sorted(doc_ids),),
+                    "SELECT DISTINCT doc_id FROM document_chunks "
+                    "WHERE doc_id = ANY(%s) AND embedding_key = %s",
+                    (sorted(doc_ids), key),
                 )
                 rows = await cur.fetchall()
         return {row[0] for row in rows}
 
-    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord]) -> None:
+    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Write the chunks first, then the file rows, in one transaction.
 
         Order matters on a crash: a file row whose chunks are missing would be skipped by the next
@@ -422,6 +528,7 @@ class PostgresDocumentIndex:
                         "content": chunk.content,
                         "coord": chunk.coordinate,
                         "emb": _vector_literal(chunk.embedding),
+                        "key": key,
                     },
                 )
             for file in files:
@@ -434,6 +541,31 @@ class PostgresDocumentIndex:
                         "fp": file.fingerprint,
                         "tags": list(file.tags),
                         "mtime": file.modified_at,
+                    },
+                )
+            await conn.commit()
+
+    async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
+        """Up to `limit` chunks whose vector was not produced by the current configuration."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._stale, {"key": key, "k": limit})
+                rows = await cur.fetchall()
+        return [StaleChunk(doc_id=r[0], ordinal=r[1], content=r[2]) for r in rows]
+
+    async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
+        """Replace each chunk's vector and key in one transaction."""
+        if not chunks:
+            return
+        async with self._connection() as conn:
+            for chunk in chunks:
+                await conn.execute(
+                    self._store_embedding,
+                    {
+                        "emb": _vector_literal(chunk.embedding),
+                        "key": key,
+                        "doc": chunk.doc_id,
+                        "ord": chunk.ordinal,
                     },
                 )
             await conn.commit()

@@ -1,98 +1,61 @@
-# Task: make a classical SMB share answerable in ChemClaw3
+# Task: the embedding configuration is part of a vector's identity
 
-Branch: `claude/sharedrive-chemclaw3-access-3okznv`. Decision:
-`docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`; operator guide:
-`docs/guides/sharedrive-concept.md`.
+Branch: `claude/sharedrive-chemclaw3-access-3okznv` (restarted from `main`; #142 is merged).
+Decision: `docs/decisions/D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it.md`.
 
-Ask: a decade of reports, presentations, spreadsheets and PDFs on an on-prem Windows/SMB file
-server (>500k files, TB scale), gated by one AD security group — and inside that group everyone
-sees everything.
+Follow-up to the mounted-share build. Reviewing its vectorization path afterwards turned up two
+gaps with one root: **the schema stores vectors and records nothing about which embedding
+configuration produced them.**
 
 ---
 
-## Plan — the five decisions everything else follows from
+## Plan
 
-- [x] **Mounted, never called.** A read-only CIFS PersistentVolume, so the code takes a POSIX path:
-      no SMB client, no credential in Python, no new network peer. D-089 needed no exception and
-      `tests/test_no_egress.py` needed no amendment.
-- [x] **A retrieve-only DataSource with a core background indexer** — the shape `vector` and
-      `lexical` already have. No widening of `IngestHalf` (it is reaction-shaped; a PowerPoint is
-      not a reaction), no core edit to `sources/base.py`, no second enable switch beside
-      `CHEMCLAW_DATA_SOURCES` (D-018).
-- [x] **Evidence, not the PR-gate.** These are pre-existing human-authored records, cited on
-      retrieval. `cli/backfill_corpus.py` PR-gates one note per document — at 500k files that is
-      500k pull requests, so it stays what it is.
-- [x] **The share's layout is a binding**, not Python (D-2026-08-04's argument, one layer up).
-      Nothing in the package names a folder, an extension list or a project code.
-- [x] **Security trimming is a source-level entitlement** in the one role vocabulary that already
-      exists. One opt-in flag unions the Entra `groups` claim into it, so both tenant wirings (app
-      role, or group object-id) work with no second code path.
-
-## Build
-
-- [x] Moved the document parsers down to `ingest/documents/parse.py` (+ `formats.py`), imported by
-      `agent/attachments.py`. Forced: `ingest` may not import `agent` (`test_layering.py`), and a
-      second parser set is the duplication CLAUDE.md forbids. Reading a PDF is an ingest concern an
-      upload happens to use, so this is the right direction anyway.
-- [x] `ingest/documents/`: `binding`, `crawl`, `chunk`, `index`, `sync`, `retriever`, `README.md`.
-- [x] `infra/sql/037_document_index.sql` — content-addressed `document_chunks`, path-addressed
-      `document_files`; inventory row and grants (full DML — the sweep genuinely deletes).
-- [x] `durable/document_sync.py` on `background-jobs`: bounded chunks, heartbeating,
-      continue-as-new. Registered in the worker, in `publish._BAD_DATA_TYPES`, and in
-      `schedules.py` conditionally on a share actually being enabled.
-- [x] `sources/sharedrive/datasource.yaml` — describes the test fixture share, so it cannot rot.
-- [x] Config: five bounds plus `entra_group_claims_as_roles`, mirrored in `.env.example`.
-- [x] `api/auth.py` — union the `groups` claim; a claim *overage* is logged, never read as "no
-      groups" (it would quietly deny the users with the most access).
-- [x] `cli/sync_share.py`, `make share-estimate` / `make share-sync`.
-- [x] Helm: read-only PVC mount, on the background worker alone.
-- [x] Docs: ADR + ledger row, operator guide, `ingest/README.md`, `ARCHITECTURE.md`, `BACKLOG.md`,
-      `DEFERRED.md` (trigger updated, not deleted — this *sidesteps* the deferral).
+- [x] **One constant.** `_NOTE_INDEX_VECTOR_DIM` → `SCHEMA_VECTOR_DIM`: there is no coherent
+      deployment where two vector columns in one database have different widths, and two private
+      constants for one fact is how they come to disagree.
+- [x] **The width guard on the constructors**, not in config — a share's name is chosen by the
+      deployment, so no `NOTE_INDEX_SOURCES`-style name set can find one, and `core` may import no
+      sibling to ask. Residual stated: it fires at first use, not process start.
+- [x] **`embedding_config_key()`** extracted in `core/embeddings.py`, with the in-memory cache
+      rebuilt on top of it — one definition of "which configuration makes a vector".
+- [x] **Migration 038**: `document_chunks.embedding_key` + its index. NULL = unknown = stale.
+- [x] **`reembed_stale()`** reading stored `content`, drained by the workflow *before* the crawl
+      and by the CLI. Never touches the share.
+- [x] `known_documents()` keyed on the configuration too, so a copy arriving under a new path
+      cannot inherit a superseded model's vector.
+- [x] Config `document_reembed_batch_size`, `.env.example`, ADR + ledger, guide, package README.
 
 ## Verify
 
-- [x] `tests/test_document_share.py` — 24 tests over a real fixture tree of real documents: crawl
-      filters, resume without double counting, unmounted-is-loud, symlink escape, page integrity
-      through chunking, dedup, no-re-embed, edit detection, **prune only on a complete crawl**,
-      entitlement (in / out / absent / ungated), citations, filters, never-raises.
-- [x] `tests/test_datasource_isolation.py` — building the share retriever loads no document parser,
-      asserted in a subprocess. Counterfactual verified: importing `parse` makes it fail.
-- [x] `tests/test_research_tools.py` — measured `{"graph": 5, "sharedrive": 5}` under the cap. A
-      flat cap in config order would read `{"graph": 10}` (D-2026-08-01).
-- [x] `tests/test_auth.py`, `test_schedules.py`, `test_helm_chart.py` — group claim and overage,
-      the conditional schedule, the read-only mount on the worker only.
-- [x] `make lint type test` green; `datasource-validate --construct` and `prose-validate` green.
-- [x] CLI smoke-tested against a fixture mount: dry run reported 2 candidates and `.doc: 1`.
+- [x] `tests/test_document_share.py` — 30 tests. The load-bearing one **deletes the share tree**
+      before re-embedding, so if the pass ever starts needing the mount, a test says so.
+      Plus: second pass is free (counted), a batch of 1 converges, a stale document is re-embedded
+      even when its content is already on record, and a bad `embedding_dim` is refused at
+      construction naming both numbers.
+- [x] **Counterfactual measured**, not assumed: reverting `known_documents` to key on presence
+      alone makes `test_a_stale_document_is_re_embedded_even_when_its_content_is_already_known`
+      fail. The test discriminates.
+- [x] `make lint type` green; `prose-validate`, `datasource-validate`, the migration and config
+      suites green.
 
 ---
 
 ## Review
 
-**Two defects the tests found that a reading would not have.** Both surfaced only because the
-assertions counted things rather than describing them:
+**Why not the cheap fix.** A `--full` flag, or a documented "drop the two tables and re-run", is a
+manual step performed by someone who already knows about the problem — and this problem raises no
+error at all. A remedy gated on already knowing does not close a silent defect. Storing the key
+makes the corpus self-healing, which is the only shape that works when nobody is watching.
 
-1. `InMemoryDocumentIndex.search_lexical` returned a raw shared-token count (2.0), violating
-   `EvidenceChunk`'s `[0, 1]` contract. The Postgres path hid it, because `ts_rank` happens to be
-   in range — it would have surfaced as a `ValidationError` in a chat turn. Fixed at the boundary
-   where two backends meet one DTO: `DocumentHit.score` is now bounded, and the Postgres value is
-   clamped, since `ts_rank` sums per-term weights and is only *usually* below 1.
-2. `deduplicated` counted only content already on record from an earlier pass, so it reported
-   **zero** for the commonest case there is — the same report filed into two project folders on one
-   crawl. Now `len(parsed) - len(fresh)`.
+**Why the guard could not go where the last one went.** The note-index width check lives in the
+config validator because `vector`/`lexical` are shipped names it can enumerate. I assumed the same
+shape would work for shares and it cannot: the name is the deployment's, and asking "is a share
+enabled?" means importing its retrieve half, which `core` may not do. Naming that constraint took
+longer than writing the guard.
 
-**Two places the design changed while building**, both wrong at scale rather than wrong in
-principle:
+**Fixed in passing:** the previous change had inserted the document-share config block between the
+vendored-dataset comment and the field it describes.
 
-- Prune began as "diff the stored path list against the crawl", which needs every path for the
-  source in memory on every chunk of a drain. Replaced with mark-and-sweep on `indexed_at`, one
-  statement per chunk — and the sweep's reference clock then had to move to the *database*, because
-  the mark is a database `now()` and worker-versus-database skew would delete freshly-marked rows.
-- The crawl cursor began as "the last accepted file". Everything skipped between that and where the
-  chunk stopped would be re-examined next pass and tallied twice, inflating a drain's skip counters
-  — and an inflating counter is worse than none, because it is read as a measurement. It is now the
-  last entry *examined*.
-
-**What is deliberately not built**, each with its row and trigger in `DEFERRED.md`: OCR, legacy
-binary Office conversion, per-file ACLs, and the universal ingest abstraction (still one caller).
-Three live edges are in `BACKLOG.md`: identity propagation into scheduled reports, a run against a
-real CIFS mount, and HNSW recall under a filtered document search.
+**Still open** (`BACKLOG.md`, unchanged): identity propagation into scheduled reports, a run
+against a real CIFS mount, HNSW recall under a filtered search, and re-reading refused files.

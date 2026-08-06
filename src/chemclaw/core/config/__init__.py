@@ -67,8 +67,8 @@ from chemclaw.core.config.memory import MemorySettings
 from chemclaw.core.config.observability import ObservabilitySettings
 from chemclaw.core.config.reports import ReportSettings
 from chemclaw.core.config.retrieval import (
-    _NOTE_INDEX_VECTOR_DIM,
     NOTE_INDEX_SOURCES,
+    SCHEMA_VECTOR_DIM,
     RetrievalSettings,
 )
 from chemclaw.core.config.safety import SafetySettings
@@ -83,6 +83,7 @@ from chemclaw.core.config.temporal import TemporalSettings
 # arrive via import — which is all of them, now that the sections live in their own modules.
 __all__ = [
     "NOTE_INDEX_SOURCES",
+    "SCHEMA_VECTOR_DIM",
     "AgentSettings",
     "BoSettings",
     "CalculatorSettings",
@@ -247,10 +248,10 @@ class Settings(
         writes_note_index = self.note_reindex_enabled or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)
         )
-        if writes_note_index and self.embedding_dim != _NOTE_INDEX_VECTOR_DIM:
+        if writes_note_index and self.embedding_dim != SCHEMA_VECTOR_DIM:
             raise ValueError(
                 f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
-                f"({_NOTE_INDEX_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
+                f"({SCHEMA_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
                 "every write. Change both together, or drop 'vector' from data_sources."
             )
         return self

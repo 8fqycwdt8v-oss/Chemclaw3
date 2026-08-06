@@ -20,6 +20,13 @@ crawl walked every root to completion. An unmounted share presents to `scandir` 
 directory, which is indistinguishable from "somebody deleted everything" — and of the two possible
 mistakes, re-indexing a corpus is recoverable and deleting one is not.
 
+**And nothing is quietly comparable to nothing.** Each stored vector records the embedding
+configuration that made it (`embedding_config_key`). Pointing the deployment at a different model
+does not move any file's fingerprint, so before this the crawl re-embedded nothing and the table
+came to hold a mix of two models' vectors — every cosine between them meaningless, with no error
+anywhere. `reembed_stale` closes it from the *stored chunk text*, so a model swap heals itself on
+the next run without the share being touched at all.
+
 **And nothing is skipped silently.** A decade-old share is full of scanned PDFs and of `.doc` files
 this system cannot read. Both are counted, per extension, and reported. Silence would be read as
 "the share held nothing else", which is the one answer that is never true.
@@ -34,7 +41,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from chemclaw.core.embeddings import embed_texts
+from chemclaw.core.embeddings import embed_texts, embedding_config_key
 from chemclaw.core.ids import stable_hash
 from chemclaw.ingest.documents.binding import DocumentShareBinding
 from chemclaw.ingest.documents.chunk import chunk_document
@@ -96,6 +103,13 @@ class SyncReport(BaseModel):
     skipped_unsupported: dict[str, int] = Field(default_factory=dict)
     failed_roots: list[str] = Field(default_factory=list)
     cursor: str = ""
+    has_more: bool = False
+
+
+class ReembedReport(BaseModel):
+    """One bounded re-embedding pass: how many chunks were refreshed, and whether more remain."""
+
+    embedded: int = 0
     has_more: bool = False
 
 
@@ -251,7 +265,8 @@ async def sync_share(
 
     # A document already carrying chunks needs no embedding — this is where four copies of one
     # report stop costing four times as much as one.
-    known = await index.known_documents({document.doc_id for document in parsed})
+    key = embedding_config_key()
+    known = await index.known_documents({document.doc_id for document in parsed}, key)
     unseen = {d.doc_id: d for d in parsed if d.doc_id not in known}
     fresh = list(unseen.values())
     # Counted as "files that cost no embedding", which is both duplicates *within* this pass and
@@ -262,9 +277,47 @@ async def sync_share(
     report.embedded_chunks = len(chunks)
 
     files = [_file_record(source, by_path[d.ref_path], d.doc_id) for d in parsed]
-    await index.upsert(files, chunks)
+    await index.upsert(files, chunks, key)
     report.indexed = len(files)
     return report
+
+
+async def reembed_stale(index: DocumentIndex, limit: int = 500) -> ReembedReport:
+    """Re-embed up to `limit` chunks whose vectors were made by a superseded configuration.
+
+    **Reads the database, never the share.** The chunk's text was stored beside its vector, so
+    changing the embedding model is a database-to-database operation: no crawl, no mount, no
+    parse. That is what makes this cheap enough to run at the head of every scheduled sync rather
+    than being a flag somebody has to remember at the moment they change a setting — and the
+    failure it prevents is silent, so a flag would not have been run.
+
+    Args:
+        index: The document index to refresh.
+        limit: How many chunks one pass may re-embed.
+
+    Returns:
+        The count refreshed and whether more stale chunks remain.
+    """
+    key = embedding_config_key()
+    stale = await index.stale_chunks(key, limit)
+    if not stale:
+        return ReembedReport()
+    embeddings = await asyncio.to_thread(embed_texts, [chunk.content for chunk in stale])
+    await index.store_embeddings(
+        [
+            ChunkRecord(
+                doc_id=chunk.doc_id,
+                ordinal=chunk.ordinal,
+                content=chunk.content,
+                embedding=embedding,
+            )
+            for chunk, embedding in zip(stale, embeddings, strict=True)
+        ],
+        key,
+    )
+    logger.info("re-embedded %d chunk(s) under %s", len(stale), key)
+    # A full pass means there may be more; a short one means the corpus is current.
+    return ReembedReport(embedded=len(stale), has_more=len(stale) == limit)
 
 
 async def prune_share(
