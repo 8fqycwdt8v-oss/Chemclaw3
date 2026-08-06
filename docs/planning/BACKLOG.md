@@ -114,8 +114,13 @@ still pass.
 
 **Documentation that asserts what the code does not do**
 
-- [ ] **[L] `NoAuth`'s docstring asserts a manifest validator that does not exist**
-      (`connectors/manifest.py:60`).
+- [x] **[L] `NoAuth`'s docstring asserts a manifest validator that does not exist** — closed by
+      D-2026-08-06-a-connector-that-authenticates-nobody, and the docstring was wrong about more
+      than the validator's existence: such a validator *cannot* work, because it sees the manifest's
+      loopback dev default rather than the effective URL `connector_urls` moves it to. So it would
+      pass on all seven shipped manifests and catch nothing in the cluster where the exposure is.
+      The rule it described is now `require_secure_channel`, judged on the effective URL at the two
+      points a connector is reached.
 - [ ] **[L] `connectors/calc/activities.py`'s module docstring denies the registration mechanism
       the file uses two lines later** and cites a queue count D-118 removed
       (`connectors/calc/activities.py:23`).
@@ -133,24 +138,34 @@ Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed
 trigger gate and added the guard that would have caught it. These are what the same lane found and
 did not fix.
 
-- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution**
-      (`connectors/server.py:84`). `CallerLogMiddleware` documents the identity headers as
-      advisory, but a bundle's activity stamps them into `bo_campaigns`/`bo_suggestions`, so
-      anything that can reach the pod can forge who ran an experiment. The root fix is connector
-      authentication (already tracked above); the narrower one is to attribute from the workflow
-      payload's `requested_by`, which is set from the validated principal, rather than from a
-      header.
-- [ ] **[L] The built-in write gate never consults the connector-declared `state_changing` set**
-      (`agent/authz.py`). `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained list while every manifest
-      already partitions its tools into `state_changing`/`read_only`; deriving the gate from the
-      declaration is the same move `expensive_actions()` and `side_effecting_tools()` already make.
-      `report_measurement` is the live example — any authenticated user may write the shared
-      calibration ledger.
-- [ ] **[L] `map_to_hpc_identity` has no caller** (`agent/identity/hpc_bridge.py:18`). The §7.2
-      oid → HPC-identity mapping log never fires on the real Nextflow path, so the audit link
-      between a chemist and a cluster job is declared and never written. Either wire it or delete
-      it — a declared-but-unwired control is exactly the shape
-      `D-2026-08-05-a-declaration-outliving-what-it-describes` is about.
+- [x] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution** —
+      closed by D-2026-08-06-a-connector-that-authenticates-nobody, by taking the root fix this row
+      names rather than the narrow one. The narrow one had already landed for the *durable* path
+      (D-2026-08-06-the-memo-already-carried-the-actor) and could not land for the inline one:
+      `suggest_next_experiment` has no workflow and so no memo to read `requested_by` from. The
+      question was never where an inline tool finds a trustworthy actor — it was why a header on a
+      call between our own pods was untrustworthy at all. It is not any more: a connector refuses a
+      request without the fleet credential, and a deployment that would have no credential and no
+      loopback boundary refuses to start.
+- [x] **[L] The built-in write gate never consults the connector-declared `state_changing` set** —
+      closed by D-2026-08-06-a-write-gate-that-reads-the-wrong-declaration, **and the fix this row
+      proposed is refuted by the measurement it needed**. Deriving from `state_changing` would have
+      newly required a privileged role for **18 tools** — `predict_pka`, `compute_xtb_energy` and
+      `suggest_next_experiment` among them — because a bundle lists those as state-changing for the
+      *plan gate's* question (they burn CPU and write a cache row), which is not the RBAC gate's
+      question. Any deployment with `entra_required` and no `tool_role_gates` entry would have lost
+      its chemistry. The axis is *whose* state a write touches: one chemist's `predict_pka` cannot
+      change what another's returns, and `report_measurement` can. So the manifest gained
+      `endpoint.privileged` — the subset of `state_changing` whose writes are shared — and the gate
+      derives from that plus `expensive_actions()`, which also let core stop naming
+      `compute_dft_energy`, a tool that was never core's.
+- [x] **[L] `map_to_hpc_identity` has no caller** — closed by
+      D-2026-08-06-a-connector-that-authenticates-nobody by wiring it, in `submit_to_hpc` on both
+      the Nextflow and mock paths, before the launch rather than after (a submission that fails
+      still consumed the intent). The mapping also lands on `HpcJobHandle.run_as`, so the audit link
+      is in Temporal history beside the `requested_by` memo it maps from rather than only in a log
+      line retention prunes. The existing unit test is why it stayed unwired: it called the function
+      itself, so it passed for as long as nothing else did.
 
 ## Open — Left by the agentic-engine / harness / deep-research review (2026-08-05)
 
@@ -899,11 +914,20 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `authz.side_effecting_tools()` (the set D-167 had already assembled), and the three ad-hoc
       checks deleted. The set moved out of `plan_gate` on the way, because dry-run applies whether
       or not the harness is on.
-- [ ] **Every shipped connector is unauthenticated** — [M]. All seven manifests ship
-      `auth: mode: none`; `connectors/server.py` correctly never trusts the `X-Chemclaw-*` headers,
-      which leaves the ingress NetworkPolicy as the only control. The `bearer` mode exists and is
-      unused, and a connector serves its *whole* FastMCP surface — `allowed_tools` is a client-side
-      filter.
+- [x] **Every shipped connector is unauthenticated** — closed by
+      D-2026-08-06-a-connector-that-authenticates-nobody. `connector_token_env` names the fleet's
+      shared credential; connector servers require it and clients send it to any connector whose
+      manifest declares `mode: none` — the set that declares itself inside our boundary — while a
+      connector with its own `bearer` keeps it, because sending the fleet key to a third party is
+      the thing being protected against. `mode: none` off loopback with nothing to present is now a
+      startup refusal rather than a silent open port.
+      **`allowed_tools` stays a client-side filter, and that is the decision rather than the
+      remainder.** Enforcing the manifest's `tools` list server-side would break the ingestion path,
+      which legitimately calls index tools outside the *agent's* subset (`connector_app`'s docstring
+      already said so). One surface with two legitimate clients wants authenticating, not
+      partitioning — and once the port refuses unauthenticated callers, the exposure the row
+      described is closed by the channel rather than by the list. The Entra auth modes are
+      unchanged: they still need the tenant that blocks every other live Entra edge.
 - [ ] **Egress is still port-scoped by default** — [S]. D-158 made destinations declarable
       (`networkPolicy.egressDestinations`) but left the default empty, which renders `to: []` — any
       destination on those ports. Closing it needs the operator's real CIDRs; until a deployment

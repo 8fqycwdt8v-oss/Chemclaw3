@@ -22,6 +22,7 @@ import httpx
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from chemclaw.agent.identity.hpc_bridge import map_to_hpc_identity
 from chemclaw.connectors.qm.cache import calculation_key
 from chemclaw.connectors.qm.hpc import nextflow
 from chemclaw.connectors.qm.specs import (
@@ -71,11 +72,22 @@ async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     inputs-derived id (reproducible in tests) after a short sleep that models submission latency so
     the step is visibly distinct in the Temporal UI. The handle shape is identical either way, so
     the workflow is agnostic.
+
+    **This is where the identity bridge fires**, on both paths and for the same reason: submission
+    is the moment a named chemist's work becomes a run under one shared HPC identity, and §7.2
+    requires that mapping to be recorded because it is the only link back — the cluster never sees
+    an Entra oid. It had no caller at all until now (`map_to_hpc_identity` was declared and unwired,
+    the shape `D-2026-08-05-a-declaration-outliving-what-it-describes` is about), so the audit link
+    between a chemist and a cluster job was documented and never written.
     """
+    # Before the launch, not after: a submission that fails still consumed the intent, and a
+    # mapping recorded only on success would be missing exactly for the runs someone asks about.
+    run_as = map_to_hpc_identity(job.requested_by)
     if settings.hpc_launch_interface == "nextflow":
-        return await nextflow.launch_run(job)
+        handle = await nextflow.launch_run(job)
+        return handle.model_copy(update={"run_as": run_as})
     await asyncio.sleep(settings.hpc_mock_submit_seconds)
-    return HpcJobHandle(scheduler_job_id=f"mock-{qm_job_key(job)}")
+    return HpcJobHandle(scheduler_job_id=f"mock-{qm_job_key(job)}", run_as=run_as)
 
 
 @durable_activity(bundle_queue("qm"))

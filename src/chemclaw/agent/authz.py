@@ -12,7 +12,8 @@ Two gates, one home, so authorization is never scattered across tools and layers
   (`chemclaw.agent.tool_authz`), generalizing the coarse gate so per-tool RBAC does not have to be
   hand-
   wired into each tool. Config: `tool_role_gates` (tool → allowed roles) + `tool_authz_default`,
-  with the built-in `DEFAULT_WRITE_TOOL_GATES` closing the write tools out of the box.
+  with the built-in `default_write_tool_gates()` closing the write tools out of the box —
+  core's own plus every enabled bundle's declared `privileged` subset.
 
 Both read the turn's ambient identity (`chemclaw.core.identity_context`) and are active only when
 `entra_required` (a real deployment with real Entra roles); in local dev they are open, so the app
@@ -58,22 +59,31 @@ class AuthorizationError(Exception):
 # exists: `request_development_report` starts an unbounded multi-section research workflow. Its
 # `authorize_trigger` call was therefore inert on the shipped chart (`entra_required=true` with
 # both role settings empty), and no other gate covered it — it is in `STATE_CHANGING_TOOLS` but
-# not in `DEFAULT_WRITE_TOOL_GATES`, so any authenticated user could launch one.
+# not in the built-in write gate, so any authenticated user could launch one.
 #
 # Declared here rather than added to the chart's `entra_expensive_actions`, so that a deployment
 # gets it without configuring anything — the same property the manifest derivation gives bundles.
 CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset({"request_development_report"})
 
-# The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
-# configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
+# The write tools **core itself owns**, gated to `entra_privileged_role_set` when the operator has
+# NOT configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
 # every *read* tool stays open (the dev-friendly posture), but a tool that launches a job or
-# mutates state must never be callable by any authenticated user just because nobody remembered
-# to gate it — writes are closed by default, opened by explicit operator config. The index_*
-# entries are defense in depth: the MCP `allowed_tools` boundary already keeps them off the
-# agent (D-029), so this gate only matters if an operator ever widens that list.
-DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
+# mutates state shared across users must never be callable by any authenticated user just because
+# nobody remembered to gate it — writes are closed by default, opened by explicit operator config.
+#
+# Core's own, because a connector's writes are now *declared* by the bundle and derived from it
+# (`default_write_tool_gates`). The index_* entries stay here despite belonging to `molfp`/`rxnfp`,
+# and the reason is structural rather than an oversight: they are deliberately absent from those
+# manifests' agent-facing `tools`, so they cannot be declared `privileged` there — a manifest may
+# only classify what it serves the agent. They are defense in depth anyway, since the MCP
+# `allowed_tools` boundary already keeps them off the agent (D-029); this gate matters only if an
+# operator widens that list.
+#
+# `compute_dft_energy` is *not* here any more, and its absence is the derivation working rather than
+# a hole: it is `qm`'s `expensive: true` job, so `expensive_actions()` gates it against the same
+# predicate. Naming another bundle's tool in core was the second source of truth this closes.
+CORE_WRITE_TOOLS: frozenset[str] = frozenset(
     {
-        "compute_dft_energy",  # launches a durable HPC/DFT run
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
@@ -85,12 +95,16 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
 # Every in-process tool that changes stored state or starts durable work — the set the harness's
 # plan gate refuses under an unapproved plan (`chemclaw.agent.plan_gate`, D-167).
 #
-# **This is a superset of `DEFAULT_WRITE_TOOL_GATES`, and the two are deliberately not merged.**
+# **This is a superset of the write gate's core half, and the two are deliberately not merged.**
 # That set is the RBAC *fallback*: membership makes a tool require a privileged role under
 # `entra_required` with no operator config, so widening it would silently narrow live deployments'
 # access to tools they can call today. Whether a tool writes and whether an unconfigured deployment
 # should close it out of the box are different questions with different blast radii, so they get
 # different sets and this one is derived from that one rather than duplicating it.
+#
+# The same distinction is now declared on the connector side as `state_changing` vs `privileged`,
+# and it is the same axis: `remember_preference` writes, and it writes *the asking chemist's own*
+# preference, so gating it behind a privileged role would refuse a user their own settings.
 #
 # The *complete* side-effecting set is this ∪ every enabled connector job ∪ every enabled template
 # launcher, assembled in `side_effecting_tools()` below. Those two are structural — every declared
@@ -107,7 +121,7 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             "request_development_report",  # starts a durable report workflow
         }
     )
-    | DEFAULT_WRITE_TOOL_GATES
+    | CORE_WRITE_TOOLS
 )
 
 # The in-process tools that only read. Not consulted at run time — the gate asks whether a tool is
@@ -121,7 +135,7 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
 #
 # The check runs over the registry, not over the union: `STATE_CHANGING_TOOLS` also names tools
 # that are not in-process at all (`compute_dft_energy` is a connector job, `index_*` are MCP tools
-# behind an `allowed_tools` boundary), inherited from `DEFAULT_WRITE_TOOL_GATES`. Those are correct
+# behind an `allowed_tools` boundary), inherited from `CORE_WRITE_TOOLS`. Those are correct
 # entries and correctly absent from the registry.
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
@@ -184,6 +198,40 @@ def side_effecting_tools() -> frozenset[str]:
     )
 
 
+def default_write_tool_gates() -> frozenset[str]:
+    """Every tool the built-in RBAC write gate closes with no operator config.
+
+    **The declaration the gate never consulted.** `DEFAULT_WRITE_TOOL_GATES` was a hand-maintained
+    list in core while every manifest already classified its own tools, so a connector write was
+    gated only if someone in core remembered it — and one was not. `report_measurement` writes the
+    calibration ledger that every chemist's `calculator_trust` reads, and any authenticated user
+    could call it.
+
+    **What it derives from is `privileged`, not `state_changing`, and that is the correction the
+    measurement forced.** Deriving from `state_changing` — the obvious reading, and the one the
+    backlog row proposed — would have newly required a privileged role for **18 tools**, among them
+    `predict_pka`, `compute_xtb_energy` and `suggest_next_experiment`: a bundle lists those as
+    state-changing because they burn CPU and write a cache row, which is the right answer to the
+    question the *plan gate* asks and the wrong answer to this one. An `entra_required` deployment
+    that had not written a `tool_role_gates` entry would have lost its science. So the manifest
+    gained a narrower declaration for the narrower question (`manifest._check_privileged`).
+
+    Three sources, each owned where its knowledge lives:
+
+    - `CORE_WRITE_TOOLS` — core's own writes, which have no manifest to declare them;
+    - every enabled connector's declared `privileged` subset;
+    - `expensive_actions()` — a job a bundle calls `expensive: true` is already refused to the same
+      actors by `authorize_trigger`, against the identical predicate, so including it here changes
+      no decision and lets core stop naming `compute_dft_energy`, which was never its tool.
+
+    Imported lazily for the same reason `side_effecting_tools()` is: the connector registry reaches
+    the agent builder, which reaches this module.
+    """
+    from chemclaw.connectors.registry import privileged_tool_names
+
+    return CORE_WRITE_TOOLS | frozenset(privileged_tool_names()) | expensive_actions()
+
+
 def expensive_actions() -> frozenset[str]:
     """Every action the coarse trigger gate protects — the declarations plus the operator's list.
 
@@ -193,7 +241,7 @@ def expensive_actions() -> frozenset[str]:
     an operator had *separately* named that job in `entra_expensive_actions`. So the manifest flag
     was decoration: under `entra_required=True` with a role-less actor, `sample_conformers`,
     `compute_interaction_energy` and `start_optimization_campaign` all ran, and only
-    `compute_dft_energy` was refused — by `DEFAULT_WRITE_TOOL_GATES` membership, a different gate
+    `compute_dft_energy` was refused — by the built-in write gate's membership, a different gate
     that happens to name it. The shipped chart is precisely that shape: `entra_required=true` with
     both role settings left empty.
 
@@ -237,7 +285,7 @@ def authorize_tool(tool: str) -> None:
     `tool_role_gates`
     (tool name → allowed roles) against the turn's ambient roles. A tool with no gate entry
     follows `tool_authz_default`: under `"deny"` (allowlist mode) it is refused outright, and
-    under `"allow"` it is open — except the built-in `DEFAULT_WRITE_TOOL_GATES`, which require a
+    under `"allow"` it is open — except the built-in `default_write_tool_gates()`, which require a
     role from `entra_privileged_role_set` out of the box (an explicit operator gate overrides
     this). The built-in write gate only *narrows* the `"allow"` default; it never widens
     `"deny"` — a privileged role is not an allowlist entry. The gate is active only under
@@ -280,7 +328,7 @@ def authorize_tool(tool: str) -> None:
             f"{_actor()} is not authorized to use {tool}: this deployment permits only an "
             "approved list of tools, and this one is not on it"
         )
-    if tool in DEFAULT_WRITE_TOOL_GATES:
+    if tool in default_write_tool_gates():
         privileged = settings.entra_privileged_role_set
         # An empty privileged set means fail closed, not open: `_has_required_role` treats
         # "no roles required" as satisfied, which is right for operator gates but would

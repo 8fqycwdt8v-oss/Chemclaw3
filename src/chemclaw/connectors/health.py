@@ -24,7 +24,9 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from chemclaw.connectors.registry import enabled, health_url
+from chemclaw.connectors.identity import require_secure_channel
+from chemclaw.connectors.manifest import HttpEndpoint
+from chemclaw.connectors.registry import enabled, endpoint_url, health_url
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -111,6 +113,17 @@ async def check_connectors_at_startup() -> list[ConnectorHealth]:
             is unreachable — the fail-fast posture a GxP deployment can opt into, where serving with
             a silently reduced tool surface is worse than not serving.
     """
+    # Before reachability, legitimacy: a connector reached off loopback with no credential is a
+    # boot-time refusal, not a health state. `connector_http_client` enforces the same rule on every
+    # call, so this changes *when* a misconfigured deployment finds out — at startup, rather than on
+    # a chemist's first turn — which is the difference between a failed rollout and a bad answer.
+    for manifest in enabled():
+        if isinstance(manifest.endpoint, HttpEndpoint):
+            require_secure_channel(
+                manifest.name,
+                endpoint_url(manifest.name, manifest.endpoint),
+                manifest.endpoint.auth,
+            )
     health = await probe_connectors()
     unreachable = [item for item in health if item.state == "unreachable"]
     if unreachable:

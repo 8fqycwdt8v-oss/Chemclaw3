@@ -68,7 +68,7 @@ def test_gated_tool_requires_a_permitted_role(monkeypatch: pytest.MonkeyPatch) -
 def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unconfigured write tool requires a privileged role even under the 'allow' default.
 
-    The built-in `DEFAULT_WRITE_TOOL_GATES` closes job launchers and state-mutating tools
+    The built-in `default_write_tool_gates()` closes job launchers and shared-state writes
     out of the box: only `entra_privileged_roles` holders may call them until an operator
     sets an explicit gate.
     """

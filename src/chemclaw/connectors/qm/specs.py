@@ -91,6 +91,13 @@ class HpcJobHandle(BaseModel):
     """
 
     scheduler_job_id: str = Field(min_length=1)
+    # The shared HPC identity this run executes under, from `agent.identity.hpc_bridge`. Carried on
+    # the handle rather than only logged, because §7.2's requirement is that the oid → HPC-identity
+    # mapping be *auditable*: a log line is pruned by whatever retention the log store has, while a
+    # field on the handle is in Temporal history beside the `requested_by` memo it maps from. The
+    # cluster is told nothing new — it authenticates our service credential and infers the identity
+    # from it — so this records what happened rather than asserting a field on someone else's API.
+    run_as: str = ""
 
 
 class QMJobResult(BaseModel):

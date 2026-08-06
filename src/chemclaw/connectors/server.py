@@ -17,10 +17,17 @@ cannot be forgotten per connector:
   be reconciled with the core audit trail, which is the whole point of sending them. It is logged,
   never trusted: authorization happened in core before the call was made, and a header on a request
   is not evidence of anything a connector should act on.
+- **Requiring the deployment's connector credential.** The sentence above is about *authorization*
+  and was always true; what was missing beside it is *authentication*. Nothing established that the
+  caller was core at all, so every connector served its whole tool surface to anything that could
+  reach the port, and the actor header a bundle records became a name anyone could choose
+  (`RequireConnectorCredential`).
 """
 
 import asyncio
 import logging
+import os
+import secrets
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
@@ -47,6 +54,11 @@ from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.tracing import continue_trace
 
 logger = logging.getLogger(__name__)
+
+# The two routes a credential is not required on: the kubelet's probe and the Prometheus scrape.
+# Neither serves a tool, reads an identity header or writes a row, and both are called by callers
+# that hold no credential — so requiring one would cost a liveness signal and buy nothing.
+_UNAUTHENTICATED_ROUTES = frozenset({"/healthz", "/metrics"})
 
 
 class CallerLogMiddleware(BaseHTTPMiddleware):
@@ -97,6 +109,67 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
             # one. The reset costs nothing and holds if that ever stops being true — but no test
             # can fail without it, so it is not claimed as a guarantee.
             reset_caller(tokens)
+
+
+class RequireConnectorCredential(BaseHTTPMiddleware):
+    """Refuse any request that does not present this deployment's connector credential.
+
+    **The half of `auth: mode: none` that was never built.** A manifest's auth block says how *core*
+    authenticates to a connector; nothing said what a connector requires of a caller, so a connector
+    Service served its whole tool surface — including the index and write tools deliberately kept
+    off the agent's `allowed_tools` — to anything that could reach the port, and the actor
+    header a bundle stamps into `bo_campaigns` could name any chemist the caller liked
+    (D-2026-08-06 authorization lane).
+
+    `connector_token_env` names the variable holding the shared credential, read per request so a
+    rotated secret needs no restart — `manifest.BearerAuth`'s idiom, deliberately not a second one.
+    Empty means this deployment requires none, which is legitimate exactly where the boundary is
+    something else (a loopback dev fleet) and is refused elsewhere at the client
+    (`connectors.identity.require_secure_channel`), so the two halves cannot disagree about whether
+    a boundary exists.
+
+    **`/healthz` and `/metrics` stay open, deliberately.** The kubelet's probe carries no credential
+    and neither does a Prometheus scrape; both were already reachable to anything on the pod
+    network, and neither serves a tool, reads a header, or writes a row. Requiring one there would
+    trade a real liveness signal for no property at all.
+
+    **Not a tool allowlist, and that is a decision rather than an omission.** The obvious
+    companion — enforce the manifest's `tools` list server-side — would be wrong: that list is
+    *the agent's* subset, and the ingestion path legitimately calls index tools outside it
+    (`connector_app`'s own docstring says so). One surface with two legitimate clients is
+    authenticated, not partitioned; partitioning it by the agent's list would break ingest while
+    calling itself a fix.
+    """
+
+    def __init__(self, app: ASGIApp, connector: str) -> None:
+        """Bind the connector's name so a refusal names which capability refused."""
+        super().__init__(app)
+        self._connector = connector
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Serve the request, or refuse it with 401 when its credential is absent or wrong."""
+        if request.url.path in _UNAUTHENTICATED_ROUTES:
+            return await call_next(request)
+        expected = os.environ.get(settings.connector_token_env, "")
+        if not expected:
+            # The variable this deployment named is unset on the *server*, while the client is
+            # sending a token it believes in. Refusing is the only safe reading: serving would be an
+            # open connector in a deployment that asked for a closed one, which is precisely the
+            # state this class exists to make unreachable.
+            logger.error(
+                "connector %s: CHEMCLAW_CONNECTOR_TOKEN_ENV names %r, which is unset in this "
+                "process — refusing every request rather than serving unauthenticated",
+                self._connector,
+                settings.connector_token_env,
+            )
+            return Response(status_code=503, content="connector credential unavailable")
+        presented = request.headers.get("Authorization", "")
+        scheme, _, token = presented.partition(" ")
+        # `compare_digest` on the token, and only after the scheme matches: a plain `==` on a
+        # credential leaks its prefix through timing, and this one is fleet-wide.
+        if scheme.lower() != "bearer" or not secrets.compare_digest(token, expected):
+            return Response(status_code=401, content="unauthorized")
+        return await call_next(request)
 
 
 def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
@@ -203,6 +276,11 @@ def connector_app(
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
     app.add_middleware(CallerLogMiddleware, connector=name)
+    # Added after the logger so it wraps *outside* it: an unauthorized request is refused before
+    # anything binds its claimed identity for a tool to read, which keeps "was bound" and "was
+    # vouched for" the same event rather than two.
+    if settings.connector_token_env:
+        app.add_middleware(RequireConnectorCredential, connector=name)
     # Added *after* `CallerLogMiddleware`: Starlette wraps in add-order with the most recently
     # added outermost, so this one now sits outside it and refuses an oversized body before any
     # handler — including the logging middleware's own `dispatch` — ever reads it (Sec-5: `/mcp`

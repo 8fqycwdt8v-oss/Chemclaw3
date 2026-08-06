@@ -13,12 +13,27 @@ So the middleware now binds them into task-local contextvars a tool body can rea
 request object, and a connector process serves every user, so anything bound at import time would
 be shared across them.
 
-**The trust rule is unchanged and is the important part.** These values arrive on an
-unauthenticated header from outside this process's trust boundary. Authorization already happened
-in core (`chemclaw.agent.authz`) before the call was made, and a connector that gated on one of
-these would be trusting a string anyone who can reach the Service could set. They are for
+**The trust rule is unchanged and is the important part.** These values arrive on a header and are
+never an input to an access decision. Authorization already happened in core
+(`chemclaw.agent.authz`) before the call was made, and a connector that gated on one of these would
+be re-deciding, downstream, a question already answered upstream by a validated token. They are for
 attribution in records and logs, and for nothing else. Every reader here is named so that stays
 checkable.
+
+**What a header is worth is what the channel it arrived on is worth**, and that is the part this
+module used to leave to chance. A forged actor in a log line is a nuisance; the same forged actor in
+`bo_campaigns.opened_by` is a GxP attribution claiming a named chemist ran an experiment they never
+ran. It was reachable by anything that could open a socket to the pod, because a connector Service
+authenticated nobody (D-2026-08-06 authorization lane). The fix is not here and deliberately so —
+scoring each record's trustworthiness individually would be a second, weaker answer to a question
+the transport can answer once: `connectors.server` refuses a request that does not present the
+deployment's connector credential, and `connectors.identity.require_secure_channel` refuses to *be*
+a deployment that has no credential and no loopback boundary either.
+
+Note what that establishes. The credential authenticates the *process* that called — that it is
+core, holding the fleet's token — not the end user, whose identity core validated before the call
+left it. That is the chain `audit_events` already rests on, one hop further out: core vouches for
+the chemist, the credential vouches for core. What it replaces is a chain with no first link.
 """
 
 from contextvars import ContextVar

@@ -167,12 +167,22 @@ def test_each_transport_builds_its_matching_maf_tool(
 def test_connector_urls_override_the_manifest_address(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A manifest ships a dev default; a cluster address belongs to the deployment."""
+    """A manifest ships a dev default; a cluster address belongs to the deployment.
+
+    The credential is set because moving a connector off loopback is exactly what makes one
+    necessary: a manifest's `auth: mode: none` describes a boundary that stops existing the moment
+    the address does not. So this is the cluster shape — overridden URL *and* fleet credential —
+    rather than the half of it that startup now refuses.
+    """
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _use(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "chemclaw.core.config.settings.connector_urls", {"alpha": "http://alpha.svc:8080/mcp"}
     )
+    monkeypatch.setattr(
+        "chemclaw.core.config.settings.connector_token_env", "CHEMCLAW_CONNECTOR_TOKEN"
+    )
+    monkeypatch.setenv("CHEMCLAW_CONNECTOR_TOKEN", "fleet-token")
     (tool,) = mcp_tools()
     assert tool.url == "http://alpha.svc:8080/mcp"
 

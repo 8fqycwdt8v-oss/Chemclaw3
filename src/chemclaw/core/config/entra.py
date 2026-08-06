@@ -49,7 +49,7 @@ class EntraSettings(BaseSettings):
     # Entra app-roles allowed to call it. A tool with no entry follows `tool_authz_default`:
     # under `"deny"` (allowlist mode) it is refused outright — only listed tools are callable,
     # by a role-holder; under `"allow"` it is callable, except the built-in write-tool gates
-    # (`agents.authz.DEFAULT_WRITE_TOOL_GATES`: job launchers and state-mutating tools require
+    # (`agent.authz.default_write_tool_gates()`: job launchers and shared-state writes require
     # an `entra_privileged_roles` role out of the box — an explicit entry here overrides that).
     # The built-in write gate only narrows `"allow"`; it never widens `"deny"`. Enforced only
     # when `entra_required` (dev gate is open). ENV override for the gates is JSON, e.g.

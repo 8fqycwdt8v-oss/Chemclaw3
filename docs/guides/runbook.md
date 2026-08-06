@@ -330,6 +330,29 @@ override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
+**The connector credential.** `CHEMCLAW_CONNECTOR_TOKEN_ENV` names the *variable* holding the fleet's
+shared connector token — never the token itself, and never the variable's name in this file either:
+the chart owns it as `secrets.keys.connectorToken`, mounted on the front door, the workers and every
+connector pod. Set it and both halves of the boundary become real: every connector Service requires
+`Authorization: Bearer $<var>` on `/mcp`, and every client reaching a connector whose manifest says
+`auth: mode: none` sends it. The value is read per request, so rotating the secret needs no restart —
+roll it by updating the Secret and letting the pods pick it up.
+
+Leave it empty only where the boundary is genuinely something else: a loopback dev fleet
+(`make connectors`). Off loopback with no credential, the front door **refuses to start**, naming the
+connector and the three ways out (set the variable, give that connector its own `bearer`, or set
+`CHEMCLAW_SERVICE_ALLOW_INSECURE=true` to accept an open connector channel deliberately). Two
+symptoms worth recognising: a connector answering **401** on every call means the client and server
+hold different tokens, and **503 "connector credential unavailable"** means that pod's Secret is not
+mounted — it refuses rather than serving unauthenticated.
+
+**What a privileged connector tool is.** A manifest's `endpoint.privileged` names the subset of
+`state_changing` whose writes are shared across users (`calc`'s `report_measurement` writes the
+calibration ledger every `calculator_trust` answer is read from). Those close by default under
+`CHEMCLAW_ENTRA_REQUIRED` and need an `entra_privileged_roles` role, or an explicit
+`CHEMCLAW_TOOL_ROLE_GATES` entry to open them. Ordinary calculators are *not* on it — they are
+state-changing because they spend CPU and cache a result, which is a different question.
+
 **Troubleshooting.** `GET /readyz` reports each enabled connector as `healthy`, `unreachable` or
 `unprobed` (no `health_url` declared — honest for a third-party server), and
 `chemclaw_connectors_unhealthy` on `/metrics` counts the unreachable ones. An unreachable connector

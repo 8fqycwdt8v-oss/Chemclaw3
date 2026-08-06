@@ -156,7 +156,7 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
 def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
     """Check that every key in `connector_urls` names a discovered bundle (rule 5).
 
-    A typo'd key is silently ignored by `_endpoint_url`, falling back to the manifest's
+    A typo'd key is silently ignored by `endpoint_url`, falling back to the manifest's
     dev-loopback default, which is unreachable in a cluster. The symptom is a WARNING plus a
     degraded `/readyz`, identical to a transient outage — so a configuration bug presents as an
     infrastructure problem. This check forces any configured URL to name a real bundle.

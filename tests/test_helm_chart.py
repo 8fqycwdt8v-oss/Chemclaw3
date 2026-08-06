@@ -50,6 +50,26 @@ def _field_for(env_key: str) -> str:
     return env_key.removeprefix("CHEMCLAW_").lower()
 
 
+def _named_credential_env() -> set[str]:
+    """Env keys a `*_env` setting *names* — read by that name, so never a `Settings` field itself.
+
+    The repo's one idiom for a credential (`manifest.BearerAuth.token_env`,
+    `Settings.connector_token_env`): configuration holds the *variable's name* and the value is read
+    from the environment per use, so a rotated secret needs no restart and no credential is written
+    into a manifest or a ConfigMap. The variable it points at is therefore consumed by Python
+    without being a field, which the orphan check above would otherwise report as dead config.
+
+    Derived from the chart's own values rather than listed, for the reason the shell exemption is:
+    an operator who renames the variable keeps the exemption automatically, and a `*_env` setting
+    added later is covered the day it appears.
+    """
+    return {
+        str(value)
+        for key, value in _VALUES["config"].items()
+        if _field_for(key).endswith("_env") and str(value).startswith("CHEMCLAW_")
+    }
+
+
 def _helper_env_keys() -> set[str]:
     """`CHEMCLAW_*` names injected from `_helpers.tpl` rather than the ConfigMap.
 
@@ -144,11 +164,15 @@ def test_chart_config_keys_have_a_consumer() -> None:
     A key that is neither is accepted silently by pydantic-settings when it arrives as an
     environment variable, so the operator who sets it gets no error and no effect. This is the only
     place that mistake can be caught.
+
+    Three ways to be read, all discovered rather than listed: a `Settings` field, a deploy script,
+    or a variable some `*_env` setting names (`_named_credential_env`).
     """
+    consumed = _SHELL_CONSUMED_ENV | _named_credential_env()
     orphans = {
         key
         for key in _chart_env_keys()
-        if _field_for(key) not in Settings.model_fields and key not in _SHELL_CONSUMED_ENV
+        if _field_for(key) not in Settings.model_fields and key not in consumed
     }
     assert not orphans, f"chart sets env nothing reads: {sorted(orphans)}"
 
@@ -220,6 +244,17 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     webhook secret's polarity — absent is *safe* rather than broken. The chain keeps catching
     modification, reordering, interior deletion and prefix truncation, and a point-in-time restore
     stays what it has always been: a trailing deletion nothing can see.
+
+    The connector credential is the seventh, and the only one that is not about reaching *outward*:
+    it authenticates core to its own capability pods. Every manifest ships `auth: mode: none`
+    meaning "inside our own trust boundary", and nothing enforced that boundary — a connector
+    Service served its whole tool surface, index and write tools included, to anything that could
+    reach the port, and let it name any chemist in the identity headers a bundle records into
+    `bo_campaigns`
+    (D-2026-08-06 authorization lane). Federation cannot supply this one: it is presented on an
+    in-cluster call between our own pods, which is the case workload identity does not cover. Its
+    polarity is the four-key one — absent, the front door refuses to start against a non-loopback
+    connector rather than degrading quietly.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -228,6 +263,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
         "CHEMCLAW_AUDIT_ANCHOR_SECRET",
+        "CHEMCLAW_CONNECTOR_TOKEN",
     }
 
 

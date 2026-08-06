@@ -35,7 +35,7 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
-from chemclaw.connectors.identity import auth_for, turn_identity_hook
+from chemclaw.connectors.identity import auth_for, require_secure_channel, turn_identity_hook
 from chemclaw.connectors.jobs import build_job_tool
 from chemclaw.connectors.manifest import (
     ConnectorManifest,
@@ -184,7 +184,7 @@ def skills_dirs() -> list[str]:
     return dirs
 
 
-def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
+def endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     """The endpoint URL, after any per-deployment override for this connector.
 
     A manifest ships a working dev default (a loopback port), but a cluster's address belongs to
@@ -225,10 +225,15 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
     Returns:
         A client the caller owns; `DegradingHttpConnector.close` is what releases it.
     """
+    url = endpoint_url(connector, endpoint)
+    # Judged on the *effective* URL, which is why it is here and not a manifest validator: a bundle
+    # ships a loopback dev default and `connector_urls` is what moves it into a cluster, so the
+    # manifest alone cannot tell whether `mode: none` still describes a trust boundary that exists.
+    require_secure_channel(connector, url, endpoint.auth)
     return httpx.AsyncClient(
         auth=auth_for(endpoint.auth, connector),
         follow_redirects=False,
-        event_hooks={"request": [turn_identity_hook(_endpoint_url(connector, endpoint))]},
+        event_hooks={"request": [turn_identity_hook(url)]},
         # Without this, httpx applies its own 5 s default to *every* phase, and the manifest's
         # `request_timeout` — which this module's docstring credits with "keeping an unreachable
         # host from hanging a turn" — did the opposite. Measured against a real server: an 8 s tool
@@ -270,7 +275,7 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     endpoint = manifest.endpoint
     if not isinstance(endpoint, HttpEndpoint) or endpoint.health_url is None:
         return None
-    effective = _endpoint_url(manifest.name, endpoint)
+    effective = endpoint_url(manifest.name, endpoint)
     if effective == endpoint.url:
         return endpoint.health_url
     shared = len(os.path.commonprefix([endpoint.url, endpoint.health_url]))
@@ -295,7 +300,7 @@ def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTo
     if isinstance(endpoint, HttpEndpoint):
         return DegradingHttpConnector(
             name=manifest.name,
-            url=_endpoint_url(manifest.name, endpoint),
+            url=endpoint_url(manifest.name, endpoint),
             allowed_tools=endpoint.tools,
             request_timeout=endpoint.request_timeout,
             load_prompts=False,
@@ -453,6 +458,31 @@ def state_changing_tool_names() -> list[str]:
             names.update(manifest.endpoint.state_changing)
         names.update(job.name for job in manifest.jobs)
     return sorted(names)
+
+
+def privileged_tool_names() -> list[str]:
+    """Every enabled connector tool whose writes are shared across users, sorted.
+
+    The narrower sibling of `state_changing_tool_names`, and the distinction is the whole reason it
+    exists: that one answers "does this spend resources or write data" (what the plan gate and
+    dry-run need), while this answers "should an ordinary authenticated chemist be refused this out
+    of the box" (what the built-in RBAC write gate needs). Deriving the second from the first was
+    measured and rejected — it would have required a privileged role for 18 tools including
+    `predict_pka` and `compute_xtb_energy`, closing the science for any deployment that turned on
+    `entra_required` without writing a `tool_role_gates` entry.
+
+    Read by `chemclaw.agent.authz.default_write_tool_gates`. Assembled here for the same reason
+    its sibling is: whether a tool's write is one chemist's own or the site's is the bundle's fact.
+    `report_measurement` writes the calibration ledger every chemist's `calculator_trust` reads.
+    """
+    return sorted(
+        {
+            tool
+            for manifest in enabled()
+            if manifest.endpoint is not None
+            for tool in manifest.endpoint.privileged
+        }
+    )
 
 
 def find_job(name: str) -> tuple[str, JobSpec]:

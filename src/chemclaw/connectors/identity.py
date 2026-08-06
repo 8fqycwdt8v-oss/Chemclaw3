@@ -37,6 +37,7 @@ downstream runs under our service identity while the requesting user's oid trave
 request and is logged, so the audit trail can always answer "which real user drove this".
 """
 
+import logging
 import os
 from collections.abc import Awaitable, Callable, Generator
 
@@ -44,13 +45,18 @@ import httpx
 
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
+from chemclaw.core.config import settings
+from chemclaw.core.http import LOOPBACK_HOSTS
 from chemclaw.core.identity_context import (
     get_current_actor,
     get_current_correlation_id,
     get_current_roles,
 )
+from chemclaw.core.logging import register_secret_env
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tracing import trace_headers
+
+logger = logging.getLogger(__name__)
 
 # The header contract, as constants so the connector-side reader and this writer cannot drift.
 HEADER_ACTOR = "X-Chemclaw-Actor"
@@ -157,6 +163,55 @@ class _EnvBearerAuth(httpx.Auth):
         yield request
 
 
+def require_secure_channel(connector: str, url: str, auth: ConnectorAuth) -> None:
+    """Refuse an unauthenticated connector call that leaves this machine.
+
+    The mirror of `api.middleware._require_secure_binding`, and the rule `NoAuth`'s docstring has
+    always claimed: `mode: none` is correct for a subprocess or a loopback dev server, and it is a
+    statement about the *deployment's* boundary rather than about the capability. Off loopback,
+    nothing enforced that boundary — a connector Service answered anything that reached it, and the
+    `X-Chemclaw-Actor` header a bundle stamps into `bo_campaigns` could name any chemist the caller
+    liked.
+
+    So the two ways to be legitimate are named: reach the connector over loopback, or send it a
+    credential (its own `bearer`, or the fleet's `connector_token_env`). `service_allow_insecure` is
+    the same explicit, logged opt-out the front door offers, for the same reason — a deployment may
+    have a boundary this process cannot see, and it should have to say so.
+
+    Called from `connector_http_client`, so every process that reaches a connector is covered by
+    construction, and again at startup (`connectors.health`) so a misconfigured deployment fails at
+    boot rather than on a chemist's first turn.
+
+    Args:
+        connector: The connector's name, for the message.
+        url: The connector's *effective* endpoint URL — after `connector_urls`, which is the address
+            actually dialled and the only one this can be judged on.
+        auth: The connector's declared auth mode.
+
+    Raises:
+        RuntimeError: When the call would leave loopback with no credential and the deployment has
+            not explicitly accepted that.
+    """
+    if auth_for(auth, connector) is not None or httpx.URL(url).host in LOOPBACK_HOSTS:
+        return
+    if not settings.service_allow_insecure:
+        raise RuntimeError(
+            f"SECURITY: connector {connector!r} is reached at {url!r} — not loopback — with no "
+            "credential, so anything that can reach it may call its tools and may name any actor "
+            "in the identity headers a bundle records. Set CHEMCLAW_CONNECTOR_TOKEN_ENV to the "
+            "variable holding the fleet's shared connector token (mounted on the connector pods "
+            "too), give the connector its own `auth: mode: bearer`, or set "
+            "CHEMCLAW_SERVICE_ALLOW_INSECURE=true to explicitly accept an unauthenticated "
+            "connector channel."
+        )
+    logger.warning(
+        "SECURITY: connector %r is reached at %r with no credential (service_allow_insecure=true) "
+        "— its tools are callable by anything that can reach it.",
+        connector,
+        url,
+    )
+
+
 def _origin(url: httpx.URL) -> tuple[str, str, int]:
     """The (scheme, host, port) an identity header may travel to, default port filled in."""
     return (url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme, 0))
@@ -206,16 +261,33 @@ def auth_for(auth: ConnectorAuth, connector: str) -> httpx.Auth | None:
     One dispatch site for the auth union, so adding a mode is one variant in
     `chemclaw.connectors.manifest.ConnectorAuth` plus one branch here.
 
+    **`mode: none` means "inside our own trust boundary", and `connector_token_env` is what makes
+    that true.** A bundle we own declares no credential of its own because the deployment, not the
+    manifest, decides how its own processes authenticate to each other — so when the deployment
+    names a shared connector credential, that is the credential a `none` connector is reached with.
+    A connector declaring its own `bearer` keeps it: that is the third-party case, and sending our
+    fleet token to someone else's server would hand out the credential this exists to protect.
+
     Args:
         auth: The connector's declared auth mode.
         connector: The connector's name, for the error message when a credential is missing.
 
     Returns:
-        An `httpx.Auth` to attach to the connector's HTTP client, or `None` for `mode: none`.
+        An `httpx.Auth` to attach to the connector's HTTP client, or `None` when this deployment
+        sends no credential to a `mode: none` connector.
     """
     if isinstance(auth, BearerAuth):
+        # Registered before it is ever read, so an httpx error or a `repr` that echoes the
+        # credential is scrubbed rather than logged — the rule `ingest.eln.warehouse.connect`
+        # already applies to a manifest-named warehouse secret. Neither credential can sit in
+        # `logging._SECRET_SETTINGS`: that inventory lists settings whose *value* is the secret,
+        # and both of these hold the variable's **name**.
+        register_secret_env(auth.token_env)
         return _EnvBearerAuth(auth.token_env, connector)
     if isinstance(auth, NoAuth):
+        if settings.connector_token_env:
+            register_secret_env(settings.connector_token_env)
+            return _EnvBearerAuth(settings.connector_token_env, connector)
         return None
     # Deliberately not `assert_never`: `ConnectorAuth` is a plain union, and a variant added
     # without a branch here must fail loudly at build time rather than silently sending no

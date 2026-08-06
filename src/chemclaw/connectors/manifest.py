@@ -54,12 +54,21 @@ JobParamType = Literal["string", "integer", "number", "boolean", "string[]", "nu
 
 
 class NoAuth(BaseModel):
-    """No credential — the connector is inside our own trust boundary.
+    """No credential of its *own* — the connector is inside our own trust boundary.
 
     Correct for a stdio connector (a subprocess of our own pod, under our own identity) and for
-    a loopback HTTP connector in dev. `ConnectorManifest` refuses it for a non-loopback URL
-    unless the deployment has explicitly opted into insecure binding, reusing the front door's
-    loopback rule rather than inventing a second notion of "safe address".
+    a loopback HTTP connector in dev. It is also the mode the deployment's shared connector
+    credential applies to: `mode: none` says "one of ours", so when `connector_token_env` names a
+    fleet credential, that is what a `none` connector is reached with and what its server requires
+    (`connectors.identity.auth_for`, `connectors.server.RequireConnectorCredential`).
+
+    **This docstring used to claim a validator that does not exist, and could not.** It said
+    `ConnectorManifest` refuses `none` for a non-loopback URL — no such check was written, and a
+    manifest cannot make it: a bundle ships a loopback dev default and `connector_urls` is what
+    moves it into a cluster, so the model sees the wrong URL to judge. The rule it described is
+    real and now lives where the effective address is known
+    (`connectors.identity.require_secure_channel`), which refuses an off-loopback connector reached
+    with no credential unless `service_allow_insecure` says so out loud.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -111,11 +120,13 @@ class HttpEndpoint(BaseModel):
     tools: list[str] = Field(default_factory=list)
     state_changing: list[str] = Field(default_factory=list)
     read_only: list[str] = Field(default_factory=list)
+    privileged: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
+        _check_privileged(self.state_changing, self.privileged)
         return self
 
 
@@ -137,11 +148,13 @@ class StdioEndpoint(BaseModel):
     tools: list[str] = Field(default_factory=list)
     state_changing: list[str] = Field(default_factory=list)
     read_only: list[str] = Field(default_factory=list)
+    privileged: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
+        _check_privileged(self.state_changing, self.privileged)
         return self
 
 
@@ -180,6 +193,32 @@ def _check_classification(
         raise ValueError(f"endpoint lists tool(s) {both} as both state_changing and read_only")
 
 
+def _check_privileged(state_changing: list[str], privileged: list[str]) -> None:
+    """Raise unless every `privileged` tool is one the endpoint already calls state-changing.
+
+    `privileged` answers a *narrower* question than `state_changing`, and the two were conflated
+    until the answer was measured. `state_changing` asks "does this spend resources or write data",
+    which the plan gate and dry-run need — and by that definition `predict_pka` and
+    `compute_xtb_energy` are state-changing, because they burn CPU and write a cache row. The
+    built-in RBAC write gate asks something else: "should an ordinary authenticated chemist be
+    refused this out of the box". Deriving the second from the first would have required a
+    privileged role for **18 tools**, `predict_pka` and `compute_xtb_energy` among them — closing
+    the scientific capability of every deployment that turned on `entra_required` without writing
+    a `tool_role_gates` entry.
+
+    So it is a declared subset rather than a derivation: the bundle says which of its writes touch
+    state *shared across users* (`report_measurement` writes the calibration ledger every chemist's
+    `calculator_trust` reads), exactly as `JobSpec.expensive` says which jobs are worth gating. A
+    tool outside `state_changing` cannot be privileged, because a read is not a write.
+    """
+    stray = sorted(set(privileged) - set(state_changing))
+    if stray:
+        raise ValueError(
+            f"endpoint marks tool(s) {stray} privileged that it does not list as state_changing; "
+            "`privileged` names the subset of `state_changing` whose writes are shared across users"
+        )
+
+
 # One connector endpoint, discriminated on `transport`. A new transport is one variant here plus
 # one branch in `connectors.registry._mcp_tool`. Both variants carry `tools` — the agent-facing
 # allow-list — because it is a property of *an endpoint's* surface: nesting it here rather than
@@ -194,6 +233,11 @@ def _check_classification(
 # bundle changes what a tool does. An undeclared tool is treated as a read: core cannot infer a
 # bundle's semantics, and guessing "write" would gate every connector's whole surface the day this
 # shipped.
+#
+# `privileged` is the subset of `state_changing` whose writes are **shared across users**, and it is
+# what the built-in RBAC write gate derives from (`agent.authz.default_write_tool_gates`). It is a
+# second, narrower declaration rather than a reuse of `state_changing` because the two answer
+# different questions and the difference was measured, not assumed — see `_check_privileged`.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 
@@ -238,7 +282,7 @@ class JobSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # The advertised tool name, so it is keyed and gated exactly like a hand-written tool
-    # (`tool_role_gates`, `DEFAULT_WRITE_TOOL_GATES`, profile narrowing all address this
+    # (`tool_role_gates`, the built-in write gate, profile narrowing all address this
     # string).
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     workflow: str = Field(min_length=1)

@@ -287,6 +287,12 @@ config:
   CHEMCLAW_HPC_PIPELINE_VERSION: "1.0.0"
   CHEMCLAW_HPC_ARTIFACT_STORE_URL: "https://artifacts.internal/chemclaw"
   CHEMCLAW_HPC_BRIDGE_IDENTITY: "chemclaw-hpc"
+  # Names the variable holding the fleet's connector credential — the `secrets.keys.connectorToken`
+  # entry, mounted on the front door, the workers and every connector pod by `chemclaw.env`. Both
+  # halves read the same name: clients send it, connector Services require it. Blanking this does
+  # not loosen the deployment quietly — with a non-loopback connector URL and no credential, startup
+  # refuses (`connectors.identity.require_secure_channel`).
+  CHEMCLAW_CONNECTOR_TOKEN_ENV: "CHEMCLAW_CONNECTOR_TOKEN"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
@@ -401,6 +407,14 @@ secrets:
     # modification, reordering, interior deletion and prefix truncation — and a point-in-time
     # restore stays what it was: an undetectable trailing deletion of the compliance trail.
     auditAnchorSecret: "CHEMCLAW_AUDIT_ANCHOR_SECRET"
+    # The credential the fleet's own processes present to a connector Service, and the one every
+    # connector Service requires. Not a user credential and not per-connector: it authenticates
+    # *core to its own capability pods*, which is the boundary a manifest's `auth: mode: none`
+    # asserted and nothing enforced — so any pod on the network could call a connector's write and
+    # index tools, and could name any chemist in the identity headers a bundle records into
+    # `bo_campaigns` (D-2026-08-06 authorization lane). Absent, the front door refuses to start
+    # against a non-loopback connector unless `CHEMCLAW_SERVICE_ALLOW_INSECURE` says so out loud.
+    connectorToken: "CHEMCLAW_CONNECTOR_TOKEN"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the

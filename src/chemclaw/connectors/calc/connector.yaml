@@ -66,6 +66,14 @@ endpoint:
     # produced; neither starts one.
     - list_artifacts
     - fetch_artifact
+  # The subset of `state_changing` whose write is *shared across users*, which is what the built-in
+  # RBAC write gate closes out of the box (`agent.authz.default_write_tool_gates`). Everything else
+  # in that list is state-changing because it spends CPU and writes a cache row keyed on its own
+  # inputs — one chemist's `predict_pka` cannot change what another chemist's returns.
+  # `report_measurement` can: it writes the calibration ledger every `calculator_trust` answer is
+  # computed from, so one wrong measurement moves the trust figure the whole site reads.
+  privileged:
+    - report_measurement
 
 skills:
   - calculation-selection
@@ -160,7 +168,7 @@ jobs:
     # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
     # jobs replaced: that gate existed for exactly this, an unbounded calculation, and dropping
     # it with the tool would have been a silent loosening. It did not in fact inherit anything —
-    # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
+    # `run_xtb_task`'s gate was built-in-write-gate membership, which went with the tool,
     # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
     # gate's set from these declarations.
     expensive: true
@@ -181,7 +189,7 @@ jobs:
     # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
     # jobs replaced: that gate existed for exactly this, an unbounded calculation, and dropping
     # it with the tool would have been a silent loosening. It did not in fact inherit anything —
-    # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
+    # `run_xtb_task`'s gate was built-in-write-gate membership, which went with the tool,
     # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
     # gate's set from these declarations.
     expensive: true

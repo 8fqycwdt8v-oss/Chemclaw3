@@ -44,6 +44,27 @@ class ConnectorSettings(BaseSettings):
     # CHEMCLAW_CONNECTOR_URLS='{"molfp":"http://chemclaw-connector-molfp:8080/mcp"}'.
     connector_urls: dict[str, str] = Field(default_factory=dict)
 
+    # The environment variable holding the fleet's shared connector credential, or empty for none.
+    #
+    # A connector's manifest declares `auth: mode: none` because a bundle we own is inside our own
+    # trust boundary — which is a statement about the *deployment*, not about the capability, and
+    # is true only when something enforces the boundary. Nothing did: a connector Service accepted
+    # any request that reached it, so anything on the pod network could call a write tool and,
+    # worse, could name any chemist it liked in the `X-Chemclaw-Actor` header a bundle stamps into
+    # `bo_campaigns` (D-2026-08-06 authorization lane).
+    #
+    # Set this and both halves of the boundary become real: every connector *server* requires
+    # `Authorization: Bearer $<this variable>` on `/mcp`, and every client reaching a connector
+    # whose manifest declares `none` sends it. The indirection through a variable *name* is
+    # `manifest.BearerAuth`'s idiom, not a second one — the value is read per request, so a rotated
+    # secret takes effect without restarting a pod, and no credential is ever written to a manifest.
+    #
+    # Empty is the dev default and stays correct there: a loopback fleet is genuinely inside its own
+    # boundary. It is *not* correct anywhere else, and a connector that binds a non-loopback
+    # interface without a credential now refuses to start unless `service_allow_insecure` says so
+    # out loud — the rule the front door already applies to itself (`api.middleware`).
+    connector_token_env: str = ""
+
     # What an unreachable enabled connector means. Default (`false`) is *degrade loudly*: the
     # service still starts, the failure is logged, reported by `/readyz` and counted by the
     # `chemclaw_connectors_unhealthy` gauge, and that connector's tools are simply not

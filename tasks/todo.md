@@ -31,53 +31,64 @@ an ADR named `D-YYYY-MM-DD-<slug>.md` with its row in `docs/decisions/README.md`
 *Backlog: "The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution" [M];
 "`map_to_hpc_identity` has no caller" [L].*
 
-- [ ] `connectors/server.py:84` — a bundle activity stamps `CallerLogMiddleware`'s advisory headers
+- [x] `connectors/server.py:84` — a bundle activity stamps `CallerLogMiddleware`'s advisory headers
       into `bo_campaigns`/`bo_suggestions`, so anything that reaches the pod forges who ran an
       experiment. Attribute from the workflow payload's `requested_by` instead — the memo is set
       from the validated principal, and `connectors/qm/workflows.py` has read that memo since F5, so
       the seam exists and the fix is to use it rather than to build one.
-- [ ] Sweep every other write that reads an identity header, so this closes as a rule and not as one
-      call site. A test asserts no durable write reads `X-Chemclaw-*`.
-- [ ] `agent/identity/hpc_bridge.py:18` — wire it on the real Nextflow path or delete it. A declared,
-      unwired control is what `D-2026-08-05-a-declaration-outliving-what-it-describes` is about.
-      Recommendation: wire it, because the §7.2 oid → HPC-identity log is the only audit link between
-      a chemist and a cluster job; if the launcher cannot reach it offline, delete it and let the
-      backlog row carry the intent.
+- [x] Sweep every other write that reads an identity header, so this closes as a rule and not as one
+      call site. **Superseded by a better rule**: the durable half was already fixed off the workflow
+      memo, and the inline half has no memo — so the fix is the channel, not the call site. A
+      connector now refuses a request without the fleet credential, and a deployment with neither a
+      credential nor a loopback boundary refuses to start.
+- [x] `agent/identity/hpc_bridge.py:18` — wired, in `submit_to_hpc` on both paths, with the mapping
+      also landing on `HpcJobHandle.run_as` so it is in Temporal history rather than only a log line
+      retention prunes. Its existing unit test is why it stayed unwired: it called the function
+      itself, so it passed for as long as nothing else did.
 
-**Acceptance**: a forged header changes no row in `bo_campaigns`; the attribution test fails on the
-unfixed tree.
+**Acceptance**: met, and mutation-proven — removing the credential gate fails three tests, removing
+the startup refusal fails two, and the ten tests pinning unchanged behaviour pass under both
+mutations. Record: `D-2026-08-06-a-connector-that-authenticates-nobody`.
 
 ### WP-2 · The write gate follows the declaration
 *Backlog: "The built-in write gate never consults the connector-declared `state_changing` set" [L].*
 
-- [ ] `agent/authz.py:74` — `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained frozenset while every
-      manifest already partitions tools into `state_changing`/`read_only`. Derive the gate from the
-      declaration, the move `expensive_actions()` and `side_effecting_tools()` already make.
-- [ ] `report_measurement` is the live miss — any authenticated user may write the shared calibration
-      ledger today. Pin it as the regression case.
-- [ ] Keep the hand-written set only for core's own in-process tools, which have no manifest, and say
-      so in the module docstring.
+- [x] `agent/authz.py:74` — derived, **from a new narrower declaration rather than from
+      `state_changing`**: deriving from that one was measured to newly gate 18 tools including
+      `predict_pka` and `compute_xtb_energy`, closing the science of any `entra_required` deployment
+      without a `tool_role_gates` entry. `endpoint.privileged` names the subset whose writes are
+      shared across users.
+- [x] `report_measurement` is the live miss — pinned as the regression case, alongside its inverse
+      (the ordinary calculators stay open), so the plausible refactor back to `state_changing` fails.
+- [x] `CORE_WRITE_TOOLS` is core's own only. `compute_dft_energy` left it — `qm`'s `expensive: true`
+      already gates it against the identical predicate, so core stopped naming another bundle's tool.
+      `index_*` stay, because they are absent from their manifests' agent-facing `tools` and so
+      cannot be declared there.
 
-**Acceptance**: adding a `state_changing` tool to any manifest gates it with no Python edit; a test
-proves that by adding one to a fixture manifest.
+**Acceptance**: met, with the target corrected — adding a **`privileged`** tool to any manifest gates
+it with no Python edit, and the inverse is pinned too (a `state_changing` tool does *not* get gated,
+because that would have closed 18 tools). Record:
+`D-2026-08-06-a-write-gate-that-reads-the-wrong-declaration`.
 
 ### WP-3 · Connector authentication
 *Backlog: "Every shipped connector is unauthenticated" [M]; "REV-3 connector server pods receive
 `CHEMCLAW_TEMPORAL_TLS_*` but mount no TLS volume" [L].*
 
-- [ ] All seven manifests ship `auth: mode: none`, leaving the ingress NetworkPolicy as the only
-      control. `bearer` exists and is unused. Ship `bearer` as the chart default with a generated
-      secret, keeping `none` reachable for the dev fleet (`make connectors`).
-- [ ] `allowed_tools` is a client-side filter and a connector serves its whole FastMCP surface —
-      enforce it server-side, so a bundle exposes what its manifest says it exposes.
-- [ ] `entra_workload`/`entra_obo` stay unbuilt: they need the tenant that blocks every other live
-      Entra edge. Record that boundary in the ADR rather than leaving it implied.
+- [x] Shipped as one fleet credential named by `connector_token_env` rather than as seven manifest
+      edits: the credential is a deployment fact, and `connector_urls` already established
+      "manifest ships the dev default, deployment overrides". `none` stays reachable for the dev
+      fleet, and is refused off loopback.
+- [x] **Deliberately not enforced server-side, and the ADR argues it**: `allowed_tools` is the
+      *agent's* subset and the ingestion path legitimately calls index tools outside it. One surface
+      with two legitimate clients wants authenticating, not partitioning — which the credential does.
+- [x] `entra_workload`/`entra_obo` stay unbuilt, recorded in the ADR as tenant-blocked.
 - [ ] Fold in REV-3: include `chemclaw.tlsMount` on the connector pod spec, or state in the chart why
       the env vars are shared without it. No `helm` binary here, so this lands as a chart change
       pinned by `tests/test_helm_chart.py`, not by a render.
 
-**Acceptance**: an unauthenticated call to a connector tool is refused; a call to a tool outside
-`allowed_tools` is refused by the server.
+**Acceptance**: an unauthenticated call to a connector tool is refused (met). The second half is
+**withdrawn with its reason**: a server-side `allowed_tools` check would break the ingestion path,
+which legitimately calls index tools outside the agent's subset.
 
 ### WP-4 · Secrets are typed and complete
 *Backlog: "Secrets are plain `str`, never rotated" [M]; "Workload identity federation is dead code

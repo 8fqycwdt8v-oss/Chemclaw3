@@ -13,7 +13,7 @@ The generated tool is a *first-class* tool, not a special case. It is registered
 same `chemclaw.core.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's
 `name`, which is what makes every existing mechanism apply to it untouched: the audit middleware
 wraps it, the per-tool authorization gate addresses it by that name (`tool_role_gates`, and the
-built-in `DEFAULT_WRITE_TOOL_GATES` for a job that writes), a profile can narrow it away, and
+built-in write gate for a job a manifest calls expensive), a profile can narrow it away, and
 `chemclaw.cli.validate_prose_contract` sees it when checking the agent's prose.
 
 Why a generated pydantic model rather than a `dict` parameter: MAF derives a tool's JSON schema

@@ -12,14 +12,16 @@ instead of once per hand-written tool.
 import pytest
 
 from chemclaw.agent.authz import (
-    DEFAULT_WRITE_TOOL_GATES,
+    CORE_WRITE_TOOLS,
     READ_ONLY_TOOLS,
     STATE_CHANGING_TOOLS,
     AuthorizationError,
     authorize_tool,
     authorize_trigger,
+    default_write_tool_gates,
     expensive_actions,
     require_actor,
+    side_effecting_tools,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
@@ -204,12 +206,17 @@ def test_every_advertised_tool_is_classified_write_or_read() -> None:
 def test_the_write_gate_is_a_subset_of_the_state_changing_set() -> None:
     """The RBAC fallback is narrower than the plan gate's set, and must stay inside it.
 
-    The two are separate on purpose — membership of `DEFAULT_WRITE_TOOL_GATES` costs an
-    unconfigured deployment access to a tool, so it is not widened lightly — but a tool that closes
-    by default under RBAC and is *not* considered state-changing by the plan gate would be an
-    outright contradiction.
+    The two are separate on purpose — membership costs an unconfigured deployment access to a tool,
+    so it is not widened lightly — but a tool that closes by default under RBAC and is *not*
+    considered state-changing by the plan gate would be an outright contradiction.
+
+    Asserted over core's half against core's set, and over the derived whole against the derived
+    whole: `default_write_tool_gates()` now includes connector tools that `STATE_CHANGING_TOOLS`
+    (in-process only) has never named, so the containment claim lives at the layer where both sides
+    know about connectors.
     """
-    assert DEFAULT_WRITE_TOOL_GATES <= STATE_CHANGING_TOOLS
+    assert CORE_WRITE_TOOLS <= STATE_CHANGING_TOOLS
+    assert default_write_tool_gates() <= side_effecting_tools()
 
 
 def test_an_operators_empty_role_list_opens_a_tool_rather_than_closing_it(
@@ -301,7 +308,7 @@ def test_every_hardcoded_authorize_trigger_action_is_actually_gated() -> None:
     the day it is enabled. But a job launched from *core* has no manifest to declare it, and
     `request_development_report` was exactly that: it calls `authorize_trigger`, the call returned
     immediately on the shipped chart (`entra_required=true`, both role settings empty), and no
-    other gate covered it — `STATE_CHANGING_TOOLS` yes, `DEFAULT_WRITE_TOOL_GATES` no. Any
+    other gate covered it — `STATE_CHANGING_TOOLS` yes, the built-in write gate no. Any
     authenticated user could start an unbounded multi-section research workflow.
 
     D-2026-08-01 fixed the same shape for manifests and left this one, because nothing checked the
@@ -319,3 +326,66 @@ def test_every_hardcoded_authorize_trigger_action_is_actually_gated() -> None:
         f"{ungated}. Declare them in CORE_EXPENSIVE_ACTIONS (core-owned) or via a manifest's "
         "`expensive: true` (bundle-owned)."
     )
+
+
+def test_a_connector_declared_privileged_write_is_gated_without_operator_config() -> None:
+    """The declaration the built-in write gate never consulted, with its live example.
+
+    `report_measurement` writes the calibration ledger every chemist's `calculator_trust` answer is
+    computed from, so one wrong measurement moves a trust figure the whole site reads. It was
+    callable by any authenticated user on the shipped chart, because the gate was a hand-maintained
+    list in core and nobody in core had remembered a `calc` tool.
+
+    Derived now, so the next bundle's shared write is gated the day it declares itself rather than
+    the day someone extends a list.
+    """
+    assert "report_measurement" in default_write_tool_gates()
+
+
+def test_the_write_gate_does_not_close_the_ordinary_calculators() -> None:
+    """The correction the measurement forced, pinned so it cannot be undone by a plausible refactor.
+
+    Deriving the gate from `state_changing` — the obvious reading, and what the backlog row asked
+    for — would have required a privileged role for **18 tools**, `predict_pka` and
+    `compute_xtb_energy` among them: a bundle lists those as state-changing because they burn CPU
+    and write a cache row, which answers the plan gate's question and not this one. Any deployment
+    that set `entra_required` without writing a `tool_role_gates` entry would have lost its
+    chemistry.
+
+    So the gate derives from the narrower `privileged` declaration, and this is the assertion that
+    says so in the direction that matters: these tools stay open.
+    """
+    gates = default_write_tool_gates()
+    for tool in (
+        "predict_pka",
+        "compute_xtb_energy",
+        "compute_electronic_properties",
+        "predict_solubility",
+        "suggest_next_experiment",
+    ):
+        assert tool not in gates, f"{tool} would need a privileged role, closing ordinary chemistry"
+
+
+def test_an_expensive_job_needs_no_hand_written_write_gate_entry() -> None:
+    """Core stops naming another bundle's tool, and the gate is unchanged by the removal.
+
+    `compute_dft_energy` used to sit in core's hand-maintained set — a second source of truth about
+    `qm`'s job. It is covered by its own manifest's `expensive: true` against the identical
+    predicate, so deriving it changes no decision and removes the copy.
+    """
+    assert "compute_dft_energy" not in CORE_WRITE_TOOLS
+    assert "compute_dft_energy" in default_write_tool_gates()
+
+
+def test_a_privileged_tool_must_be_one_the_endpoint_calls_state_changing() -> None:
+    """A read cannot be a privileged write; the manifest refuses the contradiction at load."""
+    from chemclaw.connectors.manifest import HttpEndpoint
+
+    with pytest.raises(ValueError, match="does not list as state_changing"):
+        HttpEndpoint(
+            url="http://127.0.0.1:9/mcp",
+            tools=["look", "write"],
+            state_changing=["write"],
+            read_only=["look"],
+            privileged=["look"],
+        )
