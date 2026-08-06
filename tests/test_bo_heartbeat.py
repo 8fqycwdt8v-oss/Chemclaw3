@@ -99,7 +99,7 @@ def test_propose_next_heartbeats_through_the_shared_timer(
 
 
 def test_every_bo_activity_call_declares_a_heartbeat_timeout() -> None:
-    """`BoCampaignWorkflow.run` passes `heartbeat_timeout` to all four `execute_activity` calls.
+    """`BoCampaignWorkflow.run` passes `heartbeat_timeout` to every `execute_activity` call.
 
     Checked over the AST rather than by running the workflow: the property under test is a keyword
     argument at a call site, which a live (Temporal-server-requiring, offline-skipped) workflow
@@ -118,7 +118,9 @@ def test_every_bo_activity_call_declares_a_heartbeat_timeout() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "execute_activity"
     ]
-    assert len(calls) == 4, f"expected 4 execute_activity calls, found {len(calls)}"
+    # Seed, propose, evaluate, and the campaign-record write the durable path gained when it
+    # stopped leaving `resume_campaign` with nothing to find.
+    assert len(calls) == 5, f"expected 5 execute_activity calls, found {len(calls)}"
     for call in calls:
         heartbeat_kwarg = next((kw for kw in call.keywords if kw.arg == "heartbeat_timeout"), None)
         assert heartbeat_kwarg is not None, (
