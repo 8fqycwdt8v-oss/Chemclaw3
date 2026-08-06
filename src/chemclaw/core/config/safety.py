@@ -35,3 +35,16 @@ class SafetySettings(BaseSettings):
     # procedure notes yet, so it costs nothing today and is the conservative direction for a
     # safety check; a deployment migrating a legacy corpus can turn it off while it catches up.
     safety_gate_enabled: bool = True
+    # The most components one reaction screen may carry. A reaction screen checks every
+    # incompatible-pair rule as a cross-product of the components that match each side, so the
+    # flags it can produce grow with the *square* of the input while the request stays tiny:
+    # 13 KiB of SMILES was measured producing 251,000 flags and blocking the connector's event
+    # loop for 2.48 s. `connector_max_request_bytes` is no bound on that, because the
+    # amplification is in the response.
+    #
+    # 64 is far above any real reaction — the largest shipped ELN entry has well under a dozen
+    # species — and bounds the worst case to ~1,000 pair flags and single-digit milliseconds.
+    # Refused rather than truncated: a hazard screen that silently dropped components would
+    # report "no rule matched" for chemistry it never looked at, which is the one failure this
+    # tool's own description says must never happen.
+    safety_max_components: int = Field(default=64, gt=0)
