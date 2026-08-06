@@ -15,10 +15,12 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from chemclaw.connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
+from chemclaw.connectors.bo.activities import evaluate_candidates, propose_initial
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
+from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.chem import InvalidSmilesError
 from chemclaw.core.config import settings
+from chemclaw.durable.registry import registered_activities
 from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
 from chemclaw.science.bo.campaign import optimize
 from chemclaw.science.bo.objectives import (
@@ -51,7 +53,11 @@ from tests.temporal_env import pydantic_client, start_env_or_skip
 
 warnings.filterwarnings("ignore")
 
-_BO_ACTIVITIES: Sequence[Callable[..., Any]] = [propose_initial, propose_next, evaluate_candidates]
+# Taken from the registry rather than written out, for the reason the registry exists: a
+# hand-maintained list re-creates the "written, imported, absent from the worker's list, never
+# runs" failure one level down, and the durable campaign's record-writing activity was added to
+# this workflow long after this list was first spelled (`chemclaw.durable.registry`).
+_BO_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities(bundle_queue("bo"))
 
 
 @pytest.fixture(autouse=True)

@@ -1328,3 +1328,35 @@ Rules:
    happened at all.
 3. A test written as a future regression target earns its name only after you have watched it fail
    for the right reason. Mutate, run, restore — three commands.
+
+## R5.13 — A backlog row saying "this needs a decision" is a claim about the code, and claims get checked
+
+Two rows in this pass were filed as decisions rather than diffs, and both were wrong about the code
+they described.
+
+The BO row said recording a durable campaign meant "either threading identity through a seam built
+to keep it out, or writing a fabricated actor into an audited column". The seam was built to keep
+identity out of the **payload** — a memo is per-execution metadata beside the argument, the
+distinction is stated in `connector_job.py`'s own comment, another bundle has read that memo in
+production since F5, and a test already pinned the crossing. Three pieces of evidence, all present,
+none consulted when the row was written.
+
+The conflicts row said a per-note cap "changes what KM-8 shows a chemist, which is why it is a
+decision and not a patch". `Conflict.kind` already separated author-stated from heuristic, so the
+cap applies to `suspected` alone and the declared-conflict promise is byte-identical; and the gap
+magnitude was already computed at the line that decides whether to report a pair at all, so
+"widest first" was `max` instead of `append`.
+
+Both rows were written by careful sessions in the middle of good reviews. The failure mode is
+specific: a reviewer reasons about a seam from its *purpose* ("core owns attribution") rather than
+from its *mechanism*, reaches a genuine dilemma, and files it — and the dilemma is real only under
+the reasoned-about version.
+
+Rules:
+1. Before accepting an inherited "this is blocked on a decision", spend ten minutes finding the
+   mechanism it names and reading it. A blocker is a claim about code, and it decays like any other.
+2. When a row says a fix is impossible without one of two bad options, look for the third: the
+   thing whose docstring already describes the case. If a comment in the codebase states the exact
+   situation, that is not a coincidence — someone built for it.
+3. Grep for a production reader before concluding a mechanism cannot be used. `connectors/qm`
+   answered the BO question in one line.

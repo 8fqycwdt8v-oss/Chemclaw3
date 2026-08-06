@@ -197,3 +197,72 @@ def test_distinct_campaigns_keep_independent_suggestion_histories() -> None:
         assert {s.calc_refs[0] for s in both_b} == {"from-b", "from-b-again"}
 
     asyncio.run(_run())
+
+
+def test_a_retried_durable_write_hits_the_unique_index_instead_of_appending() -> None:
+    """The idempotency the durable path needs, against the index that actually enforces it.
+
+    `bo_suggestions_job_idx` is where this lives — the in-memory backend implements the same rule
+    in Python, but a partial unique index and an `ON CONFLICT ... WHERE` inference are exactly the
+    kind of thing that is right in prose and wrong in SQL, so it is asserted here against a real
+    database. The retry must be *invisible*, not merely harmless: the caller gets back the id the
+    first attempt got.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        campaign_id = "pgcamp-retried-job"
+        suggestion = Suggestion(
+            campaign_id=campaign_id,
+            candidates=[Candidate(params={"t": 70.0})],
+            observations=[Observation(params={"t": 65.0}, value=0.8)],
+            problem={"parameters": [], "objective": {"name": "yield", "direction": "maximize"}},
+            job_id="bo-start_optimization_campaign-deadbeef",
+        )
+        first = await store.record(_campaign(campaign_id), suggestion)
+        again = await store.record(_campaign(campaign_id), suggestion)
+        assert again == first, "a retry must return the id the first attempt got, not a new row"
+        assert len(await store.suggestions_for(campaign_id, limit=10)) == 1
+
+        other_run = suggestion.model_copy(update={"job_id": "bo-start_optimization_campaign-cafe"})
+        assert await store.record(_campaign(campaign_id), other_run) != first
+        assert len(await store.suggestions_for(campaign_id, limit=10)) == 2
+
+    asyncio.run(_run())
+
+
+def test_the_inline_path_keeps_appending_because_its_run_id_is_empty() -> None:
+    """The index is partial for this reason: a shared `''` would collapse a campaign's history.
+
+    Two inline suggestions are two entries — "the sequence *is* the campaign's history" — and a
+    unique index that did not exclude the empty run id would silently make the second one vanish.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        campaign_id = "pgcamp-inline-appends"
+        suggestion = Suggestion(campaign_id=campaign_id, observations=[])
+        first = await store.record(_campaign(campaign_id), suggestion)
+        second = await store.record(_campaign(campaign_id), suggestion)
+        assert second != first
+        assert len(await store.suggestions_for(campaign_id, limit=10)) == 2
+
+    asyncio.run(_run())
+
+
+def test_a_suggestion_round_trips_the_space_it_was_proposed_against() -> None:
+    """The snapshot column, read back off a real row rather than out of the model's default."""
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        campaign_id = "pgcamp-problem-snapshot"
+        space = {"parameters": [], "objective": {"name": "yield", "direction": "maximize"}}
+        await store.record(
+            _campaign(campaign_id),
+            Suggestion(campaign_id=campaign_id, problem=space, job_id="bo-job-snapshot"),
+        )
+        (recorded,) = await store.suggestions_for(campaign_id, limit=1)
+        assert recorded.problem == space
+        assert recorded.job_id == "bo-job-snapshot"
+
+    asyncio.run(_run())

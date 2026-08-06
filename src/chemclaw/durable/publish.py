@@ -70,6 +70,11 @@ _BAD_DATA_TYPES = [
     # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
     # layer and reaches the same conclusion, and the fix is a rebuild.
     "VendoredDatasetError",
+    # A turn asked a tool the identical question once too often (`chemclaw.agent.repeat_guard`).
+    # It never crosses an activity boundary today — the guard is a chat-side middleware — but it is
+    # a `ChemclawError`, and the rule this list encodes is that every one of them fails fast: an
+    # identical call is identical on the retry too, so retrying is the one thing that cannot help.
+    "RepeatedCallRefusal",
     # `AuthorizationError` (`chemclaw.agent.authz`) and its subclasses are NOT `ChemclawError`/
     # `ValueError` — an authorization refusal is a policy decision, not bad data, and reparenting it
     # would make `chemclaw.agent.tool_authz.surface_domain_errors` swallow it ahead of

@@ -272,3 +272,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without](D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without.md) | Readiness answers for the store it cannot serve without |
 | [D-2026-08-05-the-connection-budget-is-a-fleet-number](D-2026-08-05-the-connection-budget-is-a-fleet-number.md) | The connection budget is a fleet number, and the pool's witness belongs to the pool |
 | [D-2026-08-05-three-searches-that-disagreed-about-one-note](D-2026-08-05-three-searches-that-disagreed-about-one-note.md) | Three searches that disagreed about one note, and a gate that borrowed the tree it guards |
+| [D-2026-08-06-a-flag-is-a-signal-not-an-inventory](D-2026-08-06-a-flag-is-a-signal-not-an-inventory.md) | A flag is a signal, not an inventory |
+| [D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice](D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice.md) | A tool cannot say it has nothing twice |
+| [D-2026-08-06-the-memo-already-carried-the-actor](D-2026-08-06-the-memo-already-carried-the-actor.md) | The memo already carried the actor |
+| [D-2026-08-06-the-method-decides-which-solvents-exist](D-2026-08-06-the-method-decides-which-solvents-exist.md) | The method decides which solvents exist, and it can be asked |

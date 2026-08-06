@@ -34,10 +34,17 @@ _UPSERT_CAMPAIGN = """
 
 _INSERT_SUGGESTION = """
     INSERT INTO bo_suggestions
-        (campaign_id, candidates, observations, calc_refs, actor, session_id, correlation_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (campaign_id, candidates, observations, calc_refs, problem, job_id,
+         actor, session_id, correlation_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (campaign_id, job_id) WHERE job_id <> '' DO NOTHING
     RETURNING id
 """
+
+# What a retried durable run already wrote. Read only when the insert above hit the partial unique
+# index, so the caller still gets the suggestion id it would have got the first time — a retry must
+# be invisible, not merely harmless.
+_SELECT_SUGGESTION_BY_JOB = "SELECT id FROM bo_suggestions WHERE campaign_id = %s AND job_id = %s"
 
 _SELECT_CAMPAIGN = (
     "SELECT campaign_id, objective, direction, problem, opened_by, created_at, last_asked_at "
@@ -45,8 +52,8 @@ _SELECT_CAMPAIGN = (
 )
 
 _SELECT_SUGGESTIONS = """
-    SELECT id, campaign_id, candidates, observations, calc_refs, actor, session_id,
-           correlation_id, proposed_at
+    SELECT id, campaign_id, candidates, observations, calc_refs, problem, job_id, actor,
+           session_id, correlation_id, proposed_at
     FROM bo_suggestions
     WHERE campaign_id = %s
     ORDER BY id DESC
@@ -125,14 +132,25 @@ class PostgresCampaignStore:
                         ]
                     ),
                     suggestion.calc_refs,
+                    _json(suggestion.problem),
+                    suggestion.job_id,
                     suggestion.actor,
                     suggestion.session_id,
                     suggestion.correlation_id,
                 ),
             )
-            # `BIGSERIAL` + `RETURNING id` cannot yield no row on a successful insert, so an
-            # `if row is None` fallback could only mask an anomaly behind a valid-looking id 0.
-            (suggestion_id,) = await cursor.fetchone()  # type: ignore[misc]
+            # `BIGSERIAL` + `RETURNING id` cannot yield no row on a successful insert — but
+            # `DO NOTHING` inserts no row at all when a retried durable run already wrote this
+            # suggestion, and that is the one case where no row is the correct answer rather than
+            # an anomaly. Read back the id the first attempt got, so a retry is invisible to the
+            # caller instead of merely harmless.
+            row = await cursor.fetchone()
+            if row is None:
+                cursor = await conn.execute(
+                    _SELECT_SUGGESTION_BY_JOB, (suggestion.campaign_id, suggestion.job_id)
+                )
+                row = await cursor.fetchone()
+            (suggestion_id,) = row  # type: ignore[misc]
         return int(suggestion_id)
 
     async def read_campaign(self, campaign_id: str) -> Campaign | None:
@@ -164,10 +182,12 @@ class PostgresCampaignStore:
                 candidates=row[2],
                 observations=row[3],
                 calc_refs=list(row[4] or []),
-                actor=row[5],
-                session_id=row[6],
-                correlation_id=row[7],
-                proposed_at=row[8],
+                problem=row[5] or {},
+                job_id=row[6],
+                actor=row[7],
+                session_id=row[8],
+                correlation_id=row[9],
+                proposed_at=row[10],
             )
             for row in rows
         ]
