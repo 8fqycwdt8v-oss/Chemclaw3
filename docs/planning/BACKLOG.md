@@ -32,6 +32,101 @@ mechanical fix. Ranked by how attacker-reachable the content is.
 - [ ] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
       (`agent/research_tools.py:181`). The provenance string is caller-influenced and travels
       beside content that *is* framed, which is the tell that the split was accidental.
+## Open — Quality findings left by the whole-codebase security sweep (2026-08-06)
+
+Eleven disjoint review lanes, each finding re-checked by a second agent required to **execute** a
+repro rather than re-read the code: **43 confirmed, 2 refuted, 3 already tracked**. Six work
+packages shipped (#135–#140, ADRs `D-2026-08-06-*`). These are the confirmed findings those
+packages did not close, at the severity the verifier corrected them to. Every one has a file:line
+and was reproduced; none is a reading.
+
+**Data plane and knowledge integrity**
+
+- [ ] **[M] ELN free text becomes real knowledge-graph edges** (`ingest/eln/note.py:27`). A chemist
+      can forge `contradicts`/`supersedes` relations into a PR-gated reaction note by writing them
+      into an ELN field — the gate reviews the note, not the edges it asserts.
+- [ ] **[M] A report note wikilinks non-note evidence ids** (`retrieval/harness.py:160`), producing
+      an unmergeable report and a fabricated relation type.
+- [ ] **[M] Two enabled ELN sources with the same entry id silently collapse** onto one note and
+      one fingerprint row (`ingest/eln/ingest.py:51`), contradicting the manifest's stated
+      per-source guarantee.
+- [ ] **[L] `vector.server_embed_function` reaches the SQL text unchecked**
+      (`ingest/eln/warehouse/binding.py:462`), so the module's "only checked identifiers are
+      written" invariant is false. Distinct from the documented `where:` trust boundary.
+- [ ] **[L] A warehouse row key is interpolated into a filesystem path** with no slug validation
+      (`ingest/eln/warehouse/retriever.py:184`).
+
+**The store seam** — measured by the Q-A lane rather than assumed. The ten `Protocol + InMemory +
+Postgres` triads are *not* one abstraction waiting to be extracted; what is genuinely shared is the
+connect/execute plumbing, and the divergences below are the real prize.
+
+- [ ] **[M] Two of the ten stores read/write a database the migrator never touches**
+      (`agent/turn_cost_store.py:60`, the `session_store_dsn` split).
+- [ ] **[L] `InMemoryStore.find` raises `TypeError`** on any row with a timezone-aware
+      `created_at` (`science/calc/store.py:250`) — the in-memory and Postgres halves disagree.
+- [ ] **[L] Only one of the three jsonb writers rejects non-finite floats**
+      (`science/calc/postgres_store.py:116`).
+- [ ] **[L] The Postgres connect helper is hand-rolled 14 times**
+      (`science/calc/postgres_store.py:74`), including five byte-identical docstrings and four that
+      say "one place, DRY".
+
+**Complexity hotspots** — the defects the complexity was hiding, which is what the lane was asked
+for rather than a decomposition proposal.
+
+- [ ] **[M] One non-UTF-8 ORD export aborts the entire ELN sync batch**
+      (`ingest/eln/ord_adapter.py:110`), contradicting the adapter's skip-and-continue contract.
+- [ ] **[M] `evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true**
+      (`evals/live.py:317`), so the harness's headline "failed silently" signal can never fire.
+- [ ] **[L] `run_turn` abandons the agent's `ResponseStream` on every non-exhausting exit**
+      (`api/runner.py:318`); it has no `aclose()` and no GC finalizer, so its cleanup hooks never
+      run at all.
+- [ ] **[L] The mid-turn resume drops `user_input_requests`** (`api/runner.py:780`), so an approval
+      prompt raised during a resume never reaches the stream.
+- [ ] **[L] A failed durable job is dropped from the mid-turn resume**
+      (`agent/job_results.py:83`), and the function's own docstring says it is not.
+
+**Error handling and suppression**
+
+- [ ] **[L] 22 of 56 `# noqa` directives suppress rules ruff never runs** (`pyproject.toml:8`) —
+      including 15 `BLE001` markers that read as "this broad except was linted and accepted" when
+      nothing linted it. Either enable the rules or delete the comments; today they are a claim no
+      gate checks.
+- [ ] **[L] `beating()` abandons the work it wraps when the activity is cancelled**
+      (`durable/heartbeat.py:48`) — calc's CREST runs and bo's surrogate fits keep burning CPU
+      after `cancel_job`.
+
+**Tests that cannot fail** — this repository's own most-recorded defect family
+(`tasks/lessons.md`), so each of these was proven by neutering the control and watching the test
+still pass.
+
+- [ ] **[M] `SnowflakeWarehouse._connect` classifies every client error as retryable
+      `ConnectionError`** (`ingest/eln/warehouse/snowflake.py:162`), and no test executes any
+      function body in the module.
+- [ ] **[L] `tests/test_connector_isolation.py`'s first-party half is vacuous**
+      (`tests/test_connector_isolation.py:85`): `name.split(".")[0] in ("calc",)` can never match a
+      `chemclaw.science.calc.*` module, so the check has always passed on an empty set.
+- [ ] **[L] `test_harness_agent_still_audits_every_tool_call` asserts only that the middleware list
+      is non-empty** (`tests/test_agent.py:279`) — it passes with the audit middleware removed.
+- [ ] **[L] `cli/verify_audit_chain.py` has 0% coverage**, and the "refuse to re-seal a broken
+      chain" control lives nowhere else.
+- [ ] **[L] Eight of the eleven binding transforms in `warehouse/expr.py` are never executed**
+      by the suite, including the two the shipped `eln-snowflake` binding uses.
+
+**Documentation that asserts what the code does not do**
+
+- [ ] **[L] `NoAuth`'s docstring asserts a manifest validator that does not exist**
+      (`connectors/manifest.py:60`).
+- [ ] **[L] `connectors/calc/activities.py`'s module docstring denies the registration mechanism
+      the file uses two lines later** and cites a queue count D-118 removed
+      (`connectors/calc/activities.py:23`).
+
+### Refuted, recorded so they are not re-found
+
+- Connector server pods lacking the front door's uvicorn transport bounds — the verifier could not
+  reproduce a reachable consequence.
+- A durable job's failure text reaching the model unsanitized on the job path — the sanitizer that
+  `connector_app` installs does cover it.
+
 ## Open — Authorization gaps left by the whole-codebase security sweep (2026-08-06)
 
 Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed the inert core
