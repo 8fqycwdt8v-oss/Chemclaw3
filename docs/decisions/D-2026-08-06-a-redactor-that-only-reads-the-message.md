@@ -69,12 +69,24 @@ entrypoint and there was nowhere the call had been put.
 
 So the one process family that holds per-connector bearer tokens ran with no secret redaction, no
 correlation id and no actor on any line — and it is the family whose whole job is talking to
-things over HTTP with a credential.
+things over HTTP with a credential. It also ran with **no meter provider**, which is not "telemetry
+off" but the configuration `_install_noop_meter_provider` records as leaking: with none set, the
+OpenTelemetry API proxies every instrument call and retains the proxy forever.
 
-The call goes in `connector_app`, the single point all seven bundles pass through, rather than in
-each bundle's `app.py` where an eighth bundle could forget it. Import-time is safe here and not by
-luck: uvicorn applies its own logging config in `Config.__init__` and imports the app afterwards,
-so this runs last and wins.
+The fix is to give the role the entrypoint it never had. `chemclaw.connectors.server_entry` does
+the process setup and then serves, exactly as `connectors/worker.py` does for the durable half,
+and `deploy/entrypoint.sh` execs it instead of pointing uvicorn at the app object. The app is
+handed to uvicorn as an import *string*, so it is built after logging is configured — importing it
+first would put every bundle's import-time logging on an unconfigured, unredacted root logger.
+
+**Putting the call in `connector_app` instead was tried first, and is recorded because it looked
+obviously right.** It is the single point all seven bundles pass through, so it seemed like the
+place a new bundle could not forget. But `configure_logging()` is `logging.basicConfig(force=True)`,
+which *removes every existing root handler* — and `connector_app` runs at import time in modules
+that tests, the dev composite and anything else import freely. It tore out pytest's capture handler
+and failed two GxP audit-trail tests that have nothing to do with logging. A process-wide side
+effect belongs at a process boundary, not in a composition helper, and the full suite is what said
+so: the targeted tests for the change itself all passed.
 
 ## Consequences
 
@@ -99,4 +111,8 @@ so this runs last and wins.
 - **Changing the dev Postgres password** so it stops colliding. Treats the symptom, touches five
   files that must stay in lockstep, and leaves the next repo-public default to collide again.
 - **Calling `configure_logging()` in each bundle's `app.py`.** Seven call sites, and the eighth
-  bundle is the one that forgets. The seam already has a single composition point.
+  bundle is the one that forgets.
+- **Calling it in `connector_app`.** See above — `basicConfig(force=True)` is a process-wide side
+  effect, and that function is imported by things that are not processes.
+- **Leaving `exec uvicorn <app>` and passing `--log-config`.** Would configure uvicorn's logging,
+  not ours, and still leaves nobody calling `configure_telemetry()`.

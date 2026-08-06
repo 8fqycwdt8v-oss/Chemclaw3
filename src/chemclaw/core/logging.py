@@ -198,7 +198,8 @@ _REDACTED = "***"
 #
 # Two spellings, because the password form is not the common one for a token: `scheme://user:pw@`
 # carries a principal *and* a secret, while `scheme://token@` is the whole userinfo and is how a
-# PAT reaches a git remote (`https://ghp_...@github.com/org/repo.git`). Only the first was matched,
+# PAT reaches a git remote (scheme, then the token, then `@`, then the host). Only the first was
+# matched,
 # so the more common credential form passed through verbatim. The user is still kept in the
 # two-part form, so a redacted line says which remote and which principal failed; in the one-part
 # form there is no principal to keep and the whole of it is the credential.
