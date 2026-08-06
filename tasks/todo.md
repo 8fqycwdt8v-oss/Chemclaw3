@@ -1,108 +1,125 @@
-# Task: implement the open app fixes
+# Task: whole-codebase security review, hardening, refactor and simplification (2026-08-06)
 
-Branch: `claude/temporal-workflows-llm-testing-5nziyp`.
+Branch family: `claude/codebase-review-hardening-ytzm8b-*`. Six merged PRs (#135–#140), six ADRs.
 
-**The brief was "implement app fixes" against a backlog with 110 open rows across 20 sections**, so
-the first job was picking the ones that are *product* defects — things a chemist or the system does
-wrong — as opposed to further measurement, documentation or test work. Four qualified, plus the
-bookkeeping for three rows a merged PR had already closed.
+**The brief was open — "a huge code review, security review, hardening, refactoring, improvement
+and simplification session, heavily relying on subagents and agent teams" — and the first decision
+was what *not* to do.** This is the **second** whole-codebase sweep: `refactor-hardening-plan.md`
+ran nine parallel agents on 2026-08-02 and executed R0–R6, five further deep reviews landed after
+it, and `BACKLOG.md` already carried 132 open items. A naive re-sweep would mostly have re-reported
+known work — the failure `tasks/lessons.md` records under parallel-session hazards. So it was
+scoped as a *successor* sweep: security (never given a dedicated pass), plus the within-package
+duplication and complexity the first sweep's "13 packages is right" verdict deliberately left alone.
 
-Two of the four were filed as *decisions rather than diffs*. Both turned out to be smaller than
-their rows implied, and in one case the recorded blocker was simply not true.
+## The fleet
 
----
+Eleven disjoint finder lanes — six security (`S-A` front door, `S-B` identity/RBAC, `S-C`
+connectors/outbound, `S-D` data plane/injection, `S-E` prompt injection/PR-gate, `S-F`
+secrets/deploy/supply chain) and five quality (`Q-A` store duplication, `Q-B` connector
+boilerplate, `Q-C` complexity, `Q-D` error handling, `Q-E` test honesty) — **owned by file, not by
+feature**, which is what `lessons.md` says made six concurrent agents work last time.
 
-## Plan
+Two rules did the actual work:
 
-### 1 — a solvent the method cannot model, refused at launch (`2c434f8`)
-- [x] `science/calc/solvents.py`: `ALPB_SOLVENTS` measured against the installed tblite, not
-      recalled; `require_supported_solvents` as the precondition; `SUGGESTED_SOLVENTS` a strict
-      subset so the shortlist cannot drift
-- [x] All five solvent-taking calc jobs declare it in `connector.yaml`
-- [x] `xtb_engine.COMMON_SOLVENTS` retired — it had drifted to omit dmf, dioxane, benzene and
-      nitromethane while claiming to name what process chemistry asks about
-- [x] Tests re-derive the set in both directions; end-to-end through `prepare_job_launch`
-- [x] ADR: `D-2026-08-06-the-method-decides-which-solvents-exist`
+- **Every finder deduped against `BACKLOG.md`, `DEFERRED.md`'s declined list, and this file's
+  "Measured, and not defects" section before reporting.** Only 3 of 48 came back already-tracked,
+  so the briefing held.
+- **Every finding went to a second agent required to *execute* a repro**, defaulting to REFUTED
+  when the probe did not demonstrate the failure. Result: **43 confirmed, 2 refuted, 3 already
+  tracked, 0 unverifiable**, and eight severity corrections — six down, two up.
 
-### 2 — the conflict flag becomes a signal (`cdf71ec`)
-- [x] Each note carries its **widest** disagreements (`conflict_max_per_note`, 3); the walk takes
-      the wider end first and stops at the threshold
-- [x] `Conflict.severity` pins declared conflicts above every suspected pair
-- [x] `NoteConflicts.total` + `EvidenceChunk.conflicts_total` + "(the 3 strongest of 141)" in the
-      report, so the truncation is never silent
-- [x] Re-measured: 141,156 -> 5,937 pairs, 637 -> 44 ms, 3 ids per chunk instead of ~141
-- [x] ADR: `D-2026-08-06-a-flag-is-a-signal-not-an-inventory`
+## What shipped
 
-### 3 — the durable BO campaign writes its record (`09c7700`)
-- [x] `BoCampaignWorkflow` reads `requested_by` off the run's memo — the mechanism core built for
-      exactly this, and which `connectors/qm/workflows.py` has used since F5
-- [x] `record_campaign_run` activity reusing `record_suggestion` unchanged
-- [x] `infra/sql/037_*.sql`: the problem snapshot, and `job_id` + a partial unique index for
-      idempotency (keyed on the run, never the content)
-- [x] Both store backends implement the retry rule
-- [x] `_BO_ACTIVITIES` derived from the registry instead of a hand-written list
-- [x] ADR: `D-2026-08-06-the-memo-already-carried-the-actor`
-
-### 4 — a turn stops re-asking the same question
-- [x] `agent/repeat_guard.py`: refuse (never cache) the identical call past
-      `max_identical_tool_calls`; `RepeatedCallRefusal` reuses the audit + surfacing layers
-- [x] `chemclaw_repeated_tool_calls_total{tool}` — the only trace, since the turn still answers
-- [x] Wired in `chemclaw_agent.build_agent` and the runner's per-turn ambients; the middleware
-      count assertions in `test_agent.py`/`test_profiles.py` moved 6 -> 7
-- [x] ADR: `D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice`
-
-### 5 — close the record
-- [x] The three CHECKMATE rows PR #133 fixed but left `[ ]` (the `refresh` rowcount, the webhook
-      translator, the layering granularity) — verified against `main`, then ticked
-- [x] The seven rows this pass closed, each with what it turned out to be
-- [x] `.env.example` for the two new settings
-
----
-
-## Verification
-
-- `make lint type test` green; every fix has a test **verified to fail against its own mutant**
-  (18 mutants driven across the four changes; the two that survived are named below).
-- **Live, not offline**, for the two that could not be settled in a sandbox:
-  - migration 037 applied with `make db-migrate` against the running database, then the partial
-    unique index and the `ON CONFLICT ... WHERE` inference asserted against real Postgres;
-  - the whole durable campaign through the real broker and workers — `recorded as
-    campaign-a9957bf78a2212aa`, resumed with `opened_by` `chemist@example.com` off the memo.
-- The ALPB set probed against the installed tblite rather than written from memory, which is what
-  turned up the two *different* rejection messages and the four solvents the old shortlist omitted.
-
----
+- [x] **#135 — the token-validation path.** `PyJWKClientError` is not an `InvalidTokenError`, so it
+      escaped both handlers and surfaced as a 500; the same path was an amplifier, because PyJWT
+      re-fetches the JWKS on every `kid` miss and the `kid` is chosen by an unauthenticated caller.
+      **50 anonymous tokens → 50 outbound fetches to the tenant IdP; 1 with the cooldown.** Plus
+      `/openapi.json`, unauthenticated, which the auth-coverage test skipped *while documenting
+      that it did*.
+- [x] **#136 — the redactor.** It rewrote the message and never the traceback, so every credential
+      in the inventory was readable in exactly the lines a failure produces. Plus the PAT-in-URL
+      form, the migration DSN, and the shipped default that made redaction replace the product's
+      own name with `***`. Connector servers turned out to have **no entrypoint at all**.
+- [x] **#137 — the safety screens.** Pair rules are a cross-product, so **13 KiB of SMILES produced
+      251,000 flags and blocked the connector's event loop for 2.48 s**; the request cap cannot see
+      it because the amplification is in the response. Bounded to 1,088 flags / 26.3 ms, off the
+      loop.
+- [x] **#138 — three tools that said the data was kept.** `report_measurement` said "the
+      measurement is kept" on **every call in every unconfigured deployment**, because
+      `calibration_enabled` is False by default and `record_observation` returned `0` for both
+      "stored, nothing matched" and "did nothing".
+- [x] **#139 — the injection envelope.** The nonce was per-process; a durable session outlives a
+      process, and the instructions say *only* the exact tag marks retrieved data. Plus a defang
+      that caught every visible spelling of the tag and none of the four invisible ones.
+- [x] **#140 — a gate that names nothing.** `authorize_trigger("request_development_report")` was
+      inert on the shipped chart, and no other gate covered it.
 
 ## Review
 
-**Both "decisions" dissolved on contact with the code.** The BO row said closing the gap meant
-either threading identity through a seam built to keep it out or fabricating an actor; the seam was
-built to keep identity out of the **payload**, and it has carried the actor on the memo since D-118,
-with a production reader in another bundle and a test pinning the crossing. The conflicts row said a
-per-note cap "changes what KM-8 shows a chemist"; `Conflict.kind` already separated author-stated
-from heuristic, so the cap applies to `suspected` alone and the declared-conflict promise is
-byte-identical — and the gap magnitude was already computed at the line that decides whether to
-report a pair, so "widest first" needed `max` instead of `append` and no new signal at all.
+**What was measured, not argued.**
 
-**The cost and the noise were one fact.** The conflicts row listed 637 ms and ~141 ids per chunk as
-two symptoms with two possible fixes. Ordering the group by confidence fixes both, because the same
-ordering that ranks the output is the one that lets the scan stop early.
+| | before | after |
+|---|---|---|
+| anonymous unknown-`kid` requests → JWKS fetches | 50 → 50 | 50 → 1 |
+| legitimate warm-cache request under a 40-request flood | 9.46 s | not reachable (401, no fetch) |
+| credentials in a `logger.exception` line | API key + DSN password, verbatim | redacted |
+| 13 KiB safety screen | 251,000 flags / 2.48 s blocked | 1,088 flags / 26.3 ms, off-loop |
+| `report_measurement` on the default config | "the measurement is kept" | "NOT recorded" |
+| envelope tag across two processes | two tags | one (when configured) |
+| invisible-character tag spellings defanged | 0 of 4 | 4 of 4 |
+| `request_development_report` gated on the shipped chart | no | yes |
 
-**Measuring beat recalling, again.** The ALPB list was going to be written from the shortlist that
-already existed. Probing tblite instead showed that shortlist was missing four ordinary process
-solvents, and that the library rejects a name from its *dielectric* table and from its *Born
-parameter* table with two different messages — so "which names work" is an intersection, not a list.
+**Three fixes were generalised past what was reported, and that is where the value was.**
+`screen_genotoxic_alerts` had the identical cross-product nobody reported (640 components →
+102,400 alerts), so the bound is one function both screens call. The `report_measurement` finding
+was about a swallowed write; running it showed the *default* configuration lies on every call. And
+`authorize_trigger` got a test that AST-walks every call site, because there had already been two
+occurrences of "a gate that names nothing" and an instance fix would not stop the third.
 
-**Two surviving mutants, named rather than driven to zero.** In `repeat_guard`, replacing the
-off-the-request-path early return with a fresh `Counter()` is behaviourally equivalent (every call
-is then the first). In `conflicts`, the early `break` is invisible in the output — bounding what
-each note emits already bounds the flags — so it is pinned by a test that counts *reads* rather than
-results.
+**Where I was wrong, twice, and the full suite is what caught both.**
 
-**What was deliberately not done.** The `xtb_job_heartbeat_timeout_seconds` coupling (one 600 s
-setting is both the CREST-sized legitimate gap tolerance and the only dead-worker signal) stays
-open: it is a config-surface change on the durable spine, and a per-job value wants measuring
-against a real eviction rather than reasoning about. The behavioural half of du-03 — a turn that
-loops on retrieval and never reaches the capability it needed — is partly addressed (the loop now
-costs two calls instead of eight), but whether the *cause* is retrieval, prose, or a 38-note corpus
-is still unmeasured and cannot be settled on that data.
+1. `configure_logging()` in `connector_app` looked obviously right — the single point all seven
+   bundles pass through. It is `basicConfig(force=True)`, which removes every root handler, and
+   that function runs at import time in modules tests import freely. It tore out pytest's capture
+   handler and failed two GxP audit tests unrelated to logging. Every *targeted* test passed. The
+   fix that emerged — giving connector servers the process entrypoint they never had — is better
+   than what I would have shipped, and picked up a missing `configure_telemetry()` too.
+2. The "shipped defaults are not credentials" rule compared whole values only. `conftest.py`
+   repoints `postgres_dsn` at an isolated schema, so under CI the DSN is not the default and is
+   redacted — while the password inside it still is. Locally there is no Postgres, nothing
+   repoints, and it passed. **CI is the arbiter; a local green is not the gate**, and this is what
+   that sentence means concretely.
+
+**Measurement discipline, stated because two of three probes measured nothing.** Sizing the safety
+blowup took three attempts: the first repeated one SMILES (`dict.fromkeys` deduplicated it to two
+molecules), the second grew molecule *length* with the index (so the O(n²) measured was my own
+input). Only distinct strings at constant molecule size measure the code. The first two would each
+have produced a confident, wrong write-up.
+
+**What was deliberately not done, and why.** Twenty confirmed findings are in `BACKLOG.md` with
+file:line, severity and analysis rather than half-fixed. The largest deferral is the framing lane's
+four *coverage* findings: `frame_untrusted` wraps a prose string and each unframed source returns a
+**structured model**, so covering them is a decision about which fields to wrap without corrupting
+what the model reads. That is a design question, and rushing it into a mechanism PR would have
+produced a worse answer than deferring it with the reasoning attached.
+
+**The Q-A lane's honest negative result.** The ten `Protocol + InMemory + Postgres` triads are
+*not* one abstraction waiting to be extracted — the audit chain's advisory lock and hash chain, the
+retention semantics and the key shapes genuinely differ. What is shared is the connect/execute
+plumbing (hand-rolled 14 times, five docstrings byte-identical), and the real prize is the
+divergences the duplication hides: an `InMemoryStore.find` that raises on a timezone-aware row
+where Postgres does not, and one of three jsonb writers rejecting non-finite floats. Recorded that
+way rather than as "collapse the ten".
+
+## Measured, and not defects
+
+Recorded so they are not re-litigated:
+
+- **The BO acquisition test's timeout headroom.** `test_the_suggestion_wires_the_assay_noise...`
+  fails under load and passes alone in 27.8 s against its 60 s budget. Its own docstring predicts
+  this and the marker exists to make a spike name itself. 2.2x headroom is thin but the test is
+  behaving as designed; it is adjacent to the already-tracked "two slowest pKa tests fail on a
+  loaded box" row, not a new finding.
+- **The suite must not run concurrently with the agent fleet on a 4-core box.** It manufactures
+  timeout failures indistinguishable from regressions. Every verification run in this session was
+  serialized against agent work; one that was not had to be discarded and re-run.
