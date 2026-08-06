@@ -49,6 +49,21 @@ class AuthorizationError(Exception):
     """
 
 
+# The expensive actions **core itself owns**, as distinct from the ones a connector manifest
+# declares with `expensive: true`.
+#
+# `expensive_actions()` derives its set from the enabled bundles, which is the right principle —
+# the owner of the capability declares the fact, so a bundle added next year is gated the day it
+# is enabled. But a durable job launched from core has no manifest to declare it, and exactly one
+# exists: `request_development_report` starts an unbounded multi-section research workflow. Its
+# `authorize_trigger` call was therefore inert on the shipped chart (`entra_required=true` with
+# both role settings empty), and no other gate covered it — it is in `STATE_CHANGING_TOOLS` but
+# not in `DEFAULT_WRITE_TOOL_GATES`, so any authenticated user could launch one.
+#
+# Declared here rather than added to the chart's `entra_expensive_actions`, so that a deployment
+# gets it without configuring anything — the same property the manifest derivation gives bundles.
+CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset({"request_development_report"})
+
 # The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
 # configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
 # every *read* tool stays open (the dev-friendly posture), but a tool that launches a job or
@@ -195,7 +210,7 @@ def expensive_actions() -> frozenset[str]:
     declared = frozenset(
         job.name for manifest in enabled() for job in manifest.jobs if job.expensive
     )
-    return settings.entra_expensive_action_set | declared
+    return settings.entra_expensive_action_set | declared | CORE_EXPENSIVE_ACTIONS
 
 
 def _actor() -> str:
