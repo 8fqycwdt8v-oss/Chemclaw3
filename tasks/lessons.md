@@ -1459,3 +1459,30 @@ Considered and not taken: `validate_assignment=True` on `Settings`, which would 
 field and every patch in the suite — including tests that deliberately assign invalid values to
 exercise a validator — so it trades a broad, unmeasured risk for test ergonomics. The explicit
 `SecretStr(...)` in the tests is also more honest: it says what the app can actually hold.
+
+
+## The same fan-out lesson, one package later, in a different disguise (2026-08-06)
+
+WP-5 framed four previously-bare values. I ran the framing tests and the four modules I edited; the
+gate failed **five tests in two files I had not touched** — `test_calc_artifacts.py` asserting
+`content.text == _XYZ` and `len(content.text) == max_chars`, and `test_durable_tools.py` asserting
+`hits[0].rationale == "..."`. All were correct assertions about the *old* value.
+
+This is the previous entry's lesson wearing different clothes, and that is the point worth recording.
+There the trigger was a field's **type**; here it was a field's **value shape**. Both have the same
+blast radius and neither is visible in the diff: the set of places that assert on a value is not the
+set of places that produce it.
+
+The generalization, which the first entry stated too narrowly:
+
+1. **When a value's type *or* shape changes, grep for every test that names the producing tool**, not
+   just the field. `grep -rln "fetch_artifact\|find_past_jobs" tests/` returns 34 files here; running
+   those 29 collectible ones took 14 seconds and would have caught all five.
+2. **An exact-equality assertion is a shape declaration.** `assert x == "literal"` breaks on any
+   change to what wraps the literal; `assert "literal" in x` survives a wrapper and still fails on a
+   substitution. Prefer containment where the test's subject is "the text survived", and keep
+   equality where the subject really is the exact bytes.
+3. Where two files would now assert the same property, **let each keep its own subject**:
+   `test_durable_tools` asserts the rationale survives the round trip, `test_framing_coverage`
+   asserts it is framed. Restating the framing claim in both would make one of them lie the next
+   time the treatment changes.

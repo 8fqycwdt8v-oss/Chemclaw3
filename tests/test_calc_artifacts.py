@@ -18,6 +18,18 @@ from chemclaw.connectors.calc.server import tools
 from chemclaw.core.config import settings
 from chemclaw.science.calc.artifacts import InMemoryArtifactStore, media_type_for
 
+
+def _payload(framed: str) -> str:
+    """The artifact's own text, out of the envelope `fetch_artifact` returns it in.
+
+    The tool frames its text because an artifact is a file a pipeline wrote and nobody here
+    reviewed (D-2026-08-06-a-mitigation-shipped-and-left-switched-off). The envelope is metadata
+    about trust, not content — so the assertions below are about what it *contains*, and the
+    `max_chars` contract stays a bound on the artifact's own characters rather than on the field's.
+    """
+    inner = framed.split("\n", 1)[1]
+    return inner.rsplit("\n", 1)[0]
+
 _CALC_KEY = "xtb.thermo@gfn2-v1:0123456789abcdef:fedcba9876543210"
 
 _XYZ = "3\nwater\nO 0.0 0.0 0.0\nH 0.0 0.0 0.96\nH 0.93 0.0 -0.24\n"
@@ -71,7 +83,7 @@ def test_a_readable_artifact_comes_back_whole(monkeypatch: pytest.MonkeyPatch) -
     async def _run() -> None:
         _use(monkeypatch, await _populated())
         content = await tools.fetch_artifact(f"{_CALC_KEY}#xtbopt.xyz")
-        assert content.text == _XYZ
+        assert _payload(content.text) == _XYZ
         assert content.truncated is False
         assert content.byte_size == len(_XYZ.encode())
 
@@ -110,7 +122,7 @@ def test_a_large_artifact_is_truncated_and_says_so(monkeypatch: pytest.MonkeyPat
 
         content = await tools.fetch_artifact(f"{_CALC_KEY}#hessian")
         assert content.truncated is True
-        assert len(content.text) == settings.calc_artifact_max_chars
+        assert len(_payload(content.text)) == settings.calc_artifact_max_chars
         assert content.byte_size == len(body.encode())  # the *full* size, not the read size
 
     asyncio.run(_run())
@@ -124,8 +136,8 @@ def test_a_smaller_read_is_honoured_and_a_larger_one_clamped(
     async def _run() -> None:
         _use(monkeypatch, await _populated())
         ref = f"{_CALC_KEY}#xtbopt.xyz"
-        assert len((await tools.fetch_artifact(ref, max_chars=10)).text) == 10
-        assert (await tools.fetch_artifact(ref, max_chars=10_000_000)).text == _XYZ
+        assert len(_payload((await tools.fetch_artifact(ref, max_chars=10)).text)) == 10
+        assert _payload((await tools.fetch_artifact(ref, max_chars=10_000_000)).text) == _XYZ
 
     asyncio.run(_run())
 
@@ -142,7 +154,7 @@ def test_a_negative_read_size_does_not_slice_from_the_wrong_end(
     async def _run() -> None:
         _use(monkeypatch, await _populated())
         content = await tools.fetch_artifact(f"{_CALC_KEY}#xtbopt.xyz", max_chars=-5)
-        assert len(content.text) == 1
+        assert len(_payload(content.text)) == 1
         assert content.truncated is True
 
     asyncio.run(_run())
