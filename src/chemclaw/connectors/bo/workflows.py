@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
         evaluate_candidates,
         propose_initial,
         propose_next,
+        record_campaign_run,
     )
     from chemclaw.connectors.bo.knowledge import note_from_campaign_result
     from chemclaw.core.config import settings
@@ -34,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         CampaignCarryOver,
         CampaignResult,
         CampaignSpec,
+        Candidate,
         Observation,
         best_of,
         discrete_candidate_count,
@@ -154,6 +156,33 @@ class BoCampaignWorkflow:
 
         result = CampaignResult(best=best_of(spec.problem, history), history=history)
 
+        # Write the campaign record, so `resume_campaign` can find work this path actually did.
+        # Both paths mint ids from one `campaign_id_for` space and only the inline tool ever wrote,
+        # so a durably-run campaign reported "no such campaign" about hours of evaluation.
+        #
+        # The actor comes off the run's **memo**, which core sets on every connector job for exactly
+        # this (`durable/connector_job.py`, D-118) — the same read `connectors/qm/workflows.py` has
+        # made since F5. Nothing is threaded through the payload, and nothing is fabricated: the
+        # fallback is the configured service identity, which is what `require_actor` falls back to
+        # for a run started outside the wrapper (a test, a manual re-drive).
+        #
+        # The workflow id is the idempotency key. It is stable across a continue-as-new, so a
+        # campaign that carried over does not write twice.
+        campaign_id = await workflow.execute_activity(
+            record_campaign_run,
+            args=[
+                spec.problem,
+                [Candidate(params=result.best.params)],
+                history,
+                workflow.memo_value("requested_by", settings.service_actor_id),
+                workflow.memo_value("correlation_id", ""),
+                workflow.info().workflow_id,
+            ],
+            start_to_close_timeout=timeout,
+            heartbeat_timeout=heartbeat_timeout,
+            retry_policy=BAD_DATA_RETRY,
+        )
+
         # The recommendation as a PR-gated note (step 1d.5) — *built* here, because the BO→note
         # mapping is this domain's knowledge, and *published* by core, because the PR-gate is
         # the GxP boundary and a connector must not be able to reach around it. Best-effort
@@ -168,7 +197,8 @@ class BoCampaignWorkflow:
         return ConnectorJobResult(
             summary=(
                 f"campaign {spec.objective_name!r} finished after {len(history)} evaluation(s); "
-                f"best objective {best.value:.6g} ({best.provenance})"
+                f"best objective {best.value:.6g} ({best.provenance}); "
+                f"recorded as {campaign_id}"
             ),
             data=result.model_dump(mode="json"),
             note=note,

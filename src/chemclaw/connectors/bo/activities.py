@@ -37,6 +37,7 @@ from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
+from chemclaw.science.bo.campaign_record import record_suggestion
 from chemclaw.science.bo.engine import initial_candidates, propose_candidates
 from chemclaw.science.bo.objectives import get_objective
 from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem
@@ -114,3 +115,66 @@ async def evaluate_candidates(
             )
         )
     return observations
+
+
+@durable_activity(bundle_queue("bo"))
+@activity.defn
+async def record_campaign_run(
+    problem: OptimizationProblem,
+    candidates: list[Candidate],
+    observations: list[Observation],
+    actor: str,
+    correlation_id: str,
+    job_id: str,
+) -> str:
+    """Write the finished durable campaign into the campaign record; return the campaign id.
+
+    **The gap this closes.** Both paths mint campaign ids from the same `campaign_id_for` space,
+    and only the inline `suggest_next_experiment` ever wrote. So `resume_campaign` on a campaign
+    that had run durably — hours of evaluation, a PR-gated recommendation, a real result — reported
+    no such campaign, about work that was actually done (BO deep review, 2026-08-05).
+
+    **Why an activity, and why here.** The write is I/O and non-deterministic, so it cannot live in
+    the workflow; and psycopg is already in this bundle's worker process
+    (`science.bo.campaign_record` imports it), so nothing new crosses a boundary.
+    `record_suggestion` is reused unchanged — the inline path's rules about swallowing a database
+    blip but never a programming error are exactly the rules wanted here, and a campaign that
+    finished must not fail because a record of it could not be written.
+
+    **The actor is real, not fabricated.** It is read from the run's memo by the caller and passed
+    in, which is the mechanism core set up for precisely this: `ConnectorJobWorkflow` puts
+    `requested_by` on the child's memo so a bundle whose backend runs under a shared service
+    identity can still name the user behind a run (D-118). The backlog recorded this as blocked on
+    a choice between threading identity through a seam built to keep it out and writing a
+    fabricated actor into an audited column; it was neither, because the seam already carries it —
+    `connectors/qm/workflows.py` has read the same memo in production since F5.
+
+    Args:
+        problem: The decision space, which is also the campaign's identity.
+        candidates: The recommendation this run ended on.
+        observations: Every point the campaign evaluated, which is the history a resume needs.
+        actor: The Entra actor the run is attributed to, off the memo.
+        correlation_id: The originating request, off the same memo.
+        job_id: This run's workflow id — the idempotency key, since an activity is retried by
+            design and a duplicate would be a second identical entry in a history that is meant to
+            record what was actually proposed.
+
+    Returns:
+        The campaign id, so the workflow can report the handle a chemist quotes back.
+    """
+    return await record_suggestion(
+        problem,
+        candidates=candidates,
+        observations=observations,
+        # The durable path evaluates through the objective registry rather than through descriptors
+        # read off cached calculations, so there is nothing to reference. Empty is the accurate
+        # statement, not a gap: `calc_refs` exists to trace a *stale* calculation to the suggestions
+        # drawn from it, and no calculation was drawn from here.
+        calc_refs=[],
+        # No session id: the run is attributed to the actor and the request, and the conversation it
+        # was launched from is core's to join through `job_records` rather than this bundle's to
+        # duplicate. The tuple shape is `connectors.caller.caller_provenance`'s, reused so the two
+        # writers hand `record_suggestion` the same thing.
+        provenance=(actor, "", correlation_id),
+        job_id=job_id,
+    )
