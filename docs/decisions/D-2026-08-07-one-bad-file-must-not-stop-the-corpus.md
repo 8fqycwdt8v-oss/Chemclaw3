@@ -63,14 +63,24 @@ Two of the four suspected formats turned out to be **already covered**: `python-
 the reviewer's "structurally identical" reasoning was right about the shape and wrong about two of
 the four instances; the parametrised test keeps all four as regression cover.
 
-### The index gets a wrapper type, as its own precedent already had
+### The index gets a wrapper type — on the *outage* hierarchy, not the bad-data one
 
-`DocumentIndexError(DocumentShareError)`, raised by `PostgresDocumentIndex._run` around
-`psycopg.Error`. A **subclass**, not a sibling, so a caller wanting "anything wrong with this share"
-keeps one except clause while the retriever can still separate the two: a bad binding is permanent
-and gets an ERROR naming it as misconfigured; a timeout is transient and gets a WARNING and an empty
-result. This is the `WarehouseQueryError` shape that `WarehouseVectorRetriever` has — the pattern
-was copied here without the piece that made it work.
+`DocumentIndexError`, raised by `PostgresDocumentIndex._run` around `psycopg.Error`. This is the
+`WarehouseQueryError` shape that `WarehouseVectorRetriever` has; the pattern was copied into this
+package without the piece that made it work.
+
+**It subclasses `SubsystemUnavailableError`, and the first attempt got that wrong.** I initially
+made it a `DocumentShareError`, reasoning that one except clause should catch "anything wrong with
+this share". `tests/test_publish.py` rejected it, and it was right to: `ChemclawError` is this
+repository's **non-retryable bad-data** contract — every subclass name is registered in
+`_BAD_DATA_TYPES` precisely so an activity fails fast instead of retrying invalid input. A statement
+timeout says nothing about the query, and the identical call succeeds once the database is back.
+Registering it as bad data would make a workflow give up on a blip it would otherwise ride out,
+which is the whole argument `SubsystemUnavailableError` exists to make (and why that hierarchy's
+*absence* from the list has an asserting test of its own).
+
+The convenience of one except clause was not worth putting a retryable failure in the non-retryable
+hierarchy. The retriever names both, which costs one tuple entry.
 
 Only the *read* path is wrapped. A backend failure during a sync **should** fail the activity, which
 is what Temporal's retry is for.
@@ -111,6 +121,9 @@ that the guard was on the wrong side of the call.
 **Catch `psycopg.Error` in the retriever.** Fewer lines, and it puts the database's vocabulary in
 the retrieve half, which then has to re-learn it for every future backend. The wrapper type is the
 established pattern in this repository and it already had a precedent to copy.
+
+**Make `DocumentIndexError` a `DocumentShareError`.** Tried, and wrong — see above. It buys one
+except clause and pays by classifying a retryable outage as non-retryable bad data.
 
 **Mark a poison chunk in the schema so it is never retried.** Correct, and a migration plus a state
 column for a case that should be rare. Per-chunk retry costs one failed call per run and needs no

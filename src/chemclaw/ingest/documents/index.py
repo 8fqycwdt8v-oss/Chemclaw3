@@ -30,16 +30,22 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.ingest.documents.binding import DocumentShareError
 
 
-class DocumentIndexError(DocumentShareError):
-    """The index could not answer — a backend failure, not a bad binding.
+class DocumentIndexError(SubsystemUnavailableError):
+    """The document index could not be reached, so the search never ran.
 
-    A subclass rather than a sibling so that a caller wanting "anything wrong with this share"
-    keeps one except clause, while the retriever can still tell the two apart: a bad binding is
-    permanent and deserves an ERROR naming it as misconfigured, whereas a statement timeout is
-    transient and deserves a WARNING and an empty result.
+    A `SubsystemUnavailableError` and deliberately **not** a `ChemclawError`, which is this
+    repository's *non-retryable bad-data* contract: a statement timeout says nothing about the
+    query, and the identical call succeeds once the database is back. Registering it as bad data
+    would make an activity give up on a blip it would otherwise ride out — the argument
+    `SubsystemUnavailableError` was created for, and the reason `tests/test_publish.py` asserts
+    that hierarchy's *absence* from `_BAD_DATA_TYPES`.
+
+    The message stays free of hostnames and driver text; the underlying `psycopg.Error` carries
+    those as `__cause__`, for the log and the operator.
     """
 
 
