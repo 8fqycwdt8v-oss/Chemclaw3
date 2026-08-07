@@ -53,7 +53,7 @@ retrieve: chemclaw.ingest.documents.retriever:ShareDocumentRetriever
 config:
   binding:
     mount: /mnt/sharedrive
-    required_roles: [chemclaw.sharedrive.reader]
+    required_roles: [chemclaw.sharedrive.reader]   # or `public: true` — one is mandatory
     roots:
       - path: Projects
         tags: [project-work]
@@ -69,6 +69,10 @@ config:
 
 What each part buys:
 
+- **`required_roles`** is mandatory, and so is its opposite. A binding must set either
+  `required_roles` or `public: true`; omitting both is refused at load. Empty used to mean ungated,
+  so a hand-authored manifest that simply forgot the field served the whole AD-gated drive to every
+  authenticated user, with nothing to distinguish it from a correctly gated one.
 - **`roots`** is your staged-rollout control. Start with one folder. Roots may not overlap and may
   not be combined with `.`; the crawl refuses at load rather than indexing a file twice under two
   tag sets.
@@ -90,13 +94,17 @@ tool and skill. Two tenant wirings work, and the code is identical for both:
 | Wiring | What to do | `required_roles` holds |
 | --- | --- | --- |
 | **App role** (preferred) | Assign the AD group to an Entra app role on the API's app registration. Needs Entra ID P1 for group-based assignment. | the app-role value, e.g. `chemclaw.sharedrive.reader` |
-| **Group claim** | Emit the `groups` optional claim on the app registration; set `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`. Any tier. | the group's **object-id** |
+| **Group claim** | Emit the `groups` optional claim on the app registration; set `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`. Any tier. | `group:<object-id>` — **prefixed** |
 
 A caller without it gets nothing from this source — not a filtered list, nothing.
 
 Two things to know before choosing the claim route:
 
-- The gate then reads as GUIDs, which is harder to audit than a named role.
+- The gate then reads as GUIDs, which is harder to audit than a named role. Note the **`group:`
+  prefix**: group-derived entitlements are namespaced, because a tenant may emit `groups` as names
+  rather than object-ids (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`)
+  and this is the same set that gates every write tool and skill. Without the prefix, a directory
+  group named for an app role would silently grant it.
 - A user in more groups than a token can carry (~150+) receives a **claim overage** instead of
   `groups`. Resolving it needs a Microsoft Graph call, which D-089 does not permit, so this system
   logs a warning naming the user rather than silently reading it as "no groups". Those users lose

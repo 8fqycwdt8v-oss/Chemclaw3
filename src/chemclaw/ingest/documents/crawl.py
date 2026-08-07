@@ -78,10 +78,26 @@ class CrawlResult:
 
 
 def _is_excluded(relative: str, patterns: list[str]) -> bool:
-    """Whether a mount-relative path matches any exclusion glob (also matched per basename)."""
+    """Whether a mount-relative path matches any exclusion glob (also matched per basename).
+
+    Each pattern is tried against the path, the path with a leading `/`, and the basename. The
+    leading-slash form is what makes `**/Archive/**` — the pattern the shipped manifest carries and
+    the one anybody would write — exclude a **top-level** `Archive/` as well as a nested one.
+    `fnmatch` gives `**` no special meaning, so it translates to `.*?/Archive/`, which requires a
+    separator *before* `Archive`; measured, `fnmatch("Archive/old.pdf", "**/Archive/**")` is False.
+    An operator who excluded a folder to keep it out of the corpus got it indexed and cited.
+
+    Still case-sensitive, which is a real mismatch with CIFS (`Archive`, `ARCHIVE` and `archive`
+    are one folder to the file server and three strings here) — recorded in
+    `docs/planning/BACKLOG.md` rather than silently changed, because case-folding every pattern
+    would quietly widen exclusions a deployment already relies on.
+    """
     name = relative.rsplit("/", 1)[-1]
     return any(
-        fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(name, pattern) for pattern in patterns
+        fnmatch.fnmatch(relative, pattern)
+        or fnmatch.fnmatch(f"/{relative}", pattern)
+        or fnmatch.fnmatch(name, pattern)
+        for pattern in patterns
     )
 
 
@@ -89,6 +105,19 @@ def _extension_of(name: str) -> str:
     """The lowercased suffix of a file name, `""` when it has none."""
     dot = name.rfind(".")
     return name[dot:].lower() if dot > 0 else ""
+
+
+def _within_mount(mount: Path, path: Path) -> bool:
+    """Whether a path still lands inside the mount once every link in it is resolved.
+
+    Module-level because both the per-entry guard and the per-root one need it: `descend` asks it
+    of a symlink it is about to follow, and `crawl_share` asks it of the root directory itself,
+    which `descend` never sees.
+    """
+    try:
+        return path.resolve().is_relative_to(mount)
+    except OSError:
+        return False
 
 
 class _Walk:
@@ -100,13 +129,6 @@ class _Walk:
         self.after = after
         self.limit = limit
         self.result = CrawlResult()
-
-    def _within_mount(self, path: Path) -> bool:
-        """Whether a followed link still lands inside the mount (only asked when following)."""
-        try:
-            return path.resolve().is_relative_to(self.mount)
-        except OSError:
-            return False
 
     def _accept(self, entry: os.DirEntry[str], relative: str, root: RootBinding) -> bool:
         """Record one file if it passes every filter; return False once the chunk is full."""
@@ -179,7 +201,7 @@ class _Walk:
                 continue
             if entry.is_symlink() and not self.binding.follow_symlinks:
                 continue
-            if entry.is_symlink() and not self._within_mount(Path(entry.path)):
+            if entry.is_symlink() and not _within_mount(self.mount, Path(entry.path)):
                 logger.warning("%s links outside the mount; skipping", relative)
                 continue
             if entry.is_dir(follow_symlinks=self.binding.follow_symlinks):
@@ -227,6 +249,22 @@ def crawl_share(
         directory = walk.mount if root.path == "." else walk.mount / root.path
         if not directory.is_dir():
             logger.error("root %r of share mount %s is missing", root.path, binding.mount)
+            walk.result.failed_roots.append(root.path)
+            continue
+        # The root itself is resolved, not just the entries under it. `descend`'s symlink guard
+        # runs per *entry*, so it never sees the root directory it was handed — and a root that is
+        # a link is followed by `is_dir()`, walked by `scandir`, and yields ordinary files whose
+        # `is_symlink()` is False, so nothing fires. `Projects -> /` would index the container
+        # filesystem, the knowledge repo included, under paths that still look mount-relative in
+        # the cursor and the citation. `follow_symlinks: false` does not help: it only skips
+        # symlink entries. A lexical `..` check in the binding cannot see this either — the escape
+        # is in the filesystem, not in the string.
+        if not _within_mount(walk.mount, directory):
+            logger.error(
+                "root %r of share mount %s resolves outside the mount; refusing to walk it",
+                root.path,
+                binding.mount,
+            )
             walk.result.failed_roots.append(root.path)
             continue
         try:

@@ -109,7 +109,8 @@ _SHARE_PROBE = textwrap.dedent(
     from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
 
     ShareDocumentRetriever(
-        binding={"mount": "/mnt/x", "roots": [{"path": "."}]}, name="sharedrive"
+        binding={"mount": "/mnt/x", "roots": [{"path": "."}], "public": True},
+    name="sharedrive",
     )
     loaded = {m.split(".")[0] for m in sys.modules}
     print(json.dumps({"parsers": sorted(loaded & set(%r))}))

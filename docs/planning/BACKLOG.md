@@ -53,6 +53,48 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       filename and the README is explicit that an applied file is never edited.
       *Trigger:* the next collision, or a decision to name migrations by date+slug as the ADRs are.
 
+- [ ] **Share exclusion globs are case-sensitive, and CIFS is not** — [S]. `_is_excluded` uses
+      `fnmatch`, so `Archive`, `ARCHIVE` and `archive` are three strings here and one folder to the
+      file server. An operator who excluded a restricted folder by name gets it indexed if anyone
+      ever created it with different casing. Not fixed with the leading-slash anchoring in
+      `D-2026-08-07-a-manifest-must-say-who-may-read-it`, because case-folding every pattern would
+      quietly *widen* exclusions a deployment already relies on — that is a change to make
+      deliberately, with the manifests in front of you. *Trigger:* a real share, where `share-estimate`
+      shows a folder an exclusion was meant to cover.
+
+- [ ] **The two lexical legs disagree on AND vs OR** — [M]. Postgres uses `websearch_to_tsquery`,
+      which ANDs the terms; the in-memory reference scores any chunk sharing *one* token. So a
+      multi-word question retrieves on the dense leg alone in production while the test passes on
+      the in-memory OR, and the rank fusion the whole `_search` design rests on runs one-legged.
+      `retrieval/vector_index.py` has the same shape, so this may be deliberate there — but nothing
+      says so, and the "reference the tests use" claim in `index.py` is not true for this operator.
+      *Trigger:* decide which semantics is wanted, then make both backends state it.
+
+- [ ] **`038`'s btree cannot serve the query it was added for** — [S].
+      `WHERE embedding_key IS DISTINCT FROM %(key)s` is a `DistinctExpr`, not an indexable
+      `OpExpr`, so the planner can only full-scan. The index costs write amplification on every
+      upsert and buys nothing. An indexable form is `embedding_key IS NULL OR embedding_key <> %(key)s`
+      with a partial index. *Trigger:* the first corpus large enough for the stale scan to show up.
+
+- [ ] **`embedding_config_key` omits the endpoint** — [S]. It is `provider:model:dim`, so
+      repointing `llm_base_url` at a different vendor exposing the same model name — or the same
+      vendor rolling a model's weights under an unchanged name — leaves every `embedding_key`
+      reading as current. Nothing re-embeds and nothing errors, which is the exact silent
+      corruption `038` exists to prevent, one variable further out.
+      *Trigger:* a deployment that changes `llm_base_url` without changing `embedding_model`.
+
+- [ ] **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
+      whether *some* chunk of a document carries the current key, while `index.py`'s docstring
+      states the stronger invariant. Transient in the shipped workflow, because the re-embed drain
+      completes before the crawl — but any caller that reorders the two phases inherits a real bug.
+      *Trigger:* reordering those phases, or making the drain partial.
+
+- [ ] **The citation tie-break is collation-dependent** — [S]. In-memory picks the smallest path
+      with Python's code-point `sorted()`; SQL uses `min(f.path)` under the database's collation.
+      For a document at `Projects/Report.pdf` and `Projects/acme report.pdf` the two disagree, so
+      the "deterministic citation" is a property of the deployment's collation rather than of the
+      code. *Trigger:* a corpus with duplicate content under mixed-case paths.
+
 ## Open — Left by the whole-codebase security sweep (2026-08-06)
 
 Eleven disjoint review lanes, every finding re-checked by a second agent required to execute a

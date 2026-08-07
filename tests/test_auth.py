@@ -79,13 +79,33 @@ def test_group_claims_join_the_role_set_only_when_configured(
 
     Off by default: a deployment whose tenant assigns the AD group to an app role already receives
     it as a `roles` value and must not also start matching raw group object-ids.
+
+    **Namespaced when it is on.** A tenant may emit `groups` as names rather than object-ids
+    (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`, …), so an unprefixed
+    group value *is* an app-role value — and this same set gates privileged tools and skills.
     """
     claims = {"oid": "u-9", "roles": ["bench"], "groups": ["7f1c-group-oid"]}
     assert validate_token(_sign(rsa_key, claims)).roles == frozenset({"bench"})
 
     monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
     principal = validate_token(_sign(rsa_key, claims))
-    assert principal.roles == frozenset({"bench", "7f1c-group-oid"})
+    assert principal.roles == frozenset({"bench", "group:7f1c-group-oid"})
+
+
+def test_a_group_named_like_a_privileged_role_does_not_become_one(
+    rsa_key: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escalation the prefix exists to stop, stated as a test rather than as a comment.
+
+    Turning on group claims to give a file share its read entitlement must not let anyone who can
+    get a directory group created — or who is already in one that happens to be named for an app
+    role — pass the write-tool and expensive-action gates.
+    """
+    monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
+    claims = {"oid": "u-9", "roles": [], "groups": ["process-chemist"]}
+    roles = validate_token(_sign(rsa_key, claims)).roles
+    assert "process-chemist" not in roles
+    assert roles == frozenset({"group:process-chemist"})
 
 
 def test_a_group_claim_overage_is_reported_rather_than_read_as_no_groups(

@@ -228,10 +228,18 @@ def require_schema_vector_width() -> None:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector."""
+    """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector.
+
+    Clamped to [0, 1] like the Postgres backend does (`_run`), because floating-point rounding puts
+    the *identical* vector's self-similarity above 1.0 about half the time — the denominator is two
+    square roots and rounds below the numerator. Measured: 996 of 2000 random normalised vectors,
+    worst 1.0000000000000002. `DocumentHit.score` is bounded `le=1.0`, so an exact match (a chemist
+    pasting a sentence back, or any token-set collision under the `hash` embedder) raised
+    `ValidationError` from inside the reference implementation every test validates against.
+    """
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
-    return dot / norm if norm else 0.0
+    return min(1.0, max(0.0, dot / norm)) if norm else 0.0
 
 
 def _tokens(text: str) -> set[str]:
