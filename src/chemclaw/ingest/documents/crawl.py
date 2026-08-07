@@ -65,6 +65,11 @@ class CrawlResult:
     # a share that failed to mount presents as an empty directory, and pruning on that would delete
     # the whole corpus. Anything in here means "delete nothing this run".
     failed_roots: list[str] = field(default_factory=list)
+    # Entries the walk *saw* but could not stat. They are on the share — `scandir` listed them —
+    # so the sync restamps them as seen rather than letting the sweep read their absence from this
+    # pass as deletion. A transient `EACCES` on a subtree must not empty that subtree from the
+    # index; the mark means "observed to exist", never "successfully processed".
+    unreadable: list[str] = field(default_factory=list)
     skipped_oversized: int = 0
     # Per-extension counts of everything the allowlist turned away. Reported rather than dropped:
     # an operator has to be able to see that 40% of the share is `.doc` before concluding the
@@ -117,6 +122,7 @@ class _Walk:
             stat = entry.stat(follow_symlinks=self.binding.follow_symlinks)
         except OSError:
             logger.warning("could not stat %s; skipping", relative)
+            self.result.unreadable.append(relative)
             return True
         if stat.st_size > self.binding.max_file_bytes:
             self.result.skipped_oversized += 1
@@ -138,6 +144,23 @@ class _Walk:
         )
         return True
 
+    def _order(self, entry: os.DirEntry[str]) -> str:
+        """The sort key that makes sibling order agree with joined-path order.
+
+        A directory is keyed as `name + "/"` because every path it yields begins that way, and the
+        cursor is compared against the *joined* path. Sorting on the bare name instead puts a
+        directory before a sibling file whose name extends it — `Report` before `Report.txt` — while
+        the paths sort the other way round, since `"."` (0x2E) is below `"/"` (0x2F):
+        `Docs/Report.txt` < `Docs/Report/a.txt`. The stream is then non-monotonic, and a resumed
+        pass skips `Report.txt` for good. Sibling roots do it too: `Data-Archive` loses to `Data`
+        on the bare name and wins on the joined path, so a resume drops the whole root.
+        """
+        try:
+            is_dir = entry.is_dir(follow_symlinks=self.binding.follow_symlinks)
+        except OSError:
+            is_dir = False
+        return entry.name + "/" if is_dir else entry.name
+
     def descend(self, directory: Path, root: RootBinding) -> bool:
         """Walk one directory in sorted order; return False when the chunk filled up.
 
@@ -149,7 +172,7 @@ class _Walk:
                 nothing is pruned from a share that may simply be half-mounted.
         """
         with os.scandir(directory) as entries:
-            listing = sorted(entries, key=lambda item: item.name)
+            listing = sorted(entries, key=self._order)
         for entry in listing:
             relative = PurePosixPath(entry.path).relative_to(self.mount).as_posix()
             if _is_excluded(relative, self.binding.exclude):
@@ -197,8 +220,10 @@ def crawl_share(
     # Sorted, not in declaration order: the resume cursor is a position in one lexical order over
     # the whole share, and every path under a root begins with that root's own name. Walking roots
     # out of order would make the concatenated stream non-monotonic, and `after` would then skip
-    # every file in a later-walked root that happens to sort earlier.
-    for root in sorted(binding.roots, key=lambda item: item.path):
+    # every file in a later-walked root that happens to sort earlier. Keyed with the separator
+    # appended, for the reason `_Walk._order` spells out — on the bare name, roots `Data` and
+    # `Data-Archive` sort the opposite way from the paths they yield.
+    for root in sorted(binding.roots, key=lambda item: item.path + "/"):
         directory = walk.mount if root.path == "." else walk.mount / root.path
         if not directory.is_dir():
             logger.error("root %r of share mount %s is missing", root.path, binding.mount)

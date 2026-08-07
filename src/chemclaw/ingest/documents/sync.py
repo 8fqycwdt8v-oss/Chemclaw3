@@ -151,14 +151,19 @@ def _file_record(source: str, ref: FileRef, doc_id: str) -> FileRecord:
 
 async def _parse_changed(
     refs: list[FileRef], report: SyncReport
-) -> tuple[list[_Parsed], dict[str, FileRef]]:
+) -> tuple[list[_Parsed], dict[str, FileRef], list[str]]:
     """Read and parse each changed file, tallying every refusal rather than dropping it.
 
     Reject-and-continue, the discipline the ELN sync uses: one unreadable PDF must not abort a pass
     over ten thousand files.
+
+    Returns the parsed documents, their refs by path, and the paths that were **refused but are
+    still on the share** — the caller restamps those, because a file that failed to open did not
+    stop existing and the sweep must not read this pass's silence about it as deletion.
     """
     parsed: list[_Parsed] = []
     by_path: dict[str, FileRef] = {}
+    refused: list[str] = []
     for ref in refs:
         try:
             result = await asyncio.to_thread(_read_and_parse, ref)
@@ -171,16 +176,18 @@ async def _parse_changed(
         # revisiting it if a share's refused population makes that read volume material.
         except ScannedDocumentError:
             report.skipped_scan += 1
+            refused.append(ref.path)
             continue
         except (DocumentParseError, OSError) as exc:
             logger.warning("skipping %s: %s", ref.path, exc)
             report.skipped_unreadable += 1
+            refused.append(ref.path)
             continue
         if not result.text.strip():
             report.empty += 1
         parsed.append(result)
         by_path[ref.path] = ref
-    return parsed, by_path
+    return parsed, by_path, refused
 
 
 def _chunks_for(documents: list[_Parsed], binding: DocumentShareBinding) -> list[ChunkRecord]:
@@ -253,13 +260,19 @@ async def sync_share(
     changed = [ref for ref in crawl.files if stored.get(ref.path) != ref.fingerprint]
     unchanged = [ref.path for ref in crawl.files if stored.get(ref.path) == ref.fingerprint]
     report.unchanged = len(unchanged)
-    # The mark half of the sweep: an untouched file must still count as seen, or the next complete
-    # crawl would prune the entire unchanged corpus.
-    await index.touch(source, unchanged)
+    # The mark half of the sweep, and its meaning is **"observed to exist"** — not "successfully
+    # processed". Everything the walk saw goes in: files whose fingerprint matched, and files it
+    # could see but not stat. Marking only what this pass handled is how a transient `EACCES` on a
+    # subtree, or a lock on one document, turns into a deletion of rows whose files never moved.
+    await index.touch(source, unchanged + crawl.unreadable)
     if not changed:
         return report
 
-    parsed, by_path = await _parse_changed(changed, report)
+    parsed, by_path, refused = await _parse_changed(changed, report)
+    # Same rule: a file that was opened and refused is still on the share. Its fingerprint is
+    # deliberately not stored (so the refusal stays visible in the counters, see above), but its
+    # existence is, so the sweep leaves the row it already had alone.
+    await index.touch(source, refused)
     if not parsed:
         return report
 
@@ -321,30 +334,54 @@ async def reembed_stale(index: DocumentIndex, limit: int = 500) -> ReembedReport
 
 
 async def prune_share(
-    source: str, index: DocumentIndex, started_at: datetime, crawl_was_complete: bool
+    source: str, index: DocumentIndex, started_at: datetime, report: SyncReport
 ) -> int:
     """Sweep index rows this run never saw — but only when the run actually saw the whole share.
 
     **This guard is the point of the function.** A CIFS mount that dropped, a root renamed by
     someone reorganizing the share, a permission change on one folder: each presents as "these
     files are not there", and sweeping on that evidence deletes a corpus that took days to build.
-    So the caller must have drained every root to completion with no failure, and this refuses
-    rather than trusts.
+
+    It takes the **drain's own merged report** rather than a boolean the caller worked out, because
+    there were two callers computing that boolean and only one of them was right: the durable
+    workflow caught a wedged drain and the CLI did not, so `--limit 0` swept a source it had not
+    looked at. Evidence a caller derives is a rule each caller can get wrong; evidence a caller
+    *hands over* is one rule.
+
+    Three ways a drain fails to be evidence of absence, all refusals:
+
+    - **A root failed to walk.** Half a share is not a share.
+    - **The drain never finished** (`has_more` still set). It stopped early or wedged, so the
+      unvisited tail is unmarked and would sweep wholesale.
+    - **It saw no candidates at all.** A detached CIFS volume leaves its mount point behind as an
+      empty directory, and with `roots: [{path: "."}]` there is no missing root to notice. A share
+      that is genuinely empty keeps stale rows until it has a file again, which is the harmless
+      half of the trade this whole module is built on.
 
     Args:
         source: The data-source name whose rows may be swept.
         index: The index to sweep.
         started_at: When the run began; anything not restamped since is stale.
-        crawl_was_complete: Whether every root was walked to the end without error.
+        report: The merged report for this source's whole drain.
 
     Returns:
-        How many file rows were removed (zero when the crawl was incomplete).
+        How many file rows were removed (zero whenever the drain is not evidence of absence).
     """
-    if not crawl_was_complete:
+    refusal = (
+        f"roots that could not be walked: {report.failed_roots}"
+        if report.failed_roots
+        else "the drain did not finish"
+        if report.has_more
+        else "it saw no candidate files at all"
+        if report.scanned == 0
+        else ""
+    )
+    if refusal:
         logger.warning(
-            "%s: crawl did not complete, so nothing is pruned — an unreachable share and an empty "
-            "one look identical from here",
+            "%s: nothing is pruned — %s. An unreachable share and an empty one look identical "
+            "from here, and of the two mistakes only re-indexing is recoverable",
             source,
+            refusal,
         )
         return 0
     removed = await index.prune_stale(source, started_at)

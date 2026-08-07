@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 _DRY_RUN_LIMIT = 100_000
 
 
+def _positive(value: str) -> int:
+    """A pass size argparse will not accept as zero — a pass of zero examines nothing."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def _resolve(name: str) -> DocumentShareSource:
     """Find the enabled data source carrying this share, or say what is actually enabled."""
     shares = {
@@ -108,7 +116,10 @@ async def _drain(name: str, share: DocumentShareSource, *, limit: int) -> SyncRe
             break
         after = report.cursor
     merged = merge_reports(reports, name)
-    merged.pruned = await prune_share(name, index, started_at, not merged.failed_roots)
+    # The merged report *is* the evidence, and `prune_share` reads it. This used to hand over
+    # `not merged.failed_roots`, which said nothing about a drain that stopped early — so
+    # `--limit 0` scanned nothing, reported `has_more`, and swept the whole source.
+    merged.pruned = await prune_share(name, index, started_at, merged)
     return merged
 
 
@@ -124,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--limit",
-        type=int,
+        type=_positive,
         default=1000,
         help="Documents per pass (ignored by --dry-run).",
     )
