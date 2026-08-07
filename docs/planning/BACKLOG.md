@@ -40,6 +40,19 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       index first and filters after, so a narrow `tag` over a large corpus can under-return. Harmless
       at fixture scale and unmeasured at a million chunks. *Trigger:* a real corpus is indexed —
       then compare a filtered top-k against the same query with the index disabled.
+
+- [ ] **Two migrations share the number `037`** — [S]. `infra/sql/` holds both
+      `037_bo_suggestion_provenance.sql` (#134) and `037_document_index.sql` (#142); 037 was picked
+      on a branch before #134 landed, and the merge kept both. **Nothing is broken at runtime**: the
+      ledger is keyed by filename, the runner applies `sorted(sources)` so the order is total and
+      deterministic, and the two touch independent tables with no dependency between them. What it
+      costs is legibility — `infra/sql/README.md` indexes tables *by migration number*, and one
+      number now names two files. It is the same collision the ADR sequence hit and closed by moving
+      to date-plus-slug ids (`D-2026-07-31`): "highest on `origin/main`, plus one" is a read that is
+      stale the moment another session pushes. Not fixed in place, because a rename is a new ledger
+      filename and the README is explicit that an applied file is never edited.
+      *Trigger:* the next collision, or a decision to name migrations by date+slug as the ADRs are.
+
 ## Open — Left by the whole-codebase security sweep (2026-08-06)
 
 Eleven disjoint review lanes, every finding re-checked by a second agent required to execute a
