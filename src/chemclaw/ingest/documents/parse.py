@@ -23,6 +23,7 @@ No format is accepted whose reading needs a network service (D-089).
 import csv
 import io
 import logging
+import zipfile
 from collections.abc import Callable
 
 from docx import Document
@@ -31,6 +32,7 @@ from pptx import Presentation
 from pydantic import BaseModel
 from pypdf import PdfReader
 
+from chemclaw.core.config import settings
 from chemclaw.ingest.documents.formats import EXTENSIONS, content_type_for
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,37 @@ class ParsedDocument(BaseModel):
     text: str
     # Row count for a tabular document, so a caller can say "42 runs" without re-parsing.
     rows: int = 0
+
+
+def _refuse_a_bomb(name: str, raw: bytes) -> None:
+    """Refuse an OOXML container whose parts expand past the configured ceiling.
+
+    `.docx`/`.xlsx`/`.pptx` are zip archives, so every size limit upstream of here — a share's
+    `max_file_bytes`, an upload's `attachment_max_bytes` — bounds only the *compressed* bytes. A
+    110 KB workbook holding 31 MB of sheet XML is a 282× ratio, measured; at the share's 50 MB
+    default that is ~14 GB of XML and multiple GB of Python strings, and the worker is OOM-killed
+    with no counter, no log line and no report.
+
+    Read from the central directory, so it costs no decompression. **The residual is stated:** a
+    hand-crafted archive can understate `file_size`, and this check believes it. That is a bound on
+    the realistic case — a real generator writes true sizes — not a defence against a crafted one,
+    which needs a streaming limit at every read.
+
+    Raises:
+        DocumentParseError: The declared expansion exceeds `document_max_expanded_bytes`.
+    """
+    ceiling = settings.document_max_expanded_bytes
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as container:
+            expanded = sum(item.file_size for item in container.infolist())
+    except zipfile.BadZipFile as exc:
+        raise DocumentParseError(f"could not read {name}: {exc}") from exc
+    if expanded > ceiling:
+        raise DocumentParseError(
+            f"{name} expands to {expanded} bytes from {len(raw)} on disk, past the "
+            f"{ceiling}-byte limit. A document this large compressed this well is a data export or "
+            "a malformed file rather than a document; extracting the relevant sheet will work."
+        )
 
 
 def _parse_text(raw: bytes) -> tuple[str, int]:
@@ -102,11 +135,8 @@ def _parse_pdf(raw: bytes) -> tuple[str, int]:
     CoA is a legitimate upload, and any threshold tuned to document size would refuse it — the
     thing that distinguishes a scan is that it yields *zero* characters, not few.
     """
-    try:
-        reader = PdfReader(io.BytesIO(raw))
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
-    except Exception as exc:  # pypdf raises a family of errors for malformed/encrypted files
-        raise DocumentParseError(f"could not read the PDF: {exc}") from exc
+    reader = PdfReader(io.BytesIO(raw))
+    pages = [(page.extract_text() or "").strip() for page in reader.pages]
     if not any(pages):
         raise ScannedDocumentError(
             f"no text could be extracted from any of this PDF's {len(pages)} page(s), so it is a "
@@ -126,10 +156,7 @@ def _parse_pptx(raw: bytes) -> tuple[str, int]:
     Notes are included because a project deck's reasoning frequently lives there rather than on the
     slide, and dropping them would silently discard the most informative half of the file.
     """
-    try:
-        deck = Presentation(io.BytesIO(raw))
-    except Exception as exc:
-        raise DocumentParseError(f"could not read the presentation: {exc}") from exc
+    deck = Presentation(io.BytesIO(raw))
     blocks: list[str] = []
     slides = list(deck.slides)
     for number, slide in enumerate(slides, 1):
@@ -154,10 +181,7 @@ def _parse_docx(raw: bytes) -> tuple[str, int]:
     Tables are rendered with the same `|` separator `_parse_csv` uses, so a table reads identically
     however it reached the system — one representation for the agent to learn, not three.
     """
-    try:
-        document = Document(io.BytesIO(raw))
-    except Exception as exc:
-        raise DocumentParseError(f"could not read the document: {exc}") from exc
+    document = Document(io.BytesIO(raw))
     parts = [p.text.strip() for p in document.paragraphs if p.text.strip()]
     rows = 0
     for table in document.tables:
@@ -174,10 +198,7 @@ def _parse_xlsx(raw: bytes) -> tuple[str, int]:
     attaching a yield sheet means the yields, and `=B2/C2*100` is not an answer. A workbook saved
     without cached values yields empty cells there, which is visible rather than wrong.
     """
-    try:
-        book = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
-    except Exception as exc:
-        raise DocumentParseError(f"could not read the workbook: {exc}") from exc
+    book = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
     try:
         blocks: list[str] = []
         rows = 0
@@ -208,6 +229,16 @@ _PARSERS: dict[str, Callable[[bytes], tuple[str, int]]] = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": _parse_xlsx,
 }
 
+# The zip-container formats. Their size limits upstream bound compressed bytes only, so these are
+# the three that need the expansion check before a parser is handed the archive.
+_ZIP_CONTAINERS = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+)
+
 # The two halves of the allowlist must name the same formats: `formats.EXTENSIONS` decides what a
 # crawl even opens, `_PARSERS` decides what can be read. A format in one and not the other is
 # either a file type that silently never matches or a parser nothing can reach — both invisible at
@@ -235,7 +266,7 @@ def parse_document(name: str, raw: bytes, declared_type: str | None = None) -> P
 
     Raises:
         ScannedDocumentError: A PDF with no text layer at all.
-        DocumentParseError: An unsupported format, or a file the library could not open.
+        DocumentParseError: An unsupported format, or a file that could not be read.
     """
     content_type = content_type_for(name, declared_type)
     parser = _PARSERS.get(content_type)
@@ -246,5 +277,27 @@ def parse_document(name: str, raw: bytes, declared_type: str | None = None) -> P
             "ingestion, which is not built — exporting the relevant text or table is the "
             "reliable path today."
         )
-    text, rows = parser(raw)
+    if content_type in _ZIP_CONTAINERS:
+        _refuse_a_bomb(name, raw)
+    try:
+        text, rows = parser(raw)
+    except DocumentParseError:
+        # Already precise — a refusal the parser named itself, `ScannedDocumentError` included.
+        raise
+    except Exception as exc:
+        # **One net, at the boundary, around the whole parse.** Each parser used to guard only its
+        # *constructor*, which is the one call that is not where these libraries do their work:
+        # `openpyxl` in `read_only` mode parses the sheet inside `iter_rows`, and `python-pptx`
+        # loads slide parts lazily. A truncated `sheet1.xml` from an interrupted network copy
+        # therefore raised `ElementTree.ParseError` — a `SyntaxError`, caught by nothing — and an
+        # unbalanced quote in an instrument export raised `csv.Error` from the reader, likewise
+        # outside every guard. On the share those escaped the sync's reject-and-continue net, failed
+        # the activity, and since the crawl keeps no cross-run cursor, **every later run restarted
+        # and hit the same file**: one malformed document stopped the whole corpus indexing.
+        #
+        # Broad on purpose, and only here: `raw` is untrusted bytes from a share or an upload, and
+        # every library below is a third-party parser over them. "This file could not be read" is
+        # the honest statement about any failure in that region, and it is the statement the callers
+        # already handle — one counted refusal rather than a dead job.
+        raise DocumentParseError(f"could not read {name}: {exc}") from exc
     return ParsedDocument(content_type=content_type, text=text, rows=rows)

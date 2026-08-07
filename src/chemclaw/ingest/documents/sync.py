@@ -46,7 +46,12 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.ingest.documents.binding import DocumentShareBinding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import CrawlResult, FileRef, crawl_share
-from chemclaw.ingest.documents.index import ChunkRecord, DocumentIndex, FileRecord
+from chemclaw.ingest.documents.index import (
+    ChunkRecord,
+    DocumentIndex,
+    FileRecord,
+    StaleChunk,
+)
 from chemclaw.ingest.documents.parse import (
     DocumentParseError,
     ScannedDocumentError,
@@ -110,6 +115,10 @@ class ReembedReport(BaseModel):
     """One bounded re-embedding pass: how many chunks were refreshed, and whether more remain."""
 
     embedded: int = 0
+    # Chunks the provider would not embed even one at a time. They keep a superseded vector, which
+    # is reported rather than hidden — a silently wrong vector is what this whole mechanism exists
+    # to prevent, so the count of ones it could not fix has to be visible too.
+    failed: int = 0
     has_more: bool = False
 
 
@@ -315,22 +324,64 @@ async def reembed_stale(index: DocumentIndex, limit: int = 500) -> ReembedReport
     stale = await index.stale_chunks(key, limit)
     if not stale:
         return ReembedReport()
-    embeddings = await asyncio.to_thread(embed_texts, [chunk.content for chunk in stale])
-    await index.store_embeddings(
-        [
-            ChunkRecord(
-                doc_id=chunk.doc_id,
-                ordinal=chunk.ordinal,
-                content=chunk.content,
-                embedding=embedding,
-            )
-            for chunk, embedding in zip(stale, embeddings, strict=True)
-        ],
-        key,
+    try:
+        embeddings = await asyncio.to_thread(embed_texts, [chunk.content for chunk in stale])
+        refreshed = list(zip(stale, embeddings, strict=True))
+        failed = 0
+    except Exception:
+        # **One chunk must not starve the whole corpus.** `stale_chunks` is deterministic — same
+        # `ORDER BY`, same `LIMIT`, same first batch on every attempt — so a chunk the provider
+        # refuses (an over-long hard split, a content refusal) failed this activity identically on
+        # every retry. And this drain runs *ahead* of the crawl, so that one chunk stopped all
+        # document indexing, for every share, permanently. Retrying per chunk isolates it: the rest
+        # of the batch is refreshed, and only what genuinely cannot be embedded is left behind.
+        logger.warning("batch re-embed failed; retrying %d chunk(s) individually", len(stale))
+        refreshed, failed = await _reembed_individually(stale)
+    if refreshed:
+        await index.store_embeddings(
+            [
+                ChunkRecord(
+                    doc_id=chunk.doc_id,
+                    ordinal=chunk.ordinal,
+                    content=chunk.content,
+                    embedding=embedding,
+                )
+                for chunk, embedding in refreshed
+            ],
+            key,
+        )
+    logger.info("re-embedded %d chunk(s) under %s", len(refreshed), key)
+    if failed:
+        logger.error(
+            "%d chunk(s) could not be re-embedded and keep a superseded vector; they are compared "
+            "against queries embedded by the current model until this is fixed",
+            failed,
+        )
+    # A full pass means there may be more — **but only if this pass made progress**. A batch where
+    # every chunk failed would otherwise return the identical batch forever, which is the same wedge
+    # one layer up.
+    return ReembedReport(
+        embedded=len(refreshed), failed=failed, has_more=len(stale) == limit and bool(refreshed)
     )
-    logger.info("re-embedded %d chunk(s) under %s", len(stale), key)
-    # A full pass means there may be more; a short one means the corpus is current.
-    return ReembedReport(embedded=len(stale), has_more=len(stale) == limit)
+
+
+async def _reembed_individually(
+    stale: list[StaleChunk],
+) -> tuple[list[tuple[StaleChunk, list[float]]], int]:
+    """Embed one chunk at a time so a single unembeddable one costs only itself."""
+    refreshed: list[tuple[StaleChunk, list[float]]] = []
+    failed = 0
+    for chunk in stale:
+        try:
+            vector = await asyncio.to_thread(embed_texts, [chunk.content])
+        except Exception as exc:
+            logger.warning(
+                "chunk %s#%d could not be embedded: %s", chunk.doc_id, chunk.ordinal, exc
+            )
+            failed += 1
+            continue
+        refreshed.append((chunk, vector[0]))
+    return refreshed, failed
 
 
 async def prune_share(

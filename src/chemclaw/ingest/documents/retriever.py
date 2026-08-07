@@ -37,6 +37,7 @@ from chemclaw.ingest.documents.index import (
     DocumentFilter,
     DocumentHit,
     DocumentIndex,
+    DocumentIndexError,
     default_document_index,
     require_schema_vector_width,
 )
@@ -131,6 +132,13 @@ class ShareDocumentRetriever:
             return []
         try:
             hits = await self._search(query, filters)
+        # Ordered: `DocumentIndexError` is the narrower type and must be tested first. A backend
+        # that timed out is transient and worth a warning; a binding that is wrong is permanent and
+        # worth an error naming it as such.
+        except (DocumentIndexError, ConnectionError, OSError, RuntimeError):
+            logger.warning("%s: document search failed, returning no evidence", self.name)
+            logger.debug("%s: search failure detail", self.name, exc_info=True)
+            return []
         except DocumentShareError:
             logger.error(
                 "%s: misconfigured, returning no evidence — every query will do this until it is "
@@ -138,10 +146,6 @@ class ShareDocumentRetriever:
                 self.name,
                 exc_info=True,
             )
-            return []
-        except (ConnectionError, OSError, RuntimeError):
-            logger.warning("%s: document search failed, returning no evidence", self.name)
-            logger.debug("%s: search failure detail", self.name, exc_info=True)
             return []
         return hits
 

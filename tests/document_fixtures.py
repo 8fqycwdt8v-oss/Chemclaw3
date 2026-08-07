@@ -110,3 +110,49 @@ def _text_pdf_bytes(pages: list[str]) -> bytes:
         xref_at,
     )
     return bytes(out)
+
+
+def _with_truncated_member(container: bytes, suffix: str) -> bytes:
+    """A structurally valid OOXML file whose named part is cut in half.
+
+    What an interrupted network copy leaves on a share: the zip directory is intact, so the file
+    opens, and the damage is only found when the part is actually parsed. That distinction is the
+    whole point — `openpyxl` in `read_only` mode and `python-pptx` both parse lazily, well after the
+    constructor a guard would naturally sit on.
+    """
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(container))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename.endswith(suffix):
+                data = data[: len(data) // 2]
+            out.writestr(item, data)
+    return buffer.getvalue()
+
+
+def _unbalanced_quote_csv_bytes(field_chars: int = 200_000) -> bytes:
+    """A CSV whose stray quote swallows the rest of the file into one oversized field.
+
+    An instrument export with one unescaped `"` does this. Everything after it becomes a single
+    field, and `csv` refuses past its 131072-character limit — from the reader, not the sniffer.
+    """
+    return b'name,value\n"' + b"x" * field_chars
+
+
+def _highly_compressible_xlsx_bytes(rows: int = 200_000) -> bytes:
+    """A workbook that is small on disk and large in memory — the ratio, not the size, is the point.
+
+    Every size limit upstream of the parser bounds *compressed* bytes, and OOXML is a zip. Repeated
+    identical rows compress to almost nothing, so this passes `max_file_bytes` and
+    `attachment_max_bytes` comfortably while expanding by a couple of orders of magnitude.
+    """
+    book = Workbook()
+    sheet = book.active
+    for _ in range(rows):
+        sheet.append(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()

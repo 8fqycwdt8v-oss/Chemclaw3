@@ -30,7 +30,23 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.ingest.documents.binding import DocumentShareError
+
+
+class DocumentIndexError(SubsystemUnavailableError):
+    """The document index could not be reached, so the search never ran.
+
+    A `SubsystemUnavailableError` and deliberately **not** a `ChemclawError`, which is this
+    repository's *non-retryable bad-data* contract: a statement timeout says nothing about the
+    query, and the identical call succeeds once the database is back. Registering it as bad data
+    would make an activity give up on a blip it would otherwise ride out — the argument
+    `SubsystemUnavailableError` was created for, and the reason `tests/test_publish.py` asserts
+    that hierarchy's *absence* from `_BAD_DATA_TYPES`.
+
+    The message stays free of hostnames and driver text; the underlying `psycopg.Error` carries
+    those as `__cause__`, for the log and the operator.
+    """
 
 
 class FileRecord(BaseModel):
@@ -622,11 +638,25 @@ class PostgresDocumentIndex:
         }
 
     async def _run(self, statement: str, params: dict[str, object]) -> list[DocumentHit]:
-        """Execute a ranked search and build hits, dropping any whose citation resolved to NULL."""
-        async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(statement, params)
-                rows = await cur.fetchall()
+        """Execute a ranked search and build hits, dropping any whose citation resolved to NULL.
+
+        Raises:
+            DocumentIndexError: The backend could not answer. Wrapped rather than left as
+                `psycopg.Error`, which descends from `Exception` and not from `OSError`, so the
+                retriever's "never raises" handler did not catch it: a statement timeout on a large
+                share propagated out through `gather_evidence`'s `asyncio.gather` and failed the
+                whole turn, taking the knowledge graph's answer with it. `db.connection` converts
+                only *connect-time* failures to `ConnectionError`; anything `execute` raises came
+                straight through. This is the wrapper type `WarehouseQueryError` gives the retriever
+                that copied this pattern.
+        """
+        try:
+            async with self._connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(statement, params)
+                    rows = await cur.fetchall()
+        except psycopg.Error as exc:
+            raise DocumentIndexError(f"document search failed: {exc}") from exc
         return [
             DocumentHit(
                 doc_id=row[0],
