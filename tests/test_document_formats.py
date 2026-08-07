@@ -11,14 +11,20 @@ Every fixture is **built by the format's own writer**, never a checked-in blob �
 `tests/document_fixtures.py`, which the mounted-share tests build on too.
 """
 
+import io
+import zipfile
+
 import pytest
 
 from chemclaw.agent.attachments import AttachmentError, content_type_for, parse_attachment
 from tests.document_fixtures import (
     _blank_pdf_bytes,
     _docx_bytes,
+    _highly_compressible_xlsx_bytes,
     _pptx_bytes,
     _text_pdf_bytes,
+    _unbalanced_quote_csv_bytes,
+    _with_truncated_member,
     _xlsx_bytes,
 )
 
@@ -87,7 +93,7 @@ def test_a_short_pdf_is_accepted_because_the_scan_test_is_zero_text_not_a_length
 
 def test_a_corrupt_pdf_is_refused_with_a_message_not_a_traceback() -> None:
     """A malformed upload is a user error; it must not surface as an unhandled library exception."""
-    with pytest.raises(AttachmentError, match="could not read the PDF"):
+    with pytest.raises(AttachmentError, match="could not read broken.pdf"):
         parse_attachment("broken.pdf", b"%PDF-1.4 this is not actually a pdf")
 
 
@@ -198,3 +204,61 @@ def test_a_binary_upload_never_reaches_a_text_parser() -> None:
     """The old failure mode: bytes that are not text being decoded into plausible-looking noise."""
     with pytest.raises(AttachmentError):
         parse_attachment("image.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+
+# --- a file that breaks mid-parse is a refusal, never an escaping exception ----------------------
+#
+# Every parser used to guard only its *constructor* — which is the one call these libraries do the
+# least work in. `openpyxl(read_only=True)` parses the sheet inside `iter_rows`; `python-pptx` loads
+# slide parts lazily; `csv.reader` raises from the reader, while the guard sat on the sniffer. On a
+# share those escapes failed the sync activity, and because the crawl keeps no cross-run cursor,
+# every later run restarted and hit the same file: one malformed document stopped the whole corpus.
+
+
+@pytest.mark.parametrize(
+    ("name", "make"),
+    [
+        (
+            "runs.xlsx",
+            lambda: _with_truncated_member(_xlsx_bytes({"Runs": [["a", 1]]}), "sheet1.xml"),
+        ),
+        ("deck.pptx", lambda: _with_truncated_member(_pptx_bytes([("T", "body")]), "slide1.xml")),
+        ("notes.docx", lambda: _with_truncated_member(_docx_bytes(["hello"]), "document.xml")),
+        ("export.csv", _unbalanced_quote_csv_bytes),
+    ],
+)
+def test_a_file_that_breaks_after_it_opens_is_refused_by_name(name: str, make: object) -> None:
+    """The refusal must be `AttachmentError`, so one bad file is counted rather than fatal."""
+    with pytest.raises(AttachmentError):
+        parse_attachment(name, make())  # type: ignore[operator]
+
+
+def test_a_refused_file_names_itself_so_the_log_line_is_actionable() -> None:
+    """An operator reading `skipped_unreadable: 1` needs to know which of 500k files it was."""
+    with pytest.raises(AttachmentError, match="export.csv"):
+        parse_attachment("export.csv", _unbalanced_quote_csv_bytes())
+
+
+def test_a_container_that_expands_far_past_its_size_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zip bomb wearing a workbook's clothes: under every byte limit, and it OOMs the worker.
+
+    The refusal reads the central directory, so it costs no decompression — the file is turned away
+    before a parser ever sees it.
+    """
+    from chemclaw.core.config import settings
+
+    raw = _highly_compressible_xlsx_bytes()
+    ratio = sum(i.file_size for i in zipfile.ZipFile(io.BytesIO(raw)).infolist()) / len(raw)
+    assert ratio > 20  # the property under test is the ratio, so it is measured, not assumed
+
+    monkeypatch.setattr(settings, "document_max_expanded_bytes", 1_000_000)
+    with pytest.raises(AttachmentError, match="expands to"):
+        parse_attachment("bomb.xlsx", raw)
+
+
+def test_an_ordinary_workbook_is_not_mistaken_for_a_bomb() -> None:
+    """The guard must not refuse the documents it exists to protect."""
+    raw = _xlsx_bytes({"yields": [["run", "yield"], [1, 84]]})
+    assert "1 | 84" in parse_attachment("runs.xlsx", raw).text

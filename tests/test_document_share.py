@@ -31,7 +31,7 @@ from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import crawl_share
-from chemclaw.ingest.documents.index import InMemoryDocumentIndex
+from chemclaw.ingest.documents.index import DocumentIndexError, InMemoryDocumentIndex
 from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
 from chemclaw.ingest.documents.sync import (
     SyncReport,
@@ -824,3 +824,58 @@ def test_a_wedged_drain_leaves_has_more_set_for_the_guard() -> None:
         SyncReport(source="a", scanned=4, cursor="p1", has_more=True),
     ]
     assert _merge_by_source(wedged)[0].has_more is True
+
+
+# --- one bad thing must not stop everything -----------------------------------------------------
+
+
+def test_a_backend_failure_returns_no_evidence_rather_than_failing_the_turn(
+    share: dict[str, Any],
+) -> None:
+    """`gather_evidence` fans retrievers out with a bare `asyncio.gather`, no return_exceptions.
+
+    So a raising leg does not degrade a question — it fails the whole thing, knowledge graph and
+    all. `psycopg.Error` descends from `Exception`, not `OSError`, so it used to sail straight
+    through the handler whose docstring promises this never happens.
+    """
+    import psycopg
+
+    class Exploding(InMemoryDocumentIndex):
+        async def search_dense(self, *args: Any, **kwargs: Any) -> Any:
+            raise DocumentIndexError("search failed: statement timeout") from psycopg.Error()
+
+    retriever = ShareDocumentRetriever(
+        {**share, "required_roles": []}, name=SOURCE, index=Exploding()
+    )
+    assert asyncio.run(retriever.retrieve("catalyst", {})) == []
+
+
+def test_one_unembeddable_chunk_does_not_starve_the_corpus(
+    share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stale_chunks` is deterministic, and this drain runs *ahead* of the crawl.
+
+    So a chunk the provider refuses failed the activity identically on every retry and stopped all
+    document indexing, for every share, permanently. The rest of the batch must still be refreshed.
+    """
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+
+    stale = asyncio.run(index.stale_chunks("some-other-key", 500))
+    assert len(stale) > 1
+    poison = stale[0].content
+    real = embed_texts
+
+    def refusing(texts: list[str]) -> Any:
+        if poison in texts:
+            raise ValueError("content refused by the provider")
+        return real(texts)
+
+    monkeypatch.setattr(sync_module, "embed_texts", refusing)
+    monkeypatch.setattr(sync_module, "embedding_config_key", lambda: "some-other-key", raising=True)
+
+    report = asyncio.run(reembed_stale(index, 500))
+    assert report.failed == 1
+    assert report.embedded == len(stale) - 1  # everything else was refreshed
+    # And the drain terminates rather than returning the identical batch forever.
+    assert report.has_more is False

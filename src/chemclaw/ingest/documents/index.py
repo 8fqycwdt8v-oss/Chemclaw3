@@ -33,6 +33,16 @@ from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
 from chemclaw.ingest.documents.binding import DocumentShareError
 
 
+class DocumentIndexError(DocumentShareError):
+    """The index could not answer — a backend failure, not a bad binding.
+
+    A subclass rather than a sibling so that a caller wanting "anything wrong with this share"
+    keeps one except clause, while the retriever can still tell the two apart: a bad binding is
+    permanent and deserves an ERROR naming it as misconfigured, whereas a statement timeout is
+    transient and deserves a WARNING and an empty result.
+    """
+
+
 class FileRecord(BaseModel):
     """One path on the share, and the document its bytes parsed to."""
 
@@ -622,11 +632,25 @@ class PostgresDocumentIndex:
         }
 
     async def _run(self, statement: str, params: dict[str, object]) -> list[DocumentHit]:
-        """Execute a ranked search and build hits, dropping any whose citation resolved to NULL."""
-        async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(statement, params)
-                rows = await cur.fetchall()
+        """Execute a ranked search and build hits, dropping any whose citation resolved to NULL.
+
+        Raises:
+            DocumentIndexError: The backend could not answer. Wrapped rather than left as
+                `psycopg.Error`, which descends from `Exception` and not from `OSError`, so the
+                retriever's "never raises" handler did not catch it: a statement timeout on a large
+                share propagated out through `gather_evidence`'s `asyncio.gather` and failed the
+                whole turn, taking the knowledge graph's answer with it. `db.connection` converts
+                only *connect-time* failures to `ConnectionError`; anything `execute` raises came
+                straight through. This is the wrapper type `WarehouseQueryError` gives the retriever
+                that copied this pattern.
+        """
+        try:
+            async with self._connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(statement, params)
+                    rows = await cur.fetchall()
+        except psycopg.Error as exc:
+            raise DocumentIndexError(f"document search failed: {exc}") from exc
         return [
             DocumentHit(
                 doc_id=row[0],

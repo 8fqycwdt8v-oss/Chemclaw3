@@ -75,6 +75,13 @@ class SourcesSettings(BaseSettings):
     # Every N minutes. Six hours by default: a file share is not an ELN, its documents change over
     # days, and an unchanged crawl still costs a full `scandir` pass over every path.
     document_sync_schedule_minutes: int = 360
+    # The ceiling on a zip-container document's *expanded* size. `.docx`/`.xlsx`/`.pptx` are zips,
+    # so a binding's `max_file_bytes` bounds only what the file weighs on the share: a 110 KB
+    # workbook whose sheet XML expands 280× is under every limit and still exhausts the worker's
+    # memory. Applies to uploads too, where the ratio matters more — the chat pod's own
+    # `attachment_max_bytes` is measured in megabytes. 512 MB is far above any real document and
+    # far below what OOMs a pod.
+    document_max_expanded_bytes: int = 512 * 1024 * 1024
 
     @property
     def vendored_dataset_path(self) -> Path:
