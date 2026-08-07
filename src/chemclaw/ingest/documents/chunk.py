@@ -15,9 +15,15 @@ import re
 from dataclasses import dataclass
 
 # A structural label as `chemclaw.ingest.documents.parse` writes it: `[page 3]`, `[slide 7]`,
-# `[sheet Yields]`, alone on the first line of a block. Bounded so a line of prose in square
-# brackets cannot be mistaken for one.
-_LABEL = re.compile(r"^\[([^\]\n]{1,80})\]\n")
+# `[sheet Yields]`, alone on the first line of a block.
+#
+# **Anchored to the three words the parsers actually emit.** It used to accept any bracketed line
+# under 80 characters, on the claim that prose in square brackets "cannot be mistaken for one" —
+# but length is not a vocabulary. A paragraph opening `[Figure 2: yield vs time]` was adopted as
+# the chunk's coordinate and *stripped from the body*, so the citation named a figure the chunk did
+# not come from and the caption text became unsearchable. A document cannot forge a coordinate it
+# was never given.
+_LABEL = re.compile(r"^\[(page|slide|sheet) ([^\]\n]{1,80})\]\n")
 
 
 @dataclass(frozen=True)
@@ -41,7 +47,7 @@ def _blocks(text: str) -> list[tuple[str, str]]:
         if match:
             if buffer:
                 grouped.append((coordinate, "\n\n".join(buffer)))
-            coordinate = match.group(1)
+            coordinate = f"{match.group(1)} {match.group(2)}"
             buffer = [part[match.end() :]]
         else:
             buffer.append(part)

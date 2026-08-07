@@ -34,9 +34,9 @@ this system cannot read. Both are counted, per extension, and reported. Silence 
 
 import asyncio
 import logging
+import os
 from collections import Counter
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -130,15 +130,37 @@ class _Parsed(BaseModel):
     text: str
 
 
-def _read_and_parse(ref: FileRef) -> _Parsed:
+def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
     """Read one file off the share and extract its text (blocking; called in a worker thread).
+
+    The crawl checked this path minutes ago, in a different activity: it confirmed the entry was
+    not a symlink and that its size was under `max_file_bytes`. Both can be false by now, and on a
+    share every member can write to, deliberately so. **The open re-checks rather than trusts.**
+    `O_NOFOLLOW` refuses a path that became a symlink — pointing at, say, the workload-identity
+    token the crawl never saw — and the size is re-read from the *open descriptor*, so a file that
+    grew from 1 KB to 20 GB after being accepted is refused rather than read into the worker.
 
     Raises:
         ScannedDocumentError: A PDF with no text layer.
         DocumentParseError: An unsupported format, or one the library could not open.
-        OSError: The share could not be read at this path.
+        OSError: The share could not be read at this path, or it became a symlink.
     """
-    raw = Path(ref.absolute).read_bytes()
+    # `os.open` with the flag, not `Path.read_bytes`: the check and the read must be the same
+    # operation, or the swap simply moves into the gap between them.
+    descriptor = os.open(ref.absolute, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        size = os.fstat(descriptor).st_size
+        if size > max_bytes:
+            raise DocumentParseError(
+                f"{ref.path} is {size} bytes at read time, past the {max_bytes}-byte limit "
+                f"(it was {ref.size} when the crawl accepted it)"
+            )
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1  # the context manager owns it now
+            raw = handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     parsed = parse_document(ref.path, raw)
     # The identity is the content, never the path — so four copies of one report collapse to one
     # document and a rename is free. `backfill_corpus.note_for_document` makes the same call.
@@ -159,7 +181,7 @@ def _file_record(source: str, ref: FileRef, doc_id: str) -> FileRecord:
 
 
 async def _parse_changed(
-    refs: list[FileRef], report: SyncReport
+    refs: list[FileRef], report: SyncReport, max_bytes: int
 ) -> tuple[list[_Parsed], dict[str, FileRef], list[str]]:
     """Read and parse each changed file, tallying every refusal rather than dropping it.
 
@@ -175,7 +197,7 @@ async def _parse_changed(
     refused: list[str] = []
     for ref in refs:
         try:
-            result = await asyncio.to_thread(_read_and_parse, ref)
+            result = await asyncio.to_thread(_read_and_parse, ref, max_bytes)
         # A refused file gets **no index row**, so its fingerprint is not stored and the next crawl
         # opens it again. That is a deliberate trade, not an oversight: recording it would make the
         # file look unchanged forever, and `skipped_scan` would then read zero on every run after
@@ -277,7 +299,7 @@ async def sync_share(
     if not changed:
         return report
 
-    parsed, by_path, refused = await _parse_changed(changed, report)
+    parsed, by_path, refused = await _parse_changed(changed, report, binding.max_file_bytes)
     # Same rule: a file that was opened and refused is still on the share. Its fingerprint is
     # deliberately not stored (so the refusal stays visible in the counters, see above), but its
     # existence is, so the sweep leaves the row it already had alone.

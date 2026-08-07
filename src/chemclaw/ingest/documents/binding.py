@@ -113,9 +113,19 @@ class DocumentShareBinding(BaseModel):
 
     # The entitlement a caller must hold for this source to return anything. Matched against the
     # turn's roles — which carry Entra app roles, plus group object-ids when
-    # `entra_group_claims_as_roles` is on — so an AD group reaches this either way. Empty means
-    # ungated, which is correct only for a share everyone with an account may read.
+    # `entra_group_claims_as_roles` is on — so an AD group reaches this either way.
+    #
+    # **A manifest must state its intent: either this or `public`, never neither.** It used to
+    # default to empty, and empty means ungated — so a hand-authored binding (which is the
+    # documented way to attach a real share) that named `mount` and `roots` and simply forgot this
+    # served the whole AD-gated drive to every authenticated user, with no warning and nothing to
+    # distinguish it from a correctly gated one. A security model whose default is "off" and whose
+    # failure is silent is not a security model.
     required_roles: list[str] = Field(default_factory=list)
+    # The explicit opt-out, for a share every account holder may genuinely read. It exists so that
+    # "ungated" is something a manifest *says* rather than something it omits — an author who means
+    # it writes one word, and an author who forgot gets an error naming both choices.
+    public: bool = False
 
     # Glob patterns matched against the mount-relative POSIX path. Office lock files (`~$...`),
     # archive folders and scratch directories are the usual population, and excluding them is
@@ -170,6 +180,21 @@ class DocumentShareBinding(BaseModel):
             raise ValueError(
                 f"chunk_overlap_chars ({self.chunk_overlap_chars}) must be smaller than "
                 f"chunk_chars ({self.chunk_chars}), or chunking never advances"
+            )
+        # Who may read this share is the one thing a manifest may not leave unsaid. Refused at
+        # load, so `make datasource-validate` catches it rather than a chemist finding out later.
+        if self.public and self.required_roles:
+            raise ValueError(
+                "a share cannot be both public and role-gated: `public: true` says every "
+                "authenticated caller may read it, and `required_roles` says only these may. "
+                f"Drop one — `required_roles: {self.required_roles}` is the gated choice"
+            )
+        if not self.public and not self.required_roles:
+            raise ValueError(
+                "a share must say who may read it: set `required_roles` to the Entra app role or "
+                "AD group object-id that gates it, or `public: true` if every authenticated caller "
+                "may read it. Omitting both used to mean ungated, which is a security decision no "
+                "manifest should make by accident"
             )
         return self
 

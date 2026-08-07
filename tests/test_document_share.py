@@ -32,6 +32,7 @@ from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import crawl_share
 from chemclaw.ingest.documents.index import DocumentIndexError, InMemoryDocumentIndex
+from chemclaw.ingest.documents.parse import DocumentParseError
 from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
 from chemclaw.ingest.documents.sync import (
     SyncReport,
@@ -180,7 +181,9 @@ def test_a_bounded_crawl_resumes_without_double_counting(share: dict[str, Any]) 
 
 def test_an_unmounted_share_is_loud_rather_than_empty(tmp_path: Path) -> None:
     """The one failure that must not degrade to "the share is empty"."""
-    binding = load_binding({"mount": str(tmp_path / "nope"), "roots": [{"path": "."}]})
+    binding = load_binding(
+        {"mount": str(tmp_path / "nope"), "roots": [{"path": "."}], "public": True}
+    )
     with pytest.raises(DocumentShareError, match="not mounted"):
         crawl_share(binding)
 
@@ -194,7 +197,7 @@ def test_a_symlink_out_of_the_mount_is_not_followed(tmp_path: Path) -> None:
     (mount / "Docs").mkdir(parents=True)
     (mount / "Docs" / "link").symlink_to(outside)
 
-    binding = load_binding({"mount": str(mount), "roots": [{"path": "Docs"}]})
+    binding = load_binding({"mount": str(mount), "roots": [{"path": "Docs"}], "public": True})
     assert crawl_share(binding).files == []
 
 
@@ -563,7 +566,7 @@ def test_an_ungated_share_needs_no_identity(share: dict[str, Any]) -> None:
     """Demanding an actor to check an empty requirement would block reports for no benefit."""
     index = InMemoryDocumentIndex()
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
-    ungated = {**share, "required_roles": []}
+    ungated = {**share, "required_roles": [], "public": True}
     retriever = ShareDocumentRetriever(binding=ungated, name=SOURCE, index=index)
 
     assert asyncio.run(retriever.retrieve("palladium catalyst", {})) != []
@@ -656,7 +659,7 @@ def test_a_directory_that_prefixes_a_sibling_file_does_not_hide_it(tmp_path: Pat
     (mount / "Docs" / "Report" / "a.txt").write_text("inner one")
     (mount / "Docs" / "Report" / "b.txt").write_text("inner two")
     (mount / "Docs" / "Report.txt").write_text("the sibling report")
-    binding = load_binding({"mount": str(mount), "roots": [{"path": "Docs"}]})
+    binding = load_binding({"mount": str(mount), "roots": [{"path": "Docs"}], "public": True})
 
     whole = {ref.path for ref in crawl_share(binding, limit=1000).files}
     assert "Docs/Report.txt" in whole
@@ -680,7 +683,11 @@ def test_sibling_roots_that_share_a_prefix_are_both_walked(tmp_path: Path) -> No
     (mount / "Data" / "z.txt").write_text("live data")
     (mount / "Data-Archive" / "old.txt").write_text("archived data")
     binding = load_binding(
-        {"mount": str(mount), "roots": [{"path": "Data"}, {"path": "Data-Archive"}]}
+        {
+            "mount": str(mount),
+            "roots": [{"path": "Data"}, {"path": "Data-Archive"}],
+            "public": True,
+        }
     )
 
     whole = {ref.path for ref in crawl_share(binding, limit=1000).files}
@@ -754,14 +761,16 @@ def test_a_file_that_changed_and_cannot_be_read_keeps_its_row(
     target = tmp_path / "Projects" / "acme-17" / "notes.docx"
     target.write_bytes(target.read_bytes() + b"\x00")  # fingerprint moves
 
-    real_read = Path.read_bytes
+    import os as os_module
 
-    def failing(self: Path) -> bytes:
-        if self.name == "notes.docx":
+    real_open = os_module.open
+
+    def failing(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if str(path).endswith("notes.docx"):
             raise PermissionError("sharing violation")
-        return real_read(self)
+        return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", failing)
+    monkeypatch.setattr(os_module, "open", failing)
 
     later = asyncio.run(index.clock())
     report = _drain(binding, index)
@@ -845,7 +854,7 @@ def test_a_backend_failure_returns_no_evidence_rather_than_failing_the_turn(
             raise DocumentIndexError("search failed: statement timeout") from psycopg.Error()
 
     retriever = ShareDocumentRetriever(
-        {**share, "required_roles": []}, name=SOURCE, index=Exploding()
+        {**share, "required_roles": [], "public": True}, name=SOURCE, index=Exploding()
     )
     assert asyncio.run(retriever.retrieve("catalyst", {})) == []
 
@@ -879,3 +888,159 @@ def test_one_unembeddable_chunk_does_not_starve_the_corpus(
     assert report.embedded == len(stale) - 1  # everything else was refreshed
     # And the drain terminates rather than returning the identical batch forever.
     assert report.has_more is False
+
+
+# --- the mount is a boundary, and the entitlement is not optional --------------------------------
+
+
+def test_a_root_that_is_itself_a_symlink_does_not_escape_the_mount(tmp_path: Path) -> None:
+    """The per-entry guard protects everything *inside* a root and never the root directory itself.
+
+    `walk.mount / root.path` is handed straight to `scandir`: `is_dir()` follows the link, and the
+    entries it then yields are ordinary files, so `entry.is_symlink()` is False and no check fires.
+    `Projects -> /` would index the container filesystem — the knowledge repo included — as cited
+    evidence, under paths that look mount-relative in the cursor, the citation and the logs.
+    `follow_symlinks: false` does not help: it only makes `descend` skip symlink *entries*.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "payroll.txt").write_text("salaries")
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / "Projects").symlink_to(outside)
+
+    binding = load_binding({"mount": str(mount), "roots": [{"path": "Projects"}], "public": True})
+    result = crawl_share(binding)
+    assert result.files == []
+    # And it is reported, not silently empty — an escape and an empty root are not the same thing.
+    assert result.failed_roots == ["Projects"]
+
+
+def test_a_manifest_that_forgets_its_entitlement_is_refused_at_load() -> None:
+    """Omission must not mean "everyone". The documented workflow is to hand-author a manifest.
+
+    A binding naming `mount` and `roots` but not `required_roles` served the whole AD-gated share to
+    every authenticated user, with no warning and nothing to distinguish it from a correctly gated
+    one. The security model was opt-in by default.
+    """
+    with pytest.raises(DocumentShareError, match="required_roles"):
+        load_binding({"mount": "/mnt/x", "roots": [{"path": "."}]})
+
+
+def test_a_share_everyone_may_read_says_so_out_loud() -> None:
+    """The opt-out exists, because some shares genuinely are open to every account holder."""
+    binding = load_binding({"mount": "/mnt/x", "roots": [{"path": "."}], "public": True})
+    assert binding.required_role_set == set()
+
+
+def test_public_and_required_roles_together_are_refused() -> None:
+    """One says "anyone", the other says "only these". A manifest must not claim both."""
+    with pytest.raises(DocumentShareError, match="public"):
+        load_binding(
+            {"mount": "/mnt/x", "roots": [{"path": "."}], "public": True, "required_roles": ["r"]}
+        )
+
+
+def test_an_identical_vector_scores_one_and_does_not_raise() -> None:
+    """A chemist pasting a sentence back is an exact match, and it must be answerable.
+
+    Cosine of a vector with itself rounds above 1.0 for about half of all normalised vectors — two
+    square roots in the denominator — and `DocumentHit.score` is bounded `le=1.0`.
+    """
+    import math
+    import random
+
+    from chemclaw.ingest.documents.index import _cosine
+
+    random.seed(11)
+    worst = 0.0
+    for _ in range(2000):
+        vector = [random.gauss(0, 1) for _ in range(64)]
+        norm = math.sqrt(sum(x * x for x in vector))
+        vector = [x / norm for x in vector]
+        worst = max(worst, _cosine(vector, vector))
+    assert worst <= 1.0
+
+
+def test_a_bracketed_line_of_prose_cannot_forge_a_citation_coordinate() -> None:
+    """`[Figure 2: …]` is a caption, not a page label. It must not become the chunk's coordinate.
+
+    Two failures in one: the citation named a location the chunk did not come from, and the caption
+    text was stripped out of the indexed body, so it stopped being searchable.
+    """
+    text = (
+        "[page 1]\nIntro text here\n\n"
+        "[Figure 2: yield vs time]\nThe figure shows a plateau.\n\n"
+        "[page 2]\nReal page two"
+    )
+    chunks = chunk_document(text, chunk_chars=400, overlap_chars=50)
+    coordinates = {chunk.coordinate for chunk in chunks}
+    assert coordinates == {"page 1", "page 2"}
+    assert "Figure 2: yield vs time" in "\n".join(chunk.content for chunk in chunks)
+
+
+def test_a_file_swapped_for_a_symlink_after_the_crawl_is_not_followed(
+    share: dict[str, Any], tmp_path: Path
+) -> None:
+    """The crawl and the read are different activities, minutes apart, on a writable share.
+
+    So the read is given a `FileRef` describing the file as it *was*: not a symlink, and under the
+    size limit. Publish an ordinary file, let it be accepted, then replace it with a link to
+    something the crawl never checked. `follow_symlinks: false` does not help — it is consulted at
+    crawl time, and this is after.
+    """
+    binding = load_binding(share)
+    secret = tmp_path.parent / "token"
+    secret.write_text("workload-identity-assertion")
+
+    target = tmp_path / "SOPs" / "swapped.txt"
+    target.write_text("ordinary content")
+    ref = next(r for r in crawl_share(binding).files if r.path == "SOPs/swapped.txt")
+
+    target.unlink()
+    target.symlink_to(secret)
+    with pytest.raises(OSError):
+        sync_module._read_and_parse(ref, binding.max_file_bytes)
+
+
+def test_a_file_that_grew_past_the_limit_after_the_crawl_is_refused(
+    share: dict[str, Any], tmp_path: Path
+) -> None:
+    """`max_file_bytes` was enforced against a stat taken in another activity, minutes earlier.
+
+    A 1 KB `.csv` accepted by the crawl and grown to 20 GB before the read used to be pulled into
+    the worker's memory whole. The size is re-read from the open descriptor instead.
+    """
+    binding = load_binding({**share, "max_file_bytes": 20_000})
+    target = tmp_path / "SOPs" / "grower.txt"
+    target.write_text("small")
+    ref = next(r for r in crawl_share(binding).files if r.path == "SOPs/grower.txt")
+
+    target.write_text("x" * 50_000)
+    with pytest.raises(DocumentParseError, match="at read time"):
+        sync_module._read_and_parse(ref, binding.max_file_bytes)
+
+
+def test_a_top_level_archive_is_excluded_by_the_pattern_that_says_so(tmp_path: Path) -> None:
+    """`**/Archive/**` is the shipped pattern, and `fnmatch` gives `**` no special meaning.
+
+    It translates to `.*?/Archive/`, which requires a separator before `Archive` — so a *top-level*
+    `Archive/` was not excluded at all. On a share with `roots: [{path: "."}]` that is the whole
+    archive tree an operator believed they had kept out.
+    """
+    mount = tmp_path / "mount"
+    (mount / "Archive").mkdir(parents=True)
+    (mount / "Projects" / "Archive").mkdir(parents=True)
+    (mount / "Archive" / "ancient.txt").write_text("decade-old")
+    (mount / "Projects" / "Archive" / "old.txt").write_text("also old")
+    (mount / "Projects" / "live.txt").write_text("current")
+
+    binding = load_binding(
+        {
+            "mount": str(mount),
+            "roots": [{"path": "."}],
+            "public": True,
+            "exclude": ["**/Archive/**"],
+        }
+    )
+    assert {ref.path for ref in crawl_share(binding).files} == {"Projects/live.txt"}

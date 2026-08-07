@@ -284,5 +284,6 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-06-the-caller-chooses-the-kid-not-the-workload](D-2026-08-06-the-caller-chooses-the-kid-not-the-workload.md) | The caller chooses the `kid`, not how much work we do about it |
 | [D-2026-08-06-the-memo-already-carried-the-actor](D-2026-08-06-the-memo-already-carried-the-actor.md) | The memo already carried the actor |
 | [D-2026-08-06-the-method-decides-which-solvents-exist](D-2026-08-06-the-method-decides-which-solvents-exist.md) | The method decides which solvents exist, and it can be asked |
+| [D-2026-08-07-a-manifest-must-say-who-may-read-it](D-2026-08-07-a-manifest-must-say-who-may-read-it.md) | The mount is a boundary, and omission is not a decision |
 | [D-2026-08-07-one-bad-file-must-not-stop-the-corpus](D-2026-08-07-one-bad-file-must-not-stop-the-corpus.md) | The guard belongs at the boundary, not on the constructor |
 | [D-2026-08-07-the-mark-means-observed-not-processed](D-2026-08-07-the-mark-means-observed-not-processed.md) | The sweep reads the drain's own evidence |

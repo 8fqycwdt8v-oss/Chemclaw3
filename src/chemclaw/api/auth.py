@@ -30,6 +30,17 @@ from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# What a group-derived entitlement is named, so it can never collide with an app role.
+#
+# Entra app roles are values the API's own app registration defines; group claims are values the
+# *directory* defines, and a tenant may emit them as object-ids or as names
+# (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`, …). Merged into one
+# flat set, a directory group called `process-chemist` is indistinguishable from the app role of
+# that name — so enabling `entra_group_claims_as_roles` to give one file share its read entitlement
+# would also widen every write-tool and skill gate. The prefix keeps the two namespaces apart;
+# `docs/guides/sharedrive-concept.md` documents it as what a group-gated `required_roles` holds.
+GROUP_ROLE_PREFIX = "group:"
+
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.
 _DEV_PRINCIPAL_OID = "dev-user"
@@ -187,7 +198,15 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
                 "group-derived entitlements are unavailable for this user",
                 oid,
             )
-        entitlements += list(claims.get("groups", []))
+        # **Namespaced, not merged flat.** This same role set gates privileged tools
+        # (`agent/authz.py::entra_privileged_roles`, `tool_role_gates`) and skills
+        # (`agent/skill_access.py`), so an unprefixed group value is a role value. The comment that
+        # used to sit here asserted these are group *object-ids* — but that is a tenant setting,
+        # not a guarantee: `groupMembershipClaims` can emit `sam_account_name` or
+        # `cloud_displayname` instead, at which point a group named like a privileged app role
+        # silently grants it. One flag meant to hand a file share its read entitlement must not be
+        # able to widen the write-tool gates.
+        entitlements += [f"{GROUP_ROLE_PREFIX}{group}" for group in claims.get("groups", [])]
     return Principal(oid=oid, upn=upn, roles=frozenset(entitlements))
 
 
