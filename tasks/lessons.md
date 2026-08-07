@@ -1487,3 +1487,25 @@ who does not know it invalidates a corpus.
 **Rule:** when a defect's failure mode is silent, the fix must be automatic. A flag, a documented
 procedure or a checklist item only closes defects that announce themselves — for the silent ones it
 converts a bug into a bug plus a false sense of coverage.
+
+## "The sandbox cannot run it" is a claim to test, not a limit to accept (2026-08-07, PR #143)
+
+GitHub Actions was stopped account-wide, so #143 sat with zero check runs. `make cov` failed locally
+at 82.26% against an 84.0% floor, and I recorded it as "environmental — 107 Postgres tests skip
+offline" and prepared to hold the merge for a human decision. Two things were wrong with that.
+
+First, I had asserted the cause rather than measured it. Running the same gate on the **base commit
+already merged to `main`** gave 82.40% — also failing. That single number converts "my change may
+have broken the floor" into "the floor is unreachable in this environment, including on `main`", and
+it cost one command.
+
+Second, the limit was not real. `postgres` 16 was already installed; the packaged pgvector was too
+old for one operator class, and building 0.8.0 from source took a few minutes. With a real database
+the same commit scored **84.59% — pass**, 3556 passed instead of 3449. The evidence I was going to
+ask a human to substitute their judgment for was available the whole time.
+
+**Rule:** before reporting a gate as unrunnable, try to make it runnable — check for the binary,
+build the dependency, stand up the service. And when a gate fails for a suspected environmental
+reason, run it on the unchanged base commit before saying so: "environmental" is a measurement, and
+the base-versus-head delta is what turns it into one. Escalating to the user is the right move only
+after the cheap paths are spent, not instead of them.
