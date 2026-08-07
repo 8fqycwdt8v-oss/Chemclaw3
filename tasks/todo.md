@@ -540,3 +540,45 @@ implementation time.
 
 *(Filled in as packages land — one line per package: what shipped, what the measurement said, and
 what the row's own diagnosis got wrong.)*
+
+---
+
+## Review pass — eight defects the eleven packages shipped green
+
+An intensive review of the whole branch (131 files) found **nine** findings: eight introduced by
+this branch, one (the retention DSN) pre-existing and extended by it. **Every one passed the full
+suite, `mypy --strict` and `ruff` at the moment it was committed, and every one of my tests had been
+mutation-proven.**
+
+- [x] **`SecretStr` emptied the log-redaction inventory.** The worst of them. `SecretStr` is not a
+      `str` subclass, so `_secret_values`' `isinstance(value, str)` guard skipped all six converted
+      credentials and `redact_secrets` returned a live `sk-live-…` verbatim. The mitigation is what
+      hid it: a masked `repr` means the key rarely reaches a log *by accident*, so the paths that
+      mattered were the ones nobody watched. The test asserted the field **names**, never a value.
+- [x] **`_closing` was a no-op on every real turn.** `agent.run(stream=True)` returns a
+      `from_awaitable` over a `.map`-wrapped stream, so the outer `_iterator` is another
+      `ResponseStream` with no `aclose` and the outer's hook list is empty. WP-9's test built a flat
+      stream — a shape production never produces. It walks the nest now, with a cycle guard.
+- [x] **The report citation still forged wikilinks** on its plain-text branch — the branch WP-6
+      added to *avoid* writing a link. Fixing it moved `safe_identifier` down to `kg.note`, because
+      `retrieval` may not import `agent` and the charset it reduces to is exactly the one that
+      survives neither an instruction nor a wikilink.
+- [x] **Three guards whose condition was narrower than their subject**: the framing-secret warning
+      (conditioned on `session_store=="postgres"`, which is not the default, while a connector
+      always frames cross-process); the workload-identity guard (counted *files*, so a two-template
+      file passed with one label — leaving `qm`, the HPC bundle, without one); and
+      `state <> 'pending'` (no such state exists, so it was unconditionally true).
+- [x] **Two simply wrong**: the retention sweep opened `postgres_dsn` while every table it prunes
+      follows `session_store_dsn`, and `is_note_slug` used `match` where `Note` uses `fullmatch`.
+- [x] **One declined with the number.** `default_write_tool_gates()` per call: measured 5.3 µs,
+      0.53 ms across a 100-tool-call turn. A cache would need invalidation across thirteen tests for
+      half a millisecond, and would add a second place for the gate and the config to disagree.
+
+**What it says about the method.** Mutation-proving was not the missing discipline — it kills a test
+that exercises the *right shape* and is silent about one that exercises the wrong shape. Three of
+the eight were exactly that: a fake stream, an inventory checked by key, a literal that does not
+exist. The discipline that catches them is asserting against the production shape — feed a real
+credential through the real redactor, close the object `agent.run` really returns, name states from
+the enum. Recorded in `tasks/lessons.md`; regressions in
+`tests/test_review_findings_2026_08_06.py`, each mutation-proven against the pre-fix code. Record:
+`D-2026-08-06-eight-fixes-that-shipped-green`.

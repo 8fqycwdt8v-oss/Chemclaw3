@@ -1623,3 +1623,68 @@ Rules:
    check; writing the line at the same time is cheaper than being told.
 3. **Run the full gate before writing the ADR, not after.** Both of these would have made the ADR's
    "Consequences" section wrong, and I would have written it confidently.
+
+
+## Mutation-proving a test says nothing about whether it tests the right *shape* (2026-08-06)
+
+An intensive review of eleven packages I had just shipped found **nine** defects, eight of them
+mine. Every one passed the full suite, `mypy --strict` and `ruff` at the moment it was committed,
+and every one of my tests had been mutation-proven. Mutation was not the missing discipline. Three
+of the eight were tests exercising a shape production never produces:
+
+- `_closing`'s test built a flat `ResponseStream(async_generator)`. `agent.run(stream=True)` returns
+  a `from_awaitable` over a `.map`-wrapped stream, whose `_iterator` is *another* `ResponseStream`
+  with no `aclose`. The helper released nothing on every real turn, and the test could not tell.
+- `SecretStr` broke log redaction outright, and the test asserted the field **names** were in the
+  inventory rather than feeding a value through the redactor. `SecretStr` is not a `str` subclass,
+  so the `isinstance(value, str)` guard skipped all six credentials and `redact_secrets` returned a
+  live key verbatim.
+- `state <> 'pending'` guarded nothing, because there is no `pending` state — and the test asserted
+  `"pending" in disposable`, cementing the literal instead of checking it against the enum.
+
+Mutation kills a test that exercises the right shape. It is silent about one that exercises the
+wrong shape, because reverting the fix breaks the fake exactly as it breaks the real thing — or, in
+the redaction case, does not touch the assertion at all.
+
+Rules:
+1. **Assert against the object production actually hands you.** If the code under test consumes
+   something a framework builds, construct it the way the framework does — or read the framework's
+   source to find out what it builds. `inspect.getsource` on the caller took two minutes and would
+   have found the `ResponseStream` nest.
+2. **A test over an inventory must feed a value through it, never list its keys.** "Is the name
+   registered" and "does the mechanism work on it" are different questions, and only the second is
+   the one being asked.
+3. **Name states, columns and enum members from the source of truth in the test.** Importing
+   `ProposalState` and intersecting is one line more than typing `"pending"`, and it cannot be wrong.
+4. **After a mutation passes, ask what the fake shares with production.** If the answer is "the
+   attribute I read", the test is about my mock.
+
+## A guard that counts files cannot see a per-item gap (2026-08-06)
+
+`test_every_pod_template_carries_the_workload_identity_label` searched each template *file* for the
+label string. `deployment-connectors.yaml` holds two pod templates; the label was in the server
+block; `qm` declares no endpoint, so the worker template is its only pod — the bundle that talks to
+HPC was the one left without a projected token, and the test written to catch per-template omissions
+could not see it.
+
+The same shape appeared twice more in one review: the framing-secret warning was conditioned on
+`session_store == "postgres"` when the subject is "framing crosses a process" (a connector always
+does, and the default session store is `memory`), and the retention sweep's DSN was right for the
+tables it had and wrong for the four I added.
+
+Rule: **when a guard is about "every X", count the X's.** `text.count(marker) < text.count(anchor)`
+is barely longer than `marker not in text` and it is the assertion actually intended. And when
+widening a guarded mechanism, re-read the guard's *condition* against the new subject — not just its
+body.
+
+## Fixing one instance of a class means grepping for the class (2026-08-06)
+
+WP-6 closed wikilink forgery in ELN note bodies and made the report citation link only when the
+reader's parser round-trips the id. The **else** branch of that same function — "not a note id, so
+write it as plain text" — kept interpolating warehouse-derived data verbatim into a note body, where
+`outgoing_links` reads a `[[supersedes:…]]` inside it as a real edge.
+
+I wrote the fix and the hole in the same function, in the same commit.
+
+Rule: after fixing an injection, grep for **every** place the same value reaches the same sink —
+including the branch you just added. "I handled that" is a belief about the branch I was looking at.

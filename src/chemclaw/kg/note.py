@@ -86,7 +86,47 @@ def is_note_slug(value: str) -> bool:
     one row must not fail a chemist's whole query, and "no note could ever have that id" is exactly
     the honest answer to the question being asked.
     """
-    return bool(_SLUG.match(value))
+    return bool(_SLUG.fullmatch(value))
+
+
+# Everything an id may carry. Excludes `"`, `<` and `>` (so an id cannot terminate the attribute
+# or the tag) while keeping the shapes real ids use: note slugs, `attachment:file.pdf`,
+# `job-results`.
+_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
+
+
+def safe_identifier(value: str) -> str:
+    """Reduce a caller-influenced *identifier* to a charset that cannot carry an instruction.
+
+    The counterpart to `frame_untrusted`, for the other kind of untrusted value. An envelope is
+    right for a *sentence* — a note body, a chemist's recorded reason, a mined observation — where
+    the text has to reach the model intact and be read as data. It is the wrong tool for a
+    provenance label: wrapping `eln-json:e-1041:jdoe` in a two-line envelope triples its cost and
+    still leaves it a string the model could read as prose.
+
+    An identifier only has to be recognisable, so the stronger move is available: strip it to the
+    charset an identifier needs and an instruction cannot survive. `frame_untrusted` has always
+    applied exactly this to the envelope's own `id` attribute, for the same reason and against the
+    same threat; this makes it reusable by the callers that hand the model a bare provenance field
+    beside framed content (`EvidenceChunk.source`, whose value on an ELN note carries the entry id
+    and operator name straight from the export).
+
+    Empty in, empty out — an absent provenance is a real state, and inventing "unknown" here would
+    put a word where the model should see nothing. `frame_untrusted` substitutes one because an
+    envelope must always name a source.
+
+    **It lives here, in the module that defines the link grammar, rather than beside
+    `frame_untrusted`.** It was written in `agent/framing.py` for the model-facing threat, and then
+    a second caller needed it for a *different* one: `retrieval/harness.py` writes a non-note
+    provenance label into a report note's body, where a value carrying `]] [[supersedes:x]] [[`
+    is read by `outgoing_links` below as a real edge. `retrieval` may not import `agent`
+    (`tests/test_layering.py`), and that rule is right rather than in the way — the charset this
+    reduces to is exactly the one that survives neither an instruction *nor* a wikilink, so the
+    module that owns "what reads as a link" is where both callers should find it. `agent.framing`
+    re-exports it, so its own `frame_untrusted` id attribute and every existing import are
+    unchanged.
+    """
+    return _ID_UNSAFE.sub("_", value)
 
 
 def note_relative_path(note_type: str, note_id: str) -> str:

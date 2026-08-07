@@ -37,6 +37,7 @@ import secrets
 from hashlib import sha256
 
 from chemclaw.core.config import settings
+from chemclaw.kg.note import safe_identifier
 
 
 def _envelope_nonce() -> str:
@@ -56,8 +57,13 @@ def _envelope_nonce() -> str:
     a prompt, a transcript or a stored session row.
 
     Unset falls back to the per-process random value, which is what dev and tests want and what
-    every existing deployment already has. `Settings` warns when durable sessions are configured
-    without it, because that is the exact combination where envelopes orphan.
+    every existing deployment already has. `Settings` warns whenever it is unset — **not only under
+    durable sessions**, which is what this sentence said and what the guard was first written to do.
+    Durable history is one of three ways the tag crosses a process and not the one that is always
+    on: a *connector* frames in its own process by construction
+    (`connectors/calc/server/tools.py:fetch_artifact`), and the default `session_store` is `memory`,
+    so the narrower guard was silent on exactly the shipped configuration where the mismatch is
+    guaranteed (D-2026-08-06-eight-fixes-that-shipped-green).
     """
     secret = settings.framing_envelope_secret
     if secret:
@@ -107,35 +113,6 @@ def _defang(content: str) -> str:
     return body
 
 
-# Everything an id may carry. Excludes `"`, `<` and `>` (so an id cannot terminate the attribute
-# or the tag) while keeping the shapes real ids use: note slugs, `attachment:file.pdf`,
-# `job-results`.
-_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
-
-
-def safe_identifier(value: str) -> str:
-    """Reduce a caller-influenced *identifier* to a charset that cannot carry an instruction.
-
-    The counterpart to `frame_untrusted`, for the other kind of untrusted value. An envelope is
-    right for a *sentence* — a note body, a chemist's recorded reason, a mined observation — where
-    the text has to reach the model intact and be read as data. It is the wrong tool for a
-    provenance label: wrapping `eln-json:e-1041:jdoe` in a two-line envelope triples its cost and
-    still leaves it a string the model could read as prose.
-
-    An identifier only has to be recognisable, so the stronger move is available: strip it to the
-    charset an identifier needs and an instruction cannot survive. `frame_untrusted` has always
-    applied exactly this to the envelope's own `id` attribute, for the same reason and against the
-    same threat; this makes it reusable by the callers that hand the model a bare provenance field
-    beside framed content (`EvidenceChunk.source`, whose value on an ELN note carries the entry id
-    and operator name straight from the export).
-
-    Empty in, empty out — an absent provenance is a real state, and inventing "unknown" here would
-    put a word where the model should see nothing. `frame_untrusted` substitutes one because an
-    envelope must always name a source.
-    """
-    return _ID_UNSAFE.sub("_", value)
-
-
 def frame_untrusted(content: str, *, note_id: str) -> str:
     """Wrap retrieved `content` from source `note_id` in a data envelope for the model.
 
@@ -145,5 +122,12 @@ def frame_untrusted(content: str, *, note_id: str) -> str:
     Content and id are neutralized as the module docstring describes, so neither can close the
     envelope early; the text is otherwise preserved verbatim.
     """
-    safe_id = _ID_UNSAFE.sub("_", note_id) or "unknown"
+    safe_id = safe_identifier(note_id) or "unknown"
     return f'<{ENVELOPE_TAG} id="{safe_id}">\n{_defang(content)}\n</{ENVELOPE_TAG}>'
+
+
+__all__ = [
+    "ENVELOPE_TAG",
+    "frame_untrusted",
+    "safe_identifier",
+]

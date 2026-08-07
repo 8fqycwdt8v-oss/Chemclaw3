@@ -446,15 +446,24 @@ def test_a_live_session_keeps_its_owner_row() -> None:
     assert found, "a session opened seconds ago lost its ownership to the retention pass"
 
 
-def test_a_pending_proposal_is_never_pruned() -> None:
-    """`note_proposals` prunes decided rows only — a pending one is the PR-gate's live queue.
+def test_an_undecided_proposal_is_never_pruned() -> None:
+    """`note_proposals` prunes decided rows only — an open one is the PR-gate's live queue.
 
-    Two guards, and the age one fires first: `decided_at` is NULL for a pending row, so the
+    Two guards, and the age one fires first: `decided_at` is NULL for an undecided row, so the
     interval comparison is NULL and the row is not selected even before the state check.
+
+    **This first shipped asserting `"pending" in disposable`, and there is no `pending` state** —
+    the column `CHECK`s `open|merged|rejected|failed`. The predicate was `state <> 'pending'`,
+    unconditionally true, so the "second of two guards" was one guard; the test cemented the wrong
+    literal rather than catching it. Named positively now, against the states that exist.
     """
+    from chemclaw.kg.proposal import ProposalState
+
     column, disposable = _PRUNABLE["note_proposals"]
     assert column == "decided_at"
-    assert "pending" in disposable
+    named = {word.strip("(),'") for word in disposable.split()}
+    assert named & {state.value for state in ProposalState}, f"names no real state: {disposable!r}"
+    assert "open" not in named and "failed" not in named
 
 
 def test_a_turn_claim_is_dated_by_when_it_ended() -> None:

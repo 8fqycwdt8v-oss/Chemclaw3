@@ -847,13 +847,27 @@ async def _closing(stream: Any) -> AsyncIterator[Any]:
     try:
         yield stream
     finally:
-        iterator = getattr(stream, "_iterator", None)
-        aclose = getattr(iterator, "aclose", None)
+        # **Walked, not read once**, because `agent.run(stream=True)` hands back a *nest*. It is
+        # `ResponseStream.from_awaitable(...)` over a stream that is itself `.map(...)`-wrapped
+        # (`agent_framework/_agents.py:1058`, `:1196`), so the outer object's `_iterator` is another
+        # `ResponseStream` — which has no `aclose` — and the outer's own `cleanup_hooks` list is
+        # empty. Reading one level found nothing to close and nothing to clean, on every real turn.
+        #
+        # The first version of this did exactly that and its test passed, because the test built a
+        # *flat* `ResponseStream(async_generator)` — a shape production never produces. Both halves
+        # now descend to the generator at the bottom and run every hook on the way.
+        seen: list[Any] = []
+        node: Any = stream
+        while node is not None and not any(node is s for s in seen):
+            seen.append(node)
+            node = getattr(node, "_iterator", None)
+        aclose = getattr(seen[-1], "aclose", None) if seen else None
         if aclose is not None:
             await aclose()
-        run_cleanup = getattr(stream, "_run_cleanup_hooks", None)
-        if run_cleanup is not None:
-            await run_cleanup()
+        for node in seen:
+            run_cleanup = getattr(node, "_run_cleanup_hooks", None)
+            if run_cleanup is not None:
+                await run_cleanup()
 
 
 def _signal_event(signal: Signal) -> Event:

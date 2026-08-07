@@ -105,6 +105,12 @@ spec:
       labels:
         {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/component: connector-worker-{{ $name }}
+        {{- /* The *worker* half of this file, and the one that matters most: `qm` declares no
+               endpoint, so this template is its only pod — the bundle that talks to HPC has no
+               server pod for the label above to reach. It was added to the server template alone
+               and the guard counted files rather than pod specs, so one template in a two-template
+               file passed. */}}
+        azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
       {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}

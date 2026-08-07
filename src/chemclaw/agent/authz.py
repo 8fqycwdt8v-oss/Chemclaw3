@@ -226,6 +226,15 @@ def default_write_tool_gates() -> frozenset[str]:
 
     Imported lazily for the same reason `side_effecting_tools()` is: the connector registry reaches
     the agent builder, which reaches this module.
+
+    **Recomputed per call, deliberately, and the number is here so it is not re-litigated.**
+    `authorize_tool` calls this on every tool invocation and it walks the enabled manifests twice.
+    Measured: **5.3 µs per call — 0.53 ms across a 100-tool-call turn**, against a turn dominated by
+    model latency. Caching it would need invalidation wired to `discovered.cache_clear()` *and* to
+    the thirteen tests that repoint `connectors_enabled`/`entra_expensive_actions`, which is real
+    machinery bought with half a millisecond. The live read also has a property a cache would take
+    away: a gate that reflects the config as it is now, with no second place for the two to
+    disagree.
     """
     from chemclaw.connectors.registry import privileged_tool_names
 

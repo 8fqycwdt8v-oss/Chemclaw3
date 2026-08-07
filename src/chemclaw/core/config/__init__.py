@@ -245,7 +245,7 @@ class Settings(
                 "budget_enabled=true with every cap at 0 (unlimited) guards nothing; set at least "
                 "one budget_max_* cap or disable budgets"
             )
-        if self.session_store == "postgres" and not self.framing_envelope_secret:
+        if not self.framing_envelope_secret:
             # A *warning*, not a refusal, and the asymmetry is deliberate: every rule above is a
             # configuration that cannot work, while this one works and degrades. The mitigation is
             # still on for content framed by the process reading it; what lapses is older material
@@ -257,12 +257,19 @@ class Settings(
             # warns when durable sessions are configured without it" — and nothing did. A security
             # mechanism whose own documentation describes a guard that does not exist is the shape
             # this repository keeps finding; this is that sentence becoming true.
+            #
+            # **Unconditional, and the first version's `session_store == "postgres"` condition was
+            # wrong.** Durable history is one of three ways the tag crosses a process, and not the
+            # one that is always on: a *connector* frames in its own process by construction
+            # (`connectors/calc/server/tools.py:fetch_artifact`), and the default `session_store`
+            # is `memory`, so the guard was silent on exactly the shipped configuration where the
+            # mismatch is guaranteed. Any two processes suffice; a deployment has at least two.
             logging.getLogger(__name__).warning(
-                "SECURITY: session_store=postgres without CHEMCLAW_FRAMING_ENVELOPE_SECRET — the "
-                "untrusted-content envelope tag is per-process, so retrieved content framed by "
-                "another replica or before a restart is replayed to the model as ordinary text "
-                "rather than as data. Set it to any deployment-wide value (it is hashed, never "
-                "sent to the model) to keep one tag across every pod and restart."
+                "SECURITY: no CHEMCLAW_FRAMING_ENVELOPE_SECRET — the untrusted-content envelope "
+                "tag is derived per process, so content framed by a connector, another replica, or "
+                "a process before a restart reaches the model wrapped in a tag its instructions do "
+                "not name, and is read as ordinary text rather than as data. Set it to any "
+                "deployment-wide value (it is hashed, never sent to the model)."
             )
         writes_note_index = self.note_reindex_enabled or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)

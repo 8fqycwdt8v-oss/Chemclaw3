@@ -1221,11 +1221,17 @@ def test_every_pod_template_carries_the_workload_identity_label() -> None:
     offenders = []
     for path in sorted((CHART / "templates").glob("*.yaml")):
         text = path.read_text(encoding="utf-8")
-        # A pod spec is a template that declares a container list under a pod template.
-        if "serviceAccountName:" not in text:
+        # **Counted, not searched.** A file can hold more than one pod template —
+        # `deployment-connectors.yaml` holds the connector *server* and the connector *worker* —
+        # and the first version of this asked only whether the label appeared *somewhere* in the
+        # file. It did, once, in the server block, so the file passed while `qm`'s only pod (it
+        # declares no endpoint, so it is worker-only) had no label at all. A per-template omission
+        # was invisible to the test written to catch per-template omissions.
+        pod_specs = text.count("serviceAccountName:")
+        if not pod_specs:
             continue
-        if label not in text:
-            offenders.append(path.name)
+        if text.count(label) < pod_specs:
+            offenders.append(f"{path.name} ({text.count(label)}/{pod_specs} pod templates)")
     assert not offenders, (
         f"pod templates without the workload-identity label: {offenders}. "
         "Their pods get no projected token, so anything that federates fails there and only there."

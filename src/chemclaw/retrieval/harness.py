@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import Note, cited_ids
+from chemclaw.kg.note import Note, cited_ids, safe_identifier
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 
 # Each section declares which memory layer it draws on, so the report keeps evidenced history
@@ -91,12 +91,22 @@ def _citation(source_note_id: str) -> str:
     syntax ever grows a new form, the writer follows the reader for free.
 
     A non-note source stays visible rather than being dropped: it is what the section rests on, and
-    a reader who cannot see it cannot check it.
+    a reader who cannot see it cannot check it — but it is reduced to an identifier charset first.
+    **The plain-text branch was itself a forgery vector**, and the identical one this file's own
+    sibling change closed for ELN bodies: a retriever key is warehouse data, and
+    `x]] and [[supersedes:reaction-eln-0001]] [[z` reaches the body verbatim, where
+    `Note.outgoing_links` reads the `[[supersedes:…]]` in the middle of it as a real edge. So the
+    generated report proposes retiring another team's result, through the branch added to *avoid*
+    writing a link.
+
+    `safe_identifier`, not an escape, because this branch is already saying "this is not a note
+    id" — a provenance label only has to be recognisable, and the charset that makes it so is one
+    an instruction (or a wikilink) cannot survive.
     """
     return (
         f"[[{source_note_id}]]"
         if cited_ids(f"[[{source_note_id}]]") == [source_note_id]
-        else f"source {source_note_id}"
+        else f"source {safe_identifier(source_note_id)}"
     )
 
 

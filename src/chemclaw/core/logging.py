@@ -280,6 +280,31 @@ def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     return _URL_USERINFO.sub(_redact_userinfo, redacted)
 
 
+def _plain(value: object) -> str:
+    """The string a setting holds, whether it is a `str` or a `SecretStr`.
+
+    **This function is the fix for a leak this repository introduced to itself.** Six credentials
+    became `SecretStr` so a forgotten `.get_secret_value()` renders as `**********` instead of the
+    key. `SecretStr` is not a `str` subclass, so the `isinstance(value, str)` guard that used to
+    skip a non-string field started skipping *every one of them* — and `_secret_values()` returned
+    an empty tuple, so `redact_secrets` passed a live `sk-live-...` through verbatim into any log
+    line or traceback that quoted it.
+
+    The mitigation that hid it is the same one that caused it: masked `repr` means the credential
+    rarely reaches a log by accident, so the one path that mattered — a provider echoing the key in
+    an auth error, git stderr persisted into `note_proposals.reason` — was the path nobody looked
+    at. `tests/test_secret_settings.py` asserted the *names* were in the inventory and passed with
+    the redaction dead.
+
+    Anything that is neither shape yields `""`, which `_secret_values` skips: a non-credential type
+    in the inventory is a mistake to notice, not a value to stringify into the match set.
+    """
+    if isinstance(value, str):
+        return value
+    getter = getattr(value, "get_secret_value", None)
+    return str(getter()) if callable(getter) else ""
+
+
 def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...]:
     """The distinct secret values this process actually holds, longest first.
 
@@ -301,8 +326,8 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
             values.add(candidate)
 
     for name in _SECRET_SETTINGS:
-        value = getattr(settings, name, "")
-        if not isinstance(value, str):
+        value = _plain(getattr(settings, name, ""))
+        if not value:
             continue
         _consider(value)
         # A DSN's password is also worth matching on its own: libpq accepts several spellings and a

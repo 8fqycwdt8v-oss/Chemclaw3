@@ -101,10 +101,12 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     # The spend ledger. Read over a window of days by the front door's admission check, so a row
     # older than the longest such window is already unreadable by design.
     "turn_costs": ("recorded_at", "TRUE"),
-    # Only *decided* proposals. A pending one is the PR-gate's live queue, and `decided_at` is NULL
-    # for it — which makes the age predicate false on its own, so the state check is the second of
-    # two guards rather than the only one.
-    "note_proposals": ("decided_at", "state <> 'pending'"),
+    # Only *decided* proposals, named positively against the states that exist. `ProposalState` is
+    # `open|merged|rejected|failed` and the table `CHECK`s exactly those — there is no `pending`,
+    # so the `state <> 'pending'` this first shipped with was unconditionally true and guarded
+    # nothing. `failed` is deliberately excluded with `open`: its own docstring says it is *not a
+    # decision* (the submission never reached git), and it is kept so the proposal can be replayed.
+    "note_proposals": ("decided_at", "state IN ('merged', 'rejected')"),
 }
 
 # Owner rows whose session has no history left, and which are old enough that no in-flight session
@@ -191,7 +193,14 @@ async def prune_expired_rows() -> RetentionOutcome:
     cannot disagree about what "expired" means.
     """
     outcome = RetentionOutcome(deleted={}, skipped=[])
-    async with bounded(settings.postgres_dsn) as conn:
+    # **The session DSN, not the calculation one.** Every table this prunes is a session-layer
+    # table, and all six session stores resolve `session_store_dsn or postgres_dsn`. Opening
+    # `postgres_dsn` unconditionally meant that on a split deployment the sweep deleted from the
+    # calculation database's *empty* copies of these tables and reported `deleted: {..: 0}` — which
+    # an operator reads as the policy being enforced while the real leases and ledger grow without
+    # bound. The same split this package taught `migrate.py` about creates both copies, which is
+    # what makes the wrong one silently succeed rather than fail on a missing table.
+    async with bounded(settings.session_store_dsn or settings.postgres_dsn) as conn:
         for table, (column, disposable) in _PRUNABLE.items():
             days = _window_days(table)
             if days <= 0:
