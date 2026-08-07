@@ -93,9 +93,9 @@ class DocumentSyncState(BaseModel):
     remaining: list[str]
     # The crawl cursor within the source in progress: the last path its previous chunk examined.
     after: str = ""
-    # Whether any chunk of the *current* source hit a root it could not walk. Sticky for the whole
-    # drain, because a root that failed early is still un-crawled when the last chunk succeeds.
-    degraded: bool = False
+    # No `degraded` flag: whether a drain may sweep is read off the drain's own merged report
+    # (`prune_share`), which already carries the failed roots and the unfinished tail. A flag beside
+    # the evidence is a second copy of the rule, and the copy the CLI kept was the wrong one.
     reports: list[SyncReport] = Field(default_factory=list)
     # Whether the re-embedding drain finished. Carried, because a corpus large enough to need
     # `continue_as_new` mid-re-embed must not restart that drain from the top on the next run.
@@ -161,9 +161,9 @@ async def reembed_stale_documents() -> ReembedReport:
 
 @durable_activity("background")
 @activity.defn
-async def prune_document_share(source: str, before: datetime, complete: bool) -> int:
-    """Sweep `source` rows unseen since `before` — a no-op unless the crawl actually completed."""
-    return await prune_share(source, _document_index(), before, complete)
+async def prune_document_share(source: str, before: datetime, report: SyncReport) -> int:
+    """Sweep `source` rows unseen since `before` — a no-op unless the drain evidences absence."""
+    return await prune_share(source, _document_index(), before, report)
 
 
 @durable_workflow("background")
@@ -224,7 +224,6 @@ class DocumentShareSyncWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
             state.reports.append(chunk)
-            state.degraded = state.degraded or bool(chunk.failed_roots)
             iterations += 1
             if chunk.has_more and chunk.cursor > state.after:
                 state.after = chunk.cursor
@@ -239,23 +238,22 @@ class DocumentShareSyncWorkflow:
             if chunk.has_more:
                 # Unreachable with a well-behaved crawl (a truncated pass always advances the
                 # cursor), but a bug must wedge one source with a warning rather than spin this
-                # loop — and Temporal's event history — forever. The source counts as degraded, so
-                # nothing is swept from it.
+                # loop — and Temporal's event history — forever. `has_more` survives into the
+                # merged report below, which is what stops the sweep.
                 workflow.logger.warning(
                     "document sync for %s reported more entries but no cursor advance; stopping",
                     source,
                 )
-                state.degraded = True
+            drained = merge_reports([r for r in state.reports if r.source == source], source)
             pruned = await workflow.execute_activity(
                 prune_document_share,
-                args=[source, state.started_at, not state.degraded],
+                args=[source, state.started_at, drained],
                 start_to_close_timeout=timeout,
                 retry_policy=BAD_DATA_RETRY,
             )
             state.reports[-1].pruned = pruned
             state.remaining.pop(0)
             state.after = ""
-            state.degraded = False
         return DocumentSyncOutcome(
             shares=_merge_by_source(state.reports), reembedded=state.reembedded
         )

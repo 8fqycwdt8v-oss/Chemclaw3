@@ -33,7 +33,12 @@ from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import crawl_share
 from chemclaw.ingest.documents.index import InMemoryDocumentIndex
 from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
-from chemclaw.ingest.documents.sync import prune_share, reembed_stale, sync_share
+from chemclaw.ingest.documents.sync import (
+    SyncReport,
+    prune_share,
+    reembed_stale,
+    sync_share,
+)
 from tests.document_fixtures import (
     _blank_pdf_bytes,
     _docx_bytes,
@@ -321,8 +326,8 @@ def test_two_shares_holding_the_same_relative_path_do_not_evict_each_other(
 
     # And a sweep of one share leaves the other's row alone.
     later = asyncio.run(index.clock())
-    asyncio.run(sync_share("sharedrive-2", load_binding(second), index))
-    asyncio.run(prune_share("sharedrive-2", index, later, crawl_was_complete=True))
+    second_report = asyncio.run(sync_share("sharedrive-2", load_binding(second), index))
+    asyncio.run(prune_share("sharedrive-2", index, later, second_report))
     assert asyncio.run(index.fingerprints(SOURCE, [path]))
 
 
@@ -340,8 +345,8 @@ def test_a_deleted_file_leaves_the_index_after_a_complete_crawl(
 
     (tmp_path / "SOPs" / "handling.xlsx").unlink()
     later = asyncio.run(index.clock())
-    asyncio.run(sync_share(SOURCE, binding, index))
-    removed = asyncio.run(prune_share(SOURCE, index, later, crawl_was_complete=True))
+    report = asyncio.run(sync_share(SOURCE, binding, index))
+    removed = asyncio.run(prune_share(SOURCE, index, later, report))
 
     assert removed == 1
     assert asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"])) == {}
@@ -369,7 +374,7 @@ def test_a_failed_root_prunes_nothing(share: dict[str, Any], tmp_path: Path) -> 
     report = asyncio.run(sync_share(SOURCE, binding, index))
     assert report.failed_roots == ["SOPs"]
 
-    removed = asyncio.run(prune_share(SOURCE, index, later, crawl_was_complete=False))
+    removed = asyncio.run(prune_share(SOURCE, index, later, report))
     assert removed == 0
     assert len(asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))) == 1
 
@@ -617,3 +622,205 @@ def test_a_date_window_excludes_a_file_modified_outside_it(
     assert asyncio.run(retriever.retrieve("palladium catalyst", {"until": today})) != []
     stale = today - timedelta(days=365)
     assert asyncio.run(retriever.retrieve("palladium catalyst", {"until": stale})) == []
+
+
+# --- the sweep only deletes what a complete pass really did not see ------------------------------
+#
+# Every prune test above this line used to hand `prune_share` a `crawl_was_complete` it decided
+# itself, so none of them ever asked the crawl whether sweeping was safe. These do. Each one is a
+# file **present and readable on the share** that got deleted from the index anyway.
+
+
+def _drain(binding: Any, index: InMemoryDocumentIndex, limit: int = 1000) -> Any:
+    """Drain a share the way the durable workflow does, so the sweep sees the real evidence."""
+    reports = []
+    after = ""
+    for _ in range(200):
+        report = asyncio.run(sync_share(SOURCE, binding, index, after=after, limit=limit))
+        reports.append(report)
+        if not report.has_more or report.cursor <= after:
+            break
+        after = report.cursor
+    return sync_module.merge_reports(reports, SOURCE)
+
+
+def test_a_directory_that_prefixes_a_sibling_file_does_not_hide_it(tmp_path: Path) -> None:
+    """The walk's order must be the order `after` is compared in, or a resumed drain skips files.
+
+    Siblings are sorted by bare name, but `after` is compared against the joined path. `Report`
+    (a directory) sorts before `Report.pdf`, yet `Report.pdf` sorts before `Report/a.pdf` — so a
+    chunk that stops inside the directory skips the file forever on every later pass.
+    """
+    mount = tmp_path / "mount"
+    (mount / "Docs" / "Report").mkdir(parents=True)
+    (mount / "Docs" / "Report" / "a.txt").write_text("inner one")
+    (mount / "Docs" / "Report" / "b.txt").write_text("inner two")
+    (mount / "Docs" / "Report.txt").write_text("the sibling report")
+    binding = load_binding({"mount": str(mount), "roots": [{"path": "Docs"}]})
+
+    whole = {ref.path for ref in crawl_share(binding, limit=1000).files}
+    assert "Docs/Report.txt" in whole
+
+    seen: set[str] = set()
+    after = ""
+    for _ in range(20):
+        chunk = crawl_share(binding, after=after, limit=1)
+        seen |= {ref.path for ref in chunk.files}
+        if not chunk.has_more:
+            break
+        after = chunk.cursor
+    assert seen == whole
+
+
+def test_sibling_roots_that_share_a_prefix_are_both_walked(tmp_path: Path) -> None:
+    """`Data` and `Data-Archive` pass every binding check, and `-` sorts below `/`."""
+    mount = tmp_path / "mount"
+    (mount / "Data").mkdir(parents=True)
+    (mount / "Data-Archive").mkdir(parents=True)
+    (mount / "Data" / "z.txt").write_text("live data")
+    (mount / "Data-Archive" / "old.txt").write_text("archived data")
+    binding = load_binding(
+        {"mount": str(mount), "roots": [{"path": "Data"}, {"path": "Data-Archive"}]}
+    )
+
+    whole = {ref.path for ref in crawl_share(binding, limit=1000).files}
+    seen: set[str] = set()
+    after = ""
+    for _ in range(20):
+        chunk = crawl_share(binding, after=after, limit=1)
+        seen |= {ref.path for ref in chunk.files}
+        if not chunk.has_more:
+            break
+        after = chunk.cursor
+    assert seen == whole == {"Data/z.txt", "Data-Archive/old.txt"}
+
+
+def test_a_share_that_went_empty_is_not_swept(share: dict[str, Any], tmp_path: Path) -> None:
+    """A dropped mount with root `.` presents as an empty directory and no failed root.
+
+    `crawl_share` is loud only when the mount path is *gone*. A CIFS volume that detaches leaves the
+    mount point behind as an empty directory — the exact case the whole mark-and-sweep exists for —
+    and with `roots: [{path: "."}]` there is no root left to report as missing.
+    """
+    index = InMemoryDocumentIndex()
+    binding = load_binding({**share, "roots": [{"path": "."}]})
+    _drain(binding, index)
+    assert asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))
+
+    for path in sorted(tmp_path.rglob("*"), reverse=True):
+        path.unlink() if path.is_file() else path.rmdir()
+
+    later = asyncio.run(index.clock())
+    report = _drain(binding, index)
+    assert report.scanned == 0 and not report.failed_roots
+    assert asyncio.run(prune_share(SOURCE, index, later, report)) == 0
+    assert asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))
+
+
+def test_a_file_that_cannot_be_stat_ed_keeps_its_row(
+    share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ACL push or a DFS flap makes `stat` fail on files that are still there."""
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    _drain(binding, index)
+
+    import os as os_module
+
+    real = os_module.DirEntry.stat
+    victim = "handling.xlsx"
+
+    def failing(self: Any, **kwargs: Any) -> Any:
+        if self.name == victim:
+            raise PermissionError("cifs: permission denied")
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(os_module.DirEntry, "stat", failing, raising=False)
+
+    later = asyncio.run(index.clock())
+    report = _drain(binding, index)
+    asyncio.run(prune_share(SOURCE, index, later, report))
+    assert asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))
+
+
+def test_a_file_that_changed_and_cannot_be_read_keeps_its_row(
+    share: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A document open in Word: its mtime moved, and the read fails. It is still on the share."""
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    _drain(binding, index)
+
+    target = tmp_path / "Projects" / "acme-17" / "notes.docx"
+    target.write_bytes(target.read_bytes() + b"\x00")  # fingerprint moves
+
+    real_read = Path.read_bytes
+
+    def failing(self: Path) -> bytes:
+        if self.name == "notes.docx":
+            raise PermissionError("sharing violation")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing)
+
+    later = asyncio.run(index.clock())
+    report = _drain(binding, index)
+    assert report.skipped_unreadable == 1
+    asyncio.run(prune_share(SOURCE, index, later, report))
+    assert asyncio.run(index.fingerprints(SOURCE, ["Projects/acme-17/notes.docx"]))
+
+
+def test_a_drain_that_never_finished_sweeps_nothing(share: dict[str, Any]) -> None:
+    """`--limit 0` scans nothing and reports more to come. It must not be read as "all gone"."""
+    index = InMemoryDocumentIndex()
+    binding = load_binding(share)
+    _drain(binding, index)
+
+    later = asyncio.run(index.clock())
+    stalled = asyncio.run(sync_share(SOURCE, binding, index, after="", limit=0))
+    assert stalled.has_more and stalled.scanned == 0
+    assert asyncio.run(prune_share(SOURCE, index, later, stalled)) == 0
+    assert asyncio.run(index.fingerprints(SOURCE, ["SOPs/handling.xlsx"]))
+
+
+def test_compaction_carries_the_sweep_guard_across_continue_as_new() -> None:
+    """The evidence `prune_share` reads must survive the workflow's own state compaction.
+
+    A drain of a large share is thousands of chunks, so `DocumentShareSyncWorkflow` folds them with
+    `_merge_by_source` before each `continue_as_new` — the carried state is the *input* of the next
+    run. If that fold dropped a failed root or the unfinished tail, the guard would pass on the
+    following run and sweep a share it never finished walking. This is the property that replaced
+    the `degraded` flag, so it is the one that has to hold.
+    """
+    from chemclaw.durable.document_sync import _merge_by_source
+
+    chunks = [
+        SyncReport(source="a", scanned=5, cursor="p1", has_more=True),
+        SyncReport(source="a", scanned=5, failed_roots=["SOPs"], cursor="p2", has_more=True),
+        SyncReport(source="a", scanned=2, cursor="p3", has_more=False),
+        SyncReport(source="b", scanned=3, cursor="q1", has_more=False),
+    ]
+    compacted = {report.source: report for report in _merge_by_source(chunks)}
+
+    assert compacted["a"].failed_roots == ["SOPs"]
+    assert compacted["a"].scanned == 12
+    # Folding again must be a fixed point — it happens once per continue_as_new, not once per drain.
+    twice = {r.source: r for r in _merge_by_source(list(compacted.values()))}
+    assert twice["a"].failed_roots == ["SOPs"] and twice["a"].scanned == 12
+
+    index = InMemoryDocumentIndex()
+    started = asyncio.run(index.clock())
+    assert asyncio.run(prune_share("a", index, started, compacted["a"])) == 0
+    # Share "b" finished cleanly, so its sweep is allowed — it just has nothing to remove.
+    assert asyncio.run(prune_share("b", index, started, compacted["b"])) == 0
+
+
+def test_a_wedged_drain_leaves_has_more_set_for_the_guard() -> None:
+    """A pass that reports more work but no cursor advance must not merge into "finished"."""
+    from chemclaw.durable.document_sync import _merge_by_source
+
+    wedged = [
+        SyncReport(source="a", scanned=4, cursor="p1", has_more=True),
+        SyncReport(source="a", scanned=4, cursor="p1", has_more=True),
+    ]
+    assert _merge_by_source(wedged)[0].has_more is True
