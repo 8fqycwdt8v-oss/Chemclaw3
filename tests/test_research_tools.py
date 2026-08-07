@@ -192,6 +192,9 @@ def test_a_mounted_share_is_not_starved_by_a_larger_graph(
         "mount": str(tmp_path / "share"),
         "roots": [{"path": "Docs"}],
         "extensions": [".md"],
+        # This test is about rank fusion, not the gate — so the share says "anyone" out loud rather
+        # than leaving it unsaid, which a binding may no longer do.
+        "public": True,
     }
     index = InMemoryDocumentIndex()
     asyncio.run(sync_share("sharedrive", load_binding(binding), index))
