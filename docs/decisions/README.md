@@ -279,6 +279,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-06-a-share-is-mounted-not-called](D-2026-08-06-a-share-is-mounted-not-called.md) | A classical file share becomes a corpus, and its AD group becomes an entitlement |
 | [D-2026-08-06-a-swallowed-write-reported-as-a-store](D-2026-08-06-a-swallowed-write-reported-as-a-store.md) | A swallowed write, reported as a store |
 | [D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice](D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice.md) | A tool cannot say it has nothing twice |
+| [D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it](D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it.md) | The embedding configuration is part of a vector's identity |
 | [D-2026-08-06-an-envelope-that-only-survives-its-own-process](D-2026-08-06-an-envelope-that-only-survives-its-own-process.md) | An envelope that only survives its own process |
 | [D-2026-08-06-the-caller-chooses-the-kid-not-the-workload](D-2026-08-06-the-caller-chooses-the-kid-not-the-workload.md) | The caller chooses the `kid`, not how much work we do about it |
 | [D-2026-08-06-the-memo-already-carried-the-actor](D-2026-08-06-the-memo-already-carried-the-actor.md) | The memo already carried the actor |

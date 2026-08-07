@@ -102,7 +102,36 @@ Two things to know before choosing the claim route:
   logs a warning naming the user rather than silently reading it as "no groups". Those users lose
   group-derived entitlements until the tenant is reconfigured. The app-role route has no such limit.
 
-## 4. Cost it before you buy it
+## 4. Choose a real embedding model
+
+**This is the most consequential default in the whole feature.** `CHEMCLAW_EMBEDDING_PROVIDER`
+defaults to `hash` — a deterministic feature-hash of the text's tokens. It is offline and
+reproducible, which is what lets CI and a no-credential dev run work at all, and it gives
+*token-overlap* similarity. It is **not** semantic retrieval. On a real share it behaves like a
+fuzzy keyword search wearing a vector's clothes.
+
+For anything real:
+
+```
+CHEMCLAW_EMBEDDING_PROVIDER=openai_compatible
+CHEMCLAW_EMBEDDING_MODEL=<your model>
+CHEMCLAW_EMBEDDING_DIM=1536      # must equal the vector(N) column in infra/sql/037
+```
+
+It reuses the LLM base URL, credential and private-CA transport — there is no second endpoint to
+configure. A dimension the column cannot hold is refused with a message naming both numbers, rather
+than letting pgvector reject every write later.
+
+**Changing the model later is safe and needs no action.** Every stored vector records the
+configuration that made it, so changing the model (or the provider, or the dimension) marks the
+whole corpus stale, and the next sync re-embeds it — from the text already stored beside each
+vector, so nothing is re-crawled, re-read or re-parsed, and it works even while the mount is down.
+Watch `reembedded` in the run's output; `CHEMCLAW_DOCUMENT_REEMBED_BATCH_SIZE` paces it.
+
+The one thing to plan for is *cost*: a model change re-embeds the whole corpus, so it costs what
+the first index cost. Change it before the first full crawl if you can.
+
+## 5. Cost it before you buy it
 
 **Do this before enabling the source.** It walks the real mount exactly as the crawl does, reads no
 file, and embeds nothing:
@@ -129,7 +158,7 @@ Rough shape at 500k files: ~30–50% pass the extension filter, content-hash ded
 20–40%, and the survivors average ~8 chunks each — order of a million embedding calls and ~6 GB of
 vectors. It is the dominant cost and the only one worth controlling.
 
-## 5. Enable and run it
+## 6. Enable and run it
 
 ```
 CHEMCLAW_DATA_SOURCES=graph,sharedrive
@@ -178,6 +207,10 @@ see if the CIFS mount flaps.
 **A gated share contributes nothing to scheduled reports.** `durable/report_workflow.py` runs with
 no user identity, so the entitlement cannot be checked and the source correctly declines. Right by
 construction, and tracked in `docs/planning/BACKLOG.md` for identity propagation.
+
+**A stale vector is fixed before a missing document is found.** Each run drains re-embedding
+before it crawls: a vector made by a superseded model is wrong *now*, being compared against
+freshly embedded queries, while a document not yet crawled is merely absent.
 
 **Citations look like** `sharedrive:doc-9f2a1c…#3`, with the readable location — `Projects/acme-17/
 2024/report.pdf [page 7]` — carried alongside. When several paths hold identical content the

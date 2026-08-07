@@ -18,6 +18,7 @@ import asyncio
 import logging
 import sys
 
+from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
 from chemclaw.ingest.documents.binding import DocumentShareBinding, DocumentShareError
 from chemclaw.ingest.documents.crawl import crawl_share
@@ -27,6 +28,7 @@ from chemclaw.ingest.documents.sync import (
     SyncReport,
     merge_reports,
     prune_share,
+    reembed_stale,
     sync_share,
 )
 from chemclaw.ingest.sources.registry import active_retrieve_sources
@@ -86,6 +88,15 @@ def _estimate(binding: DocumentShareBinding, report: SyncReport) -> str:
 async def _drain(name: str, share: DocumentShareSource, *, limit: int) -> SyncReport:
     """Run the real sync to completion, then sweep — the CLI mirror of the durable workflow."""
     index = default_document_index()
+    # Same order as the durable workflow: a vector made by a superseded model is wrong *now*, and
+    # this pass reads stored text rather than the share, so it is also the part that still works
+    # when the mount is unavailable.
+    while True:
+        refresh = await reembed_stale(index, settings.document_reembed_batch_size)
+        if refresh.embedded:
+            logger.info("%s: re-embedded %d stale chunk(s)", name, refresh.embedded)
+        if not refresh.has_more:
+            break
     started_at = await index.clock()
     reports: list[SyncReport] = []
     after = ""

@@ -42,6 +42,14 @@ retrieved with a citation; the PR-gate exists for what the agent generates.
 right only for a small curated folder someone wants *in* the graph. At 500k files it would be
 500k pull requests.
 
+**A vector is only good for the model that made it.** Every stored chunk records the embedding
+configuration that produced its vector (`embedding_key`, migration 038). Changing the model does
+not move any file's fingerprint, so before `D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it`
+a model swap re-embedded nothing and left the table holding a mix of two models' vectors — with no
+error anywhere. `sync.reembed_stale` refreshes them from the `content` stored beside each vector,
+so the fix is a database-to-database pass that never touches the share and runs even when the mount
+is down.
+
 **Identity is the content, not the path.** `doc_id` is the hash of the parsed text, so the same
 report in four project folders is one set of chunks and one embedding call, and a rename is free.
 It is `backfill_corpus.note_for_document`'s rule and D-011's, applied to embeddings.

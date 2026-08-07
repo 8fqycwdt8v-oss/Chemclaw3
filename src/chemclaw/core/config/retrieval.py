@@ -119,11 +119,17 @@ class RetrievalSettings(BaseSettings):
     note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
 
 
-# The `vector(N)` width in `infra/sql/012_note_index.sql`. Duplicated here rather than parsed
-# out of the SQL because the migration is the source of truth and this is the assertion
-# against it — the cross-section validator in the package `__init__.py` fails startup if the
-# two disagree.
-_NOTE_INDEX_VECTOR_DIM = 1536
+# The `vector(N)` width every embedding column in this schema was migrated with —
+# `note_index.embedding` (`infra/sql/012`) and `document_chunks.embedding` (`infra/sql/037`).
+# Duplicated here rather than parsed out of the SQL because the migrations are the source of truth
+# and this is the assertion against them.
+#
+# **One constant, not one per table.** There is no coherent deployment in which two vector columns
+# in the same database have different widths: they are all written from `embedding_dim`, by one
+# provider seam, and compared to queries embedded by that same seam. A second constant would be the
+# same fact written twice, which is how the two come to disagree
+# (`D-2026-08-05-one-rule-in-three-places-is-three-rules`).
+SCHEMA_VECTOR_DIM = 1536
 
 # The retrieve sources backed by `note_index`. Both of them, not just `vector`: `reindex_notes`
 # embeds and upserts every row it writes regardless of which half will read it, so a `lexical`-only
