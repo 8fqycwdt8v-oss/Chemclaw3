@@ -96,11 +96,15 @@ class EntraSettings(BaseSettings):
     # `groups` set beside `roles`, checked in its own places) would be the same rule written
     # twice, which is how it comes to be enforced in one place and not the other.
     #
-    # Off by default because it needs the tenant to emit the optional claim, and because the
-    # values are group *object-ids* — a gate configured against them reads as GUIDs. Where the
-    # tenant instead assigns the group to an app role, that arrives as a normal `roles` value
-    # and nothing here is needed at all. Both wirings therefore work, and neither needs a second
-    # code path.
+    # Each claim joins that set **namespaced** with `core.identity_context.GROUP_ROLE_PREFIX`, so a
+    # gate configured against a group names `group:<claim value>` and not the bare value — the
+    # prefix is what stops a directory group from being read as the app role of the same name. A
+    # tenant usually emits object-ids, so such a gate reads as a prefixed GUID;
+    # `groupMembershipClaims` can also emit names, which is precisely why the namespace exists.
+    #
+    # Off by default because it needs the tenant to emit the optional claim. Where the tenant
+    # instead assigns the group to an app role, that arrives as a normal `roles` value and nothing
+    # here is needed at all. Both wirings therefore work, and neither needs a second code path.
     entra_group_claims_as_roles: bool = False
 
     @property

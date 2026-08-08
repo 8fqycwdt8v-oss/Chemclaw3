@@ -3,6 +3,41 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the pluggable vector store (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The seam ships with a
+Qdrant adapter proven offline against a fake client; these are the edges it could not close.
+
+- [ ] **Nothing has run against a real Qdrant** — [M]. The adapter is exercised against a fake
+      client *and* a fake `qdrant_client.models`, which is a claim about the calls it makes and not
+      about a server accepting them. Unverified against a live instance: that `query_points` returns
+      `.points` on the pinned client version, that a `MatchAny` filter over a large `any:` list
+      performs, that the collection's distance is actually cosine (the adapter documents this as a
+      requirement and cannot enforce it), and that UUIDv5 point ids round-trip as expected.
+      *Trigger:* a cluster with Qdrant reachable — the same shape as the warehouse ELN connector's
+      own "only the tenant is missing" row.
+
+- [ ] **A filtered search builds its eligibility scope in memory** — [S]. `_eligible_documents`
+      selects every matching `doc_id` from `document_files` and sends the set to the store. Bounded
+      in practice by what a filter is *for* — a tag exists to narrow — and unbounded in the code: a
+      deployment whose commonest query is a broad tag over a million-document corpus will feel it.
+      Deliberate, because the alternative is denormalizing tags onto the chunk payload, which is a
+      correctness regression (the ADR's §3), not merely a different trade.
+      *Trigger:* a real corpus where a filtered query's scope query shows up in the latency budget.
+
+- [ ] **`note_index` is still pgvector-only** — [M]. The seam was built for the document corpus and
+      the note index was deliberately not moved: it has an open item of its own (no embedding-model
+      identity, no chunking — see below), any migration is a full re-embed anyway, and generalizing
+      to a second consumer before the first has run against a live server would be designing against
+      a guess. *Trigger:* the document corpus is running on an external store, and the note index's
+      own item is being closed anyway.
+
+- [ ] **The external index's SQL is unexercised** — [S]. `ExternalVectorDocumentIndex` overrides four
+      methods, and the three that touch Postgres (`store_embeddings`, `prune_stale` with its
+      `RETURNING`, `_resolve`'s `unnest` join) run only where a database does. The offline suite
+      covers the seam, the adapter and the point-id contract; these statements are covered by the
+      Postgres-marked tests, which skip in the sandbox. *Trigger:* the first run against `make up`.
+
 ## Open — Left by the Bayesian-optimization audit (2026-08-08)
 
 Record: `docs/decisions/D-2026-08-08-a-category-has-no-outside.md`. Two defects fixed and eight

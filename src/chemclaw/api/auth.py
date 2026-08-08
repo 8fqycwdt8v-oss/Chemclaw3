@@ -27,19 +27,15 @@ from pydantic import BaseModel, Field
 
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
 
 logger = logging.getLogger(__name__)
 
-# What a group-derived entitlement is named, so it can never collide with an app role.
-#
-# Entra app roles are values the API's own app registration defines; group claims are values the
-# *directory* defines, and a tenant may emit them as object-ids or as names
-# (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`, …). Merged into one
-# flat set, a directory group called `process-chemist` is indistinguishable from the app role of
-# that name — so enabling `entra_group_claims_as_roles` to give one file share its read entitlement
-# would also widen every write-tool and skill gate. The prefix keeps the two namespaces apart;
-# `docs/guides/sharedrive-concept.md` documents it as what a group-gated `required_roles` holds.
-GROUP_ROLE_PREFIX = "group:"
+# Re-exported, not defined here: the prefix is part of the role vocabulary `core.identity_context`
+# owns, and the manifests and refusal messages that teach an operator how to write a group-gated
+# entitlement have to name the same string. Imported under its own name so `auth.GROUP_ROLE_PREFIX`
+# keeps resolving for anything that already reads it from this module.
+__all__ = ["GROUP_ROLE_PREFIX", "AuthError", "Principal", "require_principal", "validate_token"]
 
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.

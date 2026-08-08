@@ -78,8 +78,9 @@ enforcement that matches reality is not per-file ACLs but: *a caller not in the 
 nothing from this source at all.* `ShareDocumentRetriever._entitled` checks the binding's
 `required_roles` against the turn's roles — the one entitlement vocabulary `authz.py`,
 `skill_access.py` and every manifest gate already share. An AD group reaches it either by being
-assigned to an Entra app role, or as a group object-id under
-`CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES`.
+assigned to an Entra app role, or — under `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES` — as its group
+claim namespaced with `core.identity_context.GROUP_ROLE_PREFIX`. So a group-gated binding names
+`group:<claim value>`, never the bare object-id, which lands in no role set and matches nothing.
 
 A **gated** share refuses when there is no identity to check (`require_actor`'s reject-if-absent
 rule, applied to a corpus). An **ungated** one has nothing to verify and needs no actor — the

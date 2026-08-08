@@ -32,9 +32,15 @@ config:
     mount: /mnt/sharedrive
 
     # The entitlement the AD group grants. Matched against the turn's roles, which carry Entra app
-    # roles — and, with `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`, group object-ids as well. So
-    # either tenant wiring works: assign the AD group to an app role, or emit the `groups` claim
-    # and name the group's object-id here. A caller without it gets nothing from this source.
+    # roles verbatim — and, with `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`, each group claim
+    # prefixed `group:`. So either tenant wiring works, but they are written differently here:
+    #
+    #   app role    -> chemclaw.sharedrive.reader   (the value below)
+    #   group claim -> group:<object-id or name>    (prefixed — the bare value matches nothing)
+    #
+    # The prefix is not decoration: this same role set gates every write tool and skill, so an
+    # unprefixed group value would be indistinguishable from an app role of that name. A caller
+    # without the entitlement gets nothing from this source — not a filtered list, nothing.
     required_roles: [chemclaw.sharedrive.reader]
 
     # One entry per subtree worth indexing. Naming subtrees rather than the whole mount is what

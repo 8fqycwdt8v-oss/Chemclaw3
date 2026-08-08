@@ -49,6 +49,11 @@ _BAD_DATA_TYPES = [
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
+    # A vector store that cannot be *built* as configured: the client package is not installed, or
+    # the provider names no adapter. Not `VectorStoreError`, which is the store being unreachable —
+    # that one is a `SubsystemUnavailableError` and must stay retryable, since the identical call
+    # succeeds once the store is back. No retry installs a package.
+    "VectorStoreConfigError",
     "TemplateError",
     "UnresolvedReference",
     "ProfileError",

@@ -274,6 +274,11 @@ def require_schema_vector_width() -> None:
     Raises:
         DocumentShareError: `embedding_dim` disagrees with the migrated column width.
     """
+    # Inert wherever the vectors do not live in that column. An external store's deployment may
+    # legitimately run a 768-wide model, and refusing it over a column nothing writes would be this
+    # check inventing a constraint instead of reporting one.
+    if settings.vector_store_provider != "pgvector":
+        return
     if settings.embedding_dim != SCHEMA_VECTOR_DIM:
         raise DocumentShareError(
             f"embedding_dim={settings.embedding_dim} disagrees with the document_chunks vector "
@@ -527,7 +532,11 @@ _ELIGIBLE = (
 )
 # The citation, resolved in the same statement: the smallest matching path. Deterministic, so a
 # repeated question cites the same file rather than alternating between copies.
-_CITATION = (
+#
+# Public because `external_index.py` resolves its hits with the identical rule after searching an
+# external store. Two spellings of "which path does this content get cited as" would be two
+# citation policies, and they would diverge the first time either was tuned.
+CITATION_SQL = (
     "(SELECT min(f.path) FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
     "AND f.chunking_key = c.chunking_key "
     "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
@@ -548,7 +557,7 @@ class PostgresDocumentIndex:
 
     def __init__(self, dsn: str | None = None) -> None:
         """Bind to the configured DSN and the configured embedding width."""
-        require_schema_vector_width()
+        self._require_vector_column()
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         width = settings.embedding_dim
         self._upsert_file = (
@@ -616,7 +625,7 @@ class PostgresDocumentIndex:
         self._dense = (
             "SELECT doc_id, ordinal, content, coordinate, score, path FROM ("
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
-            f"1 - (c.embedding <=> %(q)s::vector({width})) AS score, {_CITATION}"
+            f"1 - (c.embedding <=> %(q)s::vector({width})) AS score, {CITATION_SQL}"
             "FROM document_chunks c WHERE c.embedding IS NOT NULL "
             f"AND 1 - (c.embedding <=> %(q)s::vector({width})) > 0 AND {_ELIGIBLE}"
             f"ORDER BY c.embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
@@ -624,11 +633,31 @@ class PostgresDocumentIndex:
         )
         self._lexical = (
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
-            f"ts_rank(c.lexeme, query) AS score, {_CITATION}"
+            f"ts_rank(c.lexeme, query) AS score, {CITATION_SQL}"
             "FROM document_chunks c, websearch_to_tsquery('english', %(q)s) AS query "
             f"WHERE c.lexeme @@ query AND {_ELIGIBLE}"
             "ORDER BY score DESC, c.doc_id, c.ordinal LIMIT %(k)s"
         )
+
+    def _require_vector_column(self) -> None:
+        """Refuse a deployment whose `embedding_dim` cannot fit the column this index writes.
+
+        A hook rather than a direct call because it is only true of *this* index. The external-store
+        variant writes NULL into that column and reads it never, so the width it was migrated with
+        cannot reject anything — and running the check there would refuse a perfectly good 768-wide
+        deployment for a column it does not use.
+        """
+        require_schema_vector_width()
+
+    def _chunk_vector(self, chunk: ChunkRecord) -> str | None:
+        """The pgvector literal to store for this chunk, or `None` to leave the column NULL.
+
+        The one place `upsert` decides whether the embedding lands in Postgres at all. The
+        external-store variant returns `None` — `NULL::vector(N)` is valid whatever `N` is — so it
+        inherits the transaction, its ordering rationale and the file-row write without copying
+        twenty lines of it.
+        """
+        return _vector_literal(chunk.embedding)
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
@@ -693,7 +722,7 @@ class PostgresDocumentIndex:
                         "ord": chunk.ordinal,
                         "content": chunk.content,
                         "coord": chunk.coordinate,
-                        "emb": _vector_literal(chunk.embedding),
+                        "emb": self._chunk_vector(chunk),
                         "key": key,
                         "chunking": chunk.chunking_key,
                     },
@@ -864,6 +893,20 @@ class PostgresDocumentIndex:
         return await self._run(self._lexical, params)
 
 
-def default_document_index() -> PostgresDocumentIndex:
-    """The production document index — one place the retriever and the sync get their backend."""
-    return PostgresDocumentIndex()
+def default_document_index() -> DocumentIndex:
+    """The production document index — one place the retriever and the sync get their backend.
+
+    Two shapes, chosen by `vector_store_provider`. `pgvector` (the default) keeps the vectors in the
+    same statement that resolves the citation, which is the fastest arrangement and the one every
+    existing deployment runs. Any other provider composes the same Postgres catalogue with an
+    external vector store — see `external_index.py` for what moves and what deliberately does not.
+
+    The external branch is imported inside it, so a default deployment never loads the adapter and
+    never needs the client package it would ask for.
+    """
+    if settings.vector_store_provider == "pgvector":
+        return PostgresDocumentIndex()
+    from chemclaw.ingest.documents.external_index import ExternalVectorDocumentIndex
+    from chemclaw.retrieval.vectors.registry import default_vector_store
+
+    return ExternalVectorDocumentIndex(default_vector_store())

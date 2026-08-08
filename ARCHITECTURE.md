@@ -37,7 +37,7 @@ generates enters the graph through a **PR-gate**, so a human signs off before it
 | `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `safety` (hazard screening), `fingerprints` (ECFP4/DRFP + Tanimoto). No Temporal, no MCP. |
 | `kg/` | 4 (Graph) | The graph indexer, the schema and link validators, the PR-gate that writes notes. |
 | `ingest/` | — | Getting records in: `sources` is the generic `DataSource` seam, `eln` the ELN adapters hosted behind it, `documents` a mounted file share read as cited evidence (and the one home of this system's document parsers, which `agent/attachments.py` reuses). |
-| `retrieval/` | — | Reading back out: the retrievers, hybrid search, the vector index, the report harness. |
+| `retrieval/` | — | Reading back out: the retrievers, hybrid search, the vector index, the report harness, and `vectors/` — the seam that lets dense embeddings live outside Postgres (`pgvector` by default, Qdrant behind a late-bound client). |
 | `memory/` | — | The memory layers over past campaigns, interactions and failures, plus the ungated observations tier (D-161). |
 | `templates/` | — | Step templates: the manifest, registry and resolver. |
 | `evals/` | — | The eval harness and metrics. |

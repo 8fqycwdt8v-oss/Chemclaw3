@@ -10,8 +10,10 @@ split runs through this package, and `tests/test_datasource_isolation.py` holds 
 an AD-group decision; once on it, everyone sees everything. So the honest enforcement is not
 per-file ACLs — it is: *a caller who is not in the share's group gets nothing from this source at
 all.* The check is against the turn's roles, which carry Entra app roles and, when
-`entra_group_claims_as_roles` is set, group object-ids too — so an AD group reaches this whether
-the tenant assigns it to an app role or emits it as a `groups` claim.
+`entra_group_claims_as_roles` is set, each group claim namespaced with `GROUP_ROLE_PREFIX` — so an
+AD group reaches this whether the tenant assigns it to an app role or emits it as a `groups` claim.
+A group-gated binding names `group:<claim value>`; the bare object-id is not what lands in the role
+set and would match nothing.
 
 A gated share **refuses when there is no identity to check**, which is the `require_actor`
 reject-if-absent rule (`agent/authz.py`) applied to a corpus instead of a tool. An *ungated* share
