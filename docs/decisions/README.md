@@ -290,6 +290,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-08-a-degraded-check-must-not-clear-the-gate](D-2026-08-08-a-degraded-check-must-not-clear-the-gate.md) | The substitute was more generous |
 | [D-2026-08-08-a-derived-index-must-record-what-derived-it](D-2026-08-08-a-derived-index-must-record-what-derived-it.md) | A derived index must record what derived it |
 | [D-2026-08-08-a-partial-answer-must-say-so](D-2026-08-08-a-partial-answer-must-say-so.md) | Seven science defects that render as clean results |
+| [D-2026-08-08-a-private-import-of-a-type-alias-is-not-a-dependency](D-2026-08-08-a-private-import-of-a-type-alias-is-not-a-dependency.md) | A private import of a type alias is not a dependency |
 | [D-2026-08-08-a-rule-with-no-test-is-a-claim](D-2026-08-08-a-rule-with-no-test-is-a-claim.md) | The enforcement layer for rules this repository already states |
 | [D-2026-08-08-a-served-tool-is-a-reachable-tool](D-2026-08-08-a-served-tool-is-a-reachable-tool.md) | The allow-list guarded the agent, not the port |
 | [D-2026-08-08-a-slot-lives-as-long-as-its-response](D-2026-08-08-a-slot-lives-as-long-as-its-response.md) | A slot lives as long as its response, and a check that runs before the queue checks nothing |

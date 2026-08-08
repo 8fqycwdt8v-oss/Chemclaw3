@@ -89,8 +89,18 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
 
     `core/worker_http.py` and `connectors/server_entry.py` avoid this by passing `log_config=None`,
     but that only helps a process we start ourselves in Python. Sweeping the manager here covers
-    the entrypoint's `exec uvicorn` as well, and any future library that configures its own logger,
-    without either of them having to know this module exists.
+    the entrypoint's `exec uvicorn` as well, without it having to know this module exists.
+
+    **The sweep is one-shot, and an earlier version of this docstring claimed more than that.** It
+    said the sweep also covers "any future library that configures its own logger", which is false:
+    it walks `logging.Logger.manager` once, at `configure_logging()` time, so a non-propagating
+    logger created *after* that call is never reached. What makes it work for uvicorn is an
+    ordering fact rather than a general property — `uvicorn.Config.__init__` calls
+    `configure_logging()`, which runs `dictConfig`, before the app factory this module is
+    configured from. Measured on uvicorn 0.51.0: `uvicorn.error` exists with `propagate == False`
+    before the factory runs, and an end-to-end run under `CHEMCLAW_LOG_JSON=true` shows a DSN
+    password redacted in its traceback. A library that configures a logger later needs its own
+    call, or this sweep needs to become a `logging.setLoggerClass` hook.
     """
     handlers: list[logging.Handler] = list(logging.getLogger().handlers)
     # Snapshot under the logging module's own lock. `loggerDict` is mutated by `getLogger()`, and

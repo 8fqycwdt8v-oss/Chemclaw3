@@ -427,7 +427,11 @@ go red, then reverting it and watching it go green. The mutations are quoted ver
 
 - Duplicate `037` migration prefix is harmless: filename-keyed, deterministic, idempotent (tested with
   a third `037_*`).
-- All eight hand-rolled `_connection()` helpers use the pool, and every call site carries a timeout.
+- The hand-rolled `_connection()` helpers use the pool, and their call sites carry a timeout.
+  **The count was wrong and the "all" was an extrapolation**: there are 13 `def _connection` across 12
+  files (11 Postgres, 2 `Warehouse`), not eight, and the sweep inspected roughly half the population.
+  The conclusion held for every one inspected. `core/db.py` defaulting the timeout is the change that
+  makes the property structural rather than surveyed.
 - The nine Postgres stores share **structure, not code**: 23 shared 3-line blocks in ~1,500 normalized
   lines, nearly all the connection helper. A shared base would be an ORM re-implementation between
   three distinct documented correctness arguments.
@@ -436,11 +440,26 @@ go red, then reverting it and watching it go green. The mutations are quoted ver
 - Dead-code sweep clean: 880 public functions and 336 config fields checked against 1,471 files; the
   2+1 candidates are all dynamic-dispatch false positives.
 - `read_only` tool classification is honest today (all 18 tools instrumented for writes).
-- Owner-scoping matrix clean; `_is_reviewer` fails closed; the host-bind check resists every encoding.
-- Path containment in the git submitter resists traversal, symlinks, `--options` and unicode lookalikes.
+- `_is_reviewer` fails closed and the host-bind check resists every encoding. **The "owner-scoping
+  matrix clean" half is withdrawn**: two hours later, in this same campaign, `f79b249` found a live
+  cross-user report exposure — alice (`chemclaw.sharedrive.reader`) and bob (no roles) hashed to the
+  same `report-f4ae08785ba53296`, and `job_status()` applied no actor check. Fixed there. Whatever
+  method produced the clean bill did not catch a cross-tenant read, so it carries no weight for the
+  rest of the matrix, which has *not* been re-checked.
+- Path containment in the git submitter resists traversal, symlinks, `--options` and unicode
+  lookalikes — measured **before** T6 then modified `kg/git_submitter.py` (`_release_worktree` no
+  longer swallows `CancelledError`). The refutation predates the code it vouches for; the change is
+  in cleanup rather than in path handling, but this is a re-check, not a settled result.
 - Temporal **activity authorization** is sound post-D-168 — every user-reachable path that launches
   expensive work reaches `prepare_job_launch`. The real gap there is identity, not authorization.
-- Filtered-HNSW recall loss does not exist (recall@10 = 1.0000) — because the index was never used.
+- ~~Filtered-HNSW recall loss does not exist~~ — **SUPERSEDED, do re-open.** The refutation's own
+  premise ("the index was never used") is false at HEAD: T6 restored it
+  (D-2026-08-08-a-derived-index-must-record-what-derived-it), which is exactly what the Seq Scan had
+  been hiding. Measured after restoration: recall@10 = **0.116** uniform-random, and with a `within=`
+  predicate — which `GraphRetriever` **always** passes — the post-filter returns **5 of 8** rows.
+  Tracked as the `hnsw.ef_search` BACKLOG row.
 - The SQL trust boundary in `warehouse/sql.py` holds today; manifests are image-baked and unwritable.
-- Solvent domination really is fixed (Tanimoto 1.0000), despite being the repo's cautionary tale.
+- Solvent domination really is fixed: the transformation form scores Tanimoto **1.0000** where the
+  record form scores 0.7586 — the two numbers together are the result, and a bare "1.0000" reads as
+  the symptom rather than the fix.
 - `nextflow.py`'s httpx client is properly closed on every path.

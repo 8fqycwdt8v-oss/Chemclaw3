@@ -86,19 +86,6 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       *Trigger:* a sixth launch site, or the `interaction_tools` reuse-policy fix landing — whichever
       comes first; both touch the same three lines in five places.
 
-- [ ] **Pin `agent-framework-core` below the next minor** — [S].
-      Two modules still import `agent_framework._harness._loop` for `ShouldContinueCallable` and
-      `ShouldContinueResult` (`agent/loop_cap.py`, `agent/plan_gate.py`), which are measured absent
-      from the package top level in 1.11.0 — against a `>=1.11.0` requirement with no upper bound,
-      so a patch release that moves them is an `ImportError` at process start of both the front door
-      and the worker. The risk is live: `FunctionCallContent`/`FunctionResultContent` are already
-      absent from that top level. `tests/test_third_party_layering.py` pins the two by
-      `(file, symbol)` so a third fails, which is containment, not the fix. (The review counted
-      five; three turned out to be unnecessary — `todos_remaining`, the three `_mode` names and all
-      five `_compaction` names are exported publicly and are the identical objects, so those
-      imports are public now and their rows are deleted.)
-      *Trigger:* touches `pyproject.toml`, so it belongs with the next dependency change.
-
 - [ ] **Twenty-nine warn-and-degrade sites still uncounted, in three groups** — [S].
       Measured on `391b6ec^`, counting one `ast.ExceptHandler` whose subtree calls
       `.warning()`/`.warn()` and contains no `raise`: 41 such handlers across 34 modules, of which
