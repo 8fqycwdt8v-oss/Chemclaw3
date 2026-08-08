@@ -35,10 +35,47 @@ class ReportSection(BaseModel):
 
 
 class ReportRequest(BaseModel):
-    """A report to draft: a title and the sections to research."""
+    """A report to draft: a title, the sections to research, and who asked for it."""
 
     title: str = Field(min_length=1)
     sections: list[ReportSection] = Field(min_length=1)
+    # Who asked. This was the one user-launched durable job whose input dropped the actor entirely —
+    # `ConnectorJobInput.requested_by` and `TemplateRunInput.requested_by` are both `min_length=1`,
+    # while `request_development_report` called `require_actor()` and discarded the result.
+    #
+    # Two things followed. An entitlement-gated source contributes nothing to the report, because
+    # `ShareDocumentRetriever._entitled()` correctly declines when no identity is set — and
+    # `gather_section` only concatenates, so an un-entitled source is indistinguishable from one
+    # with no matches and `retrieval_failed` stays False. The chemist gets a draft that reads as a
+    # complete sweep of every internal source. And the PR-gated draft is proposed unattributed, so
+    # it does not appear in the requester's own review queue.
+    #
+    # Not `min_length=1`, because a scheduled report has no user and must stay expressible. Absent
+    # means absent; it is never a synthetic actor.
+    requested_by: str = ""
+    # Captured at launch rather than looked up at retrieval time, because there is no directory to
+    # look an actor's roles up in — the front door gets them from the validated token and they live
+    # in a contextvar for the turn. A background run has no turn, so if the roles do not travel on
+    # the request they do not exist by the time an entitlement is checked.
+    requested_roles: list[str] = Field(default_factory=list)
+
+
+class SectionRequest(BaseModel):
+    """One section to retrieve, plus the identity to retrieve it as.
+
+    A pair rather than a field on `ReportSection`, because who asked is a property of the *run* and
+    not of the section: the same section spec re-used by a scheduled report has no requester, and
+    `_report_id` deliberately does not key on the actor so two chemists asking for the same report
+    still share one run.
+
+    It exists at all because the fan-out addresses each child workflow by its argument, so an
+    identity that stops at the parent never reaches the activity that does the retrieving — which is
+    exactly where an entitlement is checked.
+    """
+
+    section: "ReportSection"
+    requested_by: str = ""
+    requested_roles: list[str] = Field(default_factory=list)
 
 
 class SynthesizedSection(BaseModel):

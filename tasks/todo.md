@@ -59,23 +59,23 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 - [x] **`auth: mode: bearer` is send-only** — nothing server-side reads `Authorization`, and
       `connector-validate` raises no objection. Either implement the check or reject the mode.
 
-## Lane T3 — Identity and authorization
+## Lane T3 — Identity and authorization — DONE except the correlation-header item (D-2026-08-08-identity-must-travel-with-the-work)
 
-- [ ] **CLI `--admin` borrows skill roles into the authz gates** — `cli/chat.py:70`. Shipped config
+- [x] **CLI `--admin` borrows skill roles into the authz gates** — `cli/chat.py:70`. Shipped config
       fails closed (36 allowed / 6 denied, 0/5 expensive). One skill-gate entry whose role name
       overlaps `entra_privileged_roles` → **42/42 allowed, all 5 expensive actions allowed**, on an
       unauthenticated terminal reachable by `oc exec`. Fix: dedicated `cli_admin_roles` (default empty).
-- [ ] **Durable-job note proposals recorded with no actor** — `durable/connector_job.py:334`.
+- [x] **Durable-job note proposals recorded with no actor** — `durable/connector_job.py:334`.
       `set_current_identity` appears in exactly one file under `durable/`, so the chemist who requested
       the job cannot see the PR opened on their behalf (`list_proposals` scopes by oid; detail 404s).
-- [ ] **The report workflow carries no requester identity at all** — `ReportRequest` has no
+- [x] **The report workflow carries no requester identity at all** — `ReportRequest` has no
       `requested_by`, unlike every other job input. A gated share contributes nothing and the draft
       reads as a complete sweep. **Corrects BACKLOG.md:17**, whose stated fix ("the workflow already
       carries it") is not applicable as written.
 - [ ] **Template-step connector calls drop the audit join key** — `connectors/identity.py:118`.
       Correlation/session contextvars are set only in `api/runner.py`, so connector rows written from a
       template step have empty `session_id`/`correlation_id`.
-- [ ] `/approve` records `cli_admin_actor`, not the run's actor — `cli/chat.py:228`. GxP sign-off names
+- [x] `/approve` records `cli_admin_actor`, not the run's actor — `cli/chat.py:228`. GxP sign-off names
       someone who took no action.
 
 ## Lane T4 — Answers that look right when they are not

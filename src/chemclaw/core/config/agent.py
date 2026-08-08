@@ -89,6 +89,24 @@ class AgentSettings(BaseSettings):
     # than a generic "admin".
     cli_admin_actor: str = "admin@localhost"
 
+    # The roles `--admin` holds. **Empty by default, and deliberately its own setting**: it used to
+    # be derived as the union of every role named in `skill_role_gates`, which is a *visibility*
+    # map — it decides which skills a chemist is shown — while `authorize_tool` and
+    # `authorize_trigger` read `tool_role_gates` and `entra_privileged_role_set`. Those are
+    # unrelated maps, and the coupling was the role *name*.
+    #
+    # Measured on the shipped chart the derivation is harmless (36 tools allowed, 6 denied, 0 of 5
+    # expensive actions). Add one skill gate whose role name an operator also put in
+    # `entra_privileged_roles` — the runbook's own remedy for a refused job, and the literal example
+    # in this file's `skill_role_gates` docstring — and the unauthenticated terminal CLI holds that
+    # role: 42 of 42 tools allowed, every expensive action allowed. Neither config edit mentions the
+    # CLI, and `uv sync` puts the `chemclaw` console script in the image, so `oc exec` reaches it.
+    #
+    # Empty means `--admin` bypasses *authentication* only. A deployment that genuinely wants a
+    # full-access local seam sets this explicitly, which is a decision someone made rather than a
+    # consequence of naming two unrelated things the same way.
+    cli_admin_roles: list[str] = Field(default_factory=list)
+
     # MAF Agent Harness (plan Phase F1) — the autonomous plan/execute backbone (the
     # Claude-Code-like experience). When `harness_enabled`, `build_agent` wires MAF's
     # `create_harness_agent` (todo list + plan/execute mode + a bounded completion loop) over

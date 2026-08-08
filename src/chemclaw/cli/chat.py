@@ -9,11 +9,19 @@ turn-taking chat (or a single scripted question) against a live model.
 Identity is the one thing that differs from production. Entra-ID auth (F4, D-043) is a front-door
 OIDC flow — it validates a browser-obtained token — and this is a terminal tool with no such token
 to resolve a real principal from. Rather than pretend, the CLI runs only in explicit **admin mode**
-(`--admin`): it bypasses auth and stamps the ambient identity (`chemclaw.core.identity_context`,
-same seam
-the front door stamps per turn) with the configured admin actor (`settings.cli_admin_actor`) and
-every role named in `settings.skill_role_gates`, so admin keeps seeing every skill regardless of how
-gates are configured. `resolve_identity` is the seam where a non-admin branch could resolve identity
+(`--admin`): it bypasses **authentication** and stamps the ambient identity
+(`chemclaw.core.identity_context`, the same seam the front door stamps per turn) with the configured
+admin actor (`settings.cli_admin_actor`) and the roles in `settings.cli_admin_roles`, which is empty
+by default.
+
+**It does not bypass authorization.** Under `entra_required` the tool gate and the expensive-trigger
+gate still apply, and an admin holding no privileged role is refused every expensive job and every
+knowledge write — measured, 3 of 20 tools and 5 of 5 expensive actions refused on the shipped
+config. That is the intended posture; a deployment wanting a full-access local seam populates
+`cli_admin_roles` deliberately. The roles used to be derived from `skill_role_gates`, a *visibility*
+map, so one overlapping role name silently made this terminal fully privileged.
+
+`resolve_identity` is the seam where a non-admin branch could resolve identity
 from some other token source in the future; today that branch fails loudly rather than silently
 running unauthenticated. Requiring the flag keeps "no authentication" a conscious choice, not a
 default — the GxP posture, in a dev tool.
@@ -52,23 +60,26 @@ def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[
     """Resolve the caller's audit actor and ambient roles — the CLI's identity seam.
 
     Returns `(actor, roles)`, stamped as the ambient identity for the whole CLI session so audit
-    attribution, the authorization gate, and role-scoped skill visibility all see it (F4). This
-    CLI has no browser OIDC token to validate, so it runs only in admin mode, holding every role
-    named in `settings.skill_role_gates` — preserving the CLI's promise of advertising every skill
-    regardless of how gates are configured.
+    attribution, the authorization gate, and role-scoped skill visibility all see it (F4). This CLI
+    has no browser OIDC token to validate, so it runs only in admin mode.
+
+    The roles come from `settings.cli_admin_roles` — empty by default, so `--admin` confers identity
+    and no entitlement. They used to be the union of `settings.skill_role_gates`'s values, which
+    coupled skill *visibility* to tool *authorization* through nothing but a shared role name.
 
     Args:
-        admin: Run in admin testing mode, bypassing Entra auth (this CLI has no token to check).
+        admin: Run in admin testing mode, bypassing Entra *authentication* (this CLI has no token
+            to check). Authorization still applies.
         actor: Override the audit actor label; defaults to `settings.cli_admin_actor`.
     """
     if not admin:
         raise SystemExit(
             "This CLI has no Entra-ID token to authenticate with (it is a terminal tool, not "
             "the front-door OIDC flow). Re-run with --admin to use the CLI unauthenticated for "
-            "testing (bypasses auth; advertises all skills)."
+            "testing (bypasses authentication, not authorization: with no CHEMCLAW_CLI_ADMIN_ROLES "
+            "set, expensive jobs and knowledge writes are still refused)."
         )
-    admin_roles = frozenset(role for roles in settings.skill_role_gates.values() for role in roles)
-    return actor or settings.cli_admin_actor, admin_roles
+    return actor or settings.cli_admin_actor, frozenset(settings.cli_admin_roles)
 
 
 def _build_cli_agent(args: argparse.Namespace, actor: str) -> Any:
@@ -144,12 +155,14 @@ async def _run(args: argparse.Namespace) -> None:
             if args.message is not None:
                 print((await converse(agent, args.message, connectors, session)).strip())
             else:
-                await _repl(agent, connectors, session)
+                await _repl(agent, connectors, session, actor)
     finally:
         reset_current_identity(identity_token)
 
 
-async def _repl(agent: Any, connectors: Sequence[Any] = (), session: Any = None) -> None:
+async def _repl(
+    agent: Any, connectors: Sequence[Any] = (), session: Any = None, actor: str = ""
+) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
@@ -179,14 +192,14 @@ async def _repl(agent: Any, connectors: Sequence[Any] = (), session: Any = None)
             return
         try:
             if prompt.lower() in _PLAN_COMMANDS:
-                print(await _plan_command(prompt, session), file=sys.stderr)
+                print(await _plan_command(prompt, session, actor), file=sys.stderr)
                 continue
             print((await converse(agent, prompt, connectors, session)).strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 
 
-async def _plan_command(prompt: str, session: Any) -> str:
+async def _plan_command(prompt: str, session: Any, actor: str) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
 
     `/approve` binds to the plan as it stands *now*, exactly as
@@ -224,9 +237,12 @@ async def _plan_command(prompt: str, session: Any) -> str:
         return "\n".join([*lines, f"[{plan_hash} — {verdict}, mode={session_mode(session)}]"])
     if plan_hash is None:
         return "there is no plan to approve yet; ask a question first"
-    await plan_approval_store().record(
-        session.session_id, plan_hash, settings.cli_admin_actor, True
-    )
+    # `actor`, not `settings.cli_admin_actor`. The session runs under whatever `--actor` resolved
+    # to, and every other identity consumer in this module reads that — so hardcoding the default
+    # made the durable approval record, which is the artifact of the "AI proposes, human signs off"
+    # line, name an identity that took no action and disagree with the audit rows for its own
+    # session.
+    await plan_approval_store().record(session.session_id, plan_hash, actor, True)
     grant_execute(session)
     return f"approved {plan_hash}; the session may now execute"
 

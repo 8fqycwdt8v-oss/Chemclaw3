@@ -6,6 +6,7 @@ retrievers and submitter swapped via the module factories (no database or git).
 """
 
 import asyncio
+from unittest import mock
 
 import pytest
 from temporalio.client import Client
@@ -13,6 +14,7 @@ from temporalio.worker import Worker
 
 import chemclaw.durable.report_workflow as report_workflow
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_actor, get_current_roles
 from chemclaw.durable.orchestrator import resolve_fan_out_limit
 from chemclaw.durable.report_workflow import (
     DevelopmentReportWorkflow,
@@ -21,7 +23,12 @@ from chemclaw.durable.report_workflow import (
     retrieve_section,
 )
 from chemclaw.retrieval.evidence import EvidenceChunk
-from chemclaw.retrieval.harness import ReportRequest, ReportSection
+from chemclaw.retrieval.harness import (
+    ReportRequest,
+    ReportSection,
+    SectionRequest,
+    SynthesizedSection,
+)
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
@@ -145,3 +152,74 @@ def test_background_worker_registers_report_workflow() -> None:
     assert ReportSectionWorkflow in BACKGROUND_WORKFLOWS  # the fan-out child must be registered too
     assert retrieve_section in BACKGROUND_ACTIVITIES
     assert propose_report in BACKGROUND_ACTIVITIES
+
+
+def test_a_report_carries_its_requester_into_retrieval() -> None:
+    """The gap: a gated source contributed nothing to a report, and the draft said so nowhere.
+
+    `retrieve_section` runs in an activity, where no identity contextvar is set unless something
+    puts one there. `ShareDocumentRetriever._entitled()` reads the ambient actor's roles and — quite
+    correctly — declines when there is no actor, returning `[]` without ever reaching the index.
+    `gather_section` only concatenates, so that outcome is indistinguishable from a source with no
+    matches, and `retrieval_failed` stays False. The chemist received a draft that read as a
+    complete sweep of every internal source while an entitlement-gated share had been skipped in
+    silence.
+
+    `ReportRequest` was the one user-launched durable job input with no actor field at all
+    (`ConnectorJobInput.requested_by` and `TemplateRunInput.requested_by` are both `min_length=1`),
+    and `request_development_report` called `require_actor()` and threw the result away.
+
+    Asserted at the activity, because that is the only place the identity has to be true — a value
+    that reaches the workflow and stops there is exactly the defect.
+    """
+    seen: list[tuple[str, frozenset[str]]] = []
+
+    async def _record(section: ReportSection, retrievers: object) -> SynthesizedSection:
+        seen.append((get_current_actor() or "", get_current_roles()))
+        return SynthesizedSection(
+            heading=section.heading, memory_layer=section.memory_layer, evidence=[]
+        )
+
+    async def _run() -> None:
+        with mock.patch.object(report_workflow, "gather_section", _record):
+            await report_workflow.retrieve_section(
+                SectionRequest(
+                    section=ReportSection(
+                        heading="Scope", query="what is known", memory_layer="evidence"
+                    ),
+                    requested_by="alice@corp",
+                    requested_roles=["chemclaw.sharedrive.reader"],
+                )
+            )
+
+    asyncio.run(_run())
+    assert seen == [("alice@corp", frozenset({"chemclaw.sharedrive.reader"}))]
+
+
+def test_a_scheduled_report_stamps_no_identity() -> None:
+    """Absent means absent — a background run must not acquire a synthetic actor.
+
+    The counterweight to the test above: stamping the requester's roles widens what a background run
+    can read, so it must happen only when there is a requester. A scheduled report has none and is
+    bounded exactly as it was before.
+    """
+    seen: list[str] = []
+
+    async def _record(section: ReportSection, retrievers: object) -> SynthesizedSection:
+        seen.append(get_current_actor() or "<none>")
+        return SynthesizedSection(
+            heading=section.heading, memory_layer=section.memory_layer, evidence=[]
+        )
+
+    async def _run() -> None:
+        with mock.patch.object(report_workflow, "gather_section", _record):
+            await report_workflow.retrieve_section(
+                SectionRequest(
+                    section=ReportSection(
+                        heading="Scope", query="what is known", memory_layer="evidence"
+                    )
+                )
+            )
+
+    asyncio.run(_run())
+    assert seen == ["<none>"]

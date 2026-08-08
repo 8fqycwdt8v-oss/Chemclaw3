@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
         build_playbook_notes,
     )
 
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
 
@@ -87,14 +88,35 @@ async def build_optimization_notes_activity() -> list[Note]:
 
 @durable_activity("background")
 @activity.defn
-async def publish_memory_note_activity(note: Note) -> str:
+async def publish_memory_note_activity(note: Note, actor: str = "") -> str:
     """PR-gate one already-built memory note; return its reference (the fan-out publish step).
 
     Any compound note the note links is minted into the same submission (STO-7). Applying that rule
     here, at the one gate every machine-written note passes through, is what keeps it out of each
     connector: a note author states the link, and the gate makes it resolve.
+
+    `actor` stamps the ambient identity for the duration of the gate, because `propose_note` records
+    a durable `NoteProposal` whose `actor` comes from `ambient_provenance()` — and no activity under
+    `durable/` stamped one, so every proposal a durable job opened was recorded with `actor=""`.
+    `list_note_proposals` scopes a non-reviewer's queue to `principal.oid` and `_visible_proposal`
+    404s the detail view, so the chemist who launched the job could not see the PR opened on their
+    behalf. That surface's own docstring gives exactly that as the reason it exists.
+
+    Empty is the honest default and stays supported: the memory-synthesis jobs are system-triggered
+    (a schedule, no user), and stamping a synthetic actor on them would make an unattributed
+    proposal look attributed. Absent means absent.
     """
-    return await propose_note(note, default_submitter(), dependencies=compound_dependencies(note))
+    if not actor:
+        return await propose_note(
+            note, default_submitter(), dependencies=compound_dependencies(note)
+        )
+    token = set_current_identity(actor, frozenset())
+    try:
+        return await propose_note(
+            note, default_submitter(), dependencies=compound_dependencies(note)
+        )
+    finally:
+        reset_current_identity(token)
 
 
 @durable_workflow("background")

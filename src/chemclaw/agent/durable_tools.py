@@ -37,6 +37,7 @@ from temporalio.service import RPCError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_roles
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
@@ -84,8 +85,8 @@ _TERMINAL = {
 def _report_id(request: ReportRequest) -> str:
     """A deterministic id for a report request, so re-asking is idempotent (D-011 discipline).
 
-    Keyed on the title *and* the section specs: two chemists asking for the same report get one
-    run, while changing a section's query is genuinely a different report.
+    Keyed on the title *and* the section specs, and deliberately **not** on `requested_by`: two
+    chemists asking for the same report get one run, which is the whole point of the id.
     """
     payload = [
         request.title,
@@ -116,9 +117,14 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         The job id to poll for progress.
     """
     authorize_trigger("request_development_report")
-    request = ReportRequest(title=title, sections=sections)
-    # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
-    require_actor()
+    # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user. Its
+    # result travels on the request rather than being discarded — see `ReportRequest.requested_by`.
+    request = ReportRequest(
+        title=title,
+        sections=sections,
+        requested_by=require_actor(),
+        requested_roles=sorted(get_current_roles()),
+    )
     client = await connect()
     workflow_id = _report_id(request)
     try:

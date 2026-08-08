@@ -15,6 +15,7 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.sources.registry import active_retrieve_sources
@@ -24,7 +25,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.retrieval.harness import (
         Report,
         ReportRequest,
-        ReportSection,
+        SectionRequest,
         SynthesizedSection,
         gather_section,
         report_note,
@@ -54,9 +55,29 @@ def default_retrievers() -> list[SourceRetriever]:
 
 @durable_activity("background")
 @activity.defn
-async def retrieve_section(section: ReportSection) -> SynthesizedSection:
-    """Retrieve one report section's evidence across the production sources."""
-    return await gather_section(section, default_retrievers())
+async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
+    """Retrieve one report section's evidence across the production sources, as the requester.
+
+    The identity is stamped here because this is where an entitlement is actually checked:
+    `ShareDocumentRetriever._entitled()` reads the ambient actor's roles, and with none set it
+    correctly declines — returning `[]` without reaching the index. `gather_section` only
+    concatenates, so that is indistinguishable from a source with no matches, and `retrieval_failed`
+    stays False. The result was a draft that read as a complete sweep of every internal source while
+    a gated share had been skipped in silence.
+
+    A report is *authored* by a user but *run* by the service, and stamping the requester's roles
+    onto a background run widens what that run can read. That is the right trade here and not a
+    general one: the sections are the requester's own question, the draft goes to them, and the
+    alternative on offer was not "read less" but "read less and say nothing about it". A scheduled
+    report has no requester, stamps nothing, and is bounded exactly as before.
+    """
+    if not request.requested_by:
+        return await gather_section(request.section, default_retrievers())
+    token = set_current_identity(request.requested_by, frozenset(request.requested_roles))
+    try:
+        return await gather_section(request.section, default_retrievers())
+    finally:
+        reset_current_identity(token)
 
 
 @durable_activity("background")
@@ -80,12 +101,13 @@ class ReportSectionWorkflow:
     """
 
     @workflow.run
-    async def run(self, section: ReportSection) -> SynthesizedSection:
+    async def run(self, request: SectionRequest) -> SynthesizedSection:
         """Retrieve the section; on activity failure, return a visible `retrieval_failed` marker."""
+        section = request.section
         try:
             return await workflow.execute_activity(
                 retrieve_section,
-                section,
+                request,
                 start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
                 retry_policy=BAD_DATA_RETRY,
             )
@@ -128,7 +150,14 @@ class DevelopmentReportWorkflow:
         """
         sections = await fan_out(
             ReportSectionWorkflow,
-            request.sections,
+            [
+                SectionRequest(
+                    section=section,
+                    requested_by=request.requested_by,
+                    requested_roles=request.requested_roles,
+                )
+                for section in request.sections
+            ],
             id_prefix="section",
         )
         report = Report(title=request.title, sections=sections)

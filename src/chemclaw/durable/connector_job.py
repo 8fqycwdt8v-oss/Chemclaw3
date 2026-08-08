@@ -331,9 +331,14 @@ class ConnectorJobWorkflow:
             # note is stamped with the run and its reason on the way through, here rather than in
             # each connector, so no bundle can forget and every merged note answers "why was this
             # done" as well as "what came out".
+            # `job.requested_by` travels with the note so the proposal is recorded against the
+            # chemist who launched the job. Without it `ambient_provenance()` yields `actor=""`,
+            # the row is invisible in that chemist's own review queue, and the PR opened on their
+            # behalf is one they cannot find — while the input carrying their identity sits one
+            # frame above, required and unused.
             await publish_note_best_effort(
                 publish_memory_note_activity,
-                [note_with_run_provenance(result.note, record)],
+                [note_with_run_provenance(result.note, record), job.requested_by],
                 label=f"{job.connector}:{job.job}",
             )
         if job.session_id:
