@@ -219,8 +219,29 @@ def test_a_job_only_bundle_with_no_server_module_is_not_a_violation() -> None:
     """`qm` serves no MCP surface at all — its capability is a Temporal workflow behind `jobs:`."""
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
-    with mock.patch(
-        "chemclaw.cli.validate_connectors.importlib.import_module",
-        side_effect=ModuleNotFoundError("no server"),
-    ):
+    absent = ModuleNotFoundError("No module named 'chemclaw.connectors.probe.server'")
+    absent.name = "chemclaw.connectors.probe.server.tools"
+    with mock.patch("chemclaw.cli.validate_connectors.importlib.import_module", side_effect=absent):
         assert _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST)) == []
+
+
+def test_a_bundle_whose_server_module_is_broken_is_reported_not_skipped() -> None:
+    """A *transitive* import failure must not read as "this bundle serves nothing".
+
+    Catching bare `ModuleNotFoundError` meant a missing rdkit — or any renamed dependency — made the
+    one rule that reads the running server pass vacuously, for exactly the bundle most likely to be
+    misbuilt. And any other import-time exception escaped `validate_connectors()` entirely, so CI
+    printed a traceback instead of a problem.
+    """
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    manifest = ConnectorManifest.model_validate(_MANIFEST)
+    missing_dep = ModuleNotFoundError("No module named 'rdkit'")
+    missing_dep.name = "rdkit"
+    for failure in (missing_dep, ImportError("cannot import name 'foo'"), AttributeError("boom")):
+        with mock.patch(
+            "chemclaw.cli.validate_connectors.importlib.import_module", side_effect=failure
+        ):
+            problems = _served_tool_problems(manifest)
+        assert len(problems) == 1, f"{failure!r} produced {problems}"
+        assert "probe" in problems[0]

@@ -118,17 +118,37 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     misconfigured deployment fails closed instead of accepting the empty string.
     """
 
-    def __init__(self, app: Any, *, token_env: str, connector: str) -> None:
-        """Bind the variable name to read per request (never the value — it may be rotated)."""
+    def __init__(self, app: Any, *, connector: str) -> None:
+        """Bind the connector name; the declared auth mode is resolved on first request."""
         super().__init__(app)
-        self._token_env = token_env
         self._connector = connector
+        self._token_env: str | None = None
+        self._resolved = False
+
+    def _declared(self) -> str | None:
+        """The env var this bundle's manifest names, resolved once, on first use.
+
+        **Lazily, and that is not an optimisation.** Resolving it in `connector_app` called the
+        `lru_cache`d `discovered()` at app-build time, which warmed that cache against whatever
+        `connectors_dir` happened to be set to *then* — so a caller that builds an app and only
+        afterwards points the registry at its own bundle (which is exactly what
+        `tests/test_connector_safety_rubric.py`'s fixture does, and what any late configuration
+        would do) found the registry serving stale contents. Building an app is not a moment that
+        should have side effects on shared state; the first request is.
+        """
+        if not self._resolved:
+            self._token_env = _declared_bearer_env(self._connector)
+            self._resolved = True
+        return self._token_env
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         """Refuse anything but `/healthz` and `/metrics` without the configured bearer token."""
         if request.url.path in ("/healthz", "/metrics"):
             return await call_next(request)
-        expected = os.environ.get(self._token_env, "")
+        token_env = self._declared()
+        if token_env is None:
+            return await call_next(request)
+        expected = os.environ.get(token_env, "")
         presented = request.headers.get("authorization", "")
         scheme, _, offered = presented.partition(" ")
         # Compared as *bytes*. `compare_digest` on `str` requires both operands to be ASCII-only and
@@ -310,11 +330,11 @@ def connector_app(
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
     app.add_middleware(CallerLogMiddleware, connector=name)
-    # Enforce whatever this bundle's own manifest says it requires. Read from the registry rather
-    # than taken as an argument, so the seven `app.py` modules stay one line each and no bundle can
-    # forget to pass it — the declaration is in the manifest and the enforcement follows it.
-    if (token_env := _declared_bearer_env(name)) is not None:
-        app.add_middleware(BearerAuthMiddleware, token_env=token_env, connector=name)
+    # Always installed; it resolves what this bundle's own manifest requires on the first request
+    # and passes straight through for `mode: none`. Read from the registry rather than taken as an
+    # argument, so the seven `app.py` modules stay one line each and no bundle can forget to wire
+    # it — the declaration is in the manifest and the enforcement follows it.
+    app.add_middleware(BearerAuthMiddleware, connector=name)
     # Added *after* `CallerLogMiddleware`: Starlette wraps in add-order with the most recently
     # added outermost, so this one now sits outside it and refuses an oversized body before any
     # handler — including the logging middleware's own `dispatch` — ever reads it (Sec-5: `/mcp`

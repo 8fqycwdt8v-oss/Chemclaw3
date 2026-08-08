@@ -410,9 +410,11 @@ def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(
     from chemclaw.connectors.server import BearerAuthMiddleware
 
     monkeypatch.setenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", "s3cret-token-value")
-    middleware = BearerAuthMiddleware(
-        app=None, token_env="CHEMCLAW_PROBE_CONNECTOR_TOKEN", connector="probe"
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
     )
+    middleware = BearerAuthMiddleware(app=None, connector="probe")
 
     async def _never_called(_request: Request) -> Response:
         raise AssertionError("the request must not reach the application")
