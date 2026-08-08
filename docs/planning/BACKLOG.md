@@ -121,6 +121,32 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       call's argument keys onto that has not been measured here, so those steps are skipped rather
       than guessed at; skill tools are MAF's and not knowable offline at all.
       *Trigger:* the first template whose step calls another template's launcher.
+## Open — Left by the science lane of the 2026-08-08 review campaign
+
+Record: `docs/decisions/D-2026-08-08-a-partial-answer-must-say-so.md`. Seven defects fixed; these
+are what that change deliberately did not do.
+
+- [ ] **`peroxide-with-ketone` still misses an inorganic peroxide salt** — [M]. `rules.yaml`'s
+      `left` arm is `[OX2H][OX2H]`, so `Na2O2 + acetone` raises only `peroxide` where
+      `H2O2 + acetone` raises both (measured). It is the same coordination gap the
+      `oxidizer-with-reductant` fix closed, but the rule's explanation and citation name *hydrogen
+      peroxide* forming acetone peroxide specifically, so widening the pattern alone would make the
+      stated reason false for the molecules newly matched. **Trigger**: a process chemist confirms
+      that an inorganic peroxide plus a ketone carries the same TATP-formation hazard, and supplies
+      the citation; then widen the pattern *and* the prose together.
+- [ ] **Three campaign ids moved once; a deployment with `bo_campaigns` rows needs a note** — [L].
+      `campaign_id_for` now canonicalizes the parameter and category order, so a campaign declared
+      in unsorted order answers to the id its sorted spelling already carried. Both ids are pinned
+      in `tests/test_bo_campaign_record.py`. **Trigger**: before the first production deploy that
+      carries an existing `bo_campaigns` table — either re-map the rows by recomputing
+      `campaign_id_for` over the stored `problem` JSONB, or accept the orphans and say so in the
+      release note. No live tenant exists today, which is why this is not a migration.
+- [ ] **`expect_pass` is per case, not per metric** — [L]. `inert_demonstrations()` asserts that at
+      least *one* gated metric of a demonstration fails, which is as strong as the case-level flag
+      allows: a case with two gated metrics whose second one goes inert is still invisible. No
+      shipped case needs the finer grain (`retrieval-cross-coupling-literal-miss` is the only
+      multi-metric demonstration and its passing metric is the point). **Trigger**: the first case
+      that declares two metrics both meant to fail.
 
 ## Open — Left by the mounted-document-share build (2026-08-06)
 

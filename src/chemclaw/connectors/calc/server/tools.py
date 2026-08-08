@@ -423,8 +423,9 @@ async def calculator_trust(property_name: str) -> Calibration:
     has run about 0.4 log units low over 18 measurements" is a far more useful caveat than a generic
     "predictions are uncertain".
 
-    Read `n` first. Below the configured minimum the figures are not yet meaningful — say the
-    calculator has not been calibrated rather than quoting a bias from three points.
+    **Read `verdict` first**, then `n`. A disabled ledger, an empty one and too few points are all
+    "the accuracy is unknown", never "the calculator is accurate" — and the figures are `None`
+    rather than 0.0 in those states so a zero cannot be misread as a measurement.
     `uncertainty_coverage` is the subtle one: a low value means the stated error bars are too
     narrow, so the *uncertainty* is misleading even when the values look close.
 

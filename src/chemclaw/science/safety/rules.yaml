@@ -151,7 +151,12 @@ structural:
 # least one component matches `left` and a different component matches `right`.
 incompatible_pairs:
   - id: oxidizer-with-reductant
-    left: "[$([Cl;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([Mn;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([OX2][OX2]),$([#6][OX2][NX3+](=[OX1])[OX1-])]"
+    # The peroxide arm is `[OX2,OX1-][OX2,OX1-]`, the same widening the structural `peroxide`
+    # rule carries and for the same molecule: an inorganic peroxide salt writes its oxygens as
+    # one-coordinate anions, so the two-coordinate-only form left `Na2O2 + NaBH4` raising only
+    # `peroxide` where `H2O2 + NaBH4` raised this rule as well. A rule and its structural twin
+    # must be widened together — half a fix reads exactly like a clean screen.
+    left: "[$([Cl;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([Mn;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([OX2,OX1-][OX2,OX1-]),$([#6][OX2][NX3+](=[OX1])[OX1-])]"
     right: "[$([AlH4-]),$([BH4-]),$([H-]),$([NX3;H2,H1;!$(NC=O)][NX3;H2,H1;!$(NC=O)])]"
     severity: high
     explanation: >-

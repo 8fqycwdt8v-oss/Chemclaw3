@@ -159,7 +159,15 @@ def test_a_coefficient_count_mismatch_is_refused() -> None:
 
 
 def test_an_unconstrained_problem_keeps_the_campaign_id_it_had() -> None:
-    """`constraints` enters the identity only when non-empty (the W3 rule, one field on)."""
+    """`constraints` enters the identity only when non-empty (the W3 rule, one field on).
+
+    The literal is the same `continuous-only` shape `tests/test_bo_campaign_record.py` pins, and it
+    moved there for the same reason: `campaign_id_for` now sorts the parameter list, and this shape
+    is written unsorted, so it landed on the id its sorted spelling already carried
+    (D-2026-08-08-a-partial-answer-must-say-so; the pre-canonicalization id was
+    `campaign-6958b7edaa261c83`). What this test asserts is unaffected — an empty `constraints`
+    list still contributes nothing.
+    """
     unconstrained = OptimizationProblem(
         parameters=[
             ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
@@ -167,7 +175,7 @@ def test_an_unconstrained_problem_keeps_the_campaign_id_it_had() -> None:
         ],
         objectives=[Objective(name="yield", direction="maximize")],
     )
-    assert campaign_id_for(unconstrained) == "campaign-6958b7edaa261c83"
+    assert campaign_id_for(unconstrained) == "campaign-a97f5dd910a2cc79"
 
 
 def test_adding_a_constraint_makes_it_a_different_campaign() -> None:

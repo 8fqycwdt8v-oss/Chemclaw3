@@ -48,25 +48,30 @@ logger = logging.getLogger(__name__)
 ObservationStatus = Literal["open", "promoted", "retired"]
 ObservationOrigin = Literal["corpus-mining", "interaction"]
 
-# Accumulate rather than replace: a second run that sees the same finding backed by another
-# reaction must raise its support, not restate it. Postgres has no array-union operator, so the
-# union is spelled out — `array_agg(DISTINCT ...)` over the concatenation, ordered so the stored
-# value is stable and a no-op run produces a byte-identical row.
+# **A run is authoritative for the rows it names.** Evidence and projects are replaced, not unioned
+# with what is already stored, because a mining run sees the whole corpus (`all_reactions()` reads
+# from `datetime.min`) and therefore reports an observation's *complete* membership every pass.
+#
+# The union this replaces could only ever grow, so a member that left the cluster stayed forever: a
+# reaction re-assayed SUCCESS is dropped by `mine_corpus` before fingerprinting, yet its note id
+# remained in `evidence_note_ids` and kept counting toward `support`. Proved end to end — an
+# observation crossed the promotion threshold on three notes while its own refreshed statement said
+# "failed in 2 runs across 2 projects", so the generated PR body contradicted itself in consecutive
+# paragraphs and cited a documented success as evidence of failure. `retire_stale` cannot reach it
+# either, because the row is still being re-observed.
+#
+# Accumulation is unaffected and simply moves to where it belongs: the miner sees more, so the row
+# it reports holds more. What is lost is the ability of a *partial* caller to top up a row, which
+# nothing does — and which is exactly the semantics that made retracted evidence immortal.
 _UPSERT = """
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
 ON CONFLICT (id) DO UPDATE SET
-    -- The statement restates what the accumulated evidence shows, so it is refreshed rather than
-    -- kept: a row whose evidence says three projects must not still read "two projects".
+    -- The statement restates what the current evidence shows, so it is refreshed rather than kept:
+    -- a row whose evidence says three projects must not still read "two projects".
     statement = EXCLUDED.statement,
-    evidence_note_ids = (
-        SELECT array_agg(DISTINCT e ORDER BY e)
-          FROM unnest(observations.evidence_note_ids || EXCLUDED.evidence_note_ids) AS e
-    ),
-    projects_seen = (
-        SELECT array_agg(DISTINCT p ORDER BY p)
-          FROM unnest(observations.projects_seen || EXCLUDED.projects_seen) AS p
-    ),
+    evidence_note_ids = EXCLUDED.evidence_note_ids,
+    projects_seen = EXCLUDED.projects_seen,
     last_seen = now()
 """
 
@@ -215,10 +220,13 @@ def _observation(row: tuple[Any, ...]) -> Observation:
 
 
 async def record(observations: list[Observation]) -> int:
-    """Upsert observations, accumulating support onto rows that already exist. Returns the count.
+    """Upsert observations; each one replaces the row it names. Returns the count.
 
-    Accumulating rather than replacing is what makes support mean anything across runs: the same
-    finding seen again with a different reaction behind it is more supported, not restated.
+    **The caller must pass an observation's complete evidence**, because that is what is stored —
+    see `_UPSERT`. Both miners do by construction: they read the whole corpus each pass, so the
+    cluster they emit *is* the current membership. Support still accumulates across runs; it now
+    tracks the corpus in both directions, so a reaction the record has since retracted stops
+    counting instead of backing a promotion forever.
     """
     if not observations:
         return 0

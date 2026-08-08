@@ -22,14 +22,21 @@ measurement of the same thing meets it without a second naming scheme.
   answer is miscalibrated in a way that makes its uncertainty actively misleading, which is worse
   than reporting none.
 
-**Deliberately advisory.** Nothing here changes a prediction. Recording is best-effort and a
+**Deliberately advisory.** Nothing here changes a prediction. *Recording* is best-effort and a
 calibration failure never fails a calculation — a broken ledger must degrade the *advice about*
 predictions, never the predictions themselves.
+
+**Reading is not.** The rule above is about the write that rides along with a calculation; it was
+also applied to the read, and there it means something else entirely. `reconciled_for` is called
+only by the two trust tools, so a swallowed read has no calculation to protect — it just answers
+"no measurement has ever missed" when the database is down. It raises now, and `Calibration`
+carries a `verdict` that separates a disabled ledger from an empty one from too few points, because
+all three used to serialize as bias/MAE/RMSE 0.0 and the ledger is **off by default**.
 """
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -101,13 +108,21 @@ class Calibration(BaseModel):
 
     `n` is reported alongside every figure because a bias computed from three points is not a bias;
     a surface that shows the number without the count invites exactly that mistake.
+
+    The three error figures are `None` rather than 0.0 when there is nothing to compute them from,
+    for the reason `uncertainty_coverage` already was: a zero bias is a *measurement*, and a
+    calculator that has never been measured must not be reported as a perfect one.
     """
 
     calc_type: str
     n: int
-    bias: float = 0.0
-    mean_absolute_error: float = 0.0
-    rmse: float = 0.0
+    # Whether the ledger is recording at all. `calibration_enabled` defaults to **False**, so a
+    # shipped deployment's answer here is "nothing is being recorded", not "nothing has missed" —
+    # and those two were the same payload.
+    enabled: bool = True
+    bias: float | None = None
+    mean_absolute_error: float | None = None
+    rmse: float | None = None
     # Fraction of observations that fell inside the prediction's stated ±1σ interval. `None` when
     # no prediction carried an uncertainty — deliberately not 0.0, which would read as "never
     # covered" rather than "never claimed".
@@ -117,7 +132,44 @@ class Calibration(BaseModel):
     @property
     def is_meaningful(self) -> bool:
         """Whether enough observations exist for the figures to mean anything."""
-        return self.n >= settings.calibration_min_observations
+        return self.enabled and self.n >= settings.calibration_min_observations
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before quoting any of these figures.
+
+        A `computed_field` and not a bare property, for the reason `FingerprintSearch.verdict` and
+        `ScreenResult.verdict` are: a property is not serialized, so the sentence explaining what
+        an all-zero payload means would never leave this process — and this was the last advisory
+        model in the package without one. A **database outage** is not among the states below
+        because it is no longer a state: `reconciled_for` raises rather than answering `[]`.
+        """
+        if not self.enabled:
+            return (
+                "CALIBRATION NOT RECORDED: the prediction ledger is disabled, so no "
+                f"{self.calc_type} prediction has ever been scored against a measurement. This is "
+                "NOT evidence that "
+                "the calculator is accurate — nothing was measured. Say the calculator's accuracy "
+                "is unknown here and that an operator must enable the ledger."
+            )
+        if self.n == 0:
+            return (
+                f"UNCALIBRATED: no measurement has yet been reconciled against a {self.calc_type} "
+                "prediction of this calculator version. Its accuracy is unknown, not good. Do not "
+                "quote a bias or an error bar from this result."
+            )
+        if not self.is_meaningful:
+            return (
+                f"PROVISIONAL: {self.n} observation(s), too few to be meaningful (the minimum is "
+                f"{settings.calibration_min_observations}). Report the count, not the figures — a "
+                "bias from a handful of points is noise."
+            )
+        return (
+            f"Measured over {self.n} observation(s) of this calculator version. Quote the figures "
+            "with the count, and check `calculator_outliers` before trusting the average on a "
+            "specific class of molecule."
+        )
 
 
 class Residual(BaseModel):
@@ -263,13 +315,16 @@ def summarize(
     pairs: list[tuple[float, float | None, float]],
     *,
     unit: str = "",
+    enabled: bool = True,
 ) -> Calibration:
     """Compute the calibration figures from `(predicted, uncertainty, observed)` triples.
 
     Pure, so the statistics are testable without a database — the same split the eval harness uses.
+    `enabled` is carried through rather than read from config here for the same reason: it is the
+    caller's fact about the ledger, and this function must stay a function of its arguments.
     """
     if not pairs:
-        return Calibration(calc_type=calc_type, n=0, unit=unit)
+        return Calibration(calc_type=calc_type, n=0, enabled=enabled, unit=unit)
     errors = [predicted - observed for predicted, _sigma, observed in pairs]
     # Only predictions that actually claimed an uncertainty can be scored for coverage; a
     # calculator that reports none is not "never covered", it made no claim to check.
@@ -286,6 +341,7 @@ def summarize(
     return Calibration(
         calc_type=calc_type,
         n=n,
+        enabled=enabled,
         bias=sum(errors) / n,
         mean_absolute_error=sum(abs(e) for e in errors) / n,
         rmse=(sum(e * e for e in errors) / n) ** 0.5,
@@ -304,19 +360,28 @@ async def reconciled_for(calc_type: str, calc_version: str) -> list[Residual]:
     measurement somebody made and typed in; the table's growth is bounded by bench work, not by
     how often the calculator runs. A cap here would silently drop measurements from the
     calibration, which is worse than the read it would protect.
+
+    **A read failure raises**, where it used to be logged and answered as `[]`. The module's
+    best-effort rule protects a *calculation* from a ledger fault — but nothing calls this during
+    a calculation. Its only callers are `calculator_trust` and `calculator_outliers`, whose entire
+    deliverable is this read, so there was no primary result the swallow was protecting: an
+    unreachable database returned an empty residual list, which the summary then rendered as
+    bias/MAE/RMSE 0.0 — a calculator that has never missed. That is the read half of
+    D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed, whose write half was fixed in
+    `record_observation` for the identical reason.
+
+    Raises:
+        Exception: whatever the database raises. The connector's error sanitizer turns it into a
+            caller-safe message; what matters is that it is not reported as a clean ledger.
     """
     if not settings.calibration_enabled:
         return []
-    try:
-        async with db.connection(
-            settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(_SELECT_RECONCILED, (calc_type, calc_version))
-                rows = await cur.fetchall()
-    except Exception:
-        logger.warning("could not read calibration for %s", calc_type, exc_info=True)
-        return []
+    async with db.connection(
+        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+    ) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_SELECT_RECONCILED, (calc_type, calc_version))
+            rows = await cur.fetchall()
     return [
         Residual(
             subject=subject,
@@ -334,8 +399,13 @@ async def calibration_for(calc_type: str, calc_version: str, *, unit: str = "") 
 
     `calc_version` is required rather than defaulted: a default would silently reproduce the pooled
     reading this exists to remove, and every caller already knows which version answered.
+
+    Raises whatever `reconciled_for` raises — see its note on why a failed read is not an empty one.
     """
     residuals = await reconciled_for(calc_type, calc_version)
     return summarize(
-        calc_type, [(r.predicted, r.uncertainty, r.observed) for r in residuals], unit=unit
+        calc_type,
+        [(r.predicted, r.uncertainty, r.observed) for r in residuals],
+        unit=unit,
+        enabled=settings.calibration_enabled,
     )

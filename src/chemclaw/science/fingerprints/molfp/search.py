@@ -111,8 +111,11 @@ async def find_substructure_matches(
     The scan is bounded to `substructure_scan_max_records` (a full-table load into the
     worker heap is the failure mode) and the result to `fingerprint_max_top_k` (a broad
     fragment like "C" matches essentially every organic molecule — an unbounded hit list
-    would flood the model context); hitting either cap logs a warning so a truncated
-    result is never silent. A pattern-fingerprint prefilter is a later optimization for
+    would flood the model context). Hitting either cap is reported **in the result**
+    (`scan_truncated`/`hits_truncated`, and the `verdict` sentence built from them), not only in
+    the log: the log is read by an operator after the fact, while the payload is what the model
+    holds when it writes the answer, and a scan the record cap cut short used to render as "this
+    is a genuine negative result". A pattern-fingerprint prefilter is a later optimization for
     large corpora (ECFP bits cannot screen substructures soundly).
 
     Each hit carries the compound note to cite (`MoleculeHit`), so a functional-group query
@@ -146,7 +149,8 @@ async def find_substructure_matches(
         raise FingerprintError(str(exc)) from exc
     cap = settings.substructure_scan_max_records
     records = await store.all_records(limit=cap)
-    if len(records) == cap:
+    scan_truncated = len(records) == cap
+    if scan_truncated:
         log.warning(
             "substructure scan hit the %d-record cap; matches may be incomplete "
             "(raise CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS or narrow the corpus)",
@@ -154,7 +158,7 @@ async def find_substructure_matches(
         )
     timeout = settings.substructure_match_timeout_seconds
     try:
-        hits = await asyncio.wait_for(
+        hits, hits_truncated = await asyncio.wait_for(
             asyncio.to_thread(_scan_for_matches, records, pattern), timeout=timeout
         )
     except TimeoutError as exc:
@@ -162,16 +166,28 @@ async def find_substructure_matches(
             f"substructure match for {query!r} exceeded {timeout}s over {len(records)} molecules; "
             "narrow the pattern (or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
         ) from exc
-    return FingerprintSearch[MoleculeHit](subject="molecule", hits=hits, index_empty=not records)
+    return FingerprintSearch[MoleculeHit](
+        subject="molecule",
+        hits=hits,
+        index_empty=not records,
+        scan_truncated=scan_truncated,
+        hits_truncated=hits_truncated,
+    )
 
 
-def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> list[MoleculeHit]:
+def _scan_for_matches(
+    records: list[FingerprintRecord], pattern: Chem.Mol
+) -> tuple[list[MoleculeHit], bool]:
     """Match `pattern` against each record, stopping at the result cap (the CPU-bound half).
 
     Split out as a plain synchronous function so it can run in a worker thread: it is the only
     part of the search that burns CPU, and keeping it separate makes the async wrapper's one
     responsibility — bounding it — obvious. A record whose stored SMILES no longer parses is
     skipped rather than aborting the scan (one bad row must not hide every real hit).
+
+    Returns the matches **and whether it stopped early**, rather than letting the caller infer
+    truncation from `len(matches) == cap`: a corpus holding exactly `cap` matches is complete, and
+    reporting it as partial is the same class of untrue statement in the other direction.
     """
     max_matches = settings.fingerprint_max_top_k
     matches: list[MoleculeHit] = []
@@ -185,5 +201,5 @@ def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> li
                     "narrow the query or raise CHEMCLAW_FINGERPRINT_MAX_TOP_K",
                     max_matches,
                 )
-                break
-    return matches
+                return matches, True
+    return matches, False

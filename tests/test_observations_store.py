@@ -1,12 +1,13 @@
 """The observations tier against a real database — the half no pure test can reach (D-161).
 
 `tests/test_observations.py` covers the miners and the model, which is where the domain rules
-live. It cannot cover the SQL, and the SQL here is not boilerplate: the upsert accumulates
-`evidence_note_ids` and `projects_seen` through correlated `array_agg(DISTINCT …)` subqueries in
-its `SET` clause, and the anti-feedback rule is a CHECK constraint. Both are the kind of thing that
-is valid Python and wrong SQL, and both are load-bearing — accumulation is what makes support mean
-anything across runs, and the constraint is the guarantee behind "an observation can never
-corroborate itself".
+live. It cannot cover the SQL, and the SQL here is not boilerplate: the upsert makes each run
+authoritative for the rows it names — `evidence_note_ids` and `projects_seen` are replaced, not
+merged with what is stored — and the anti-feedback rule is a CHECK constraint. Both are the kind
+of thing that is valid Python and wrong SQL, and both are load-bearing: replacement is what makes
+support track the corpus in *both* directions (the `array_agg(DISTINCT …)` union it replaces could
+only grow, so a reaction re-assayed SUCCESS backed a promotion forever), and the constraint is the
+guarantee behind "an observation can never corroborate itself".
 
 Skipped where no Postgres is reachable, so this is the offline sandbox's blind spot and CI's job.
 """
@@ -41,21 +42,76 @@ def _finding(statement: str = "s", **overrides: object) -> Observation:
     return Observation(**{**fields, **overrides})  # type: ignore[arg-type]
 
 
-def test_a_second_sighting_accumulates_support_rather_than_restating_it() -> None:
+def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
     """The whole reason support means anything across runs.
 
-    Same finding, different evidence: the row must end up backed by both notes and both projects.
-    If the upsert replaced instead of merging, support would measure the last run rather than the
-    corpus, and an observation could never cross a promotion threshold at all.
+    Support must follow the corpus: a finding seen again with another reaction behind it ends up
+    backed by both notes and both projects.
+
+    **This used to assert something subtly different** — that two runs reporting *disjoint*
+    evidence are unioned by the SQL. That union is what let evidence outlive the corpus, so it is
+    gone: a run is authoritative for the rows it names, and both miners emit an observation's
+    complete membership because they mine the whole corpus every pass (`all_reactions()` reads
+    from `datetime.min`). Accumulation now comes from the miner seeing more, which is the only
+    place it can come from and still mean "what the record currently shows".
     """
 
     async def _run() -> None:
         await _clean_db_or_skip()
         await store.record([_finding()])
-        await store.record([_finding(evidence_note_ids=["reaction-r2"], projects_seen=["beta"])])
+        await store.record(
+            [
+                _finding(
+                    evidence_note_ids=["reaction-r1", "reaction-r2"],
+                    projects_seen=["alpha", "beta"],
+                )
+            ]
+        )
 
         found = await store.open_observations()
         assert len(found) == 1  # one row, not two — the id is the scope
+        assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
+        assert found[0].projects_seen == ["alpha", "beta"]
+        assert found[0].support == 2
+
+    asyncio.run(_run())
+
+
+def test_a_run_drops_the_evidence_the_corpus_has_since_retracted() -> None:
+    """Support must not count a reaction that has left the cluster.
+
+    Proved end to end through the real mine → record chain: three cross-project failures make a
+    3-note observation; `ddd3` is then re-assayed a SUCCESS, so `mine_corpus` drops it before
+    fingerprinting and the next run's cluster holds two. Under the old union the row kept all
+    three — a promotion threshold crossed on a documented success, and a PR body that says
+    "failed in 2 runs across 2 projects … no successful run is in this cluster" one paragraph
+    before "supported by 3 merged notes across 3 projects".
+    """
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        await store.record(
+            [
+                _finding(
+                    evidence_note_ids=["reaction-r1", "reaction-r2", "reaction-r3"],
+                    projects_seen=["alpha", "beta", "gamma"],
+                )
+            ]
+        )
+        assert (await store.open_observations())[0].support == 3
+
+        # The next full-corpus pass no longer sees r3: it is a SUCCESS now, so it left the cluster.
+        await store.record(
+            [
+                _finding(
+                    evidence_note_ids=["reaction-r1", "reaction-r2"],
+                    projects_seen=["alpha", "beta"],
+                )
+            ]
+        )
+
+        found = await store.open_observations()
+        assert len(found) == 1
         assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
         assert found[0].projects_seen == ["alpha", "beta"]
         assert found[0].support == 2

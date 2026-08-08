@@ -96,6 +96,14 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
     # True only when the index holds nothing searchable — never a hit list that merely came back
     # short. Probed (cheaply) at the one moment it can change the meaning of the result: no hits.
     index_empty: bool = False
+    # The two ways a search can stop early, carried in the payload for the same reason
+    # `index_empty` is: a truncation known only to the log cannot reach the model that writes the
+    # answer. `scan_truncated` = not every stored record was examined (so an empty result is not
+    # evidence of absence); `hits_truncated` = the scan stopped at the result cap (so the count is
+    # a floor, not a total). Both default False: a search that examined its whole corpus is the
+    # normal case, and every other entry point leaves them so.
+    scan_truncated: bool = False
+    hits_truncated: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -110,6 +118,10 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         production callers, until a live run showed a chemist being told "no hazards detected" six
         times. The tool docstring is read once when the tool is defined; the result payload is what
         sits in the context window when the answer is written.
+
+        Truncation is answered here for the same reason emptiness is: a scan the record cap cut
+        short returned `hits: []`, `index_empty: false` and the sentence "this is a genuine
+        negative result" over a corpus whose one match it had never looked at.
         """
         if self.index_empty:
             return (
@@ -120,11 +132,26 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
                 "populate it. Do not say that nothing similar was found."
             )
         if not self.hits:
+            if self.scan_truncated:
+                return (
+                    f"SEARCH INCOMPLETE: only part of the {self.subject} index was examined "
+                    "before the scan hit its record cap, and nothing in that part matched. This "
+                    f"is NOT evidence that no such {self.subject} exists — the rest of the corpus "
+                    "was never looked at. Report the search as inconclusive and say an operator "
+                    "must raise the scan cap or narrow the corpus."
+                )
             return (
                 f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
                 "index holds records and was searched, so this is a genuine negative result."
             )
-        return f"{len(self.hits)} indexed {self.subject}(s) matched this query."
+        matched = f"{len(self.hits)} indexed {self.subject}(s) matched this query."
+        if self.scan_truncated or self.hits_truncated:
+            return (
+                f"PARTIAL RESULT: {matched} The scan stopped early "
+                f"({'record cap' if self.scan_truncated else 'result cap'}), so this is a lower "
+                "bound and further matches may exist. Do not report it as the complete set."
+            )
+        return matched
 
 
 @runtime_checkable

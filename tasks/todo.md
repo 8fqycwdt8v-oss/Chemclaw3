@@ -186,23 +186,41 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 - [x] Malformed webhook body is a 500, not a 422. Now 422 with `loc`/`msg` only — never `errors()`
       whole, which echoes the body back. The signature gate is untouched and still runs first.
 
-## Lane T8 — Science correctness
+## Lane T8 — Science correctness — DONE (D-2026-08-08-a-partial-answer-must-say-so)
 
-- [ ] **A truncated substructure scan renders as a genuine negative** — `molfp/search.py:165`. The
-      verdict string asserts "this is a genuine negative result" while the cap silently hid matches.
-      The module's own docstring says a caveat outside the payload has zero effect on the model.
-- [ ] **pKa cache key does not name the program that ran** — `science/calc/pka.py:430`. Proved the
-      un-keyed setting moves the number (5.400052 / 5.402952 / 5.335181) under a byte-identical key.
-- [ ] **Peroxide-salt fix applied to one rule, not its twin** — `safety/rules.yaml:154`. Na2O2 + NaBH4
-      raises no `oxidizer-with-reductant`; H2O2 + NaBH4 does.
-- [ ] **Calibration outage is byte-identical to a clean ledger** — zero bias/MAE/RMSE read as "never
-      measured". The write half of this exact argument was already fixed; the read half was not.
-- [ ] **Campaign id forks on parameter and category ordering** — while constraint terms *are*
-      canonicalized against precisely this failure.
-- [ ] **Observation support accumulates evidence the corpus retracted** — the generated PR body
-      contradicts itself in consecutive paragraphs and cites a documented success as evidence of failure.
-- [ ] **`eval-strict` cannot see a science gate that stops firing** — raising two thresholds to 1000
-      dropped a by-design failure and CI stayed green with `regressions=0`.
+- [x] **A truncated substructure scan reported a genuine negative** — 21-record store, cap 20, the
+      sole azide at id 900 → `hits: []` and a verdict calling it "a genuine negative result".
+      `FingerprintSearch` now carries `scan_truncated`/`hits_truncated` and the verdict reads
+      `SEARCH INCOMPLETE` / `PARTIAL RESULT`; `_scan_for_matches` reports that it stopped early
+      rather than the caller inferring it from `len == cap`.
+- [x] **The pKa cache key did not name the method** — tblite and xtb produced a byte-identical key,
+      and pyridine came back 5.400052 / 5.402952 / 5.335181 across gradient tolerances under one
+      key. `relaxation_spec()` is now the single spec construction shared by `_relaxed_energy` and
+      the key. **A second instance surfaced while fixing it**: `xtb_opt_trust_radius` was read
+      inside the optimizer loop, so it was in no key at all — measured, 0.35 vs 0.05 relax ethanol
+      to two different hashes. Now an `OptSpec` field.
+- [x] **The peroxide pair rule missed inorganic peroxides** — `Na2O2 + NaBH4` raised `peroxide`
+      only; it now also raises `oxidizer-with-reductant`. A carboxylate and a nitro group are
+      pinned as still silent.
+- [x] **A dead DSN and a disabled ledger produced identical calibration payloads** — and the
+      disabled state is the *default*, so that was the shipped deployment. `reconciled_for` raises
+      (its only callers are the two trust tools, so the swallow protected nothing) and
+      `Calibration` gained a verdict `computed_field` with `None` figures.
+- [x] **One campaign was three ids** — `[T,S]`, `[S,T]` and reversed categories. Both lists are
+      sorted in the identity payload *only*: measured, parameter order gives byte-identical
+      candidates, but category order moves the acquisition optimizer (2.1018 vs 2.0691), so the
+      surrogate keeps the caller's order.
+- [x] **A retracted observation kept its support** — proved on live Postgres: support stayed at 3
+      with a self-contradictory PR body. The upsert now replaces; support falls 3→2 and the row
+      leaves `promotable()`.
+- [x] **`eval-strict` exited 0 on an inert suite** — thresholds at 1000 silently dropped
+      `pharma-solvent-heavy`. `inert_demonstrations()` + `--strict` now exit 1 with a report line.
+
+**Refuted — the two `tests/test_pka.py` failures this campaign treated as pre-existing on `main`
+do not reproduce.** 27 passed on unaltered `main` sources (320 s) and 29 with the change (291 s).
+The pKa key cannot have been the cause either: both tests call `predict_pka` directly and never
+touch a store. The campaign's alternate hypothesis — a tblite-numerics environment difference — is
+the one left standing.
 
 ## Lane T9 — Make recurrence impossible (enforcement) — MOSTLY DONE (D-2026-08-08-a-rule-with-no-test-is-a-claim)
 

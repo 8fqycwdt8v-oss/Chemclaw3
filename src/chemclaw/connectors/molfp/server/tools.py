@@ -55,6 +55,8 @@ async def substructure_matches(query: str) -> FingerprintSearch[MoleculeHit]:
 
     **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means the index
     holds nothing and the question was not answered — not that no molecule bears the fragment.
+    `scan_truncated: true` means only part of the corpus was examined, so an empty result is
+    inconclusive; `hits_truncated: true` means the hit count is a lower bound, not a total.
     """
     return await find_substructure_matches(_store, query)
 

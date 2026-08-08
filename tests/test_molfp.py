@@ -223,16 +223,83 @@ def test_substructure_hits_are_lean_and_capped(
     asyncio.run(_run())
 
 
-def _sleeping_scan(seconds: float) -> Callable[..., list[MoleculeHit]]:
+def test_a_truncated_scan_does_not_render_as_a_genuine_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan the record cap cut short must not answer "we have no precedent for this".
+
+    The regression: with the sole azide sorted last by id and the cap set below the corpus
+    size, the scan never reached it and the payload read `hits: []`, `index_empty: false`,
+    verdict "this is a genuine negative result". The truncation went to the log only, which
+    the model never sees — the same failure `index_empty` exists to prevent, one cap over.
+    """
+    monkeypatch.setattr(settings, "substructure_scan_max_records", 20)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for i in range(20):
+            await store.add(record_for(f"{100 + i}", "CCO"))
+        await store.add(record_for("900", "CC(=O)N=[N+]=[N-]"))  # last by id, never reached
+        result = await find_substructure_matches(store, "[N-]=[N+]=N")
+        assert result.hits == [] and result.index_empty is False
+        assert result.scan_truncated is True
+        payload = result.model_dump()
+        assert payload["scan_truncated"] is True
+        assert "genuine negative" not in payload["verdict"]
+        assert "SEARCH INCOMPLETE" in payload["verdict"]
+
+    asyncio.run(_run())
+
+
+def test_a_capped_hit_list_says_the_count_is_a_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hit count is not the total when the scan stopped at the result cap.
+
+    The mirror of the truncated-scan case: `fingerprint_max_top_k` stops the scan at the
+    cap-th match, so the count is a lower bound, and the verdict has to say so in the payload.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 3)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for i in range(6):
+            await store.add(record_for(f"{100 + i}", "CCO"))
+        result = await find_substructure_matches(store, "CCO")
+        assert len(result.hits) == 3
+        assert result.hits_truncated is True and result.scan_truncated is False
+        assert "PARTIAL RESULT" in result.model_dump()["verdict"]
+
+    asyncio.run(_run())
+
+
+def test_a_complete_substructure_scan_reports_no_truncation() -> None:
+    """The common case stays unchanged: both flags false, and the verdict keeps its wording.
+
+    The counterfactual for the two tests above — without it they would also pass on a build
+    that flagged every search as partial.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        hit = await find_substructure_matches(store, "CCO")
+        assert hit.scan_truncated is False and hit.hits_truncated is False
+        assert hit.verdict == "1 indexed molecule(s) matched this query."
+        miss = await find_substructure_matches(store, "[N-]=[N+]=N")
+        assert miss.hits == [] and "genuine negative" in miss.verdict
+
+    asyncio.run(_run())
+
+
+def _sleeping_scan(seconds: float) -> Callable[..., tuple[list[MoleculeHit], bool]]:
     """A stand-in for the CPU-bound scan that blocks its thread for `seconds`, then matches nothing.
 
     A real pathological SMARTS would take minutes and is not reproducible across RDKit versions;
     what both tests need is only that the scan blocks a *thread*, which this reproduces exactly.
     """
 
-    def _scan(*_args: object, **_kwargs: object) -> list[MoleculeHit]:
+    def _scan(*_args: object, **_kwargs: object) -> tuple[list[MoleculeHit], bool]:
         time.sleep(seconds)
-        return []
+        return [], False
 
     return _scan
 

@@ -22,10 +22,13 @@ from chemclaw.science.calc.pka import (
     PkaInput,
     calc_version,
     ionisable_sites,
+    pka_cache_key,
     predict_pka,
     run_cached_pka,
 )
 from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import Structure
+from chemclaw.science.calc.xtb_opt import OptSpec
 
 
 def test_calc_version_embeds_engine_build() -> None:
@@ -339,6 +342,53 @@ def test_neither_acidic_nor_basic_raises() -> None:
     """Benzene has no proton to lose and no lone pair to gain one on."""
     with pytest.raises(ValueError, match="no acidic .* and no basic nitrogen"):
         predict_pka(PkaInput(smiles="c1ccccc1"))
+
+
+def test_the_pka_key_names_the_optimizer_that_relaxed_the_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every optimizer setting that moves the pKa must move its key (D-011).
+
+    The regression: the base branch relaxes both species through `optimize_structure`, and
+    none of that spec reached the key. Measured, the number moves — pyridine came out at
+    5.400052 / 5.402952 / 5.335181 for gradient tolerances 5e-4 / 5e-3 / 2e-2 — while the key
+    stayed byte-identical, so the second setting served the first setting's answer. `engine`
+    is the same defect from the other side: a tblite-relaxed pKa keyed as the xtb binary's.
+    """
+
+    def key_for() -> str:
+        return pka_cache_key(PkaInput(smiles="c1ccncc1")).as_str()
+
+    baseline = key_for()
+    assert baseline == key_for()  # unchanged settings, unchanged key
+    for name, value in (
+        ("xtb_opt_gradient_tolerance", 5e-3),
+        ("xtb_opt_max_steps", 7),
+        ("xtb_opt_trust_radius", 0.05),
+        ("xtb_engine", "xtb"),
+    ):
+        monkeypatch.setattr(settings, name, value)
+        assert key_for() != baseline, f"{name} does not reach the pKa cache key"
+        monkeypatch.undo()
+
+
+def test_the_optimizer_key_names_its_trust_radius(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`xtb_opt_trust_radius` is a spec field, so it is keyed by construction (D-011).
+
+    It was read straight from settings inside the optimizer's inner loop, which put it in no
+    key at all. Measured on ethanol, it moves the answer: 0.35 and 0.05 relax to different
+    geometries (`st_e868cd6fe533107f` vs `st_860015aca7be952c`) and different energies, and
+    a structure id is what every downstream key is built on.
+    """
+    structure = Structure(
+        elements=[8, 1, 1],
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.96], [0.93, 0.0, -0.24]],
+        charge=0,
+    )
+    baseline = OptSpec().cache_key(structure).as_str()
+    monkeypatch.setattr(settings, "xtb_opt_trust_radius", 0.05)
+    assert OptSpec().trust_radius == 0.05
+    assert OptSpec().cache_key(structure).as_str() != baseline
 
 
 def test_calc_version_covers_both_calibrations() -> None:

@@ -55,6 +55,8 @@ def test_bias_distinguishes_a_correctable_calculator_from_a_scattered_one() -> N
     scattered = summarize("solubility", scattered_pairs)
     assert biased.bias == pytest.approx(0.5)
     assert biased.mean_absolute_error == pytest.approx(scattered.mean_absolute_error)
+    # `bias` is `float | None` — `None` only when nothing was measured, which both of these were.
+    assert biased.bias is not None and scattered.bias is not None
     assert abs(scattered.bias) < abs(biased.bias)  # same typical error, no usable correction
 
 
@@ -84,10 +86,62 @@ def test_a_figure_from_too_few_points_is_flagged_as_not_meaningful() -> None:
 
 
 def test_an_empty_ledger_is_empty_rather_than_a_fabricated_zero_bias() -> None:
-    """Reporting bias 0.0 with n=0 would read as a perfectly calibrated calculator."""
+    """Reporting bias 0.0 with n=0 would read as a perfectly calibrated calculator.
+
+    Now enforced rather than merely asserted by equality against the same defaults: the figures
+    are `None` when there was nothing to compute them from, so the payload cannot be read as a
+    measurement of zero.
+    """
     empty = summarize("solubility", [])
     assert empty == Calibration(calc_type="solubility", n=0)
     assert not empty.is_meaningful
+    assert empty.bias is None and empty.mean_absolute_error is None and empty.rmse is None
+
+
+def test_a_calibration_says_which_of_its_four_states_it_is_in() -> None:
+    """The verdict every other advisory model in the package carries, on the one that lacked it.
+
+    Four states serialized identically before: `{"n": 0, "bias": 0.0, "mae": 0.0, "rmse": 0.0}`
+    for a disabled ledger, an empty one, and — via a swallowed error — a database outage. The
+    ledger is **off by default**, so the most common deployment was the one reporting a
+    perfectly calibrated calculator.
+    """
+    disabled = summarize("pka", [], enabled=False)
+    assert "NOT RECORDED" in disabled.verdict
+    assert "NOT RECORDED" in disabled.model_dump()["verdict"]  # a bare property never ships
+
+    empty = summarize("pka", [])
+    assert "no measurement" in empty.verdict.lower()
+    assert "NOT RECORDED" not in empty.verdict
+
+    few: list[tuple[float, float | None, float]] = [(1.0, None, 1.2)]
+    assert "too few" in summarize("pka", few).verdict.lower()
+
+    many: list[tuple[float, float | None, float]] = [
+        (1.0, None, 1.1)
+    ] * settings.calibration_min_observations
+    meaningful = summarize("pka", many).verdict
+    assert "too few" not in meaningful.lower() and "NOT RECORDED" not in meaningful
+
+
+def test_a_calibration_read_that_failed_raises_instead_of_reporting_a_clean_ledger() -> None:
+    """A database outage must not be served as "this calculator has never missed".
+
+    The write half of this argument was settled by
+    D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed; this is the read half.
+    `reconciled_for` swallowed every exception into `[]`, and the only callers of it are the two
+    trust tools whose entire deliverable *is* the ledger read — so there was no primary result
+    the swallow was protecting.
+    """
+
+    async def _run() -> None:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(settings, "calibration_enabled", True)
+            patch.setattr(settings, "postgres_dsn", "postgresql://nobody@127.0.0.1:1/none")
+            with pytest.raises(Exception, match="Postgres unreachable"):
+                await calibration_for("pka", "v1", unit="pKa")
+
+    asyncio.run(_run())
 
 
 # --- AGT-3: file ingress ----------------------------------------------------------------------
@@ -273,6 +327,8 @@ def test_one_measurement_scores_every_version(monkeypatch: pytest.MonkeyPatch) -
         assert reconciled == 2
         hi = await calibration_for("rev12-bias", "hi", unit="log S")
         lo = await calibration_for("rev12-bias", "lo", unit="log S")
+        # Both versions reconciled a row, so neither bias is the "never measured" `None`.
+        assert hi.bias is not None and lo.bias is not None
         return hi.bias, lo.bias
 
     hi_bias, lo_bias = asyncio.run(_run())
