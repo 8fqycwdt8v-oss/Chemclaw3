@@ -12,18 +12,36 @@ Deliberately scoped to the pure layer: no database, no network, no Temporal. A p
 failures need a live stack to reproduce is a flaky test, and the counterexample — the whole point —
 becomes unusable. `hypothesis` prints and replays the minimal failing input, which is the artefact
 worth having here.
+
+Three more invariants joined the beachhead (T11), each one a claim some module already makes in
+prose and no test quantified: the note serialization round-trip that `kg/render.py`'s docstring
+states as an equation, the PR-gate submission's dedup, and the budget tracker's monotonicity. The
+round-trip writes to a `tempfile` — still no service, and the counterexample still replays.
+
+The fourth candidate, "the in-memory and Postgres `find` backends agree", is deliberately *not*
+here: it needs a database, which is the one thing this file will not take.
+`tests/test_postgres_store.py::test_find_matches_the_in_memory_backend` compares them on fixed
+fixtures, and `docs/planning/BACKLOG.md` carries the generated version.
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
+from datetime import date
+from pathlib import Path
 
-from hypothesis import assume, given, settings
+import pytest
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
+from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.core.bounded import BoundedLru
+from chemclaw.core.config import settings as config
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import cited_ids, mentioned_ids
+from chemclaw.kg.note import Note, Relation, cited_ids, mentioned_ids, parse_note
+from chemclaw.kg.pr_gate import _build_submission
+from chemclaw.kg.render import render_note
 
 # JSON-native values, which is exactly what `stable_hash` documents itself as taking. Bounded in
 # size because the property is about canonicalisation, not about throughput, and an unbounded
@@ -165,3 +183,143 @@ def test_both_citation_readers_dedupe_and_keep_first_seen_order(body: str) -> No
         ids = reader(body)
         assert len(ids) == len(set(ids)), "a repeated citation must yield one id"
         assert ids == list(dict.fromkeys(ids)), "first-seen order must be preserved"
+
+
+# --- the note round trip, the equation `kg/render.py` states -----------------------------------
+
+# `Note._slug_only` bounds ids and types; generating outside it would only exercise the validator.
+_SLUGS = st.from_regex(r"\A[a-z0-9][a-z0-9._-]{0,20}\Z").filter(
+    lambda slug: ".." not in slug and not slug.endswith(".") and not slug.endswith(".lock")
+)
+
+# Bodies are generated **stripped and carriage-return-free**, and both exclusions are findings
+# rather than convenience. `python-frontmatter` strips the content it parses, so a body of `" "`
+# comes back `""`; and `Path.read_text` translates newlines, so `"a\rb"` comes back `"a\nb"`. Both
+# are normalisations of characters Markdown does not distinguish, so neither is worth fixing — but
+# `render.py` stated the round trip as an unqualified equation, and it is not one. Its docstring
+# now says which two things it is up to.
+_BODIES = st.text(alphabet=st.characters(exclude_characters="\r"), max_size=120).map(str.strip)
+
+
+# A window that is never inverted, since `TemporalWindow` refuses those at construction and this
+# property is about serialization, not about the validator.
+def _ordered_window(pair: tuple[date | None, date | None]) -> tuple[date | None, date | None]:
+    """Put a generated pair of dates the right way round; leave an open-ended one alone."""
+    start, end = pair
+    if start is None or end is None or start <= end:
+        return pair
+    return end, start
+
+
+_WINDOWS = st.tuples(st.none() | st.dates(), st.none() | st.dates()).map(_ordered_window)
+
+
+@st.composite
+def _notes(draw: st.DrawFn) -> Note:
+    """A schema-valid `Note` across every optional field, so none is silently never generated."""
+    valid_from, valid_to = draw(_WINDOWS)
+    return Note(
+        id=draw(_SLUGS),
+        type=draw(_SLUGS),
+        body=draw(_BODIES),
+        tags=draw(st.lists(st.text(min_size=1, max_size=10), max_size=3)),
+        created_by=draw(st.sampled_from(["human", "agent"])),
+        source=draw(st.none() | st.text(min_size=1, max_size=20)),
+        confidence=draw(st.none() | st.floats(min_value=0.0, max_value=1.0)),
+        valid_from=valid_from,
+        valid_to=valid_to,
+        relations=draw(
+            st.lists(
+                st.builds(Relation, rel=_SLUGS, to=_SLUGS, confidence=st.none()),
+                max_size=2,
+            )
+        ),
+    )
+
+
+@given(_notes())
+@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+def test_a_note_survives_the_write_read_round_trip(note: Note) -> None:
+    """`parse_note(write(render_note(n))) == n`, quantified rather than asserted in a docstring.
+
+    This is the graph's durability claim. Every agent-authored note reaches Git through
+    `render_note` and comes back through `parse_note`, so a field that does not survive is a fact
+    the system silently forgets between proposing it and reading it — and `exclude_none=True`
+    means an optional field that round-tripped wrongly would look like an absence rather than an
+    error. The existing tests cover one hand-written note; a generator covers every combination of
+    the nine optional fields, which is where an omission would actually hide.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "note.md"
+        path.write_text(render_note(note), encoding="utf-8")
+        assert parse_note(path) == note
+
+
+@given(
+    note=_notes(),
+    dependencies=st.lists(_notes(), max_size=5),
+    directory=st.sampled_from(["knowledge", "kg/notes"]),
+)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_a_submission_writes_each_note_once_with_its_subject_first(
+    note: Note, dependencies: list[Note], directory: str
+) -> None:
+    """One path per note, subject first — the invariant `_build_submission`'s docstring claims.
+
+    It argues that a caller "may legitimately list the same dependency twice" and that writing one
+    path twice in a commit is "at best noise and at worst two different renderings racing". Both
+    halves are quantified here, because the generator produces exactly the collisions a fixed
+    example cannot enumerate: a dependency repeated, a dependency that *is* the subject, and two
+    distinct notes that share an id and differ in body — the racing-renderings case, where the
+    first occurrence must win rather than the last.
+    """
+    submission = _build_submission(note, directory, dependencies)
+    paths = [file.path for file in submission.files]
+    assert len(paths) == len(set(paths)), "a commit that writes one path twice"
+    assert submission.files[0].path.startswith(f"{directory}/{note.type}/{note.id}")
+    assert submission.branch == f"note/{note.id}"
+
+    expected_ids = list(dict.fromkeys([note.id, *(dep.id for dep in dependencies)]))
+    assert len(paths) == len(expected_ids)
+
+
+# --- budget monotonicity: a booked turn is never unbooked ---------------------------------------
+
+
+@given(
+    turns=st.lists(st.integers(min_value=-50, max_value=500), min_size=1, max_size=25),
+    cap=st.integers(min_value=1, max_value=8),
+)
+@settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_the_budget_refusal_is_permanent_once_a_cap_is_reached(turns: list[int], cap: int) -> None:
+    """A scope that has been refused stays refused — the guard's one safety property.
+
+    The tracker is documented as best-effort about *overshoot*: concurrent turns may pass `check`
+    before any of them `record`. It is not best-effort about the other direction. A cap that
+    un-fired would let the "$400 in twenty minutes" runaway resume by itself, and nothing upstream
+    re-checks. So: once `check` raises for a session, no later `record` may make it pass again.
+
+    Negative token counts are generated deliberately — a provider's usage field is not
+    trustworthy, `_book` clamps with `max(tokens, 0)`, and a clamp that was removed would let a
+    bad usage report *refund* a session's budget.
+    """
+    patch = pytest.MonkeyPatch()
+    patch.setattr(config, "budget_enabled", True)
+    patch.setattr(config, "budget_max_turns_per_session", cap)
+    patch.setattr(config, "budget_max_tokens_per_session", 0)
+    patch.setattr(config, "budget_max_turns_per_user", 0)
+    patch.setattr(config, "budget_max_tokens_per_user", 0)
+    try:
+        tracker = BudgetTracker()
+        refused = False
+        for tokens in turns:
+            try:
+                tracker.check("s", None)
+            except BudgetExceeded:
+                refused = True
+            else:
+                assert not refused, "a refused session was admitted again by a later turn"
+            tracker.record("s", None, tokens=tokens)
+        assert refused == (len(turns) > cap)
+    finally:
+        patch.undo()

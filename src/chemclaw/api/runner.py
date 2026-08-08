@@ -834,8 +834,12 @@ def _signal_event(signal: Signal) -> Event:
     if isinstance(signal, ApprovalSignal):
         # Carries the durable hold's handle, so a surface can answer it via
         # POST /approvals/{id}/decision. The `user_input_requests` path in the turn loop emits the
-        # *other* kind of approval — a plan prompt, which has no hold and is answered by the next
-        # turn — and deliberately leaves `approval_id` empty to mark that difference.
+        # *other* kind of approval — MAF's own `function_approval_request` content, raised by a
+        # tool registered with `approval_mode="always_require"` — and leaves `approval_id` empty
+        # because there is no durable hold behind it and nothing in this deployment answers one.
+        # (The comment here used to call that path "a plan prompt … answered by the next turn".
+        # It is not: plan approval is `chemclaw.agent.plan_gate`, and it never reaches this
+        # stream.)
         return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     if isinstance(signal, ToolFailureSignal):
         return ToolFailedEvent(tool=signal.tool, message=signal.message)

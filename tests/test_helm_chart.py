@@ -12,6 +12,21 @@ Two failure modes live in that gap, and both are silent until production:
 2. **A malformed value on a real field** — this one *does* crash, at import, in every pod at once.
 
 These tests close both, offline, against the same `Settings` the pods construct.
+
+**What they read, and therefore what they cannot see.** Everything below asserts against the
+chart's *source*: `values.yaml` parsed as YAML, and the `templates/` files as text. Nothing here
+renders. So a claim of the form "the mount is read-only" is really "the string `readOnly: true`
+appears inside that helper's body" — true of a helper that wraps it in a `{{- if }}` no deployment
+satisfies, and true of one whose surrounding block never renders at all. The same holds for every
+`include "…"` count and every "this key appears only in that file" check.
+
+That is not a gap anyone can close here: `helm` is not a Python dependency and is absent from the
+sandbox this suite runs in. It is closed *in CI*, but only halfway — the `chart` job renders with
+`helm template` and pipes the result to `kubeconform`, which asks whether the YAML is schema-valid
+and never asks whether it says what these tests claim. Asserting on rendered documents needs
+`helm` in the job that runs pytest, which is a CI change rather than a test change; see
+`docs/planning/BACKLOG.md` (LIVE — "assert on rendered chart YAML"). Until then, read a green run
+here as "the template source says so", not "the cluster will see so".
 """
 
 import json

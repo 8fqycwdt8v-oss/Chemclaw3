@@ -33,3 +33,25 @@ discover, and `make db-migrate` globbed a moved directory and applied zero migra
 So: after writing or moving one of these, **break it on purpose and watch it fail** before trusting
 the green. Each of the modules above now asserts against a non-empty set explicitly, which is the
 cheap version of the same discipline.
+
+## Running on a loaded machine: `CHEMCLAW_TEST_TIMEOUT_SCALE`
+
+Every test is capped at 180 s (`pyproject.toml`), and a few compute-bound ones carry a tighter
+`@pytest.mark.timeout(...)` so a spiking optimizer names itself instead of eating the whole file's
+budget. **A marker overrides `--timeout` and `PYTEST_TIMEOUT`**, so the tightest caps were the ones
+no command line could relax — the wrong way round when the machine is busy.
+
+`CHEMCLAW_TEST_TIMEOUT_SCALE` multiplies every cap, markers included:
+
+```
+CHEMCLAW_TEST_TIMEOUT_SCALE=4 make test    # ~4x slack, every cap, same relative tightness
+```
+
+Reach for it when you see the `timeouts — these assertions never ran` section in the output. That
+section exists because a timed-out test is **not evidence about the code**: its assertions never
+ran, and reading one as a numerical failure has already cost this repository a wrong baseline that
+six agents worked against for hours. `tests/test_suite_timeouts.py` pins both the scaling and that
+section.
+
+CI does not set it (the gate runs in ~5 minutes on a dedicated runner); it is for a developer
+machine or a sandbox running several jobs at once.

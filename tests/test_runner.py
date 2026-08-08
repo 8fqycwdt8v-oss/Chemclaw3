@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession, TodoSessionStore
+from agent_framework import AgentSession, Content, TodoSessionStore
 
 import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
@@ -30,11 +30,13 @@ from chemclaw.agent.loop_cap import observe_loop_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
+    ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorEvent,
     Event,
     JobStartedEvent,
     PlanEvent,
+    TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -46,7 +48,17 @@ class _Update:
     def __init__(self, text: str = "") -> None:
         self.text = text
         self.contents: list[object] = []
-        self.user_input_requests: list[object] = []
+
+    @property
+    def user_input_requests(self) -> list[object]:
+        """Derived from `contents`, exactly as MAF's `AgentResponseUpdate` derives it.
+
+        It used to be an independent `[]` that nothing ever filled, here and in nineteen other
+        fake updates across the suite — so the runner's approval branch had never been executed by
+        any test at all. A property over `contents` means a fake carrying a real
+        `function_approval_request` reaches that branch without the fake having to know it exists.
+        """
+        return [c for c in self.contents if getattr(c, "user_input_request", False)]
 
 
 class _FakeAgent:
@@ -181,6 +193,59 @@ def _events(agent: Any) -> list[Any]:
         return [event async for event in runner.run_turn(agent, session, "run it")]
 
     return asyncio.run(_collect())
+
+
+class _ApprovalRequestingAgent:
+    """Streams a real MAF `function_approval_request` mid-turn, as a gated tool would."""
+
+    mcp_tools: list[object] = []
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
+        async def _gen() -> Any:
+            yield _Update(text="I need to run a DFT job. ")
+            update = _Update()
+            update.contents = [
+                Content.from_function_approval_request(
+                    id="appr-1",
+                    function_call=Content.from_function_call(
+                        call_id="c1", name="submit_dft_job", arguments={"smiles": "CCO"}
+                    ),
+                )
+            ]
+            yield update
+            yield _Update(text="waiting.")
+
+        return _gen()
+
+
+def test_an_approval_request_names_the_tool_it_would_run() -> None:
+    """The runner's `user_input_requests` branch, executed by a test for the first time.
+
+    Every fake update in this suite hard-coded `user_input_requests=[]`, so nothing had ever
+    reached `yield ApprovalRequestEvent(prompt=approval_prompt(request))`. Driven with the content
+    MAF actually produces — a `function_approval_request` raised by a tool registered
+    `approval_mode="always_require"` — two things showed up that a `[]` cannot:
+
+    - The stream does **not** raise. A `ValidationError` here was the hypothesis; it is refuted.
+    - The prompt was the bare fallback `"Approval requested."`, because MAF puts the subject on a
+      nested `function_call` and none of the attributes `approval_prompt` scanned are set. A
+      chemist was being asked to approve an unnamed something.
+
+    The event is also asserted to arrive *between* the tokens: an approval that lands after the
+    answer is a decision requested about work already reported.
+    """
+    events = _events(_ApprovalRequestingAgent())
+    approvals = [e for e in events if isinstance(e, ApprovalRequestEvent)]
+    assert [e.prompt for e in approvals] == ["Approve calling submit_dft_job?"]
+    tokens = [i for i, e in enumerate(events) if isinstance(e, TokenEvent)]
+    assert tokens[0] < events.index(approvals[0]) < tokens[-1]
 
 
 def test_launched_job_is_announced_to_the_streaming_turn() -> None:

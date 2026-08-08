@@ -13,20 +13,32 @@ every test; see its docstring for why that has to be autouse rather than a per-f
 
 `_free_port` is the one "ask the OS for an unused loopback port" helper, shared by every test
 that starts a real server instead of being redefined per file (Rule of Three).
+
+`pytest_collection_modifyitems` owns both wall-clock-cap adjustments: the `thread` timeout method
+for Temporal-backed modules, and `CHEMCLAW_TEST_TIMEOUT_SCALE`, which is the one knob that relaxes
+*every* cap — including the per-test markers, which no command-line flag can reach.
 """
 
 import asyncio
+import os
 import socket
 from collections.abc import Iterator
 
 import psycopg
 import pytest
+from _pytest.config import UsageError
+from _pytest.terminal import TerminalReporter
 
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.kg.submission import NoteSubmission
 from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
+
+# `pytester` runs a throwaway pytest session inside a tmp dir, which is the only way to observe
+# what a hook in *this* file does to a collected item's markers. Enabled here because pytest only
+# honours `pytest_plugins` in the rootdir conftest. Used by `tests/test_suite_timeouts.py`.
+pytest_plugins = ["pytester"]
 
 
 def _free_port() -> int:
@@ -124,7 +136,76 @@ def loopback_service_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+def timeout_scale() -> float:
+    """How much slack every per-test wall-clock cap gets on this machine (default 1.0).
+
+    Not a `Settings` field, for the reason `tests/pg.py` gives for `TEST_SCHEMA`: `core/config/` is
+    the operator-facing deployment surface and its parity test requires every field to appear in
+    `.env.example`. How loaded the machine running the tests is has nothing to do with a
+    deployment.
+
+    Read per call rather than at import so a test can set it and see the effect.
+    """
+    raw = os.environ.get("CHEMCLAW_TEST_TIMEOUT_SCALE", "1")
+    try:
+        scale = float(raw)
+    except ValueError:
+        raise UsageError(f"CHEMCLAW_TEST_TIMEOUT_SCALE must be a number, got {raw!r}") from None
+    if scale <= 0:
+        raise UsageError(f"CHEMCLAW_TEST_TIMEOUT_SCALE must be positive, got {scale}")
+    return scale
+
+
+def _base_timeout(config: pytest.Config) -> float:
+    """The cap an item would get with no marker: `--timeout` if given, else the `timeout` ini."""
+    given = config.getoption("timeout", None)
+    if given is not None:
+        return float(given)
+    ini = config.getini("timeout")
+    return float(ini) if ini else 0.0
+
+
+def _apply_timeout_scale(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Multiply every item's effective wall-clock cap by `CHEMCLAW_TEST_TIMEOUT_SCALE`.
+
+    **Why a scale and not larger constants.** A `@pytest.mark.timeout(90)` marker overrides
+    `--timeout` and `PYTEST_TIMEOUT`, so the tests with the *tightest* caps are exactly the ones a
+    loaded machine cannot relax — the inverse of what is wanted. That is not hypothetical: this
+    repository's own hardening campaign recorded two `test_pka.py` tests as pre-existing numerical
+    failures on unchanged `main` and briefed six agents to ignore them, when both were
+    `Timeout (>180.0s) from pytest-timeout` and their assertions had never run. Given
+    `--timeout=0` on the same tree and the same box, the pair passed in 1071 s. Hours of work went
+    against a false baseline, and a suite that reports red under load teaches its readers to
+    discount red.
+
+    Raising the constants instead was considered and rejected: the observed single-test runtime
+    under five concurrent agents was ~6x the cap, and that multiplier is a property of the machine,
+    not of the test. A constant chosen for a loaded box is no cap at all on an idle one, which
+    throws away what these markers are for — naming a spiking optimizer early rather than letting
+    it eat the file's whole budget (`test_bo_predict.py`, `test_bo_constraints.py` both say so).
+    Scaling keeps every cap's *ratio* to the work and moves them together.
+
+    An explicit marker is written onto every item rather than adjusting the session default,
+    because the session default is not what a marked item is held to. Prepended (`append=False`)
+    so it becomes the closest marker, and any `method=`/`func_only=` the existing marker carried is
+    copied onto the replacement — `_get_item_settings` reads them all off the *one* closest marker,
+    so dropping them would silently return a Temporal module to the `signal` method that cannot
+    reach it.
+    """
+    scale = timeout_scale()
+    if scale == 1.0:
+        return
+    default = _base_timeout(config)
+    for item in items:
+        marker = item.get_closest_marker("timeout")
+        kwargs = dict(marker.kwargs) if marker is not None else {}
+        seconds = float(marker.args[0]) if marker is not None and marker.args else default
+        if seconds <= 0:
+            continue  # 0 means "no cap"; scaling it is still no cap
+        item.add_marker(pytest.mark.timeout(seconds * scale, **kwargs), append=False)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Give Temporal-backed tests a `thread`-method timeout, because `signal` cannot reach them.
 
     `pyproject.toml` sets `timeout_method = signal` deliberately: it fails the one hung test and
@@ -145,8 +226,40 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
     Selected by module rather than by marker so a new Temporal test is covered the day it is
     written: importing `start_env_or_skip` is what makes a module able to hang this way.
+
+    `CHEMCLAW_TEST_TIMEOUT_SCALE` is applied last, after that marker exists, so the scaled
+    replacement can carry `method="thread"` forward.
     """
     for item in items:
         module = getattr(item, "module", None)
         if module is not None and hasattr(module, "start_env_or_skip"):
             item.add_marker(pytest.mark.timeout(method="thread"))
+    _apply_timeout_scale(config, items)
+
+
+def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
+    """Say plainly which failures were timeouts, because two readers already got it wrong.
+
+    `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
+    short summary was read as a numerical failure by two separate reviewers of this repository, and
+    the mistake propagated into a campaign's baseline. The difference matters more than its
+    wording suggests: a timed-out test proves *nothing* about the assertions it never reached, so
+    it is not evidence either way, whereas a failed assertion is a finding.
+
+    Printed as its own section, after the short summary, naming the knob that fixes it.
+    """
+    timed_out = sorted(
+        report.nodeid
+        for report in terminalreporter.stats.get("failed", [])
+        if "from pytest-timeout" in str(report.longrepr)
+    )
+    if not timed_out:
+        return
+    terminalreporter.write_sep("=", "timeouts — these assertions never ran", yellow=True)
+    for nodeid in timed_out:
+        terminalreporter.write_line(f"TIMEOUT {nodeid}")
+    terminalreporter.write_line(
+        "These are wall-clock caps, not assertion failures: nothing above is evidence about the "
+        "code under test. On a loaded machine re-run with CHEMCLAW_TEST_TIMEOUT_SCALE=4 (it "
+        "scales the per-test markers too, which --timeout cannot)."
+    )

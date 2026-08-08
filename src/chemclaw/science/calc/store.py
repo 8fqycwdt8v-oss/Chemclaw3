@@ -244,11 +244,22 @@ class InMemoryStore:
         Insertion order stands in for time here: this store keeps no clock, and giving it one
         would make a test's ordering depend on how fast it ran. A row with an explicit
         `created_at` still sorts by it, so a fixture that sets one gets the ordering it asked for.
+
+        Undated rows are held out of the comparison rather than given a sentinel date. They lead,
+        because in a store whose only clock is insertion order a row nobody dated is the newest
+        thing it knows — but a `datetime.max` sentinel to express that was naive while every real
+        `created_at` here is timezone-aware, so `find` raised `TypeError: can't compare
+        offset-naive and offset-aware datetimes` the moment one store held both kinds of row.
+        Partitioning states the same policy and has no sentinel to get wrong.
         """
         matched = [stored for stored in self._data.values() if _matches(stored, query)]
         matched.reverse()  # newest first, since dict order is insertion order
-        matched.sort(key=lambda s: s.created_at or datetime.max, reverse=True)
-        return matched[: query.limit]
+        undated = [stored for stored in matched if stored.created_at is None]
+        dated: list[tuple[datetime, StoredResult]] = [
+            (stored.created_at, stored) for stored in matched if stored.created_at is not None
+        ]
+        dated.sort(key=lambda pair: pair[0], reverse=True)
+        return (undated + [stored for _, stored in dated])[: query.limit]
 
 
 def _matches(stored: StoredResult, query: CalculationQuery) -> bool:

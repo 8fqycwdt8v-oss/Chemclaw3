@@ -305,42 +305,84 @@ the one left standing.
 - [ ] Two `connectors/server.py` / `caller.py` docstrings claim a per-request guarantee that
       measurement disproves (identity is frozen at MCP handshake).
 
-## Lane T11 — Tests that do not constrain behaviour (proved by stub-survival)
+## Lane T11 — tests that do not constrain behaviour
 
-Each item below was proved by mutating the implementation in a scratch clone and observing the tests
-still pass — not by reading them.
+Closed by `docs/decisions/D-2026-08-08-a-test-that-survives-the-mutation-it-names.md`. Every item
+marked done was re-proved by re-applying the exact mutation that had survived, watching the suite
+go red, then reverting it and watching it go green. The mutations are quoted verbatim in the ADR.
 
-- [ ] **Artifact eviction is tested only by grepping its SQL string** — `tests/test_artifact_eviction.py:46`.
-      All 7 tests assert substrings of `_EVICT_IDLE`/`_EVICT_TO_FIT`; the one test that calls the job
-      runs it with both triggers off, so it returns before opening a connection. **Four mutations each
-      leave all 7 green**, including one that deletes every blob in `artifact_blobs` on the first sweep,
-      and one that evicts the most expensive artifacts first — the exact failure the docstring says it
-      prevents. Fix: DB-backed tests in the shape of `test_retention.py`, which does this correctly.
-- [ ] **`compute_seconds` COALESCE in the upsert is unconstrained** — `tests/test_postgres_store.py:53`.
-      Replacing it with `EXCLUDED.compute_seconds` survives 45 tests. Every re-put then NULLs the
-      recorded cost, and eviction orders by it — so the most expensive calculations become the first
-      evicted, turning D-011 cache hits into HPC re-runs.
-- [ ] **`default_store()` may return an in-memory cache undetected** — stubbing it to `InMemoryStore()`
-      survives 56 tests. This is the identical defect class the repo already found once and wrote
-      `test_audit.py:210` for; its own artifact twin has the assertion. One line fixes it.
-- [ ] **The disabled-budget no-op holds only if both guards do** — `tests/test_budget.py:30` asserts
-      only that `check` did not raise. Deleting the guard in `record()` survives 77 tests and re-opens
-      the memory leak `BoundedLru` exists to prevent.
-- [ ] **The no-authenticated-user rejection is fully redundant** — `tests/test_authz.py:65`. The whole
-      `if actor is None: raise` block in `authorize_trigger` can be deleted with the authz suite green,
-      because the role check happens to also raise. `pytest.raises` carries no `match=`, so the two
-      refusals are indistinguishable. Add `match=` to both.
-- [ ] **The approval/user-input SSE path is never exercised** — every fake update in the repo hard-codes
-      `user_input_requests=[]`, so stubbing `approval_prompt` to `None` survives; in production that is
-      a mid-stream ValidationError at the exact moment a human approval was requested.
-- [ ] **Chart tests grep Go-template source, never rendered YAML** — `_template_text()` reads raw
-      `.yaml`/`.tpl`, so `kind: ServiceMonitor` inside a comment or a false `{{ if }}` satisfies them.
-- [ ] `InMemoryStore.find`'s `created_at` sort can be deleted; only the insertion-order fallback is
-      covered, so the two backends can disagree exactly where ordering was stated rather than implied.
-- [ ] **Widen the 9-test property beachhead** to four crisp invariants: `render_note`→`parse_note`
-      round-trip (pinned today by one example), `_build_submission` dedup permutation-invariance,
-      budget monotonicity (the axis where `+=`→`=` survived a previous run), and in-memory vs Postgres
-      `find` agreement.
+- [x] **Artifact eviction (`tests/test_artifact_eviction.py`) — 7 substring tests, 4 surviving
+      mutations.** Kept all seven (indistinguishability was the defect, not redundancy) and added
+      five live-Postgres tests that assert on *which blobs survive*. All four mutations now fail:
+      `cumulative >= 0 AND %s IS NOT NULL` (deletes every blob), `) DESC,` → `) ASC,` (evicts the
+      most expensive first), `last_access_at < now()` (idle window widened to everything), and
+      `MAX(a.compute_seconds)` without the idle divisor. The fourth needed a second attempt — the
+      first version of that test had the two ranking axes agreeing, so the tiebreaker rescued the
+      mutant and it survived; it discriminates only when cost and idle time disagree.
+      A fifth test pins that an evicted blob takes its `calculation_artifacts` link row (migration
+      019's cascade) and leaves `calculation_results` alone.
+
+- [x] **`compute_seconds` COALESCE — both of them.** `postgres_artifacts._UPSERT_LINK` (the one that
+      turns a D-011 cache hit into a re-run: a nulled cost ranks the blob at the bottom of
+      `_EVICT_TO_FIT`) and `postgres_store._UPSERT`. `compute_seconds = EXCLUDED.compute_seconds,`
+      survived 42 and 47 tests respectively; both now fail.
+
+- [x] **`default_store()` may be in-memory undetected.** One assertion mirroring
+      `test_default_artifact_store_is_postgres_backed`. `return InMemoryStore()` now fails.
+
+- [x] **Budget `record()` guard — 77 tests survived its deletion.** `test_disabled_is_a_no_op` now
+      re-reads the disabled period through an enabled tracker, which is what a deployment does (the
+      chart ships `budget_enabled: true`). Deleting `if not settings.budget_enabled: return` fails.
+
+- [x] **`authorize_trigger` no-actor rejection was indistinguishable.** `match=` added to both
+      `pytest.raises`; neither test removed. Deleting the `if actor is None:` block now fails
+      `test_no_user_is_forbidden` with a regex mismatch naming the wrong refusal.
+
+- [x] **The approval / user-input SSE path — the `ValidationError` is REFUTED, a different defect
+      found.** `_Update.user_input_requests` in `tests/test_runner.py` became a property over
+      `contents`, as MAF derives it; driven with a real `function_approval_request` the stream does
+      not raise. It did render every approval as the bare `"Approval requested."`, because MAF puts
+      the subject on a nested `function_call` and none of the attributes `approval_prompt` scanned
+      are set. Fixed to `Approve calling <name>?`. The comment justifying the empty `approval_id`
+      ("a plan prompt … answered by the next turn") was wrong and is corrected — plan approval is
+      `agent/plan_gate.py` and never reaches this stream. Not done: unifying the other nineteen
+      per-file fake updates (BACKLOG).
+
+- [~] **Chart tests grep Go-template source, never rendered YAML.** Not fixable here: `helm` is
+      absent and faking a renderer was explicitly ruled out. `tests/test_helm_chart.py`'s module
+      docstring now states the limit in the first paragraph a reader reaches — including that CI's
+      `make helm-validate` only schema-checks the render and never asserts on it. BACKLOG row with
+      trigger "a `helm` binary in the job that runs pytest".
+
+- [x] **`InMemoryStore.find` `created_at` sort — partly REFUTED, and it exposed a live crash.**
+      Both sort *directions* are already killed by existing tests (`reverse=False` fails
+      `test_an_empty_query_returns_everything_newest_first`; Postgres `DESC` → `ASC` fails
+      `test_find_matches_the_in_memory_backend` via its `limit=1` query). Only *where an undated row
+      lands* was unpinned. Writing that test found the sort key `s.created_at or datetime.max` is
+      **naive** while every real `created_at` is aware, so one store holding one dated and one
+      undated result raised `TypeError: can't compare offset-naive and offset-aware datetimes` —
+      no order at all. Sentinel removed; undated rows are partitioned out and lead.
+
+- [x] **Property beachhead widened, three of the four named invariants.** `render_note`→`parse_note`
+      round-trip (which showed `kg/render.py`'s docstring states an equation that is not one:
+      frontmatter strips the body, `read_text` normalises `\r` — docstring corrected, every
+      frontmatter field round-trips exactly), `_build_submission` dedup, budget monotonicity. The
+      fourth (in-memory vs Postgres `find` agreement) needs a database, which
+      `tests/test_properties_core.py` refuses by design — BACKLOG.
+
+- [x] **Hard `@pytest.mark.timeout` markers.** A marker overrides `--timeout` and `PYTEST_TIMEOUT`,
+      so the tightest caps were the ones no command line could relax. `CHEMCLAW_TEST_TIMEOUT_SCALE`
+      now multiplies **every** cap including the markers; `CHEMCLAW_TEST_TIMEOUT_SCALE=4 make test`
+      is the supported answer on a loaded box. Raising the constants was rejected on the
+      measurement (single-test runtime under contention was ~6x the cap, and that multiplier is a
+      property of the machine); deleting them was rejected because a runaway xTB optimisation
+      hanging CI is a real failure they catch. A `pytest_terminal_summary` hook now prints
+      `timeouts — these assertions never ran` naming each node and the knob, which is the part that
+      addresses the damage: two readers of this repository read `Failed: Timeout (>180.0s)` as a
+      numerical failure. `tests/test_suite_timeouts.py` drives a real pytest session importing the
+      real hook; both `_apply_timeout_scale(config, items)` and the `**kwargs` carry-forward (which
+      keeps `method="thread"` on Temporal modules) fail when mutated. Documented in
+      `tests/README.md`. CI does not set a scale — the gate runs in ~5 min on a dedicated runner.
 
 ## To BACKLOG with triggers (not fixed this session)
 

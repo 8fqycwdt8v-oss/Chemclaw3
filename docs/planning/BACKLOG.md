@@ -199,6 +199,44 @@ are what that change deliberately did not do.
       shipped case needs the finer grain (`retrieval-cross-coupling-literal-miss` is the only
       multi-metric demonstration and its passing metric is the point). **Trigger**: the first case
       that declares two metrics both meant to fail.
+## Open — Left by the test-evidence lane (2026-08-08, D-2026-08-08-a-test-that-survives-the-mutation-it-names)
+
+Record: `docs/decisions/D-2026-08-08-a-test-that-survives-the-mutation-it-names.md`. Nine tests that
+survived a mutation of the code they name are closed there, each with the mutation quoted. These
+three are what that lane could not close.
+
+- [ ] **The Helm chart tests assert on template *source*, never on rendered YAML** — [M].
+      Every check in `tests/test_helm_chart.py` reads `values.yaml` as YAML and `templates/*` as
+      text, so "the document share is mounted read-only" means "`readOnly: true` appears inside that
+      helper's body" — which stays true if the helper is wrapped in a `{{- if }}` no deployment
+      satisfies, or if the block around it never renders. The same holds for every `include "…"`
+      count and every "this key appears only in that file" assertion. CI *does* render (the `chart`
+      job runs `make helm-validate`), but pipes the output to `kubeconform`, which asks whether the
+      YAML is schema-valid and never whether it says what these tests claim. The fix is to render
+      once in the job that runs pytest and assert on the parsed documents; the offline suite keeps
+      the source-level checks and skips the rendered ones. Deliberately not faked with a
+      hand-rolled Go-template evaluator — that would be a second renderer to be wrong.
+      *Trigger:* a `helm` binary available in the job that runs pytest (today it is installed only
+      in the separate `chart` job, which has no `uv`).
+
+- [ ] **The in-memory and Postgres `find` backends are compared on fixed fixtures, not generated
+      ones** — [S]. `test_find_matches_the_in_memory_backend` runs five hand-written queries and
+      compares result *sets*; `_matches` (Python) and `_FIND` (SQL) express the same predicate twice
+      and nothing makes them stay equal beyond those five. The generated version belongs with the
+      other property tests, and `tests/test_properties_core.py` refuses a database on purpose ("a
+      property test whose failures need a live stack to reproduce is a flaky test"). It therefore
+      needs either a second, Postgres-backed property module or a decision that the rule bends here.
+      *Trigger:* the next time the two implementations of a filter diverge, or a new filter is added
+      to `CalculationQuery`.
+
+- [ ] **Twenty test files each define their own fake streamed update** — [S]. Each hard-codes the
+      fields the runner branches on; `user_input_requests=[]` was one, and it kept the approval
+      branch unexecuted by any test until D-2026-08-08 fixed the one fake in `tests/test_runner.py`
+      to derive it from `contents` the way MAF does. The other nineteen still assert a shape MAF
+      does not have, so the next field the runner learns to read will be invisible to all of them in
+      the same way. One shared builder in `tests/conftest.py`, mirroring `AgentResponseUpdate`,
+      would fix the class rather than the instance.
+      *Trigger:* the next runner change that reads a new attribute off a streamed update.
 
 ## Open — Left by the mounted-document-share build (2026-08-06)
 
