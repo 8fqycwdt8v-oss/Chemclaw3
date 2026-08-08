@@ -94,6 +94,27 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_audit_sink_failures_total": (
         "GxP audit records that could not be persisted (the trail is incomplete)."
     ),
+    # The durable subsystem's counterpart to `chemclaw_connectors_unreachable_total`. It did not
+    # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
+    # it reads `tool.is_connected` over connector tools and never names Temporal, so a broker
+    # outage produced no server-side signal at all at the shipped log level.
+    "chemclaw_durable_unreachable_total": (
+        "Turns whose durable-subsystem health probe failed (Temporal did not answer)."
+    ),
+    # Non-zero means the provider reported usage this process could not parse, so those turns were
+    # metered at zero. The budget guard meters what this reports, so a non-zero rate here means the
+    # runaway-cost refusal is not binding — while every dashboard shows a deployment costing
+    # nothing. Distinct from "no usage reported at all", which is legitimate and counts nothing.
+    "chemclaw_usage_unreadable_total": (
+        "Streamed usage contents that carried no readable token count (the turn metered zero)."
+    ),
+    # Non-zero means answers are being scored by the citation gate rather than the LLM judge. The
+    # two measure different things (resolvability vs faithfulness), so this is not a slow path — it
+    # is a weaker verdict, and without a counter a judge outage looked identical to a healthy
+    # deployment on every dashboard.
+    "chemclaw_verifier_degraded_total": (
+        "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
+    ),
     # Non-zero means this process's log redaction is missing the per-connector bearer tokens, for
     # as long as it runs. It is incremented once, at startup, so any non-zero value is permanent
     # for that pod and the right response is a restart after fixing the manifest — which is why it

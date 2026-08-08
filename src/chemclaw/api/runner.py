@@ -627,6 +627,18 @@ async def run_turn(
                 completed=answered,
             )
         )
+        if turn_usage.unreadable:
+            # The provider reported usage and we could not read it, which is not the same as a
+            # provider that reports none: this turn was metered at zero against a budget that is
+            # enabled by default in the chart, so the cost guard is not binding. ERROR because the
+            # remedy is a code change, and counted because a per-turn log line during an outage is
+            # noise that nobody aggregates.
+            logger.error(
+                "usage_unreadable: %d usage content(s) carried no token count; this turn metered "
+                "zero and the budget guard did not bind",
+                turn_usage.unreadable,
+            )
+            METRICS.increment("chemclaw_usage_unreadable_total", float(turn_usage.unreadable))
         if turn_usage.total:
             METRICS.increment("chemclaw_tokens_total", float(turn_usage.total), spend_labels)
         # Published separately from the total because they are priced separately (REV-10). Each is
@@ -681,10 +693,20 @@ async def _durable_subsystem_reachable() -> bool:
             settings.connector_health_timeout_seconds,
         )
     except Exception:
-        # DEBUG, not WARNING: `open_reachable` already logs and counts a degraded turn, and an
-        # outage this probe finds is reported to the chemist on the stream — logging it at
-        # attention level once per turn would bury the connector sweep's own signal under it.
+        # DEBUG stays: an outage this probe finds is reported to the chemist on the stream, and
+        # logging it at attention level once per turn would bury the connector sweep's own signal.
+        #
+        # The counter is new, and the comment that used to stand alone here was checkably false.
+        # It said `open_reachable` "already logs and counts a degraded turn" — that counter is
+        # `chemclaw_connectors_unreachable_total`, which reads `tool.is_connected` over *connector*
+        # tools and never names Temporal. Measured at the shipped `log_level=INFO` with the broker
+        # pointed at a dead port: the probe returned False, zero log lines were emitted, and
+        # `METRICS.render()` was unchanged. So every chemist was being told durable jobs were
+        # unavailable while nothing server-side said so — the dashboard read healthy until someone
+        # opened a ticket. A counter is the right instrument precisely because the log line must
+        # stay quiet: it aggregates per-turn noise into one alertable rate.
         logger.debug("the durable subsystem did not answer its health probe", exc_info=True)
+        METRICS.increment("chemclaw_durable_unreachable_total")
         return False
 
 

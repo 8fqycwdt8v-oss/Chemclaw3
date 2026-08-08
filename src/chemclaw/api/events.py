@@ -178,6 +178,13 @@ class AnswerEvent(BaseModel):
     confidence: float | None = None
     unsupported_claims: list[str] = []
     review_required: bool = False
+    # Which check produced `confidence`, when one did. `None` means verification was off.
+    #
+    # The routing flag alone cannot carry this: a degraded turn and a genuinely low-confidence turn
+    # both arrive as `review_required=True`, and a reviewer needs to know whether the judge was
+    # even reachable. It is on the wire because the surface is where "this was scored by the weaker
+    # check" has to be legible; the flag is the safety property and this is the transparency.
+    verified_by: Literal["judge", "citation-gate"] | None = None
 
 
 class ToolFailedEvent(BaseModel):

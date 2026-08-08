@@ -376,7 +376,14 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(runner_answer, "verify_turn_answer", _boom)
     answer = _answer(_run_turn())
     assert answer.text == "Yield was 90% [[reaction-a]]."
-    assert answer.confidence is None and answer.unsupported_claims == []
+    assert answer.confidence is None
+    # A check that was configured on and *crashed* must not read as one that ran and passed.
+    # It used to leave `review_required` False and `unsupported_claims` empty — byte-for-byte
+    # the event a clean verdict produces — so a verification outage was invisible to the
+    # surface and to the reviewer. The turn is still returned, which is what "never a sunk
+    # turn" meant and still means.
+    assert answer.review_required is True
+    assert answer.unsupported_claims == ["verification did not run"]
 
 
 class _CallContent:
@@ -682,7 +689,15 @@ def test_the_same_citation_is_supported_when_a_tool_in_the_turn_returned_it(
         )
     )
     assert answer.confidence == 1.0
-    assert answer.review_required is False
+    # `_offline_verification` is "verification on, judge unreachable", so this verdict came
+    # from the citation gate standing in for the judge. It scores *resolvability* — do the
+    # wikilinks name chunks this turn retrieved — not the *faithfulness* the judge scores,
+    # and measured it is the more generous of the two: the same cited-but-contradicted
+    # answer scores 1.0/supported degraded against 0.0/unsupported judged. A substitute
+    # check cannot clear the gate on behalf of the check that did not run. What this test
+    # still proves is the thing it was written for: the citation resolved, confidence 1.0.
+    assert answer.verified_by == "citation-gate"
+    assert answer.review_required is True
 
 
 def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
@@ -707,7 +722,15 @@ def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
         _CitingAgent(f"The solvent was screened [[{note_id}]].", tool_result=buried)
     )
     assert answer.confidence == 1.0
-    assert answer.review_required is False
+    # `_offline_verification` is "verification on, judge unreachable", so this verdict came
+    # from the citation gate standing in for the judge. It scores *resolvability* — do the
+    # wikilinks name chunks this turn retrieved — not the *faithfulness* the judge scores,
+    # and measured it is the more generous of the two: the same cited-but-contradicted
+    # answer scores 1.0/supported degraded against 0.0/unsupported judged. A substitute
+    # check cannot clear the gate on behalf of the check that did not run. What this test
+    # still proves is the thing it was written for: the citation resolved, confidence 1.0.
+    assert answer.verified_by == "citation-gate"
+    assert answer.review_required is True
 
 
 _METHOD_ANSWER = "Use a Kinetex C18 column at 1.0 mL/min with detection at 254 nm."

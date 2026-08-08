@@ -11,6 +11,7 @@ deployment and how their verdicts combine into the one routing flag a surface re
 
 import logging
 from collections.abc import Sequence
+from typing import Literal
 
 from chemclaw.agent.verifier import (
     promised_uncalled_tools,
@@ -52,17 +53,32 @@ async def build_answer_event(
     Neither check may sink the turn: a verifier failure degrades to the unscored answer.
     """
     confidence: float | None = None
+    verified_by: Literal["judge", "citation-gate"] | None = None
     unsupported: list[str] = []
     review = False
     if settings.verifier_enabled:
         try:
             result = await verify_turn_answer(answer, tool_outputs)
         except Exception:
-            logger.exception("answer verification failed; returning the unscored answer")
+            # A check that was configured on and did not complete must not be indistinguishable
+            # from one that ran and passed. Leaving `review` False here made a crashed verification
+            # emit the same routing flag as a clean verdict — the outer twin of the degrade defect
+            # below, with two nested guards and neither marking the result.
+            logger.exception("answer verification crashed; routing the turn to review")
+            unsupported = ["verification did not run"]
+            review = True
         else:
             confidence = result.confidence
+            verified_by = result.verified_by
             unsupported = [claim.text for claim in result.unsupported]
             review = result.confidence < settings.verifier_confidence_threshold
+            # The citation gate scores *resolvability* and the judge scores *faithfulness*, so when
+            # the judge is unreachable the substitute answers a different question — and answers it
+            # more generously: measured, the same cited-but-contradicted answer scored 1.0/supported
+            # degraded against 0.0/unsupported judged. A verdict that could not be taken must not
+            # clear the review gate on the strength of a check that was never run.
+            if result.verified_by != "judge":
+                review = True
     if settings.answer_shape_gate_enabled:
         shapes = [
             *ungrounded_parameter_shapes(answer, tool_outputs),
@@ -83,6 +99,7 @@ async def build_answer_event(
     return AnswerEvent(
         text=answer,
         confidence=confidence,
+        verified_by=verified_by,
         unsupported_claims=unsupported,
         review_required=review,
     )

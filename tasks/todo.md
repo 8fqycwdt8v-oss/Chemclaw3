@@ -78,23 +78,23 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 - [x] `/approve` records `cli_admin_actor`, not the run's actor — `cli/chat.py:228`. GxP sign-off names
       someone who took no action.
 
-## Lane T4 — Answers that look right when they are not
+## Lane T4 — Answers that look right when they are not — DONE (D-2026-08-08-a-degraded-check-must-not-clear-the-gate)
 
-- [ ] **Judge outage raises confidence to 1.0** — `agent/verifier.py:249`. A cited-but-contradicted
+- [x] **Judge outage raises confidence to 1.0** — `agent/verifier.py:249`. A cited-but-contradicted
       answer scores **1.0/supported** when the judge is down vs **0.0/unsupported** when it works, and
       `review_required` flips False. The docstring argues no flag is needed — that argument covers only
       the *uncited* branch. Fix: `verified_by` on the result, cap the deterministic gate below the
       review threshold when standing in, add `chemclaw_verifier_degraded_total`.
-- [ ] **Zero token metering silently disarms the budget guard** — `api/runner_usage.py:62`. Duck-typed
+- [x] **Zero token metering silently disarms the budget guard** — `api/runner_usage.py:62`. Duck-typed
       on MAF keys; a rename meters 0 forever. Proved: 50 turns × 15,000 real tokens booked as 0 against
       a 1,000-token cap, and `check()` still allowed the next turn. Cheap automatic guard: answer text
       with `total == 0` is a self-detectable contradiction.
-- [ ] **Temporal outage detected every turn, reported to no operator** — `api/runner.py:683`. The
+- [x] **Temporal outage detected every turn, reported to no operator** — `api/runner.py:683`. The
       rationale comment ("open_reachable already counts it") is checkable and false — that counter is
       over connector tools. At the shipped INFO level: no log line, no metric change.
-- [ ] **Retrieved content can close the judge's `<evidence>` tag** — `agent/verifier.py:182`. Reuse
+- [x] **Retrieved content can close the judge's `<evidence>` tag** — `agent/verifier.py:182`. Reuse
       `framing.frame_untrusted` so the delimiter is nonce'd, instead of a hand-rolled tag.
-- [ ] Verification crash yields an unscored answer that reads as unflagged — `api/runner_answer.py:60`.
+- [x] Verification crash yields an unscored answer that reads as unflagged — `api/runner_answer.py:60`.
 
 ## Lane T5 — Durable execution correctness
 
