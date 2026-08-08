@@ -22,6 +22,7 @@ import asyncio
 
 import httpx
 import pytest
+from starlette.responses import Response
 
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.connectors.identity import (
@@ -339,3 +340,95 @@ def test_a_mode_none_connector_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("chemclaw.connectors.server._declared_bearer_env", lambda name: None)
     with TestClient(connector_app(FastMCP("probe"), name="probe")) as client:
         assert client.post("/mcp", json={}).status_code != 401
+
+
+def test_an_unreadable_manifest_makes_the_connector_refuse_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real `_declared_bearer_env`, on the path where it decides whether a control exists.
+
+    The three tests above monkeypatch that function away, so the function that decides whether the
+    connector is guarded at all was executed by none of them — which is how its first version came
+    to fail *open*. `discovered()` parses every bundle in `connectors_dirs` and raises on one bad
+    YAML, so a typo in an operator's prepended directory (the documented PATH-like override), or a
+    mount briefly unreadable at pod start, took every bearer-mode connector in the process
+    anonymous while logging only that it "could not read manifests to resolve its auth mode".
+
+    A control whose absence is decided by a file being unreadable is not a control. The connector
+    now refuses until an operator fixes the manifest.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.registry import ConnectorError
+    from chemclaw.connectors.server import _declared_bearer_env, connector_app
+
+    def _unreadable() -> dict[str, object]:
+        raise ConnectorError("/etc/connectors/other/connector.yaml: invalid manifest")
+
+    monkeypatch.setattr("chemclaw.connectors.registry.discovered", _unreadable)
+    assert _declared_bearer_env("probe") is not None, (
+        "an unresolved auth mode must not read as none"
+    )
+
+    client = TestClient(connector_app(FastMCP("probe"), name="probe"))
+    assert client.get("/healthz").status_code == 200, "probes stay open so the pod can be drained"
+    assert client.post("/mcp", json={}).status_code == 401
+    assert (
+        client.post("/mcp", json={}, headers={"Authorization": "Bearer anything"}).status_code
+        == 401
+    )
+
+
+def test_a_mode_none_bundle_resolves_to_no_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other real-resolution case: every shipped bundle declares `mode: none`.
+
+    Without this, "fail closed on an unreadable manifest" could be satisfied by failing closed
+    always, which would break `make connectors`, the dev composite and the transport tests.
+    """
+    from chemclaw.connectors.server import _declared_bearer_env
+
+    assert _declared_bearer_env("molfp") is None
+    assert _declared_bearer_env("not-a-bundle") is None
+
+
+def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compare_digest` on `str` raises `TypeError` unless both sides are ASCII.
+
+    Starlette decodes header bytes as latin-1, so one non-ASCII byte turned the auth boundary into
+    a 500 with a traceback that any remote party could produce at will — and made "fail closed" a
+    property of an exception handler upstream rather than of the branch written for it.
+
+    Driven through the middleware's own `dispatch` rather than `TestClient`, because httpx encodes
+    outgoing headers as ASCII and refuses to send the bytes a real server accepts. The scope is the
+    shape uvicorn builds: raw bytes, decoded latin-1 by Starlette.
+    """
+    from starlette.requests import Request
+
+    from chemclaw.connectors.server import BearerAuthMiddleware
+
+    monkeypatch.setenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", "s3cret-token-value")
+    middleware = BearerAuthMiddleware(
+        app=None, token_env="CHEMCLAW_PROBE_CONNECTOR_TOKEN", connector="probe"
+    )
+
+    async def _never_called(_request: Request) -> Response:
+        raise AssertionError("the request must not reach the application")
+
+    async def _status_for(raw_header: bytes) -> int:
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": [(b"authorization", raw_header)],
+                "query_string": b"",
+            }
+        )
+        response = await middleware.dispatch(request, _never_called)
+        return int(response.status_code)
+
+    for raw in (b"Bearer \xff", b"Bearer s3cret-token-valu\xe9", b"Bearer \xc3\xa9"):
+        assert asyncio.run(_status_for(raw)) == 401, f"{raw!r} did not produce a clean refusal"

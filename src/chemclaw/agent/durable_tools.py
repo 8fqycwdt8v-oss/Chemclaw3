@@ -85,12 +85,27 @@ _TERMINAL = {
 def _report_id(request: ReportRequest) -> str:
     """A deterministic id for a report request, so re-asking is idempotent (D-011 discipline).
 
-    Keyed on the title *and* the section specs, and deliberately **not** on `requested_by`: two
-    chemists asking for the same report get one run, which is the whole point of the id.
+    Keyed on the title, the section specs **and the requester's entitlement**. The last part is not
+    idempotency, it is access control, and leaving it out was a cross-user data exposure the moment
+    `retrieve_section` began reading entitlement-gated sources as the requester.
+
+    Sharing one run across chemists is only sound while the run reads the same corpus for everyone.
+    It no longer does. Alice holding `chemclaw.sharedrive.reader` launches a report and the gated
+    share's documents land in the draft; Bob asks for the same title and sections, gets the same id
+    from `WorkflowAlreadyStartedError`, and `job_status()` — which applies no actor check, and which
+    `find_past_jobs` explicitly points people at with other people's job ids — hands him a completed
+    report built from a corpus his AD group excludes him from. The mirror case is the defect this
+    was all meant to fix: Bob first, and Alice silently receives the narrowed sweep.
+
+    The roles rather than the actor are what the corpus actually depends on, so two chemists with
+    the *same* entitlement still share a run and the idempotency argument survives where it is true.
+    The actor is included as well because it is what the draft is attributed to.
     """
     payload = [
         request.title,
         *(f"{s.heading}|{s.query}|{s.memory_layer}" for s in request.sections),
+        request.requested_by,
+        *sorted(request.requested_roles),
     ]
     return f"report-{stable_hash(payload)}"
 

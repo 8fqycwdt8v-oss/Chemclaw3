@@ -67,10 +67,16 @@ means "entitlement" may confer one.**
   that was already being called, and a `SectionRequest` carries both to the child workflow.
 - `_plan_command` takes the run's actor.
 
-**On the two "absent" defaults.** Neither new field is `min_length=1`, and that is deliberate rather
-than lax: the memory-synthesis jobs and a scheduled report are system-triggered, have no user, and
-must stay expressible. Stamping a synthetic actor on them would make an unattributed proposal look
-attributed, which is worse than an honestly empty one. Absent means absent.
+**On the "absent" default.** `publish_memory_note_activity`'s `actor=""` is real and stays: the
+memory-synthesis jobs are schedule-triggered, have no user, and a synthetic actor would make an
+unattributed proposal look attributed — worse than an honestly empty one.
+
+`ReportRequest.requested_by` is **not** such a case, and the first version of this ADR claimed it
+was. There is no scheduled-report launcher: `request_development_report` is the only constructor in
+`src/`, and `require_actor()` either raises or returns `settings.service_actor_id`, never `""`. The
+optional field bought a branch nothing could reach and a test that proved nothing about production,
+while permitting a future caller to launch a report with no attribution. It is `min_length=1` now,
+matching `ConnectorJobInput` and `TemplateRunInput`.
 
 **On roles captured rather than looked up.** `requested_roles` is snapshotted at launch because
 there is nothing to look an actor's roles up *in* — the front door reads them from the validated
@@ -80,8 +86,22 @@ request they do not exist by the time an entitlement is checked.
 **On stamping a requester's roles onto a background run**, which the backlog row correctly flagged
 as needing a decision: it widens what that run can read, and that is the right trade *here* and not
 in general. The sections are the requester's own question, the draft is proposed for them, and the
-alternative on offer was not "read less" — it was "read less and say nothing about it". A scheduled
-report stamps nothing and is bounded exactly as before.
+alternative on offer was not "read less" — it was "read less and say nothing about it". The
+corollary is the run id below: a run that reads one chemist's corpus may not be shared with another.
+
+**On the report's run id.** Making `retrieve_section` read entitlement-gated sources as the
+requester changed what `_report_id` means. It keyed on title and sections only, which was sound
+while a report read the same corpus for everyone — and the moment it did not, sharing a run became a
+cross-user exposure: Alice with the share role launches, the gated documents land in the draft, Bob
+asks for the same title and sections, `WorkflowAlreadyStartedError` hands him the same id, and
+`job_status()` applies no actor check at all (`find_past_jobs` explicitly gives people other
+chemists' job ids for that call). The id now includes the requester and their sorted roles. Two
+chemists with the *same* entitlement still share a run, which is where the idempotency argument was
+true all along.
+
+This was caught by review, after the first version of this change shipped the exposure. Worth
+recording as a shape rather than an incident: **widening what a job reads changes what its
+deduplication key has to mean**, and the key lived in a different file from the change.
 
 ## Consequences
 
@@ -95,8 +115,15 @@ gated source's role actually reads it.
 
 The report identity is asserted **at the activity**, not at the workflow, because that is the only
 place it has to be true: a value that reaches the workflow and stops there is precisely the defect
-being fixed. Its counterweight — a scheduled report stamping nothing — is pinned in the same file,
-so a future change cannot satisfy one by breaking the other.
+being fixed. Its counterweight — a fan-out payload with no requester stamping nothing — is pinned in
+the same file, so a future change cannot satisfy one by breaking the other.
+
+`ReportSectionWorkflow` and `retrieve_section` changed their argument type from `ReportSection` to
+`SectionRequest`, which **a report in flight across the deploy cannot replay**: the old payload
+fails validation, the workflow task retries forever and the parent's fan-out never completes. Drain
+report workflows before upgrading, or accept that any in-flight report must be cancelled and
+re-requested. Stated here because a breaking change that is only discovered in the cluster is the
+same defect as an unstated one.
 
 What this does not do is give the durable layer a general identity seam. Four call sites now carry
 an actor explicitly; a fifth that forgets will fail the same way, silently. The general fix is a

@@ -430,7 +430,7 @@ not close:
 - [ ] **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up
       that the "separate documented backfill" the operator was assumed to have skipped does not
       exist. `make reindex` is note-index-only; the fingerprint tables are filled as a side effect
-      of the ELN sync (`ElnSyncWorkflow`) or by `index_molecule`/`index_reaction` one record at a
+      of the ELN sync (`ElnSyncWorkflow`), which calls `FingerprintStore.add()` in process — the only
       time, and `docs/guides/runbook.md` covers only re-indexing after a *definition* change (§vi).
       An operator standing up a corpus has no procedure to follow, which is how a live run reached
       1,025 indexed notes and 0 fingerprints. The connectors now say so loudly at startup, so this

@@ -50,9 +50,13 @@ class ReportRequest(BaseModel):
     # complete sweep of every internal source. And the PR-gated draft is proposed unattributed, so
     # it does not appear in the requester's own review queue.
     #
-    # Not `min_length=1`, because a scheduled report has no user and must stay expressible. Absent
-    # means absent; it is never a synthetic actor.
-    requested_by: str = ""
+    # `min_length=1`, matching `ConnectorJobInput.requested_by` and `TemplateRunInput.requested_by`.
+    # An earlier version left it optional to keep "a scheduled report" expressible — but there is no
+    # scheduled-report launcher: `request_development_report` is the only constructor in `src/`, and
+    # `require_actor()` either raises or returns `settings.service_actor_id`, never `""`. The
+    # optional field bought nothing real and permitted a future caller to launch a report with no
+    # attribution, which is the failure the other two inputs' `min_length=1` exists to prevent.
+    requested_by: str = Field(min_length=1)
     # Captured at launch rather than looked up at retrieval time, because there is no directory to
     # look an actor's roles up in — the front door gets them from the validated token and they live
     # in a contextvar for the turn. A background run has no turn, so if the roles do not travel on

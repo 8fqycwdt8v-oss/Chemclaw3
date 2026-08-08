@@ -123,17 +123,30 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     A bundle with no server module is not a violation: `qm` is job-only, and its capability is a
     Temporal workflow behind `jobs:` rather than an MCP surface.
 
-    Costs one import of every bundle's server package (~13s across the seven, mostly rdkit and the
-    ML stack). That is a real cost for a CI gate and it is the price of asking the server instead of
-    the file — the isolation this would otherwise violate is a *runtime* property of the chat pod
+    Costs one import of every bundle's server package (measured 20.8s for the whole gate, mostly
+    rdkit and the ML stack). That is a real cost for a CI gate and it is the price of asking the
+    server instead of the file — the isolation this would otherwise violate is a *runtime* property
+    of the chat pod
     (`tests/test_connector_isolation.py`), and this is a separate short-lived process.
     """
     if manifest.endpoint is None:
         return []
+    target = f"chemclaw.connectors.{manifest.name}.server.tools"
     try:
-        module = importlib.import_module(f"chemclaw.connectors.{manifest.name}.server.tools")
-    except ModuleNotFoundError:
-        return []
+        module = importlib.import_module(target)
+    except ModuleNotFoundError as exc:
+        # Only "this bundle has no server module" is not a violation — `qm` is job-only, its
+        # capability a Temporal workflow behind `jobs:`. A *transitive* ModuleNotFoundError (a
+        # missing rdkit, a renamed dependency) means the bundle is broken, and swallowing it made
+        # the rule pass vacuously for exactly the bundle most likely to be misbuilt.
+        if exc.name == target:
+            return []
+        return [f"connector {manifest.name!r}: its server module could not be imported ({exc})"]
+    except Exception as exc:
+        # Anything else — an ImportError from a submodule, a failure at import time — is reported
+        # rather than propagated, so CI prints "connector X: ..." instead of a bare traceback from
+        # a validator that never reached its own `main()`.
+        return [f"connector {manifest.name!r}: its server module raised on import ({exc!r})"]
     server = getattr(module, "server", None)
     if server is None:
         return []

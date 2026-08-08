@@ -13,6 +13,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import chemclaw.durable.report_workflow as report_workflow
+from chemclaw.agent.durable_tools import _report_id
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 from chemclaw.durable.orchestrator import resolve_fan_out_limit
@@ -80,6 +81,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
     async def _run() -> None:
         request = ReportRequest(
             title="Widget development",
+            requested_by="chemist@corp",
             sections=[
                 ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
                 ReportSection(heading="Safety", query="hazard data", memory_layer="evidence"),
@@ -119,6 +121,7 @@ def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -
     async def _run() -> None:
         request = ReportRequest(
             title="Widget development",
+            requested_by="chemist@corp",
             sections=[
                 ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
             ],
@@ -152,6 +155,38 @@ def test_background_worker_registers_report_workflow() -> None:
     assert ReportSectionWorkflow in BACKGROUND_WORKFLOWS  # the fan-out child must be registered too
     assert retrieve_section in BACKGROUND_ACTIVITIES
     assert propose_report in BACKGROUND_ACTIVITIES
+
+
+def test_a_report_run_is_not_shared_across_entitlements() -> None:
+    """Two chemists with different roles must not share one report run.
+
+    `_report_id` keyed on title+sections only, which was sound while a report read the same corpus
+    for everyone — and stopped being sound the moment `retrieve_section` began reading
+    entitlement-gated sources as the requester. Alice holding the share role launches a report and
+    the gated documents land in the draft; Bob asks for the same title and sections, gets the same
+    id back from `WorkflowAlreadyStartedError`, and `job_status()` applies no actor check at all
+    (`find_past_jobs` explicitly hands people other chemists' job ids for exactly that call). Bob
+    collects a report built from a corpus his AD group excludes him from.
+
+    So this is access control living in an id, not idempotency. Two chemists with the *same*
+    entitlement still share a run, which is where the idempotency argument was true all along.
+    """
+    sections = [ReportSection(heading="Scope", query="what is known", memory_layer="evidence")]
+
+    def _request(actor: str, roles: list[str]) -> ReportRequest:
+        return ReportRequest(
+            title="Route scouting", sections=sections, requested_by=actor, requested_roles=roles
+        )
+
+    entitled = _report_id(_request("alice@corp", ["chemclaw.sharedrive.reader"]))
+    unentitled = _report_id(_request("bob@corp", []))
+    assert entitled != unentitled, "a chemist without the share role must not join an entitled run"
+    assert entitled == _report_id(_request("alice@corp", ["chemclaw.sharedrive.reader"])), (
+        "the same request from the same person must still be idempotent"
+    )
+    assert _report_id(_request("carol@corp", ["a", "b"])) == _report_id(
+        _request("carol@corp", ["b", "a"])
+    ), "role order is not a different entitlement"
 
 
 def test_a_report_carries_its_requester_into_retrieval() -> None:
@@ -196,12 +231,17 @@ def test_a_report_carries_its_requester_into_retrieval() -> None:
     assert seen == [("alice@corp", frozenset({"chemclaw.sharedrive.reader"}))]
 
 
-def test_a_scheduled_report_stamps_no_identity() -> None:
-    """Absent means absent — a background run must not acquire a synthetic actor.
+def test_a_section_with_no_requester_stamps_no_identity() -> None:
+    """Absent means absent — the fan-out payload must not acquire a synthetic actor.
 
-    The counterweight to the test above: stamping the requester's roles widens what a background run
-    can read, so it must happen only when there is a requester. A scheduled report has none and is
-    bounded exactly as it was before.
+    The counterweight to the test above: stamping a requester's roles widens what the run can read,
+    so it must happen only when there *is* a requester.
+
+    Scoped to `SectionRequest`, not `ReportRequest`, and the distinction matters. An earlier version
+    of this test claimed to cover "a scheduled report" — there is no scheduled-report launcher, and
+    `require_actor()` never returns `""`, so that branch was unreachable and the test proved nothing
+    about production. `ReportRequest.requested_by` is now `min_length=1`. What remains true is that
+    the activity must not invent an identity when handed a payload without one.
     """
     seen: list[str] = []
 

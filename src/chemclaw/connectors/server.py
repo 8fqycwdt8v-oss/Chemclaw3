@@ -51,15 +51,29 @@ from chemclaw.core.tracing import continue_trace
 logger = logging.getLogger(__name__)
 
 
-def _declared_bearer_env(name: str) -> str | None:
-    """The env var holding this bundle's bearer token, or `None` if it declares `mode: none`.
+# The sentinel `_declared_bearer_env` returns when it cannot find out what this bundle requires.
+# No environment variable has this name, so `os.environ.get` yields `""` and the middleware refuses
+# every request — a connector that cannot read its own manifest serves nothing rather than
+# everything.
+_UNRESOLVED_AUTH = "CHEMCLAW_CONNECTOR_AUTH_UNRESOLVED"
 
-    Imported lazily and failure-tolerant on purpose: `connector_app` is called at import time by
-    seven bundle modules, and a bundle must still be constructible when the manifest directory is
-    not readable (a unit test importing `app.py`, a dev process pointed elsewhere). The cost of
-    that tolerance is that an unreadable manifest serves *unauthenticated*, which is the
-    pre-existing behaviour and is why `connector-validate` checks the declaration separately — a
-    gate that can be disabled by an unreadable file is not a gate, so the file is validated in CI.
+
+def _declared_bearer_env(name: str) -> str | None:
+    """The env var holding this bundle's bearer token, `None` for `mode: none`, or fail closed.
+
+    Imported lazily because `connector_app` is called at import time by seven bundle modules.
+
+    **A read failure returns the sentinel, not `None`.** The first version returned `None` — no
+    middleware, whole `/mcp` surface anonymous — and justified it with "`connector-validate` checks
+    the declaration separately". That justification was false: the validator has no auth check of
+    any kind, and it validates the *repository's* manifest directory, not the one mounted in the
+    pod. `discovered()` parses every bundle in `connectors_dirs` and raises `ConnectorError` on one
+    bad YAML, so a single typo in an operator's prepended directory — the documented PATH-like
+    override — would have taken every bearer-mode connector in the process unauthenticated, logging
+    only that it "could not read manifests to resolve its auth mode".
+
+    A control whose absence is decided by a file being unreadable is not a control. Failing closed
+    makes the same event loud: the connector answers 401 until an operator fixes the manifest.
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
     from chemclaw.connectors.registry import discovered
@@ -67,8 +81,13 @@ def _declared_bearer_env(name: str) -> str | None:
     try:
         found = discovered()
     except Exception:
-        logger.warning("connector %s: could not read manifests to resolve its auth mode", name)
-        return None
+        logger.error(
+            "connector_auth_unresolved: connector %s could not read its manifests, so it cannot "
+            "tell whether it requires a bearer token; refusing every MCP request until it can",
+            name,
+            exc_info=True,
+        )
+        return _UNRESOLVED_AUTH
     for _bundle, manifest in found.values():
         if manifest.name == name and isinstance(manifest.endpoint, HttpEndpoint):
             auth = manifest.endpoint.auth
@@ -112,10 +131,18 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         expected = os.environ.get(self._token_env, "")
         presented = request.headers.get("authorization", "")
         scheme, _, offered = presented.partition(" ")
+        # Compared as *bytes*. `compare_digest` on `str` requires both operands to be ASCII-only and
+        # raises `TypeError` otherwise, and Starlette decodes headers as latin-1 — so a single
+        # non-ASCII byte in the header turned this security boundary into a 500 with a traceback,
+        # which any remote party could produce at will. The refusal must come from the branch
+        # written for it, not from an exception handler upstream.
         if (
             not expected
             or scheme.lower() != "bearer"
-            or not compare_digest(offered.strip(), expected)
+            or not compare_digest(
+                offered.strip().encode("utf-8", "surrogateescape"),
+                expected.encode("utf-8", "surrogateescape"),
+            )
         ):
             logger.warning(
                 "connector %s refused an unauthenticated MCP request to %s",

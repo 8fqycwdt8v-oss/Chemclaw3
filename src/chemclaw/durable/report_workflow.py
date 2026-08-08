@@ -82,9 +82,25 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
 
 @durable_activity("background")
 @activity.defn
-async def propose_report(report: Report) -> str:
-    """Render the gathered report as a PR-gated `report` note; return the reference."""
-    return await propose_note(report_note(report), default_submitter())
+async def propose_report(report: Report, requested_by: str = "") -> str:
+    """Render the gathered report as a PR-gated `report` note; return the reference.
+
+    `requested_by` stamps the ambient identity for the gate, for the same reason
+    `publish_memory_note_activity` takes one: `propose_note` records a durable `NoteProposal` whose
+    actor comes from `ambient_provenance()`, and an activity sets none. Without it the draft is
+    recorded with `actor=""`, `list_note_proposals` scopes a non-reviewer's queue to
+    `principal.oid`, and the chemist who asked cannot find the PR opened on their behalf.
+
+    This was missed in the first pass: the memory-note path was fixed and this one was not, while a
+    comment on `ReportRequest.requested_by` claimed both were.
+    """
+    if not requested_by:
+        return await propose_note(report_note(report), default_submitter())
+    token = set_current_identity(requested_by, frozenset())
+    try:
+        return await propose_note(report_note(report), default_submitter())
+    finally:
+        reset_current_identity(token)
 
 
 @durable_workflow("background")
@@ -163,7 +179,7 @@ class DevelopmentReportWorkflow:
         report = Report(title=request.title, sections=sections)
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
-        note_ref = await publish_note(propose_report, [report])
+        note_ref = await publish_note(propose_report, [report, request.requested_by])
         return ConnectorJobResult(
             summary=(
                 f"Drafted {request.title!r} with {len(sections)} section(s); "

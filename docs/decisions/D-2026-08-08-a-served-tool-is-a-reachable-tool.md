@@ -84,17 +84,31 @@ refuses rather than compares, so a half-configured deployment fails closed inste
 empty string; comparison is `compare_digest`.
 
 The manifest is read from the registry rather than passed in, so all seven `app.py` modules stay one
-line and no bundle can forget to wire it. That lookup is failure-tolerant — a bundle must still be
-importable when the manifest directory is not readable — and the cost of that tolerance is that an
-unreadable manifest serves unauthenticated. That is the pre-existing behaviour, and it is why the
-declaration is validated separately in CI: a gate that an unreadable file can disable is not a gate.
+line and no bundle can forget to wire it. **A read failure fails closed**, and the first version of
+this change got that wrong: it returned "no auth declared", installed no middleware, and justified
+it as "`connector-validate` checks the declaration separately". That justification was false — the
+validator has no auth check of any kind, and it reads the *repository's* manifest directory, not the
+one mounted in the pod. `discovered()` parses every bundle in `connectors_dirs` and raises on one
+bad YAML, so a single typo in an operator's prepended directory — the documented PATH-like override
+— would have taken every bearer-mode connector anonymous, logging only that it could not resolve the
+mode. A control whose absence is decided by a file being unreadable is not a control; it now answers
+401 until an operator fixes the manifest.
+
+Two smaller corrections from the same review. The token is compared as **bytes**: `compare_digest`
+on `str` requires ASCII-only operands and Starlette decodes headers as latin-1, so one non-ASCII
+byte made the auth boundary raise `TypeError` and return 500 — any remote party could produce it at
+will, and "fail closed" became a property of an exception handler rather than of the branch written
+for it. And `_served_tool_problems` now distinguishes "this bundle has no server module" from "this
+bundle's server module is broken": catching bare `ModuleNotFoundError` meant a missing transitive
+dependency (rdkit, say) read as "serves nothing", so the one rule that reads the running server
+passed vacuously for exactly the bundle most likely to be misbuilt.
 
 ## Consequences
 
 The fingerprint corpus is no longer writable over MCP, and the gap cannot reopen silently: adding a
 tool to a bundle's server without declaring it in the manifest now fails `make connector-validate`.
-The cost is one import of every bundle's server package (~13s across the seven, mostly rdkit and the
-ML stack) in a CI gate. That is the price of asking the server instead of the file, and the
+The cost is one import of every bundle's server package (measured 20.8s for the whole gate,
+mostly rdkit and the ML stack). That is the price of asking the server instead of the file, and the
 isolation it might appear to violate is a *runtime* property of the chat pod
 (`tests/test_connector_isolation.py`) rather than of a short-lived validator process.
 
