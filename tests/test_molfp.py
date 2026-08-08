@@ -8,12 +8,11 @@ The Postgres backend reproduces the same ranking in SQL (tested in CI).
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 
+import psycopg
 import pytest
 
-from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp import search
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
@@ -587,24 +586,35 @@ def test_substructure_scan_caps_and_warns(
     asyncio.run(_run())
 
 
+class _NullConnection:
+    """A psycopg connection stand-in: enterable, and nothing is executed on it."""
+
+    async def __aenter__(self) -> "_NullConnection":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
 def test_postgres_store_applies_the_configured_statement_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The Postgres backend must bound its (slow HNSW) queries like every other store (COR-5/CON-2).
 
-    A regression pin for the fpstore-only omission: `_connection` must forward
-    `pg_statement_timeout_seconds` to the shared `db.connection`, so a long similarity scan is
-    cancelled rather than pinning its worker. Verified offline by capturing the connect call.
+    A regression pin for the fpstore-only omission. It asserts on the libpq `options` the connect
+    actually receives rather than on the keyword `_connection` passes: since
+    D-2026-08-08-a-borrowed-connection-is-bounded-by-default the store passes no keyword at all and
+    `db.connection` supplies the bound, so the old assertion would have proven only that this
+    store still repeats itself — not that a long similarity scan is cancelled rather than pinning
+    its worker. Verified offline by capturing the psycopg connect.
     """
     captured: dict[str, object] = {}
 
-    @asynccontextmanager
-    async def _fake_connection(dsn: str, **kwargs: object) -> AsyncIterator[object]:
-        captured["dsn"] = dsn
+    async def _fake_connect(dsn: str, **kwargs: object) -> object:
         captured.update(kwargs)
-        yield object()
+        return _NullConnection()
 
-    monkeypatch.setattr(db, "connection", _fake_connection)
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
     store = PostgresFingerprintStore(
         "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
     )
@@ -615,7 +625,8 @@ def test_postgres_store_applies_the_configured_statement_timeout(
 
     asyncio.run(_enter())
 
-    assert captured["statement_timeout_seconds"] == settings.pg_statement_timeout_seconds
+    expected = int(settings.pg_statement_timeout_seconds * 1000)
+    assert f"-c statement_timeout={expected}" in str(captured["options"])
 
 
 # --- An empty index must not answer "nothing similar" --------------------------------------------

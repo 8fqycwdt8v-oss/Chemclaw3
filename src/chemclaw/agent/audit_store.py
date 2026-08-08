@@ -90,9 +90,7 @@ class PostgresAuditSink:
 
     async def record(self, event: AuditEvent) -> None:
         """Append one audit event, chained to the current tip under a serializing advisory lock."""
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             # Serialize appenders so two concurrent inserts cannot read the same tip and fork the
             # chain. The xact lock releases on commit/rollback, bounding contention to one insert.
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_AUDIT_CHAIN_LOCK_KEY,))

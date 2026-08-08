@@ -107,9 +107,7 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
     calls: dict[str, list[ToolCall]] = {}
     jobs: dict[str, list[Job]] = {}
 
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with connection(target) as conn:
         cursor = await conn.execute(_MESSAGES, (session_id,))
         for correlation_id, message, _created in await cursor.fetchall():
             if correlation_id not in turns:

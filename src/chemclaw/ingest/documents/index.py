@@ -624,9 +624,7 @@ class PostgresDocumentIndex:
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection with the configured per-statement timeout (pooled where opened)."""
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             yield conn
 
     async def fingerprints(

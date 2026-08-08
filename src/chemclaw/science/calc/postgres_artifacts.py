@@ -102,9 +102,7 @@ class PostgresArtifactStore:
             return None
         digest = content_address(data)
         codec, payload = encode(data)
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_INSERT_BLOB, (digest, codec, len(data), len(payload), payload))
                 await cur.execute(
@@ -121,9 +119,7 @@ class PostgresArtifactStore:
 
     async def open(self, content_hash: str) -> bytes | None:
         """Return the artifact's original bytes, or `None` on a miss."""
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_BLOB, (content_hash,))
                 row = await cur.fetchone()
@@ -139,9 +135,7 @@ class PostgresArtifactStore:
 
     async def list_for(self, calc_key: str) -> list[ArtifactRef]:
         """Return every artifact this calculation produced, ordered by name."""
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_LINKS, (calc_key,))
                 rows = await cur.fetchall()

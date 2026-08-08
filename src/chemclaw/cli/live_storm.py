@@ -41,7 +41,7 @@ from temporalio.client import WorkflowExecutionStatus
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
-from chemclaw.core.db import connect as db_connect
+from chemclaw.core.db import connection as db_connection
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -246,7 +246,7 @@ def _lane(script: str, *args: str, env: Mapping[str, str] | None = None) -> str:
 
 async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
     """One value from the live database, through the application's own connection helper."""
-    async with await db_connect(settings.postgres_dsn) as conn:
+    async with db_connection(settings.postgres_dsn) as conn:
         cursor = await conn.execute(sql, params)
         row = await cursor.fetchone()
         return None if row is None else row[0]

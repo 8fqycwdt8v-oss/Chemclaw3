@@ -26,10 +26,12 @@ from tests.pg import migrated_db_or_skip
 
 
 async def _scalar(sql: str) -> str:
-    """Run a one-value query on a borrowed connection (every test here wants exactly this)."""
-    async with db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    """Run a one-value query on a borrowed connection (every test here wants exactly this).
+
+    Passes no `statement_timeout_seconds`, so every test routed through it exercises the
+    defaulted path that every store now takes.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
         cursor = await conn.execute(sql)
         row = await cursor.fetchone()
     assert row is not None
@@ -94,6 +96,50 @@ def test_pooled_connections_keep_the_dsn_search_path_and_our_statement_timeout(
             statement_timeout = await _scalar("SHOW statement_timeout")
         assert "chemclaw_test_" in search_path
         assert statement_timeout == "1500ms"
+
+    asyncio.run(_run())
+
+
+def test_a_caller_that_asks_for_no_timeout_still_gets_the_configured_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connection()` bounds the statement even when the call site says nothing about a timeout.
+
+    Measured before the default existed: `SHOW statement_timeout` on a connection borrowed with no
+    keyword returned `0` — no bound at all — both pooled and unpooled. Every store passed
+    `pg_statement_timeout_seconds` by hand, so the bound was a convention twenty-two call sites
+    happened to keep rather than a property of the helper, and a twenty-third that forgot would
+    hold a pooled connection on one bad query for as long as the query ran.
+
+    Both paths are asserted because they are different code: unpooled falls through to `connect()`,
+    pooled builds the libpq `options` into the pool's connection kwargs.
+    """
+    monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 7.5)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        assert await _scalar("SHOW statement_timeout") == "7500ms"  # unpooled
+        async with db.pooling():
+            assert await _scalar("SHOW statement_timeout") == "7500ms"  # pooled
+
+    asyncio.run(_run())
+
+
+def test_an_explicit_timeout_still_overrides_the_default() -> None:
+    """A call site that needs a different bound keeps it — the readiness probe is the live one.
+
+    `/readyz` deliberately bounds its `SELECT 1` at `service_readiness_db_timeout_seconds` (2 s), a
+    tighter budget than the stores'. A default that silently replaced an explicit argument would
+    turn that probe into a 30-second hang, which is the failure it exists to avoid.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.5) as conn:
+            cursor = await conn.execute("SHOW statement_timeout")
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == "2500ms"
 
     asyncio.run(_run())
 

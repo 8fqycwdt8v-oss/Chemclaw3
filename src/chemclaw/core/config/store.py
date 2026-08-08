@@ -44,8 +44,11 @@ class StoreSettings(BaseSettings):
     pg_connect_timeout_seconds: int = Field(default=10, gt=0)
     # Per-statement wall-clock bound for the store connections (libpq statement_timeout). A hung
     # query is cancelled after this instead of consuming the whole enclosing activity's
-    # start-to-close budget. 0 disables it; migrations deliberately connect without a statement
-    # timeout (an index build may be slow).
+    # start-to-close budget. Applied by `db.connection()` to every borrowed connection whose caller
+    # names no bound of its own, so a store cannot be unbounded by forgetting an argument
+    # (D-2026-08-08-a-borrowed-connection-is-bounded-by-default). 0 disables it; migrations
+    # deliberately connect without a statement timeout (an index build may be slow), via
+    # `db.connect()` rather than by omitting an argument.
     pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
     # How long a migration's DDL may *wait for a table lock* (libpq `lock_timeout`) before giving
     # up. Deliberately not `statement_timeout`, and the distinction is the whole point: an

@@ -202,9 +202,7 @@ async def take_anchor(
     if not settings.audit_anchor_secret:
         return None
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with connection(target) as conn:
         cursor = await conn.execute(_TAKE)
         totals = await cursor.fetchone()
         cursor = await conn.execute(_TIP)
@@ -266,9 +264,7 @@ async def latest_anchor(dsn: str | None = None) -> Anchor | None:
     if not settings.audit_anchor_secret:
         return None
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with connection(
-        target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with connection(target) as conn:
         cursor = await conn.execute(_LATEST, {"limit": _LATEST_CANDIDATES})
         rows = await cursor.fetchall()
     skipped = 0

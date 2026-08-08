@@ -271,9 +271,7 @@ class PostgresNoteIndex:
         raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
         activity for its whole budget.
         """
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             yield conn
 
     async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:

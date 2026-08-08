@@ -3,6 +3,28 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the connection-timeout default (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-borrowed-connection-is-bounded-by-default.md`. The default
+landed; this is what the change surfaced and did not close.
+
+- [ ] **The front door holds two pools against one database, and the fleet budget counts one** —
+      [S]. Pools are keyed by `(dsn, libpq options)` and the statement timeout rides on the options
+      (D-107), so `/readyz` bounding its probe at `service_readiness_db_timeout_seconds` (2 s, and
+      correctly so) gives it a pool of its own beside the stores' 30 s pool. Measured in one
+      process against the live database: `len(db._POOLS) == 2` for a single DSN and
+      `pool_size == 6` at `pg_pool_min_size = 3` — twice the warm connections
+      `chemclaw_pg_pool_max_size` reports as this process's share of
+      `chemclaw_pg_fleet_max_connections`
+      (`D-2026-08-05-the-connection-budget-is-a-fleet-number`). Pre-existing and not introduced by
+      the default — deleting thirty explicit arguments left the probe as the *only* second pool in
+      the tree, which is what made it visible. The fix is not to merge the pools (the probe's
+      tighter bound is the reason it is safe to probe at all) but to decide whether a
+      `SET LOCAL statement_timeout` for the probe's one statement is preferable to a second pool,
+      or whether the fleet gauge should count pools rather than assume one.
+      *Trigger:* the first cluster where the fleet connection budget is actually tight — or any
+      change to `pg_pool_min_size`, which multiplies by the pool count rather than by one.
+
 ## Open — Left by the review-and-hardening campaign (2026-08-08)
 
 - [ ] **A decided approval hold can be reopened, and the obvious fix is worse** — [M].

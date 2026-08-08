@@ -87,9 +87,7 @@ async def record_session_event(
     insert would deliver the same notification twice. With a key set, the second insert lands on
     the unique index and becomes a no-op; None (non-retrying writers) appends unconditionally.
     """
-    async with db.connection(
-        _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(_dsn(dsn)) as conn:
         await conn.execute(_INSERT, (session_id, kind, Jsonb(payload or {}), dedupe_key))
         await conn.commit()
 
@@ -107,9 +105,7 @@ async def claim_unconsumed(
     The tailer calls this once per poll rather than holding a connection of its own, so the whole
     claim — connection included — lives in this one function.
     """
-    async with db.connection(
-        _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(_dsn(dsn)) as conn:
         if kinds is None:
             cursor = await conn.execute(_CLAIM, (session_id,))
         else:

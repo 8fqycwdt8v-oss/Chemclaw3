@@ -158,9 +158,7 @@ async def _session_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection
 
     Extracted once the third store in this module needed the identical four lines.
     """
-    async with db.connection(
-        dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(dsn) as conn:
         yield conn
 
 
