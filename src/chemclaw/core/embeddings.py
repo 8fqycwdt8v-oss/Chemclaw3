@@ -72,7 +72,7 @@ def embedding_config_key() -> str:
     the URL, because this key is written into `document_chunks.embedding_key` and
     `note_index.embedding_key` — one copy per row, in tables nothing prunes and the runtime role can
     read. `llm_base_url` is a plain `str` with no validator forbidding userinfo, so
-    `https://svc:token@llm.internal/v1` is a configuration this deployment accepts and the verbatim
+    `https://svc:token@chemclaw-llm/v1` is a configuration this deployment accepts and the verbatim
     form persisted the password; even without one, an internal hostname does not belong in every row
     of a corpus. A digest keeps the only property the key needs — two endpoints differ, one endpoint
     does not — and the readable part (provider, model, dimension) is what an operator reads a key

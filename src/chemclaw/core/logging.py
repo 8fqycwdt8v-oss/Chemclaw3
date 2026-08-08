@@ -588,7 +588,17 @@ class SecretRedactingFilter(logging.Filter):
             # let a formatter re-render the original.
             record.msg = redacted
             record.args = None
-        if record.exc_info is not None and record.exc_text is None:
+        # Truthiness, not `is not None`, and the difference is a crash. `Logger._log` stores
+        # whatever it was handed: `logger.error(..., exc_info=False)` puts the *bool* on the record,
+        # so `is not None` sent `False` into `formatException`, which subscripts it —
+        # `TypeError: 'bool' object is not subscriptable`. Filters run inside `Handler.handle`,
+        # outside logging's own error handling, so that propagated to whoever was logging. It
+        # reached production code through `metrics_bridge.degraded(..., exc_info=False)`: the one
+        # site passing it is `skill_manifest`, inside the `except` whose whole purpose is to skip a
+        # malformed `SKILL.md` and continue, so a single bad manifest made `build_agent` raise.
+        # `logging`'s own `Formatter.format` has always tested truthiness here; matching it is both
+        # the fix and the reason no other formatter had this problem.
+        if record.exc_info and record.exc_text is None:
             # `_EXC_RENDERER` is built once at module scope: constructing a `Formatter` here would
             # be per-record work, and `formatException` reaches `traceback`, which `logging` has
             # already imported — so nothing on this path imports anything (see `ContextFilter`).

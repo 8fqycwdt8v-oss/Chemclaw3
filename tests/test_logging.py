@@ -809,6 +809,61 @@ def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
     )
 
 
+def test_a_log_call_that_declines_a_traceback_does_not_crash_the_filter() -> None:
+    """`exc_info=False` is a bool on the record, and the filter used to subscript it.
+
+    Found by a cross-lane review, and invisible to every lane that produced it. The logging lane
+    moved traceback rendering into the filter (so a credential in a traceback is redacted before a
+    deployment's own formatter sees it) guarded by `record.exc_info is not None`. The enforcement
+    lane then added `degraded(..., exc_info: bool = True)`, which forwards straight to
+    `logger.log`. `Logger._log` stores what it is handed, so `exc_info=False` is a *bool* on the
+    record: `False is not None` is true, and `formatException(False)` raises
+    `TypeError: 'bool' object is not subscriptable`.
+
+    Filters run inside `Handler.handle`, outside logging's own error handling, so it propagated to
+    the caller. The one production site passing it is `skill_manifest`, inside the `except` whose
+    entire job is to skip a malformed `SKILL.md` and carry on — so one bad manifest made
+    `build_agent` raise instead. `logging`'s own `Formatter.format` tests truthiness here; the fix
+    is to match it.
+    """
+    import logging as stdlib_logging
+
+    from chemclaw.core.logging import SecretRedactingFilter
+
+    record = stdlib_logging.LogRecord(
+        name="probe",
+        level=stdlib_logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="declined a traceback",
+        args=(),
+        exc_info=False,  # type: ignore[arg-type]
+    )
+    assert SecretRedactingFilter().filter(record) is True
+    assert record.exc_text is None, "a declined traceback must not be rendered"
+
+
+def test_the_filter_survives_a_second_test_that_built_the_front_door() -> None:
+    """The order dependence that hid the bug above from every per-lane test run.
+
+    `configure_logging()` installs this filter on handlers that outlive the test that built them,
+    so `pytest tests/test_degraded.py` alone passed while
+    `pytest tests/test_auth.py tests/test_degraded.py` failed two. A defect reachable only in a
+    particular order is one that every lane's own green run is structurally unable to see, which is
+    why this asserts the composed state rather than the isolated one.
+    """
+    import logging as stdlib_logging
+
+    from chemclaw.core.logging import configure_logging
+    from chemclaw.core.metrics_bridge import degraded
+
+    configure_logging()
+    configure_logging()  # idempotent, and the second call is what a second suite would do
+    degraded(
+        stdlib_logging.getLogger("probe"), "log_redaction", "no traceback here", exc_info=False
+    )
+
+
 def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     """`configure_logging` is documented as safe to call more than once — for every handler.
 
