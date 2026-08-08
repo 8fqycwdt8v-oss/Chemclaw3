@@ -21,6 +21,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
 from chemclaw.ingest.documents.formats import SUPPORTED_EXTENSIONS
 
 
@@ -112,8 +113,11 @@ class DocumentShareBinding(BaseModel):
     roots: list[RootBinding] = Field(min_length=1)
 
     # The entitlement a caller must hold for this source to return anything. Matched against the
-    # turn's roles — which carry Entra app roles, plus group object-ids when
-    # `entra_group_claims_as_roles` is on — so an AD group reaches this either way.
+    # turn's roles — which carry Entra app roles verbatim, plus each group claim under
+    # `entra_group_claims_as_roles`, **namespaced with `GROUP_ROLE_PREFIX`** — so an AD group
+    # reaches this either way. A group-gated share therefore names `group:<claim value>` here, not
+    # the bare object-id: the prefix is what stops a directory group from being read as the app
+    # role of the same name, and a value written without it matches nothing at all.
     #
     # **A manifest must state its intent: either this or `public`, never neither.** It used to
     # default to empty, and empty means ungated — so a hand-authored binding (which is the
@@ -191,10 +195,11 @@ class DocumentShareBinding(BaseModel):
             )
         if not self.public and not self.required_roles:
             raise ValueError(
-                "a share must say who may read it: set `required_roles` to the Entra app role or "
-                "AD group object-id that gates it, or `public: true` if every authenticated caller "
-                "may read it. Omitting both used to mean ungated, which is a security decision no "
-                "manifest should make by accident"
+                "a share must say who may read it: set `required_roles` to the Entra app role that "
+                f"gates it (or to `{GROUP_ROLE_PREFIX}<claim value>` for an AD group — group "
+                "claims are namespaced, so the bare object-id matches nothing), or `public: true` "
+                "if every authenticated caller may read it. Omitting both used to mean ungated, "
+                "which is a security decision no manifest should make by accident"
             )
         return self
 
