@@ -33,6 +33,8 @@ async def similar_reactions(
 
     **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means no reaction
     has been indexed and the question was not answered — never report it as "we have no precedent".
+    `hits_truncated: true` means more reactions cleared the threshold than `top_k` could return, so
+    the count is a lower bound on the precedent on file, not the amount of it.
     """
     search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
     return search.model_copy(

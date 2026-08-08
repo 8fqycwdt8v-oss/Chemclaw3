@@ -129,7 +129,14 @@ structural:
     # N,N-disubstituted hydrazine — 1,1-dimethylhydrazine (UDMH) among them — which is the
     # opposite of the intended scope. `!$(N[a])` keeps aryl-diazo/azo systems out, which the
     # H-on-both requirement had been excluding incidentally.
-    smarts: "[NX3;!$(NC=O);!$(N[a])][NX3;H2,H1;!$(NC=O)]"
+    #
+    # `NX4+` beside `NX3`: protonating a hydrazine is what a catalogue does to it, and the salt
+    # is the ordinary bench form — hydrazine monohydrochloride and hydrazine sulfate carry an
+    # `NX4+` nitrogen and so screened clean, the same shape of miss the anionic peroxide and the
+    # anionic N-halamine were. Measured over the 83 distinct structures of the reagent identity
+    # table, this newly matches hydrazinium salts and nothing else: an ammonium or amine salt has
+    # no N-N bond, and an acylated one is still excluded as a hydrazide.
+    smarts: "[NX3,NX4+;!$(NC=O);!$(N[a])][NX3,NX4+;H3,H2,H1;!$(NC=O)]"
     severity: medium
     explanation: >-
       Free hydrazine motif: toxic, a suspected carcinogen, and a strong reductant that forms
@@ -156,8 +163,14 @@ incompatible_pairs:
     # one-coordinate anions, so the two-coordinate-only form left `Na2O2 + NaBH4` raising only
     # `peroxide` where `H2O2 + NaBH4` raised this rule as well. A rule and its structural twin
     # must be widened together — half a fix reads exactly like a clean screen.
+    #
+    # The hydrazine arm carries `NX4+` for the same reason its structural twin does: hydrazine is
+    # bought and weighed as its hydrochloride or sulfate, whose protonated nitrogen is `NX4+`, so
+    # the neutral-only form let the catalogue form of the reductant pass beside an oxidiser while
+    # free hydrazine fired. Measured over the reagent identity table, the widened arm newly matches
+    # hydrazinium salts only.
     left: "[$([Cl;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([Mn;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([OX2,OX1-][OX2,OX1-]),$([#6][OX2][NX3+](=[OX1])[OX1-])]"
-    right: "[$([AlH4-]),$([BH4-]),$([H-]),$([NX3;H2,H1;!$(NC=O)][NX3;H2,H1;!$(NC=O)])]"
+    right: "[$([AlH4-]),$([BH4-]),$([H-]),$([NX3,NX4+;H3,H2,H1;!$(NC=O)][NX3,NX4+;H3,H2,H1;!$(NC=O)])]"
     severity: high
     explanation: >-
       A strong oxidizer and a strong reducing agent appear in the same reaction. Combined directly

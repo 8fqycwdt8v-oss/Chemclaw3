@@ -624,6 +624,39 @@ def test_a_peroxide_salt_is_an_oxidizer_to_the_pair_rule_as_well() -> None:
         }, innocent
 
 
+def test_a_hydrazinium_salt_is_a_hydrazine_to_both_rules() -> None:
+    """The salt is how hydrazine is actually weighed out, and it screened clean on both rules.
+
+    Protonating a hydrazine makes that nitrogen `NX4+`, so `[NX3;H2,H1]` stopped matching:
+    hydrazine monohydrochloride and hydrazine sulfate raised neither the structural `hydrazine`
+    rule nor `oxidizer-with-reductant` beside an oxidiser, while free hydrazine raised both. Same
+    class, same hazard, same waste stream — and the protonated spelling is the ordinary catalogue
+    form.
+
+    Both rules are widened together, which is the standard the peroxide widening set: a rule and
+    its structural twin fixed apart read exactly like a clean screen. Neither prose moved, because
+    neither had to — "free hydrazine motif … a strong reductant that forms energetic mixtures with
+    oxidizers" is about the N–N motif and its chemistry, not about its protonation state.
+    """
+    salts = ("[NH3+]N.[Cl-]", "[NH3+]N.[O-]S([O-])(=O)=O", "[NH3+][NH3+].[Cl-].[Cl-]")
+    for salt in salts:
+        assert "hydrazine" in {f.rule_id for f in screen_structure(salt).flags}, salt
+        assert "oxidizer-with-reductant" in {
+            f.rule_id for f in screen_reaction([salt, "OO"]).flags
+        }, salt
+    # Measured across the 83 distinct structures of the reagent identity table, the widening newly
+    # matches hydrazinium salts and nothing else. These are the near misses that keep it honest:
+    # an ordinary ammonium or amine salt has no N–N bond, and an acylated one is a hydrazide.
+    for innocent in (
+        "[NH4+].[Cl-]",  # ammonium chloride
+        "[NH3+]CC[NH3+].[Cl-].[Cl-]",  # ethylenediamine dihydrochloride
+        "[NH3+]O.[Cl-]",  # hydroxylamine hydrochloride
+        "[NH3+]c1ccccc1.[Cl-]",  # aniline hydrochloride
+        "NC(=O)N[NH3+].[Cl-]",  # semicarbazide hydrochloride — acylated, so a hydrazide
+    ):
+        assert "hydrazine" not in {f.rule_id for f in screen_structure(innocent).flags}, innocent
+
+
 def test_a_complex_hydride_fires_against_a_vicinal_dichloride_too() -> None:
     """1,2-dichloroethane carries the same incompatibility as DCM and was silent.
 

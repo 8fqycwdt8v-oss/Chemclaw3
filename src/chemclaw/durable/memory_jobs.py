@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import BaseModel
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
@@ -38,7 +39,28 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
 logger = logging.getLogger(__name__)
 
 
-async def all_reactions() -> list[OrdReaction]:
+class CorpusRead(BaseModel):
+    """The memory corpus as one read: the reactions, **and whether that is all of them**.
+
+    The second field exists because the first one alone is indistinguishable from a shrunken
+    corpus, and one consumer acts on the difference. `memory.observations.record` replaces a
+    stored observation's evidence when a pass is authoritative — which is only true if the pass
+    saw everything — so a read that skipped entries must say so rather than let a partial view be
+    written down as the complete record (the defect
+    `D-2026-08-08-a-partial-answer-must-say-so` §6 fixes).
+
+    `complete` is about *this* read, not about configuration: a source an operator has turned off
+    is not part of the corpus, so a read without it is complete. What makes a read partial is an
+    entry a source returned and this job could not map — the corpus holds a reaction the miner
+    never saw. Honest limit: a source that silently returns fewer entries than it holds is
+    invisible here, because nothing downstream of `fetch_new_entries` can know what it withheld.
+    """
+
+    reactions: list[OrdReaction]
+    complete: bool
+
+
+async def read_corpus() -> CorpusRead:
     """Read and map every reaction from the *configured active* ingest sources (the memory corpus).
 
     Reads the ingest halves of `settings.data_sources` (via `chemclaw.ingest.sources.registry`),
@@ -48,9 +70,13 @@ async def all_reactions() -> list[OrdReaction]:
     ingest half feeds the same canonical schema, so the memory layers reason over the union without
     knowing any source's shape. Adding a future source is one registry entry + one config token,
     not a change here (the "keep integrations dumb, put the reasoning above them" line).
+
+    Returns a `CorpusRead` rather than the bare list so a skipped entry is a fact the caller can
+    act on instead of a silence — see that model.
     """
     since = datetime.min.replace(tzinfo=UTC)
     reactions: list[OrdReaction] = []
+    skipped = 0
     for adapter in active_ingest_sources():
         for raw in await adapter.fetch_new_entries(since):
             try:
@@ -61,8 +87,26 @@ async def all_reactions() -> list[OrdReaction]:
                 # unexpected error surfaces instead of being silently dropped; log the skip
                 # so a corpus that quietly loses reactions is diagnosable.
                 logger.info("memory job skipped an unmappable ELN entry: %s", exc)
+                skipped += 1
                 continue
-    return reactions
+    if skipped:
+        logger.warning(
+            "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so this pass "
+            "saw %d reaction(s) and not the whole record",
+            skipped,
+            len(reactions),
+        )
+    return CorpusRead(reactions=reactions, complete=not skipped)
+
+
+async def all_reactions() -> list[OrdReaction]:
+    """The corpus as a plain list, for the three note builders that cannot act on completeness.
+
+    They propose notes through the PR-gate, where a human reads what was built; nothing they do
+    rewrites stored state on the strength of "this is everything". The observation miner does, and
+    calls `read_corpus` directly.
+    """
+    return (await read_corpus()).reactions
 
 
 @durable_activity("background")

@@ -28,7 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.memory.observations import record as record_observations
     from chemclaw.memory.playbook import playbook_note
 
-from chemclaw.durable.memory_jobs import all_reactions
+from chemclaw.durable.memory_jobs import read_corpus
 from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
 
 logger = logging.getLogger(__name__)
@@ -41,14 +41,27 @@ async def mine_observations_activity() -> int:
 
     Upsert, not insert: an observation's id is derived from its content, so a finding seen again
     accumulates the evidence behind it instead of minting a near-duplicate row every night.
+
+    Whether the row may also *shrink* is `read_corpus().complete`, passed straight through to
+    `record`. Both miners derive every observation's evidence and projects from the reaction
+    corpus — the interaction miner too, which attributes projects through `project_of` — so a
+    partial read is exactly the case in which an absent member is not a retraction.
+
+    A note `load_notes` skips does **not** make the pass partial, and that asymmetry is the point:
+    an unparseable note drops its own observation from `found` entirely, so no row is rewritten —
+    it simply stops being re-observed and ages out through `retire_stale`, which is the designed
+    path. A skipped *reaction* is different: the observation is still emitted, with less behind it.
     """
-    reactions = await all_reactions()
+    corpus = await read_corpus()
     # Off the loop: `load_notes` is a synchronous full parse of the corpus, and an async activity
     # shares its worker's event loop with every other activity on the queue. Same reason
     # `retrieval.retrievers` threads it.
     notes = await asyncio.to_thread(load_notes, settings.knowledge_path)
-    found = [*mine_corpus(reactions), *mine_interactions(notes, reactions)]
-    recorded = await record_observations(found)
+    found = [
+        *mine_corpus(corpus.reactions),
+        *mine_interactions(notes, corpus.reactions),
+    ]
+    recorded = await record_observations(found, complete=corpus.complete)
     logger.info("observation mining recorded %d finding(s)", recorded)
     return recorded
 

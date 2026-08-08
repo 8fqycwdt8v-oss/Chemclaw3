@@ -186,6 +186,24 @@ are what that change deliberately did not do.
       stated reason false for the molecules newly matched. **Trigger**: a process chemist confirms
       that an inorganic peroxide plus a ketone carries the same TATP-formation hazard, and supplies
       the citation; then widen the pattern *and* the prose together.
+- [ ] **`complex-hydride-with-chlorinated-solvent` misses sodium hydride** — [M]. Its `left` arm is
+      `[$([AlH4-]),$([BH4-])]`, so `['[H-].[Na+]', 'ClCCl']` raises **nothing** (measured through
+      `screen_reaction`), while `oxidizer-with-reductant` already lists `[H-]` among its reductants
+      and NaH with halocarbons is a Bretherick's entry. Left on the same rule as
+      `peroxide-with-ketone`: the explanation says "complex hydride reducing agents" and the rule id
+      says the same, so a saline hydride is outside its written justification — widening the pattern
+      would make the stated reason false for the molecule newly matched. **Trigger**: a process
+      chemist supplies the citation for the saline-hydride/halocarbon hazard; then either widen this
+      rule's pattern *and* its prose and id together, or add a `saline-hydride-with-chlorinated-
+      solvent` rule beside it with its own explanation.
+- [ ] **`azide-with-dichloromethane` misses chloroform** — [M]. The `right` arm is `[CH2](Cl)Cl`, so
+      `['[Na+].[N-]=[N+]=[N-]', 'ClC(Cl)Cl']` raises only the structural `non-carbon-azide` flag and
+      not the pair rule (measured). Triazidomethane from chloroform is the documented sibling of the
+      diazidomethane hazard the rule is written about — the rule's own explanation even names
+      triazidomethane — but its first clause and its id name *dichloromethane* as the partner, so
+      widening the pattern alone leaves the explanation false for chloroform. **Trigger**: a citation
+      for the chloroform case (the rule cites Peet & Weber 1988, which is about DCM); then widen the
+      pattern, the prose and the id together — `azide-with-polychloromethane` or similar.
 - [ ] **Three campaign ids moved once; a deployment with `bo_campaigns` rows needs a note** — [L].
       `campaign_id_for` now canonicalizes the parameter and category order, so a campaign declared
       in unsorted order answers to the id its sorted spelling already carried. Both ids are pinned
@@ -199,6 +217,24 @@ are what that change deliberately did not do.
       shipped case needs the finer grain (`retrieval-cross-coupling-literal-miss` is the only
       multi-metric demonstration and its passing metric is the point). **Trigger**: the first case
       that declares two metrics both meant to fail.
+- [ ] **The `pka` calibration ledger resets whenever the pKa key widens** — [M]. `predictions` is
+      keyed `(calc_type, calc_version, input_hash)` and `reconciled_for` reads with an exact
+      `calc_version` predicate (D-139), so this campaign's key widening orphaned every reconciled
+      pKa residual: `calculator_trust("pka")` reports `UNCALIBRATED`, n=0, until each molecule is
+      re-predicted. Nothing needs re-measuring — `record_prediction` re-reconciles from
+      `measurements` on write — but only per molecule re-predicted. Documented in `pka.calc_version`
+      and in the ADR's Consequences; what is *not* decided is whether an operator should be given a
+      re-prediction sweep over the measured set. **Trigger**: the first deployment with a populated
+      `predictions` table, or the next widening of a calibrated calculator's version string.
+- [ ] **A partial corpus read is detected only where the miner can see it** — [S]. `read_corpus()`
+      reports `complete=False` when an entry `map_to_ord` rejects, which is what gates the
+      observation upsert's replace branch. A source that silently returns *fewer entries than it
+      holds* — a truncated warehouse query, a share that failed to mount — is invisible: nothing
+      downstream of `fetch_new_entries` can know what was withheld, so such a pass still counts as
+      complete and may shrink an observation's evidence. **Trigger**: the first live ingest source
+      whose fetch can partially succeed; then the `DataSource` contract needs a completeness signal
+      of its own, and `read_corpus` should propagate it rather than infer it.
+
 ## Open — Left by the test-evidence lane (2026-08-08, D-2026-08-08-a-test-that-survives-the-mutation-it-names)
 
 Record: `docs/decisions/D-2026-08-08-a-test-that-survives-the-mutation-it-names.md`. Nine tests that

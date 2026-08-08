@@ -18,7 +18,7 @@ from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp import search
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.molfp.search import (
-    MoleculeHit,
+    ScanOutcome,
     find_similar_molecules,
     find_substructure_matches,
     record_for,
@@ -271,6 +271,137 @@ def test_a_capped_hit_list_says_the_count_is_a_floor(monkeypatch: pytest.MonkeyP
     asyncio.run(_run())
 
 
+def test_a_similarity_hit_list_cut_at_top_k_says_so_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sibling entry point had the same silence, and a comment declaring it correct.
+
+    `find_similar_molecules` returns at most `fingerprint_top_k` (default 10) of however many
+    clear the threshold, and set neither flag — so 18 qualifying molecules rendered as
+    `"10 indexed molecule(s) matched this query."`, which reads as a total. That is exactly what
+    `hits_truncated` was added to say on the substructure entry point next door, in the same
+    commit, and `store.py`'s comment asserted the omission ("every other entry point leaves them
+    so") rather than noticing it.
+
+    A page that holds everything qualifying is still not partial — pinned below, because a flag
+    that fires on every full page is the `len == cap` inference again.
+    """
+    monkeypatch.setattr(settings, "fingerprint_top_k", 10)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for i in range(18):
+            await store.add(record_for(f"m{i:02d}", "CCO"))  # all identical, so all qualify
+        cut = await find_similar_molecules(store, "CCO")
+        assert len(cut.hits) == 10 and cut.hits_truncated is True
+        assert "PARTIAL RESULT" in cut.model_dump()["verdict"]
+
+        # Exactly the page size, nothing beyond it: a complete answer.
+        exact = InMemoryFingerprintStore()
+        for i in range(10):
+            await exact.add(record_for(f"m{i:02d}", "CCO"))
+        whole = await find_similar_molecules(exact, "CCO")
+        assert len(whole.hits) == 10 and whole.hits_truncated is False
+        assert whole.verdict == "10 indexed molecule(s) matched this query."
+
+    asyncio.run(_run())
+
+
+def test_a_corpus_holding_exactly_the_result_cap_is_not_reported_as_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exactly `fingerprint_max_top_k` matches is a *complete* answer, not a lower bound.
+
+    The boundary the first version of this flag could not see: it returned `True` the instant
+    the cap-th match was appended, so `hits_truncated` was identical to `len(hits) == cap` for
+    every input — the very inference `_scan_for_matches`'s docstring says it exists to replace.
+    A corpus of exactly `cap` matches (default 100) rendered as `PARTIAL RESULT: … Do not report
+    it as the complete set`, which is the lane's own defect pointing the other way.
+
+    Both spellings are pinned: cap matches and nothing else, and cap matches followed by
+    non-matching records (the flag must not fire merely because records remained unexamined —
+    they were examined and did not match).
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 3)
+
+    async def _run() -> None:
+        exact = InMemoryFingerprintStore()
+        for i in range(3):
+            await exact.add(record_for(f"{100 + i}", "CCO"))
+        result = await find_substructure_matches(exact, "CCO")
+        assert len(result.hits) == 3 and result.hits_truncated is False
+        assert result.verdict == "3 indexed molecule(s) matched this query."
+
+        with_tail = InMemoryFingerprintStore()
+        for i in range(3):
+            await with_tail.add(record_for(f"{100 + i}", "CCO"))
+        await with_tail.add(record_for("900", "c1ccccc1"))  # scanned, does not match
+        tailed = await find_substructure_matches(with_tail, "CCO")
+        assert len(tailed.hits) == 3 and tailed.hits_truncated is False
+        assert "PARTIAL RESULT" not in tailed.verdict
+
+        # One more match than the cap is the case the flag is *for*.
+        over = InMemoryFingerprintStore()
+        for i in range(4):
+            await over.add(record_for(f"{100 + i}", "CCO"))
+        assert (await find_substructure_matches(over, "CCO")).hits_truncated is True
+
+    asyncio.run(_run())
+
+
+def test_a_corpus_holding_exactly_the_scan_cap_is_a_complete_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corpus of exactly `substructure_scan_max_records` was fully examined.
+
+    `scan_truncated` was `len(records) == cap`, so a store sitting exactly on the cap (default
+    5000) turned a true "no azide on file" into `SEARCH INCOMPLETE: … Report the search as
+    inconclusive`. A clean negative reported as inconclusive is the same untruth as an
+    incomplete scan reported as a negative — the flag has to distinguish "read cap records and
+    there were more" from "read cap records and that was all of them".
+    """
+    monkeypatch.setattr(settings, "substructure_scan_max_records", 5)
+
+    async def _run() -> None:
+        exact = InMemoryFingerprintStore()
+        for i in range(5):
+            await exact.add(record_for(f"{100 + i}", "CCO"))
+        result = await find_substructure_matches(exact, "[N-]=[N+]=N")
+        assert result.hits == [] and result.scan_truncated is False
+        assert "genuine negative result" in result.verdict
+
+        over = InMemoryFingerprintStore()
+        for i in range(6):
+            await over.add(record_for(f"{100 + i}", "CCO"))
+        truncated = await find_substructure_matches(over, "[N-]=[N+]=N")
+        assert truncated.scan_truncated is True
+        assert "SEARCH INCOMPLETE" in truncated.verdict
+
+    asyncio.run(_run())
+
+
+def test_a_row_that_no_longer_parses_makes_the_scan_incomplete() -> None:
+    """A record the scan could not read is a record it did not examine, and that is the flag.
+
+    `_scan_for_matches` skips an unparseable stored SMILES so one bad row cannot hide every real
+    hit — but it recorded nothing, so a corpus whose only azide carried a malformed label answered
+    `hits: []` under "this is a genuine negative result". That is precisely what `scan_truncated`
+    is documented to rule out ("not every stored record was examined"), reached by the other of
+    the two ways it can happen.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ok", "CCO"))
+        # Bypass `record_for`, which would refuse to fingerprint it — this is a row that parsed
+        # when it was indexed and does not now (a lenient canonicalization, a changed RDKit).
+        await store.add(FingerprintRecord(id="broken", label="not-a-molecule", bits="01"))
+        result = await find_substructure_matches(store, "[N-]=[N+]=N")
+        assert result.hits == [] and result.scan_truncated is True
+        assert "genuine negative" not in result.verdict
+        assert "SEARCH INCOMPLETE" in result.verdict
+
+    asyncio.run(_run())
+
+
 def test_a_complete_substructure_scan_reports_no_truncation() -> None:
     """The common case stays unchanged: both flags false, and the verdict keeps its wording.
 
@@ -290,16 +421,16 @@ def test_a_complete_substructure_scan_reports_no_truncation() -> None:
     asyncio.run(_run())
 
 
-def _sleeping_scan(seconds: float) -> Callable[..., tuple[list[MoleculeHit], bool]]:
+def _sleeping_scan(seconds: float) -> Callable[..., ScanOutcome]:
     """A stand-in for the CPU-bound scan that blocks its thread for `seconds`, then matches nothing.
 
     A real pathological SMARTS would take minutes and is not reproducible across RDKit versions;
     what both tests need is only that the scan blocks a *thread*, which this reproduces exactly.
     """
 
-    def _scan(*_args: object, **_kwargs: object) -> tuple[list[MoleculeHit], bool]:
+    def _scan(*_args: object, **_kwargs: object) -> ScanOutcome:
         time.sleep(seconds)
-        return [], False
+        return ScanOutcome([], False, 0)
 
     return _scan
 

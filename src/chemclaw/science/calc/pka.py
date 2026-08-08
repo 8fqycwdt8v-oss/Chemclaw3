@@ -446,6 +446,29 @@ def calc_version() -> str:
     molecule *after* the key is built, and a key that has to re-derive the dispatch is a key that
     can disagree with it. The cost is that an acid result is invalidated by an optimizer change
     that could not have touched it — recomputing more than necessary, never serving a stale value.
+
+    **Two costs of widening this string are not cache misses, and both are accepted deliberately.**
+
+    A cache miss costs CPU; the *calibration ledger* costs bench work. `predictions` is keyed
+    `(calc_type, calc_version, input_hash)` and `reconciled_for` reads with an exact `calc_version`
+    predicate (D-139, so a v1 that ran high is never averaged with a v2 that ran low), so every
+    reconciled pKa residual recorded under a previous version becomes unreachable the moment this
+    string moves: `calculator_trust("pka")` reports `UNCALIBRATED`, n=0, until each molecule is
+    predicted again. It is recoverable without re-measuring anything — `record_prediction`
+    re-reconciles from `measurements` on write — but only per molecule re-predicted, so the
+    ledger refills at the rate the calculator is used, not at once. Any version widening here pays
+    that, and it is worth pricing before widening: an operator who needs the figures back sooner
+    re-runs the measured set.
+
+    And under the default `xtb_engine=auto`, `relaxation_spec()` resolves a concrete backend, so a
+    pod **with** the `xtb` binary and one **without** now compute different pKa keys — the pKa
+    cache is fleet-partitioned where it used to name only the tblite/RDKit wheels and was
+    machine-independent. That is wanted: the base branch really does relax through whichever
+    backend is present, the two do not agree to the last decimal, and a shared key would serve one
+    program's number as the other's — the defect this string was widened to remove. A heterogeneous
+    fleet therefore computes some molecules twice, which is the honest price; pinning
+    `CHEMCLAW_XTB_ENGINE` to one backend removes the split for a deployment that would rather not
+    pay it.
     """
     return (
         f"{settings.xtb_method}+{engine_version()}/alpb-{settings.pka_solvent}/"

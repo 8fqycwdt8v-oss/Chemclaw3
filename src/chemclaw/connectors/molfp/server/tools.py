@@ -42,7 +42,9 @@ async def similar_molecules(
     `top_k` and `threshold` (Tanimoto floor) default to the configured values.
 
     **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means the index
-    holds nothing and the question was not answered — it is not a finding of novelty.
+    holds nothing and the question was not answered — it is not a finding of novelty. And
+    `hits_truncated: true` means more molecules cleared the threshold than `top_k` could return,
+    so the count is a lower bound: raise `top_k` before saying how many analogs exist.
     """
     return await find_similar_molecules(_store, smiles, top_k, threshold)
 

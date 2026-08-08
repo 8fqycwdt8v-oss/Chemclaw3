@@ -225,7 +225,13 @@ read before it is characterised.
       to two different hashes. Now an `OptSpec` field.
 - [x] **The peroxide pair rule missed inorganic peroxides** — `Na2O2 + NaBH4` raised `peroxide`
       only; it now also raises `oxidizer-with-reductant`. A carboxylate and a nitro group are
-      pinned as still silent.
+      pinned as still silent. **Review found three sibling rules with the same asymmetry; 1 of 3
+      widened.** Hydrazine salts now fire identically to free hydrazine (structural rule and
+      pair-rule arm widened together, `NX4+`): 4 newly matched structures across the repo's 83-85
+      reagent table, all hydrazinium salts, 0 ordinary reagents, 0 lost. NaH-with-halocarbon and
+      chloroform-with-azide were **not** widened and are filed with the `peroxide-with-ketone`
+      reasoning — each rule's prose and id name *complex* hydrides and dichloromethane
+      specifically, so widening the pattern alone would falsify the stated justification.
 - [x] **A dead DSN and a disabled ledger produced identical calibration payloads** — and the
       disabled state is the *default*, so that was the shipped deployment. `reconciled_for` raises
       (its only callers are the two trust tools, so the swallow protected nothing) and
@@ -240,11 +246,12 @@ read before it is characterised.
 - [x] **`eval-strict` exited 0 on an inert suite** — thresholds at 1000 silently dropped
       `pharma-solvent-heavy`. `inert_demonstrations()` + `--strict` now exit 1 with a report line.
 
-**Refuted — the two `tests/test_pka.py` failures this campaign treated as pre-existing on `main`
-do not reproduce.** 27 passed on unaltered `main` sources (320 s) and 29 with the change (291 s).
-The pKa key cannot have been the cause either: both tests call `predict_pka` directly and never
-touch a store. The campaign's alternate hypothesis — a tblite-numerics environment difference — is
-the one left standing.
+**On the two `tests/test_pka.py` failures:** this lane reported them as "do not reproduce" and left
+the tblite-numerics hypothesis standing. Half right. They *do* reproduce under load and they are
+`pytest-timeout` expiries, not assertion failures — settled at `--timeout=0` → 2 passed in 1071 s.
+The lane's sound half survives: neither test touches a store, so the pKa key was never a candidate.
+The ADR's "Refuted by measurement" section has been rewritten as a timeout finding. See the
+gate-state section at the top of this file.
 
 ## Lane T9 — Make recurrence impossible (enforcement) — MOSTLY DONE (D-2026-08-08-a-rule-with-no-test-is-a-claim)
 

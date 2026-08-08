@@ -21,12 +21,14 @@ from typing import Any
 
 import pytest
 
+from chemclaw.core.ids import stable_hash
 from chemclaw.science.bo.campaign_record import (
     _IDENTIFYING_EXCLUSIONS,
     _SPACE_FIELDS,
     Campaign,
     InMemoryCampaignStore,
     Suggestion,
+    _space_of,
     campaign_id_for,
     campaign_store,
     read_campaign_thread,
@@ -458,6 +460,29 @@ def test_a_single_objective_problem_keeps_the_id_it_had_before_the_migration() -
         assert campaign_id_for(problem) == _BASELINE_IDS[label], label
 
 
+def _pre_canonicalization_id(problem: OptimizationProblem) -> str:
+    """`campaign_id_for` as it hashed *before* parameter and category order were canonicalized.
+
+    Rebuilt here rather than asserted about, because the claim this pins is a statement about the
+    old algorithm and the old algorithm is gone: the id a shape carried then cannot be recovered by
+    calling the current function, which sorts whatever it is handed. The first assertion below
+    keeps the reconstruction honest — it must reproduce the three ids captured from the parent
+    commit, or this helper has drifted from the code it stands in for.
+
+    Faithful for the three baseline shapes only: none carries a constraint or a second objective,
+    so the two conditional keys of the identity payload are not reproduced here.
+    """
+    space: list[dict[str, Any]] = []
+    for parameter in problem.parameters:
+        dumped = _space_of(parameter)
+        if isinstance(parameter, CategoricalParameter):
+            # The old payload kept the caller's category order, which is precisely the fork.
+            dumped["categories"] = list(parameter.categories)
+        space.append(dumped)  # and the caller's parameter order, unsorted
+    identity = {"space": space, "objective": problem.objective.model_dump(mode="json")}
+    return f"campaign-{stable_hash(identity)}"
+
+
 def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
     """The one deliberate id move, pinned in both directions so it can never happen quietly.
 
@@ -466,6 +491,11 @@ def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
     order, so an already-sorted campaign keeps its row and its unsorted twin merges into it. Rows
     written under the pre-canonicalization ids are orphaned — a one-time cost, recorded in
     `BACKLOG.md`, against a fork that would otherwise recur on every re-declaration.
+
+    **This test used to be unable to fail.** It hashed the sorted spelling with the *new* code,
+    which sorts anyway, so its first assertion restated the pin one function above and its second
+    compared two literals; mutations removing either sort left it green. The claim is about the old
+    algorithm, so the old algorithm has to appear — `_pre_canonicalization_id` is it.
     """
     for label, problem in _baseline_problems().items():
         rewritten = [
@@ -477,8 +507,12 @@ def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
         sorted_spelling = problem.model_copy(
             update={"parameters": sorted(rewritten, key=lambda p: p.name)}
         )
-        assert campaign_id_for(sorted_spelling) == _BASELINE_IDS[label], label
-        assert _BASELINE_IDS[label] != _PRE_CANONICALIZATION_IDS[label], label
+        # As written, the shape used to hash here — the row now orphaned.
+        assert _pre_canonicalization_id(problem) == _PRE_CANONICALIZATION_IDS[label], label
+        # And its sorted spelling already carried the id it has now: the move is a merge onto an
+        # existing row, not a newly minted one. This is the whole claim.
+        assert _pre_canonicalization_id(sorted_spelling) == _BASELINE_IDS[label], label
+        assert campaign_id_for(problem) == _BASELINE_IDS[label], label
 
 
 def test_the_legacy_spelling_hashes_to_the_same_id_as_the_new_one() -> None:

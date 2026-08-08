@@ -376,9 +376,14 @@ def test_the_optimizer_key_names_its_trust_radius(monkeypatch: pytest.MonkeyPatc
     """`xtb_opt_trust_radius` is a spec field, so it is keyed by construction (D-011).
 
     It was read straight from settings inside the optimizer's inner loop, which put it in no
-    key at all. Measured on ethanol, it moves the answer: 0.35 and 0.05 relax to different
+    key at all. Measured *on ethanol*, it moves the answer: 0.35 and 0.05 relax to different
     geometries (`st_e868cd6fe533107f` vs `st_860015aca7be952c`) and different energies, and
     a structure id is what every downstream key is built on.
+
+    The fixture below is **water**, not ethanol, and deliberately: this test asks only whether the
+    setting reaches the key, which is a hash over the spec and costs no SCF at all. That the
+    optimizer then *obeys* the field is the other half of the claim and cannot be seen from a key
+    — it is pinned by `tests/test_xtb_opt.py`'s trust-radius test, which does relax ethanol.
     """
     structure = Structure(
         elements=[8, 1, 1],

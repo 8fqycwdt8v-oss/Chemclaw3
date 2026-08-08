@@ -98,10 +98,13 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
     index_empty: bool = False
     # The two ways a search can stop early, carried in the payload for the same reason
     # `index_empty` is: a truncation known only to the log cannot reach the model that writes the
-    # answer. `scan_truncated` = not every stored record was examined (so an empty result is not
-    # evidence of absence); `hits_truncated` = the scan stopped at the result cap (so the count is
-    # a floor, not a total). Both default False: a search that examined its whole corpus is the
-    # normal case, and every other entry point leaves them so.
+    # answer. `scan_truncated` = not every stored record was examined — the record cap cut the scan
+    # short, or a row's stored structure no longer parses and could not be matched — so an empty
+    # result is not evidence of absence; `hits_truncated` = more matched than the result list could
+    # hold (so the count is a floor, not a total). Both default False, which is the *common* case
+    # and not a convention the entry points may lean on: every search that can truncate sets them,
+    # similarity search included — its page cap is `fingerprint_top_k`, and a page of 10 out of 18
+    # read as a total for exactly as long as this comment said the omission was correct.
     scan_truncated: bool = False
     hits_truncated: bool = False
 
@@ -134,11 +137,11 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         if not self.hits:
             if self.scan_truncated:
                 return (
-                    f"SEARCH INCOMPLETE: only part of the {self.subject} index was examined "
-                    "before the scan hit its record cap, and nothing in that part matched. This "
-                    f"is NOT evidence that no such {self.subject} exists — the rest of the corpus "
-                    "was never looked at. Report the search as inconclusive and say an operator "
-                    "must raise the scan cap or narrow the corpus."
+                    f"SEARCH INCOMPLETE: not every stored {self.subject} was examined — the scan "
+                    "stopped at its record cap, or a stored record could not be read — and "
+                    "nothing that was examined matched. This is NOT evidence that no such "
+                    f"{self.subject} exists. Report the search as inconclusive and say an operator "
+                    "must raise the scan cap or repair the index (the connector log names which)."
                 )
             return (
                 f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
@@ -415,8 +418,18 @@ async def find_matches(
     query_bits: str,
     top_k: int | None = None,
     threshold: float | None = None,
-) -> list[Match]:
+) -> tuple[list[Match], bool]:
     """Search a store with the configured `top_k`/`threshold` defaults applied.
+
+    Returns the page **and whether more records qualified than it could hold**, because a page is
+    not a total: `fingerprint_top_k` defaults to 10, and 18 molecules over the threshold rendered
+    as "10 indexed molecule(s) matched this query" — a floor read as a count, which is the defect
+    `hits_truncated` exists to name on the substructure entry point. One extra row is asked for and
+    dropped, the same probe the bounded substructure scan uses.
+
+    Honest limit on the durable backend: the threshold filter applies *after* pgvector's ordered
+    HNSW scan, so a selective threshold can return fewer rows than qualify in the table and the
+    flag then under-reports. It errs toward `False` — it never calls a complete page partial.
 
     The one place the generic search knobs fall back to config, so the molecule
     and reaction entry points cannot drift in how they default (DRY). `top_k` may arrive
@@ -432,7 +445,8 @@ async def find_matches(
     k = min(max(k, 1), settings.fingerprint_max_top_k)
     t = threshold if threshold is not None else settings.fingerprint_similarity_threshold
     t = min(max(t, 0.0), 1.0)
-    return await store.find_similar(query_bits, k, t)
+    found = await store.find_similar(query_bits, k + 1, t)
+    return found[:k], len(found) > k
 
 
 async def index_is_empty(store: FingerprintStore, hits: Sequence[BaseModel]) -> bool:

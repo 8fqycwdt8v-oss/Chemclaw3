@@ -9,6 +9,7 @@ capability surfaces them; the `reaction-search` skill decides how to set them (G
 
 import asyncio
 import logging
+from typing import NamedTuple
 
 from pydantic import BaseModel
 from rdkit import Chem
@@ -85,13 +86,16 @@ async def find_similar_molecules(
     on an unparseable query so the caller never searches with a meaningless fingerprint.
 
     Returns a `FingerprintSearch`, not a bare list, so "we have no analog on file" and "nothing
-    has been indexed" cannot arrive as the same empty list — see that model's docstring.
+    has been indexed" cannot arrive as the same empty list — see that model's docstring. For the
+    same reason a full page carries `hits_truncated` when more molecules cleared the threshold than
+    `top_k` could hold: the page is a floor, and it read as a total.
     """
-    matches = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
+    matches, truncated = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
     return FingerprintSearch[MoleculeHit](
         subject="molecule",
         hits=[MoleculeHit.for_molecule(match.label, match.similarity) for match in matches],
         index_empty=await index_is_empty(store, matches),
+        hits_truncated=truncated,
     )
 
 
@@ -148,8 +152,13 @@ async def find_substructure_matches(
         # *rule* for what a valid pattern is now lives in one place (`core.chem`).
         raise FingerprintError(str(exc)) from exc
     cap = settings.substructure_scan_max_records
-    records = await store.all_records(limit=cap)
-    scan_truncated = len(records) == cap
+    # Read one row past the cap to *observe* truncation instead of inferring it from
+    # `len(records) == cap`, which cannot tell "there were more" from "that was all of them" and
+    # so turned a corpus sitting exactly on the cap into `SEARCH INCOMPLETE` over a clean
+    # negative. One extra row is the whole cost; the surplus is dropped before matching.
+    probed = await store.all_records(limit=cap + 1)
+    scan_truncated = len(probed) > cap
+    records = probed[:cap]
     if scan_truncated:
         log.warning(
             "substructure scan hit the %d-record cap; matches may be incomplete "
@@ -158,7 +167,7 @@ async def find_substructure_matches(
         )
     timeout = settings.substructure_match_timeout_seconds
     try:
-        hits, hits_truncated = await asyncio.wait_for(
+        scan = await asyncio.wait_for(
             asyncio.to_thread(_scan_for_matches, records, pattern), timeout=timeout
         )
     except TimeoutError as exc:
@@ -166,40 +175,76 @@ async def find_substructure_matches(
             f"substructure match for {query!r} exceeded {timeout}s over {len(records)} molecules; "
             "narrow the pattern (or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
         ) from exc
+    if scan.unreadable:
+        log.warning(
+            "%d stored molecule(s) could not be parsed and were not matched; the scan is "
+            "reported as incomplete",
+            scan.unreadable,
+        )
     return FingerprintSearch[MoleculeHit](
         subject="molecule",
-        hits=hits,
+        hits=scan.hits,
         index_empty=not records,
-        scan_truncated=scan_truncated,
-        hits_truncated=hits_truncated,
+        # A row whose stored structure no longer parses was fetched and never matched, which is
+        # what `scan_truncated` means — "not every stored record was examined". Folded in here
+        # rather than given a flag of its own: the model's move is identical either way (do not
+        # report a miss as a negative), and a second boolean would split one instruction in two.
+        scan_truncated=scan_truncated or bool(scan.unreadable),
+        hits_truncated=scan.hits_truncated,
     )
 
 
-def _scan_for_matches(
-    records: list[FingerprintRecord], pattern: Chem.Mol
-) -> tuple[list[MoleculeHit], bool]:
+class ScanOutcome(NamedTuple):
+    """What one substructure pass found, and the two ways it fell short of the whole corpus.
+
+    A tuple rather than three positional returns because the two caveats are read together and
+    each answers a different question: `hits_truncated` says the count is a floor,
+    `unreadable` says the *corpus* was not fully examined and so a miss is not a negative.
+    """
+
+    hits: list[MoleculeHit]
+    hits_truncated: bool
+    unreadable: int
+
+
+def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> ScanOutcome:
     """Match `pattern` against each record, stopping at the result cap (the CPU-bound half).
 
     Split out as a plain synchronous function so it can run in a worker thread: it is the only
     part of the search that burns CPU, and keeping it separate makes the async wrapper's one
     responsibility — bounding it — obvious. A record whose stored SMILES no longer parses is
-    skipped rather than aborting the scan (one bad row must not hide every real hit).
+    skipped rather than aborting the scan (one bad row must not hide every real hit) — and
+    **counted**, because skipping it silently meant a corpus whose one azide row carried a
+    malformed label still answered "this is a genuine negative result".
 
-    Returns the matches **and whether it stopped early**, rather than letting the caller infer
+    Returns the matches **and whether a match was left out**, rather than letting the caller infer
     truncation from `len(matches) == cap`: a corpus holding exactly `cap` matches is complete, and
     reporting it as partial is the same class of untrue statement in the other direction.
+
+    Which is why the cap bounds what is *returned* and the scan runs on until it either finds a
+    match it cannot return — the one fact that makes the count a floor — or runs out of records.
+    Stopping at the cap-th match made the flag exactly the `len == cap` inference above, since it
+    fired without ever asking whether another match existed. Continuing costs nothing new in the
+    worst case: a miss already scans every record, and a broad fragment finds its surplus match
+    within a record or two of the cap. The whole scan stays bounded by the record cap and by
+    `substructure_match_timeout_seconds` above.
     """
     max_matches = settings.fingerprint_max_top_k
     matches: list[MoleculeHit] = []
+    unreadable = 0
     for record in records:
         mol = Chem.MolFromSmiles(record.label)
-        if mol is not None and mol.HasSubstructMatch(pattern):
-            matches.append(MoleculeHit.for_molecule(record.label))
-            if len(matches) == max_matches:
-                log.warning(
-                    "substructure result capped at %d matches (id order); "
-                    "narrow the query or raise CHEMCLAW_FINGERPRINT_MAX_TOP_K",
-                    max_matches,
-                )
-                return matches, True
-    return matches, False
+        if mol is None:
+            unreadable += 1
+            continue
+        if not mol.HasSubstructMatch(pattern):
+            continue
+        if len(matches) == max_matches:
+            log.warning(
+                "substructure result capped at %d matches (id order); "
+                "narrow the query or raise CHEMCLAW_FINGERPRINT_MAX_TOP_K",
+                max_matches,
+            )
+            return ScanOutcome(matches, True, unreadable)
+        matches.append(MoleculeHit.for_molecule(record.label))
+    return ScanOutcome(matches, False, unreadable)
