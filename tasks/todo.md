@@ -486,6 +486,61 @@ go red, then reverting it and watching it go green. The mutations are quoted ver
       keeps `method="thread"` on Temporal modules) fail when mutated. Documented in
       `tests/README.md`. CI does not set a scale — the gate runs in ~5 min on a dedicated runner.
 
+## Lane BO — Bayesian optimization (the unexamined subsystem)
+
+Audited `science/bo/engine.py`, `science/bo/problem.py`, `science/bo/campaign*.py`,
+`science/bo/progress.py`, `connectors/bo/{server/tools,activities,workflows}.py` against the real
+BoFire 0.4.1 / BoTorch 0.18.1 stack and a live Postgres. Record:
+`docs/decisions/D-2026-08-08-a-category-has-no-outside.md`.
+
+**The mathematics held.** Two defects found, both on the connector surface; eight hypotheses
+refuted by measurement.
+
+- [x] **A categorical level the problem never declared reached the model as "an internal error
+      occurred"** — `_require_points_match` checked parameter *names* and never *values*, and
+      `strategy.predict` (unlike `strategy.tell`) runs no validation. Measured:
+      `{solvent: "DMF"}` → `KeyError`, `{temperature: "hot"}` → `TypeError`,
+      `{solvent: 2}` → `KeyError` — none a `ValueError`, so `connectors.server` sanitized all three
+      into a string the model cannot repair from and retries. The *same* mistake in an observation
+      already came back as a clean forwarded `ValueError` from BoFire. Fixed at the tool boundary,
+      with the refusal naming the parameter, the value and the levels that exist. `predict_outcome`'s
+      docstring, which promised "out-of-range points are answered, not refused" without
+      qualification, is corrected: that is true of a range and false of a category.
+      Deliberately **not** `point_in_domain` — it returns False for the 400 °C point too, and that
+      point must stay answered (pinned by a test).
+
+- [x] **A batch that could not be filled rendered as a complete answer** — measured on a 2×2 space
+      with three of four conditions run: asked for 3, got 1, and the whole summary was a reading of
+      that one candidate's posterior sd. BoFire emits `UserWarning: Expected 3 candidates, got 1`
+      into a log nobody reads. `ExperimentSuggestion` now carries `requested` and the summary leads
+      with the shortfall. The engine's under-delivery is correct and unchanged.
+
+**Refuted (measured, do not re-audit):** objective sense end-to-end for SOBO and MOBO
+(`minimize` → 27.76/36.96/32.61 on a true minimum of 30; `maximize` → 99.53/120.0/120.0 on a true
+maximum of 120); constraint sense for all
+three relations on both the seeding and the model-guided path (20/20 random seeds satisfied each of
+`<=`, `>=`, `==`); per-objective fit attribution (R² 1.0000 vs 0.0454 for a linear vs a scrambled
+objective, stable under objective reordering); parameter-order and observation-order determinism
+(identical recommendations); `_resolution` against standard DoE tables at 3–8 factors; categorical
+round-trip, run distinctness and bounds across full and fractional designs; record→resume
+persistence under both the in-memory and the live Postgres store; and observation-value validation
+(already covered by BoFire's `tell`).
+
+**Left, with triggers, in `docs/planning/BACKLOG.md`:** `generate_screening_design` forwards a
+BoFire message naming no fix; a durable campaign's declared `direction` is not checked against its
+registered objective (needs a sense declared per registry entry — a chemist's call); a campaign's
+stored history is only as long as the last ask (documented design, and unioning would have to
+decide what a revised measurement means).
+
+Gate: `ruff format` + `ruff check` clean; `mypy src examples tests` — no issues in 598 files; every
+`test_bo*.py` plus `test_jobs_api.py`, `test_connector_isolation.py`, `test_decision_log.py`,
+`test_deferred_register.py` — **271 passed, 3 skipped** (Temporal offline), 0 failed at
+`CHEMCLAW_TEST_TIMEOUT_SCALE=4`. `make prose-validate` OK.
+
+Files changed: `src/chemclaw/connectors/bo/server/tools.py`, `tests/test_bo_predict.py`,
+`tests/test_bo_tools.py`, `docs/decisions/D-2026-08-08-a-category-has-no-outside.md`,
+`docs/decisions/README.md`, `docs/planning/BACKLOG.md`.
+
 ## To BACKLOG with triggers (not fixed this session)
 
 - Network policy: DNS egress `to: []` survives a correct config; default install permits all egress.

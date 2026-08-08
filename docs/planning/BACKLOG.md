@@ -3,6 +3,44 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the Bayesian-optimization audit (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-category-has-no-outside.md`. Two defects fixed and eight
+hypotheses refuted by measurement; these are the three the audit deliberately left.
+
+- [ ] **`generate_screening_design` forwards a BoFire message that names no fix** — [S]. A factor
+      count with no available generator (measured: 4 factors at `n_generators=2`, which would give
+      4 runs for 4 main effects) reaches the caller as BoFire's own `ValueError: No generator
+      available for the requested combination.` It *is* a `ValueError`, so `connectors.server`
+      forwards it verbatim and the model is not left with "an internal error occurred" — but the
+      sentence names neither the factor count nor the remedy (ask for fewer generators). The
+      adjacent refusals in `factorial_design` all name both. **Trigger**: the next time a live turn
+      is observed retrying `generate_screening_design` after this message, or the next change that
+      touches `_fractional_design`'s guards.
+
+- [ ] **A durable campaign's declared direction is not checked against its registered objective** —
+      [M]. `CampaignSpec` carries both `problem.objectives[0].direction` (which drives
+      `MinimizeObjective`/`MaximizeObjective` and `best_of`) and `objective_name` (which selects the
+      evaluator from `science.bo.objectives`'s registry). Nothing binds them, so a spec naming
+      `solubility_max` with `direction: "minimize"` would run a full campaign toward the *worst*
+      solubility and report it as the best, with every number internally consistent. Both fields are
+      LLM-authored on the `start_optimization_campaign` tool. Not fixed here because the registry
+      does not currently declare a sense for its entries, and inventing one is a modelling decision
+      rather than a bug fix — `reizman_suzuki` returns a yield and `solubility_max` a log S, and
+      whether a registered objective may legitimately be optimized in either direction is a
+      chemist's call. **Trigger**: a third objective joins `_REGISTRY`, or a campaign is observed
+      finishing with a direction the requester did not intend. The fix is one declared `direction`
+      per registry entry plus a check in `require_campaign_startable`.
+
+- [ ] **A campaign's stored history is only as long as the last ask** — [M]. `read_campaign_thread`
+      returns the *latest* suggestion's observations, which is complete only under the documented
+      assumption that each turn passes the campaign's whole run history. Measured: an ask made with
+      a shorter list shrinks what a later `resume_campaign` reports (3 runs → 2), on both the
+      in-memory and the Postgres store. This is the documented design rather than a defect, and the
+      alternative — unioning observations across suggestions — would have to decide what a *revised*
+      measurement of one condition means. **Trigger**: an agent is observed resuming onto a
+      truncated history, or a chemist corrects a previously reported value.
+
 ## Open — Left by the connection-timeout default (2026-08-08)
 
 Record: `docs/decisions/D-2026-08-08-a-borrowed-connection-is-bounded-by-default.md`. The default
