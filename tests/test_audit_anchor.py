@@ -17,16 +17,23 @@ These tests drive the pure halves — signing, parsing, comparison — offline. 
 the *reasoning*, and none of it needs a server.
 """
 
+import asyncio
+
 import pytest
 
 from chemclaw.agent.audit_anchor import (
     ANCHOR_LOG_MARKER,
     Anchor,
     compare,
+    latest_anchor,
     parse_anchor,
     sign,
     signature_ok,
+    take_anchor,
 )
+from chemclaw.core.config import settings
+from chemclaw.core.db import connection
+from tests.pg import migrated_db_or_skip
 
 _SECRET = "anchor-secret"
 
@@ -214,3 +221,48 @@ def test_the_verifier_holds_the_trail_to_an_anchor_when_given_one() -> None:
         max_event_id=check.last_id,
         tip_hash=check.tip_hash,
     )
+
+
+def test_one_junk_anchor_does_not_disable_the_high_water_mark() -> None:
+    """Appending an unsigned anchor must not remove the control — no forgery required.
+
+    `latest_anchor` read exactly one row and returned None when that row's signature failed. So a
+    single `INSERT INTO audit_anchors` with `taken_at = now()` and `signature = 'junk'` — needing
+    only INSERT, not the key — made `durable/audit_chain.py` set `held_to = None` and skip its
+    comparison, and a trail truncated to any length verified clean. That is strictly less work than
+    the tampering the module says the anchors still catch.
+
+    Skipping *past* an invalid anchor is not the same as stopping at it. The rotated-key rationale
+    justifies the first and never justified the second.
+    """
+
+    async def _run() -> tuple[Anchor | None, Anchor | None]:
+        await migrated_db_or_skip()
+        monkey = settings.audit_anchor_secret
+        settings.audit_anchor_secret = "anchor-secret-for-this-test"
+        try:
+            async with connection(
+                settings.postgres_dsn,
+                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+            ) as conn:
+                await conn.execute("DELETE FROM audit_anchors")
+            genuine = await take_anchor()
+            before = await latest_anchor()
+            async with connection(
+                settings.postgres_dsn,
+                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+            ) as conn:
+                await conn.execute(
+                    "INSERT INTO audit_anchors "
+                    "(taken_at, row_count, max_event_id, tip_hash, chain_version, signature) "
+                    "VALUES (now() + interval '1 minute', %s, %s, %s, %s, 'junk')",
+                    (0, 0, "" if genuine is None else genuine.tip_hash, 1),
+                )
+            return before, await latest_anchor()
+        finally:
+            settings.audit_anchor_secret = monkey
+
+    before, after = asyncio.run(_run())
+    assert before is not None, "the genuine anchor must be readable to begin with"
+    assert after is not None, "one junk row removed the high-water mark entirely"
+    assert after.tip_hash == before.tip_hash, "the valid anchor behind the junk row must be found"

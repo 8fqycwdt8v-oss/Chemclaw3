@@ -140,8 +140,28 @@ class PublishNoteWorkflow:
         )
 
 
-def _slice_for_this_run(notes: list[Note], id_prefix: str) -> list[Note]:
-    """Take at most `memory_max_notes_per_run` notes, rotating the window on each daily run.
+@durable_activity("background")
+@activity.defn
+async def resolve_notes_per_run() -> int:
+    """Resolve the per-run note cap outside workflow code, as `resolve_fan_out_limit` does.
+
+    `_slice_for_this_run`'s return value *is* the input list to `fan_out`, so the cap decides how
+    many `StartChildWorkflow` commands the workflow emits. Reading live settings inside workflow
+    code makes that a function of the replaying worker's config rather than of history: measured
+    with `workflow.now()` pinned and the corpus fixed, `cap=25` emitted 25 children
+    (campaign-000..024) and `cap=10` emitted 10 (campaign-000..009). A redeploy that lowers the
+    value mid-fan-out therefore replays 10 starts against 25 recorded child-started
+    events — a non-determinism error, which is a workflow *task* failure, which retries forever
+    ignoring the retry policy and wedges the run (the trap D-093 documents).
+
+    `orchestrator.py` states this rule and captures its own bound through a local activity; the line
+    above it in the same function did not.
+    """
+    return settings.memory_max_notes_per_run
+
+
+def _slice_for_this_run(notes: list[Note], cap: int, id_prefix: str) -> list[Note]:
+    """Take at most `cap` notes, rotating the window on each daily run.
 
     These jobs rescan the whole corpus with no cursor and had no ceiling on what one run could
     propose. In practice they stay quiet — an id anchored on a cluster's smallest member reuses its
@@ -155,9 +175,9 @@ def _slice_for_this_run(notes: list[Note], id_prefix: str) -> list[Note]:
     corpus is reached within one cycle, after which every note is a no-op re-proposal.
 
     Sorted by id so the ordering is stable rather than incidental to build order, and
-    `workflow.now()` rather than a wall clock because a workflow must replay identically.
+    `workflow.now()` rather than a wall clock because a workflow must replay identically. `cap` is
+    passed in rather than read here for the same reason — see `resolve_notes_per_run`.
     """
-    cap = settings.memory_max_notes_per_run
     if cap <= 0 or len(notes) <= cap:
         return notes
     ordered = sorted(notes, key=lambda note: note.id)
@@ -189,8 +209,14 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
         start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
         retry_policy=BAD_DATA_RETRY,
     )
+    cap = await workflow.execute_local_activity(
+        resolve_notes_per_run,
+        # The generic short-activity budget, as `resolve_fan_out_limit` uses beside it.
+        start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+        retry_policy=BAD_DATA_RETRY,
+    )
     return await fan_out(
-        PublishNoteWorkflow, _slice_for_this_run(notes, id_prefix), id_prefix=id_prefix
+        PublishNoteWorkflow, _slice_for_this_run(notes, cap, id_prefix), id_prefix=id_prefix
     )
 
 

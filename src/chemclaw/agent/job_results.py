@@ -33,8 +33,11 @@ import asyncio
 import logging
 from typing import Any
 
+from temporalio.client import WorkflowFailureError
+
 from chemclaw.agent.durable_tools import completed_job_status
 from chemclaw.core.temporal_client import connect
+from chemclaw.durable.connector_job import failure_reason
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,26 @@ async def await_job_results(
 
     async def _collect(job_id: str) -> None:
         handle = (await connect()).get_workflow_handle(job_id)
-        collected[job_id] = completed_job_status(job_id, await handle.result()).model_dump()
+        try:
+            collected[job_id] = completed_job_status(job_id, await handle.result()).model_dump()
+        except WorkflowFailureError as exc:
+            # **A failed job is a result, not an absence.** `gather(return_exceptions=True)` was
+            # collecting these and the return value was never bound, so a job whose workflow failed
+            # was simply missing from `collected` — and the runner's `if results:` then skipped the
+            # resume entirely, leaving the model to finish the turn on its pre-wait text ("I've
+            # launched the calculation, it's running"), narrating a success that did not happen.
+            # The only trace was an INFO line reading "no result yet", which asserts the job is
+            # still pending when it has failed permanently.
+            #
+            # This module's docstring already promised the opposite: "A job that failed is reported
+            # with its status rather than omitted ... dropping it would leave the model narrating a
+            # success that did not happen."
+            logger.info("mid-turn resume: job %s failed; reporting it in this turn", job_id)
+            collected[job_id] = {
+                "job_id": job_id,
+                "status": "failed",
+                "summary": failure_reason(exc),
+            }
 
     try:
         await asyncio.wait_for(

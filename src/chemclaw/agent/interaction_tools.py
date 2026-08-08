@@ -10,6 +10,7 @@ state (it lives in Temporal) and return immediately.
 """
 
 from pydantic import BaseModel
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
@@ -54,6 +55,18 @@ async def start_approval(candidate: InteractionCandidate) -> str:
             owned,
             id=approval_id,
             task_queue=settings.background_task_queue,
+            # **REJECT_DUPLICATE, and this was the one of five copies of this idiom with no policy
+            # at all.** temporalio defaults to ALLOW_DUPLICATE, so `WorkflowAlreadyStartedError`
+            # fires only while the prior run is *open*: once a hold had been approved, rejected or
+            # expired, re-surfacing the same candidate started a fresh run under the same id and
+            # reset the hold to pending. A human clicks No, the surface re-renders the candidate,
+            # and a second click can flip a sign-off that was already recorded — with the docstring
+            # above promising "the hold already exists — idempotent surface".
+            #
+            # REJECT_DUPLICATE rather than the ALLOW_DUPLICATE_FAILED_ONLY the four job launchers
+            # use, because the cases differ: a failed *job* should be re-runnable, while a decided
+            # *hold* is a GxP record and re-opening it is the defect, whatever it decided.
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
         )
     except WorkflowAlreadyStartedError:
         _announce(owned, approval_id)

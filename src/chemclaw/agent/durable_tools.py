@@ -33,10 +33,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.core.config import settings
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_roles
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
@@ -209,6 +210,15 @@ async def job_status(job_id: str) -> DurableJobStatus:
     try:
         description = await handle.describe()
     except RPCError as exc:
+        # **NOT_FOUND only.** The rationale below is sound for "Temporal has never heard of this
+        # id" and for nothing else, and `RPCError` carries `.status` while this code never read it:
+        # UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and PERMISSION_DENIED all arrived here
+        # and were reported to a chemist as "no durable job with id …". A broker rolling during a
+        # poll told them their running campaign did not exist.
+        if exc.status is not RPCStatusCode.NOT_FOUND:
+            raise SubsystemUnavailableError(
+                f"the durable subsystem did not answer for job {job_id!r} ({exc.status.name})"
+            ) from exc
         # Temporal has never heard of this id — which, for a job that genuinely ran, means its
         # history has aged out rather than that it never existed. Ask the durable record before
         # telling a chemist their campaign does not exist.
@@ -340,6 +350,15 @@ async def cancel_job(job_id: str) -> bool:
     client = await connect()
     try:
         await client.get_workflow_handle(job_id).cancel()
-    except RPCError:
+    except RPCError as exc:
+        # `False` means "Temporal does not know this id", and the route turns it into a 404. Any
+        # other status is an outage, and reporting it as a nonexistent job is the worst available
+        # answer: an operator cancelling a runaway DFT run during a broker roll was told the run
+        # did not exist, stopped trying, and the cluster kept burning.
+        if exc.status is not RPCStatusCode.NOT_FOUND:
+            raise SubsystemUnavailableError(
+                f"the durable subsystem did not answer the cancel for job {job_id!r} "
+                f"({exc.status.name})"
+            ) from exc
         return False
     return True

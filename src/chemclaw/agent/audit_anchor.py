@@ -78,11 +78,22 @@ _INSERT = """
          reseal_reason, reseal_by)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 """
+# The newest *few*, not the newest one. Reading a single row made an appended junk anchor a way to
+# disable the control: `latest_anchor` returned None, `durable/audit_chain.py` set `held_to = None`
+# and skipped its compare entirely, so a trail truncated to any length verified clean. That needs
+# no forgery — only INSERT on `audit_anchors`, or a half-finished secret rotation — and it is
+# strictly less work than the tampering the module says the table still catches.
+#
+# Bounded rather than unbounded: an attacker who can insert can insert many, and scanning the whole
+# table to find one valid anchor would trade a silent failure for a slow one. Past this many
+# consecutive invalid anchors the control reports absent, loudly, which is the honest answer.
+_LATEST_CANDIDATES = 16
+
 _LATEST = """
     SELECT taken_at, row_count, max_event_id, tip_hash, chain_version, signature
     FROM audit_anchors
     ORDER BY taken_at DESC, id DESC
-    LIMIT 1
+    LIMIT %(limit)s
 """
 
 
@@ -240,10 +251,17 @@ async def _now(conn: Any) -> str:
 async def latest_anchor(dsn: str | None = None) -> Anchor | None:
     """The newest anchor recorded in the database, or None if there is none or none is valid.
 
-    An anchor whose signature does not verify is treated as absent and logged. It is not treated as
-    a *failure*, because the ordinary cause is a rotated secret rather than an attack — and refusing
-    to verify the chain at all because an old anchor no longer validates would take the whole
-    control offline for a key rotation.
+    An anchor whose signature does not verify is skipped and logged, and the search continues to
+    the next-newest. Skipping an invalid anchor is not treated as a *failure*, because the ordinary
+    cause is a rotated secret rather than an attack — and refusing to verify the chain at all
+    because an old anchor no longer validates would take the whole control offline for a rotation.
+
+    **Skipping past an invalid one is not the same as stopping at it**, and the first version did
+    the latter: it read exactly one row and returned None when that row failed. So appending a
+    single unsigned anchor — no forgery, just an INSERT — made `latest_anchor` return None, which
+    made `durable/audit_chain.py` set `held_to = None` and skip its comparison, which made a trail
+    truncated to any length verify clean. One junk row disabled the high-water mark the table exists
+    to be.
     """
     if not settings.audit_anchor_secret:
         return None
@@ -251,23 +269,31 @@ async def latest_anchor(dsn: str | None = None) -> Anchor | None:
     async with connection(
         target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
-        cursor = await conn.execute(_LATEST)
-        row = await cursor.fetchone()
-    if row is None:
-        return None
-    anchor = Anchor(
-        taken_at=str(row[0]),
-        row_count=int(str(row[1])),
-        max_event_id=int(str(row[2])),
-        tip_hash=str(row[3]),
-        chain_version=int(str(row[4])),
-        signature=str(row[5]),
-    )
-    if not signature_ok(anchor):
+        cursor = await conn.execute(_LATEST, {"limit": _LATEST_CANDIDATES})
+        rows = await cursor.fetchall()
+    skipped = 0
+    for row in rows:
+        anchor = Anchor(
+            taken_at=str(row[0]),
+            row_count=int(str(row[1])),
+            max_event_id=int(str(row[2])),
+            tip_hash=str(row[3]),
+            chain_version=int(str(row[4])),
+            signature=str(row[5]),
+        )
+        if signature_ok(anchor):
+            if skipped:
+                logger.warning(
+                    "skipped %d newer audit anchor(s) whose signatures did not verify before "
+                    "reaching a valid one (taken at %s)",
+                    skipped,
+                    anchor.taken_at,
+                )
+            return anchor
+        skipped += 1
         logger.warning(
-            "ignoring the newest audit anchor (taken at %s): its signature does not verify under "
-            "the configured CHEMCLAW_AUDIT_ANCHOR_SECRET — most often a rotated key",
+            "ignoring an audit anchor (taken at %s): its signature does not verify under the "
+            "configured CHEMCLAW_AUDIT_ANCHOR_SECRET — most often a rotated key",
             anchor.taken_at,
         )
-        return None
-    return anchor
+    return None

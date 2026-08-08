@@ -102,28 +102,28 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
       `framing.frame_untrusted` so the delimiter is nonce'd, instead of a hand-rolled tag.
 - [x] Verification crash yields an unscored answer that reads as unflagged — `api/runner_answer.py:60`.
 
-## Lane T5 — Durable execution correctness
+## Lane T5 — Durable execution correctness — DONE except the digest mailbox (D-2026-08-08-an-outage-is-not-a-missing-job)
 
-- [ ] **Every Temporal `RPCError` reported as "no such job"** — `agent/durable_tools.py:322`, `:190`.
+- [x] **Every Temporal `RPCError` reported as "no such job"** — `agent/durable_tools.py:322`, `:190`.
       Five status codes all produce HTTP 404 "no such job". An operator cancelling a runaway DFT job
       during a broker roll is told it does not exist. Fix: re-raise unless NOT_FOUND.
-- [ ] **`start_approval` omits `id_reuse_policy`** — `agent/interaction_tools.py:51`, the one of five
+- [x] **`start_approval` omits `id_reuse_policy`** — `agent/interaction_tools.py:51`, the one of five
       copies without it. temporalio defaults to ALLOW_DUPLICATE, so a **decided** hold reopens as
       pending and a second click can flip a recorded GxP sign-off.
-- [ ] **A MAF string discriminator decides which DB rows get deleted** — `durable/retention.py:53`.
+- [x] **A MAF string discriminator decides which DB rows get deleted** — `durable/retention.py:53`.
       Simulating a plausible `function_call` rename flips `droppable_rows` from `set()` to `{1}` —
       deleting a call row and stranding its result, which `message_pairing.py` calls "a bricked session
       with no self-heal path". Silent; breaks sessions days later.
 - [ ] **Digest events land in a mailbox no consumer can claim** — `durable/digest.py:146`. The only
       consumer claims different kinds on a real session id, yet the watermark advances, **permanently**
       disqualifying the matched notes.
-- [ ] **Mid-turn resume silently drops failed jobs** — `agent/job_results.py:83`. `gather(...)`'s
+- [x] **Mid-turn resume silently drops failed jobs** — `agent/job_results.py:83`. `gather(...)`'s
       result is discarded, so the model finishes the turn narrating a success that did not happen. Two
       docstring sentences promise the opposite.
-- [ ] **Live settings read decides how many children a synthesis starts** — `durable/memory_jobs.py:138`.
+- [x] **Live settings read decides how many children a synthesis starts** — `durable/memory_jobs.py:138`.
       A mid-flight redeploy that lowers the cap wedges the run in a workflow-task retry loop.
       Same shape one level milder in `document_sync.py:210,230`.
-- [ ] **One junk anchor row disables tail-truncation detection** — `agent/audit_anchor.py:266`. No
+- [x] **One junk anchor row disables tail-truncation detection** — `agent/audit_anchor.py:266`. No
       forgery needed; a truncated audit trail then verifies clean.
 
 ## Lane T6 — Index and ingest integrity
