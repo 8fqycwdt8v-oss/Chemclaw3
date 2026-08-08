@@ -385,6 +385,38 @@ three are what that lane could not close.
       would fix the class rather than the instance.
       *Trigger:* the next runner change that reads a new attribute off a streamed update.
 
+## Open — Left by the mutation-testing lane (2026-08-08, D-2026-08-08-a-survivor-is-a-hypothesis)
+
+Record: `docs/decisions/D-2026-08-08-a-survivor-is-a-hypothesis.md`. The first real `make mutants`
+run covered the three modules `[tool.mutmut]` named and nothing had ever mutated —
+`kg/pr_gate.py`, `kg/note.py`, `agent/audit_store.py` — and ended at 206 of 223 killed with every
+survivor triaged. These two are what it did not close.
+
+- [ ] **Four of the seven `[tool.mutmut]` modules have still never been run under a corrected test
+      selection** — [S]. `agent/authz.py`, `api/budget.py`, `api/runner_trace.py` and
+      `science/calc/store.py` have a stored report showing **103 survivors**, produced under the
+      same `pytest_add_cli_args_test_selection` that this lane measured as understating the suite by
+      **29 of 39 survivors** on the three modules it did cover. Two files it omitted
+      (`tests/test_relations.py`, `tests/test_metrics_bridge.py`) accounted for all of them, and
+      neither names the module it protects. So the 103 is an upper bound of unknown tightness, and
+      triaging it as-is would generate tests for behaviour that is already pinned. Re-run each with
+      `make mutants ARGS='chemclaw.<module>.*'`, then re-apply every survivor against the **full**
+      suite before treating any of them as a finding.
+      *Trigger:* the next hardening pass that wants a number for those four modules, or any change
+      to one of them — whichever comes first.
+
+- [ ] **The mutmut test selection is maintained by hand and nothing checks it** — [S]. It is a
+      list of eighteen (now twenty) filenames whose stated job is "the tests that can actually kill
+      these mutants", and it was wrong for two of the seven modules because the killing tests do not
+      mention the module they cover — `tests/test_relations.py` builds a graph, and the graph is
+      what calls `split_link`. mutmut already collects per-mutant coverage in its stats phase
+      (`mutmut tests-for-mutant`), so the list is derivable rather than declarable: generate it from
+      a full-suite coverage run and fail CI when a named module has a covering test file that is not
+      listed. Not done here because it needs one clean full-suite coverage run under the `mutants/`
+      copy, which is the thing the selection exists to avoid, so the cost has to be measured before
+      the design is chosen.
+      *Trigger:* the third time a survivor turns out to be killed by an unlisted test file.
+
 ## Open — Left by the mounted-document-share build (2026-08-06)
 
 Record: `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`. The share is crawled,

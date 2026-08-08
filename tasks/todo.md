@@ -541,6 +541,58 @@ Files changed: `src/chemclaw/connectors/bo/server/tools.py`, `tests/test_bo_pred
 `tests/test_bo_tools.py`, `docs/decisions/D-2026-08-08-a-category-has-no-outside.md`,
 `docs/decisions/README.md`, `docs/planning/BACKLOG.md`.
 
+## Lane M — mutation testing of the three never-mutated `[tool.mutmut]` modules
+
+Record: `docs/decisions/D-2026-08-08-a-survivor-is-a-hypothesis.md`.
+`make mutants` had never been run. Scoped it to the three modules nothing had ever mutated —
+`kg/pr_gate.py`, `kg/note.py`, `agent/audit_store.py` — 223 mutants.
+
+**First run: 171 killed / 39 survived / 12 no-tests / 1 timeout.
+After the fixes below: 206 killed / 17 survived / 0 no-tests / 0 timeouts.**
+
+- [x] **Found mutmut 3's real mutant naming** — the filter is an `fnmatch` over keys built by
+      `get_mutant_name`, which dots the source path and then strips the literal prefix `src.`.
+      Working form: `make mutants ARGS='chemclaw.kg.pr_gate.*'` (importable path, not source path).
+      `source_paths` was never narrowed, so `pyproject.toml` needed no revert on that count.
+- [x] **The mutmut test selection was the defect** — `pytest_add_cli_args_test_selection` omitted
+      `tests/test_relations.py` (kills 24 `note.py` mutants: every `split_link` and `outgoing_*`
+      one, including all 12 reported as "no tests") and `tests/test_metrics_bridge.py` (kills all 5
+      `chemclaw_notes_proposed_total` mutants). **29 of 39 survivors were false.** Both files added
+      with per-file comments; the block comment now records DA-7's measured answer — a narrow run
+      misleads, and by a lot — instead of posing the question.
+- [x] **`propose_note` never proved it stamps provenance** — `actor`/`session_id`/`correlation_id`
+      each deleted in turn left the whole suite green, and all three default to `""`. Not merely a
+      record gap: `api/deps.py` scopes a non-reviewer on `proposal.actor != principal.oid`, so an
+      unstamped row is one its own author gets a 404 for. The route was tested; the stamping it
+      depends on was not (the route test builds its row from a helper that hard-codes `actor`).
+      New: `test_note_proposals.py::test_a_recorded_proposal_carries_the_turn_that_made_it`.
+- [x] **The reviewer's file count was unpinned** — `len(files) - 1` → `+ 1` / `- 2` and `> 1` →
+      `>= 1` / `> 2` all survived the whole suite. `test_pr_gate.py` now asserts the count for the
+      two-file and three-file cases and its absence for a dependency-free note.
+- [x] **Dependency dedup — corrected under measurement, and the correction is the result.**
+      `continue`→`break` was reported SURVIVED and `seen.add(None)` timed out, but
+      `test_properties_core.py`'s property test *does* kill both. Its generator reaches the
+      discriminating shape (a repeat followed by a further new dependency) in **1 of 100 examples**
+      (instrumented), costing **83 s** and **158 s** on a cold hypothesis DB. A seed-dependent,
+      three-minute killer is not a regression test; the new deterministic example kills both in
+      milliseconds. The predecessor ADR's claim about that generator is true of some collisions and
+      measurably not of this one — both docstrings now say which.
+- [x] **`split_link`: `partition` → `rpartition` survived** — it silently repairs
+      `[[precursor-of:compound:x]]` into a *resolving* link to note `x`, the exact failure
+      `test_a_malformed_typed_link_is_reported_as_written` is named for. One assertion added there.
+- [x] **17 survivors left deliberately, each with its reason in the ADR** — 7 equivalent (measured:
+      `stable_hash(chars=None)` == `chars=64` since a SHA-256 hexdigest is exactly 64 chars; five
+      `setdefault(k, None)` → `setdefault(k)`; `encoding="UTF-8"` codec normalisation) and 10
+      harmless (human-facing prose wrapped/case-flipped, error-message capitalisation,
+      `encoding=None` which differs only off a UTF-8 locale). Killing any of them needs an
+      exact-prose pin or a mocked locale — the kind of test this campaign's test-quality lane exists
+      to remove.
+
+**No product code changed.** The three modules were correct; the defect was in the mutation
+harness's own configuration. Two follow-ups in `BACKLOG.md`: the other four `[tool.mutmut]` modules
+still carry a 103-survivor report produced under the same understating selection, and the selection
+itself is hand-maintained with nothing checking it.
+
 ## To BACKLOG with triggers (not fixed this session)
 
 - Network policy: DNS egress `to: []` survives a correct config; default install permits all egress.

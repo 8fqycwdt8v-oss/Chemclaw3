@@ -22,7 +22,14 @@ from fastapi.testclient import TestClient
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.proposal import (
@@ -201,6 +208,40 @@ def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
     # Still diagnostic: which remote failed, and why, survive the redaction.
     assert "git.example.invalid" in recorded.reason
     assert "could not read Username" in recorded.reason
+
+
+def test_a_recorded_proposal_carries_the_turn_that_made_it(
+    store: InMemoryProposalStore,
+) -> None:
+    """Who proposed this note — the provenance half of "AI proposes, human signs off".
+
+    `propose_note` reads `(actor, session_id, correlation_id)` ambiently and stamps them on the
+    row. Nothing asserted that it does, and the three fields default to `""`, so dropping any of
+    the three stamps produced an unattributable compliance record with a fully green suite —
+    measured by mutation (each of `actor=actor`, `session_id=session_id`,
+    `correlation_id=correlation_id` deleted in turn, whole suite still passing).
+
+    The actor is load-bearing beyond the record: `chemclaw.api.deps` scopes a non-reviewer to
+    `proposal.actor != principal.oid`, so an unstamped row is one its own author is served a 404
+    for. The route's half of that rule is tested; the stamping it depends on was not.
+    """
+    identity = set_current_identity("u-oid-chemist", frozenset({"chemist"}))
+    session = set_current_session_id("sess-42")
+    correlation = set_current_correlation_id("conv-7")
+    try:
+        _run(propose_note(_note(), FakeSubmitter()))
+    finally:
+        reset_current_correlation_id(correlation)
+        reset_current_session_id(session)
+        reset_current_identity(identity)
+
+    [recorded] = _run(store.listing(None, "", 10, None))
+    assert recorded.actor == "u-oid-chemist"
+    assert recorded.session_id == "sess-42"
+    assert recorded.correlation_id == "conv-7"
+    # And the scoping the actor exists for actually selects on it.
+    assert _run(store.listing(None, "u-oid-chemist", 10, None)) == [recorded]
+    assert _run(store.listing(None, "someone-else", 10, None)) == []
 
 
 def test_a_store_failure_never_fails_the_submission(
