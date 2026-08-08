@@ -94,6 +94,13 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_audit_sink_failures_total": (
         "GxP audit records that could not be persisted (the trail is incomplete)."
     ),
+    # Non-zero means this process's log redaction is missing the per-connector bearer tokens, for
+    # as long as it runs. It is incremented once, at startup, so any non-zero value is permanent
+    # for that pod and the right response is a restart after fixing the manifest — which is why it
+    # is a counter to alert on rather than a line to read.
+    "chemclaw_redaction_inventory_failures_total": (
+        "Startups that could not resolve the connector bearer-token names for log redaction."
+    ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it

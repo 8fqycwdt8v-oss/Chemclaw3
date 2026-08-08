@@ -406,6 +406,12 @@ secrets:
     # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
     # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
+    # The HMAC key `agent/framing.py` derives the retrieved-content envelope tag from. It belongs
+    # here rather than in `config` below because `config` renders into a ConfigMap, which the
+    # OpenShift `view` role can read — a far wider grant than `get secrets`. Anyone who learns this
+    # value can compute the tag, close the envelope from inside a document they can place in any
+    # retrieval source, and have their text read as instructions instead of as data.
+    framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
     # The shared secret the git host signs its post-merge webhook with. Without it
     # `/events/knowledge-merged` can still force a reindex but may not close a proposal as merged
     # (D-2026-07-31-a-proposal-is-a-record-not-a-branch), so every reviewed note would stay in the

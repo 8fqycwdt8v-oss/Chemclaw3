@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 
 import pytest
 
@@ -526,3 +527,188 @@ def test_every_named_secret_is_a_real_settings_field() -> None:
         'getattr default of "", so it redacts nothing and fails silently — delete it, or correct '
         "it to the field's current name."
     )
+
+
+# --- The JSON path: where the redaction the filter performed was thrown away -------------------
+
+
+def _json_emitted(record: logging.LogRecord) -> str:
+    """Everything the *JSON* handler would write, filter first, exactly as a pod runs it."""
+    import json
+
+    from chemclaw.core.logging import JsonFormatter, SecretRedactingFilter
+
+    SecretRedactingFilter().filter(record)
+    return json.dumps(json.loads(JsonFormatter().format(record)))
+
+
+@pytest.mark.parametrize("emit", [_emitted, _json_emitted], ids=["plain", "json"])
+def test_a_credential_inside_an_exception_never_reaches_either_formatter(
+    _secrets: None, emit: "Callable[[logging.LogRecord], str]"
+) -> None:
+    """The finding: the redaction was real and the JSON formatter discarded it.
+
+    `SecretRedactingFilter` renders and scrubs the traceback into `record.exc_text` precisely so a
+    formatter cannot switch redaction off — and `JsonFormatter.format` then called
+    `formatException(record.exc_info)`, reaching past the scrubbed copy into the original exception
+    and emitting the credential in full.
+
+    The leak existed **only in production**: the chart sets `CHEMCLAW_LOG_JSON=true`, while every
+    redaction test above ran the plain formatter. That is why this one is parametrized over both
+    rather than added as a third JSON case — the assertion set is identical and the formatter is
+    the only axis, so a future formatter cannot be introduced with its own private blind spot.
+    """
+    try:
+        raise RuntimeError(f"auth failed for {_KEY} against {_DSN}")
+    except RuntimeError as exc:
+        emitted = emit(_record_with_exception("upstream call failed", exc))
+    assert _KEY not in emitted
+    assert _DSN not in emitted
+    assert "sup3rs3cret-password" not in emitted
+    assert "RuntimeError" in emitted, "the traceback must still be reported, only scrubbed"
+
+
+def test_the_json_formatter_redacts_even_without_the_filter(_secrets: None) -> None:
+    """Defence in depth: a handler someone else configured still must not emit the key.
+
+    The filter is the mechanism and this is the backstop. It cannot see the per-connector bearer
+    tokens (only the filter resolves those), so it is not a replacement — but it must never be the
+    reason a credential is written.
+    """
+    import json
+
+    from chemclaw.core.logging import JsonFormatter
+
+    try:
+        raise RuntimeError(f"auth failed for {_KEY}")
+    except RuntimeError as exc:
+        record = _record_with_exception("upstream call failed", exc)
+    payload = json.loads(JsonFormatter().format(record))
+    assert _KEY not in payload["exception"]
+
+
+def test_a_stack_dump_survives_into_the_json_object(_secrets: None) -> None:
+    """`stack_info` was scrubbed by the filter and then dropped by the JSON formatter entirely."""
+    import json
+
+    from chemclaw.core.logging import JsonFormatter, SecretRedactingFilter
+
+    record = _record("failed")
+    record.stack_info = f"Stack (most recent call last):\n  connecting to {_DSN}"
+    SecretRedactingFilter().filter(record)
+    payload = json.loads(JsonFormatter().format(record))
+    assert "sup3rs3cret-password" not in payload["stack"]
+    assert "Stack (most recent call last)" in payload["stack"]
+
+
+# --- Handlers this module never reached ---------------------------------------------------------
+
+
+def test_configure_logging_reaches_a_non_propagating_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The front door's uvicorn loggers were outside the redaction boundary entirely.
+
+    `deploy/entrypoint.sh` starts the API as `exec uvicorn ... --factory` with no `--log-config`, so
+    uvicorn installs its own dictConfig first and gives `uvicorn` a handler with `propagate: false`.
+    `uvicorn.error` logs every unhandled ASGI exception with `exc_info` — the records most likely to
+    carry a DSN or an auth header — and they reached a stream this module had never touched.
+
+    Asserting on the filters rather than on captured output because that is the property that
+    generalises: any logger that opts out of propagation must still be swept.
+    """
+    from chemclaw.core.logging import (
+        ContextFilter,
+        SecretRedactingFilter,
+        configure_logging,
+    )
+
+    private = logging.getLogger("chemclaw.test.uvicorn_like")
+    private.propagate = False
+    handler = logging.StreamHandler()
+    private.addHandler(handler)
+    monkeypatch.setattr(private, "handlers", [handler], raising=False)
+    try:
+        configure_logging()
+        installed = [type(existing) for existing in handler.filters]
+        assert SecretRedactingFilter in installed
+        assert ContextFilter in installed
+    finally:
+        private.removeHandler(handler)
+        private.propagate = True
+
+
+# --- Credentials this process does not hold -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("secret", "label"),
+    [
+        ("ghp_0123456789abcdefghijklmnopqrstuvwxyz", "github classic PAT"),
+        ("github_pat_11ABCDEFG0abcdefghij_KLMNOPQRSTUVWXYZ0123456789", "github fine-grained PAT"),
+        ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "anthropic key"),
+        ("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", "openai project key"),
+        (
+            "eyJhbGciOiJIUzI1NiJ9.eyJvaWQiOiJhbGljZSJ9.c2lnbmF0dXJlLWhlcmU",
+            "entra bearer token",
+        ),
+    ],
+)
+def test_a_credential_this_process_does_not_hold_is_still_redacted(secret: str, label: str) -> None:
+    """The value inventory can only cover what this process configured.
+
+    Everything that merely passes through — the caller's own bearer token, a PAT quoted in an
+    upstream error — was outside it, and eleven realistic shapes were measured reaching the stream
+    verbatim. These rules are anchored on a vendor-assigned prefix and a long opaque tail, so they
+    are structural without being a guess.
+    """
+    from chemclaw.core.logging import redact_secrets
+
+    assert secret not in redact_secrets(f"upstream rejected {secret} at 09:31")
+
+
+def test_a_libpq_password_and_a_query_string_token_are_redacted_with_their_label() -> None:
+    """The two spellings `_URL_USERINFO` cannot see; the label survives so the line still reads."""
+    from chemclaw.core.logging import redact_secrets
+
+    libpq = redact_secrets("host=wh.internal password=S3cr3tP4ssw0rd dbname=eln")
+    assert "S3cr3tP4ssw0rd" not in libpq
+    assert "password=" in libpq
+    assert "dbname=eln" in libpq, "only the credential is replaced, not the rest of the string"
+
+    query = redact_secrets("GET /v1/rows?access_token=abcdef0123456789ghijkl&limit=10")
+    assert "abcdef0123456789ghijkl" not in query
+    assert "access_token=" in query
+    assert "limit=10" in query
+
+
+def test_an_opaque_bearer_credential_is_redacted_and_the_scheme_kept() -> None:
+    """A bearer token with no internal structure has only its scheme to anchor on."""
+    from chemclaw.core.logging import redact_secrets
+
+    emitted = redact_secrets("Authorization: Bearer w7Fq2xLpNv8sTr4Kd1Zy")
+    assert "w7Fq2xLpNv8sTr4Kd1Zy" not in emitted
+    assert "Bearer" in emitted
+
+
+@pytest.mark.parametrize(
+    "innocent",
+    [
+        "CC(=O)Oc1ccccc1C(=O)O",
+        "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
+        "playbook-suzuki-coupling-optimisation",
+        "D-2026-08-06-a-share-is-mounted-not-called",
+        "calculation cache token count 1234567890 for reaction-aaa1",
+        "chemclaw_turn_tokens_total 4096",
+    ],
+)
+def test_the_structural_rules_never_touch_ordinary_content(innocent: str) -> None:
+    """The reason pattern matching was rejected once, held to.
+
+    A false positive corrupts a log line, and a rule that ate a SMILES, an InChIKey, a note slug or
+    an ADR id would be worse than the leak it closed. Each of these is a string this system logs
+    routinely, and none carries a vendor prefix or a credential label.
+    """
+    from chemclaw.core.logging import redact_secrets
+
+    assert redact_secrets(innocent) == innocent

@@ -220,6 +220,18 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     webhook secret's polarity — absent is *safe* rather than broken. The chain keeps catching
     modification, reordering, interior deletion and prefix truncation, and a point-in-time restore
     stays what it has always been: a trailing deletion nothing can see.
+
+    The framing envelope key is the seventh, and it is the only one added because it was in the
+    *wrong place* rather than missing. It is not a credential to an external system, which is how it
+    came to have no slot here at all — so the only place left to set it was `.Values.config`, which
+    renders into a ConfigMap. A ConfigMap is readable by the OpenShift `view` role, a far wider
+    grant than `get secrets`, and the value is the HMAC key `agent/framing.py` derives
+    `ENVELOPE_TAG` from. The agent instructions say only an envelope carrying exactly that tag marks
+    retrieved content as data, so anyone who reads it and can place text into any retrieval source —
+    a knowledge note, the mounted share, ELN data — closes the envelope from inside and has their
+    text read as instructions. It shares the webhook secret's polarity in the narrow sense that an
+    empty value still starts, but not its safety: an unset key means a *predictable* tag, which is
+    the state the secret exists to leave behind.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -228,6 +240,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
         "CHEMCLAW_AUDIT_ANCHOR_SECRET",
+        "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
     }
 
 
@@ -569,3 +582,29 @@ def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(
                 authorize_trigger(job)
     finally:
         reset_current_identity(token)
+
+
+def test_no_secret_is_carried_in_the_plaintext_config_map() -> None:
+    """A credential in `.Values.config` is a credential in a ConfigMap.
+
+    `templates/config.yaml` ranges over `.Values.config` into a `kind: ConfigMap`, so anything
+    listed there is readable by every principal holding `get configmaps` — which the OpenShift
+    `view` role grants, and which is a far wider audience than `get secrets`. `secrets.keys` is the
+    other slot and the only correct one for a credential.
+
+    Written as a check against the redaction inventory rather than against a hand-kept list,
+    because those are the same question asked twice: `_SECRET_SETTINGS` is this codebase's own
+    statement of which settings hold a credential, so a value it names has already been declared
+    too sensitive to appear in a log line, and a ConfigMap is more durable than a log line. The
+    framing envelope key was in `config`'s position by omission — it is not a credential to an
+    external system, so it was never given a Secret slot — and that is exactly the case a
+    name-shaped heuristic would miss and this one catches.
+    """
+    from chemclaw.core.logging import _SECRET_SETTINGS
+
+    exposed = sorted(key for key in _VALUES["config"] if _field_for(key) in set(_SECRET_SETTINGS))
+    assert not exposed, (
+        f"these settings hold a credential (they are in _SECRET_SETTINGS) but are declared in "
+        f".Values.config, which renders into a plaintext ConfigMap: {exposed}. Move each to "
+        "secrets.keys and argue it in test_chart_declares_only_the_documented_secrets."
+    )

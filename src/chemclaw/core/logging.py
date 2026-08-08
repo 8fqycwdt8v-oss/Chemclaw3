@@ -58,11 +58,34 @@ def configure_logging() -> None:
     # logger is not consulted for records that propagate up from a child — and every module here
     # logs through `getLogger(__name__)`, so almost every record is a propagated one. On the
     # handler, nothing reaches an output stream unfiltered.
-    for handler in logging.getLogger().handlers:
+    for handler in _handlers_that_reach_an_output_stream():
         handler.addFilter(ContextFilter())
         handler.addFilter(SecretRedactingFilter())
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
+
+
+def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
+    """Every handler a record can reach — the root's, plus any non-propagating logger's own.
+
+    "Put the filter on the root handler" is only complete while every record propagates to the
+    root, and the front door is the one process where that is false. It is started as
+    `exec uvicorn ... --factory` with no `--log-config`, so uvicorn installs its own dictConfig
+    first and gives `uvicorn` a handler with `propagate: false`. `uvicorn.error` — which logs every
+    unhandled ASGI exception with `exc_info`, i.e. exactly the records that carry a DSN or an auth
+    header — then reaches an output stream that this module had never touched: unredacted,
+    uncorrelated, and in plain text even under `CHEMCLAW_LOG_JSON=true`.
+
+    `core/worker_http.py` and `connectors/server_entry.py` avoid this by passing `log_config=None`,
+    but that only helps a process we start ourselves in Python. Sweeping the manager here covers
+    the entrypoint's `exec uvicorn` as well, and any future library that configures its own logger,
+    without either of them having to know this module exists.
+    """
+    handlers: list[logging.Handler] = list(logging.getLogger().handlers)
+    for existing in logging.root.manager.loggerDict.values():
+        if isinstance(existing, logging.Logger) and not existing.propagate:
+            handlers.extend(existing.handlers)
+    return handlers
 
 
 # Set once per process: `metrics.set_meter_provider` refuses a second call and warns, and the only
@@ -149,6 +172,12 @@ _SECRET_SETTINGS = (
     "session_store_dsn",
     "note_webhook_secret",
     "audit_anchor_secret",
+    # Not a credential to an external system, which is why it was missed — but it is the HMAC key
+    # `agent/framing.py` derives `ENVELOPE_TAG` from, and the agent instructions say only an
+    # envelope carrying exactly that tag marks retrieved content as data. Anyone who learns it and
+    # can place text into any retrieval source closes the envelope from inside, and their text is
+    # read as instructions: it defeats the prompt-injection mitigation it exists to make durable.
+    "framing_envelope_secret",
 )
 
 # The git push credential for the knowledge-sync sidecar (`deploy/knowledge-sync.sh`). It has no
@@ -205,6 +234,55 @@ _REDACTED = "***"
 # two-part form, so a redacted line says which remote and which principal failed; in the one-part
 # form there is no principal to keep and the whole of it is the credential.
 _URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s:@]*)(?::([^/\s@]*))?@")
+
+
+# Credentials this process does **not** hold, matched by shape rather than by value.
+#
+# The value inventory above can only redact what this process configured, which leaves out the
+# whole class of credentials that merely *pass through*: the caller's own Entra bearer token, a
+# third-party PAT quoted in an upstream error, a warehouse DSN in libpq `key=value` form (the
+# userinfo pattern only sees the URL spelling). Measured, eleven realistic shapes reached the
+# stream verbatim.
+#
+# Pattern matching was rejected once, for a good reason — a false positive corrupts a log line, and
+# an over-eager rule that ate molecule ids or note slugs would be worse than the leak. So every
+# rule below is anchored on a vendor-assigned prefix or an explicit key name, and each requires a
+# long opaque tail. None of them can match a SMILES, an InChIKey, a note slug or a `D-NNN` id: those
+# carry no `ghp_`/`sk-`/`eyJ` prefix and no `password=`/`token=` label.
+#
+# `(?P<keep>...)` is the part a reader still needs — the label, so a redacted line says *which*
+# credential failed rather than becoming an anonymous `***`.
+_STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
+    # GitHub tokens: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (classic, 36 chars) and the fine-grained
+    # `github_pat_` form. Both are vendor-assigned prefixes that occur in nothing else.
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    # Anthropic and OpenAI keys, including the project-scoped spellings.
+    re.compile(r"\bsk-(?:ant|proj|svcacct)-[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"\bsk-[A-Za-z0-9]{32,}"),
+    # A JWT — three base64url segments separated by dots, the first starting `eyJ` because a JOSE
+    # header always begins `{"`. This is the inbound Entra access token's shape.
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+"),
+    # libpq key/value connection strings: `host=... password=... dbname=...`. The URL form is
+    # covered by `_URL_USERINFO`; this is the spelling a warehouse driver uses.
+    re.compile(r"(?P<keep>\bpassword\s*=\s*)(?!\s)[^\s;'\"]{4,}", re.IGNORECASE),
+    # A credential in a query string or a header/JSON rendering. Anchored on the key name so the
+    # bare words "token" or "secret" in prose cannot trigger it — the `=`/`:` and a long opaque
+    # value are both required.
+    re.compile(
+        r"(?P<keep>\b(?:access_token|refresh_token|api[_-]?key|client_secret)\s*[=:]\s*[\"']?)"
+        r"[^\s&,;\"']{8,}",
+        re.IGNORECASE,
+    ),
+    # `Authorization: Bearer <opaque>` — the JWT rule covers the common case, but an opaque bearer
+    # or a Basic credential has no internal structure to match, so the scheme is the anchor.
+    re.compile(r"(?P<keep>\b(?:Bearer|Basic)\s+)[A-Za-z0-9_\-.~+/=]{12,}"),
+)
+
+
+def _redact_structural(match: "re.Match[str]") -> str:
+    """Replace a structurally-matched credential, keeping the label that names it."""
+    return f"{match.groupdict().get('keep') or ''}{_REDACTED}"
 
 
 def _redact_userinfo(match: "re.Match[str]") -> str:
@@ -277,7 +355,10 @@ def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     # which `tests/test_filtering_a_record_never_imports_anything` forbids for the reason recorded
     # there: an import from inside a filter re-entered the filter under Temporal's sandbox and
     # wedged the worker. The test caught this the first time it ran.
-    return _URL_USERINFO.sub(_redact_userinfo, redacted)
+    redacted = _URL_USERINFO.sub(_redact_userinfo, redacted)
+    for pattern in _STRUCTURAL_SECRETS:
+        redacted = pattern.sub(_redact_structural, redacted)
+    return redacted
 
 
 def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -369,10 +450,24 @@ class SecretRedactingFilter(logging.Filter):
                 and isinstance(manifest.endpoint.auth, BearerAuth)
             )
         except Exception:
-            logging.getLogger(__name__).warning(
-                "could not resolve connector bearer-token env names for log redaction; "
-                "connector credentials will not be scrubbed from log lines this process",
+            # ERROR and a counter, not a WARNING. The degraded state is unbounded in time (it lasts
+            # the process's life) and its trigger is *correlated with its consequence*: the thing
+            # that breaks this resolution is a bad connector manifest, and a bad connector manifest
+            # is exactly what produces the connector failures whose tracebacks then carry the
+            # bearer token in clear. A single WARNING in container startup output is the line
+            # nobody reads. `redaction_inventory_incomplete` is the stable marker to alert on.
+            logging.getLogger(__name__).error(
+                "redaction_inventory_incomplete: could not resolve connector bearer-token env "
+                "names for log redaction; connector credentials will NOT be scrubbed from log "
+                "lines for the life of this process",
                 exc_info=True,
+            )
+            # Imported here rather than at module scope: `filter` must not reach an import (see
+            # `ContextFilter`), and this branch runs at construction, once, only on failure.
+            from chemclaw.core.metrics_bridge import record_metric
+
+            record_metric(
+                lambda metrics: metrics.increment("chemclaw_redaction_inventory_failures_total")
             )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -452,6 +547,15 @@ class JsonFormatter(logging.Formatter):
     (`session_id`) and to a person (`actor`). An exception is rendered into `exception` rather than
     trailing after the line, because a multi-line traceback in a line-delimited format is how a
     stack trace becomes forty unparseable entries.
+
+    **`exception` is taken from `record.exc_text`, never re-rendered from `exc_info`.** That is the
+    whole point of `SecretRedactingFilter` rendering the traceback itself: re-rendering here would
+    reach past the redaction into the original exception and emit the credential the filter had
+    already replaced. It did, and only in production — the chart sets `CHEMCLAW_LOG_JSON=true`
+    while the tests ran the plain formatter, so a measured leak of an API key and a DSN password
+    lived in the one path no test took. The `redact_secrets` fallback covers the case where this
+    formatter is used on a handler that carries no filter: it cannot see the per-connector bearer
+    tokens the filter resolves, but it must not be the reason a secret is emitted.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -465,6 +569,10 @@ class JsonFormatter(logging.Formatter):
             "actor": getattr(record, "actor", "-"),
             "session_id": getattr(record, "session_id", "-"),
         }
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+        if record.exc_text:
+            payload["exception"] = record.exc_text
+        elif record.exc_info:
+            payload["exception"] = redact_secrets(self.formatException(record.exc_info))
+        if record.stack_info:
+            payload["stack"] = record.stack_info
         return json.dumps(payload, default=str)
