@@ -126,36 +126,40 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 - [x] **One junk anchor row disables tail-truncation detection** — `agent/audit_anchor.py:266`. No
       forgery needed; a truncated audit trail then verifies clean.
 
-## Lane T6 — Index and ingest integrity
+## Lane T6 — Index and ingest integrity — DONE (D-2026-08-08-a-derived-index-must-record-what-derived-it)
 
-- [ ] **`note_index` keeps two models' vectors after a swap** — `retrieval/vector_index.py:329`.
-      Proved on live pgvector: after the swap the exact-text match scores **0.0000** and is dropped by
-      the `> 0` floor; production `search_dense` returned 1 of 4 notes. **The documented workaround is
-      wrong** — BACKLOG names `make reindex`, the incremental target, which measured 0. Fix: mirror
-      migration 038's `embedding_key` column.
-- [ ] **`embedding_config_key` omits the endpoint** — `core/embeddings.py:58`. Fixes `document_chunks`
-      too, one variable further out. (Both halves are existing BACKLOG rows — close them.)
-- [ ] **Pushed note recorded FAILED, or not at all** — `kg/git_submitter.py:309`. A raising `finally`
-      in cleanup replaces a successful return *after* the branch is on the remote: the reviewer queue
-      shows 0 and `close_merged_notes` moves 0. With `CancelledError` (BaseException) there is **no
-      durable row of any kind**.
-- [ ] **`, note_id` tie-break disables the HNSW index entirely** — `retrieval/vector_index.py:207`.
-      Isolated by EXPLAIN at N=20,000: bare ORDER BY → HNSW, 16.7 ms; with the tie-break → Seq Scan,
-      250.2 ms. Removing only the tie-break: **11.7 ms, 25x**. Fix: tie-break in an outer query over
-      the k rows.
-- [ ] **A note whose filename stem ≠ its id is never indexed at all** — `vector_index.py:332`.
-      `None != None` is False, so it is "unchanged" forever, and `full=True` does not help. Corpus is
-      currently clean → latent. Add the check to `kg-validate`.
-- [ ] **Warehouse sync wedges permanently** — `ingest/eln/warehouse/adapter.py:160`. LIMIT cuts on the
-      watermark, the cursor advances on `created_at`. Once >`fetch_limit` rows are amended, new
-      reactions are never ingested again and the wedge guard is never reached. The repo's own test fake
-      ignores WHERE/ORDER/LIMIT, which is why no test sees it.
-- [ ] **Chunking params are outside document identity** — `ingest/documents/sync.py:313`. Changing
-      `chunk_chars` re-chunks nothing; when a re-chunk does happen it strands the old chunking's higher
-      ordinals, which are then re-embedded and become indistinguishable.
-- [ ] **Warehouse retriever embeds on the event loop** and lets provider errors escape into a
-      `gather` without `return_exceptions` — `warehouse/retriever.py:109`.
-- [ ] Migration 038's btree cannot serve its own `IS DISTINCT FROM` scan — measured Seq Scan at 1M rows.
+- [x] **`note_index` keeps two models' vectors after a swap** — migration **039** adds
+      `note_index.embedding_key`; `fingerprints()` reports only rows made by the current
+      configuration, so a superseded row has no fingerprint to match and the *incremental*
+      `make reindex` re-embeds it. Pinned on live pgvector: model swap → 2 of 2 re-embedded, one
+      distinct key in the table, next run 0.
+- [x] **`embedding_config_key` omits the endpoint** — the key now names the endpoint for
+      `openai_compatible` (`rstrip("/")`), empty slot for `hash`. Both BACKLOG rows closed.
+- [x] **Pushed note recorded FAILED, or not at all** — `_release_worktree` swallows everything the
+      cleanup raises, `CancelledError` included; three tests (error, cancelled, and the leftover the
+      next sweep reclaims) fail against the old `finally` and pass now.
+- [x] **`, note_id` tie-break disables the HNSW index entirely** — moved to an outer sort over the
+      k rows. Re-measured, EXPLAIN ANALYZE at N=20,000, median of 5: shipped **243.05 ms** (Seq
+      Scan) → **3.58 ms** (Index Scan + 10-row sort); ids identical to the no-tie-break form.
+      Consequence measured and filed: the search is approximate again — recall@10 vs an exact scan
+      is 1.0000 clustered, 0.116 uniform-random (new BACKLOG row for `hnsw.ef_search`).
+- [x] **A note whose filename stem ≠ its id is never indexed at all** — absent now means unknown
+      means embed it (with a WARNING naming the file), and `kg.validate` refuses the mismatch.
+      Old logic reproduced first: indexed 1 of 2, and `full=True` also 1.
+- [x] **Warehouse sync wedges permanently** — the cursor advances on `entry_window(...)`, and the
+      future-timestamp guard checks the same value. `tests/warehouse_fake.WatermarkWarehouse`
+      honours WHERE/ORDER BY/LIMIT; the new test fails against the old cursor.
+- [x] **Chunking params are outside document identity** — migration **040** adds `chunking_key` to
+      both `document_files` and `document_chunks` (two gates, both must see it), and `upsert`
+      deletes every ordinal at or above the new count. Three tests, including the first test the
+      Postgres backend has ever had.
+- [x] **Warehouse retriever embeds on the event loop** — offloaded, plus an `except Exception`
+      backstop. The same backstop went into `documents/retriever.py`, whose "never raises"
+      docstring was untrue for the identical provider-error case.
+- [ ] Migration 038's btree cannot serve its own `IS DISTINCT FROM` scan — **not fixed**, left as
+      the existing BACKLOG row. The lesson was taken rather than the index: 039 adds no index for
+      its own key column and says why. It costs write amplification and buys nothing; it corrupts
+      nothing, which is why it ranked last.
 
 ## Lane T7 — API robustness — DONE (D-2026-08-08-a-slot-lives-as-long-as-its-response)
 

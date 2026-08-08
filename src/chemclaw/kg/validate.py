@@ -45,6 +45,18 @@ def validate(notes_dir: Path) -> list[str]:
             problems.append(f"duplicate id {note.id!r} in {path} and {id_to_path[note.id]}")
         else:
             id_to_path[note.id] = path
+        # The filename *is* an index key, not decoration. `chemclaw.kg.graph.note_file_fingerprints`
+        # reads a note's id back out of `path.stem` — stat-only, it never parses — and
+        # `reindex_notes` looks that map up by the id in the frontmatter. When the two disagree the
+        # note is missing from both sides of the diff, which used to read as "unchanged" and left it
+        # out of the retrieval index entirely and silently. That half is fixed there; this is the
+        # half that keeps a mismatch from merging at all, because the right name is knowable here.
+        if path.stem != note.id:
+            problems.append(
+                f"note {note.id!r} is in {path}, whose filename says {path.stem!r} — "
+                f"the file must be named {note.id + '.md'!r} "
+                "(the note index keys on the filename and would skip this note)"
+            )
         located.append((note, path))
 
     notes = [note for note, _ in located]

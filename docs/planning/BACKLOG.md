@@ -189,18 +189,29 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       says so, and the "reference the tests use" claim in `index.py` is not true for this operator.
       *Trigger:* decide which semantics is wanted, then make both backends state it.
 
+- [ ] **`hnsw.ef_search` is not a setting, and the dense note search is now approximate** — [S].
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it` moved the `note_id` tie-break to an
+      outer sort, which restored the HNSW index the inner one had disabled (243 ms → 3.6 ms at
+      N=20,000) — and with it, approximate recall, which the accidental Seq Scan had been hiding.
+      Measured against an exact scan: recall@10 **1.0000** on clustered vectors (the shape a real
+      corpus has) and **0.116** on uniformly random ones (the pathological case for any ANN index).
+      No knob exists to trade latency back for recall. *Trigger:* a corpus where a note a chemist
+      knows exists does not come back, or the first recall regression an eval catches.
+
 - [ ] **`038`'s btree cannot serve the query it was added for** — [S].
       `WHERE embedding_key IS DISTINCT FROM %(key)s` is a `DistinctExpr`, not an indexable
       `OpExpr`, so the planner can only full-scan. The index costs write amplification on every
       upsert and buys nothing. An indexable form is `embedding_key IS NULL OR embedding_key <> %(key)s`
-      with a partial index. *Trigger:* the first corpus large enough for the stale scan to show up.
+      with a partial index. Deliberately not fixed by
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it`, which took the lesson instead:
+      `039` and `040` add **no** index for their own key columns, and say why in the file.
+      *Trigger:* the first corpus large enough for the stale scan to show up.
 
-- [ ] **`embedding_config_key` omits the endpoint** — [S]. It is `provider:model:dim`, so
-      repointing `llm_base_url` at a different vendor exposing the same model name — or the same
-      vendor rolling a model's weights under an unchanged name — leaves every `embedding_key`
-      reading as current. Nothing re-embeds and nothing errors, which is the exact silent
-      corruption `038` exists to prevent, one variable further out.
-      *Trigger:* a deployment that changes `llm_base_url` without changing `embedding_model`.
+- [x] **`embedding_config_key` omits the endpoint** — closed by
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it`. The key names the endpoint for
+      `openai_compatible` (trailing slash stripped); the slot stays empty for `hash`, which never
+      reaches one. The half this does **not** close is a vendor rolling a model's weights under an
+      unchanged name at an unchanged URL — no key can see that, and only a re-embed fixes it.
 
 - [ ] **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
       whether *some* chunk of a document carries the current key, while `index.py`'s docstring
@@ -1260,15 +1271,13 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       no product element is absent from the inputs, so `benzene + methanol >> paracetamol` passes.
       No charge balance, no yield-vs-limiting-reagent check despite `amount_mmol` being parsed. The
       stronger check already exists and is not reused (`science/calc/reaction.py:178`).
-- [ ] **`note_index` has no embedding-model identity, and there is no chunking** — [M], **and it
-      is the one item of this block that was not attempted**, so it is stated rather than
-      half-done. Changing `CHEMCLAW_EMBEDDING_MODEL` serves mixed-generation vectors until someone
-      remembers `make reindex`, and nothing detects it — while the in-process embed cache *is*
-      keyed on the model and its docstring names this hazard. Separately, a note is one vector over
-      its whole body and the returned excerpt is `body[:240]`, so a reaction note's matched
-      procedure step is never what comes back. The two halves are one migration and one reindex,
-      and chunking in particular changes what a retrieval hit *is* — every eval baseline moves with
-      it — so it earns its own change rather than riding along with molecule identity.
+- [ ] **A note is one vector over its whole body** — [M]. The identity half of this row is closed
+      (`D-2026-08-08-a-derived-index-must-record-what-derived-it`: `note_index.embedding_key`,
+      migration 039, and the ordinary incremental `make reindex` now heals a model change). What
+      remains is chunking: a note is embedded as a single vector and the returned excerpt is
+      `body[:240]`, so a reaction note's matched procedure step is never what comes back. It earns
+      its own change because it alters what a retrieval hit *is* — every eval baseline moves with
+      it. *Trigger:* the first corpus where whole-note vectors visibly lose a procedure step.
 - [x] **Hazard screening misses the notes that propose conditions** — the note-type half is
       closed: the gate covers `experiment-proposal` and `bo-candidate` by type, not only by a
       `## Procedure` heading a parameter table does not have.

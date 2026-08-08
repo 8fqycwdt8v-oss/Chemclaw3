@@ -25,7 +25,10 @@ configuration that made it (`embedding_config_key`). Pointing the deployment at 
 does not move any file's fingerprint, so before this the crawl re-embedded nothing and the table
 came to hold a mix of two models' vectors — every cosine between them meaningless, with no error
 anywhere. `reembed_stale` closes it from the *stored chunk text*, so a model swap heals itself on
-the next run without the share being touched at all.
+the next run without the share being touched at all. The chunking that cut each row is recorded the
+same way and for the same reason (`binding.chunking_key`), and both of the gates below compare it —
+the fingerprint gate decides whether a document is re-read, the `known_documents` gate whether it is
+re-embedded, and a chunk-size change must be visible to both or one of them skips the file.
 
 **And nothing is skipped silently.** A decade-old share is full of scanned PDFs and of `.doc` files
 this system cannot read. Both are counted, per extension, and reported. Silence would be read as
@@ -287,7 +290,8 @@ async def sync_share(
     if not crawl.files:
         return report
 
-    stored = await index.fingerprints(source, [ref.path for ref in crawl.files])
+    chunking = binding.chunking_key
+    stored = await index.fingerprints(source, [ref.path for ref in crawl.files], chunking)
     changed = [ref for ref in crawl.files if stored.get(ref.path) != ref.fingerprint]
     unchanged = [ref.path for ref in crawl.files if stored.get(ref.path) == ref.fingerprint]
     report.unchanged = len(unchanged)
@@ -310,7 +314,7 @@ async def sync_share(
     # A document already carrying chunks needs no embedding — this is where four copies of one
     # report stop costing four times as much as one.
     key = embedding_config_key()
-    known = await index.known_documents({document.doc_id for document in parsed}, key)
+    known = await index.known_documents({document.doc_id for document in parsed}, key, chunking)
     unseen = {d.doc_id: d for d in parsed if d.doc_id not in known}
     fresh = list(unseen.values())
     # Counted as "files that cost no embedding", which is both duplicates *within* this pass and
@@ -321,7 +325,7 @@ async def sync_share(
     report.embedded_chunks = len(chunks)
 
     files = [_file_record(source, by_path[d.ref_path], d.doc_id) for d in parsed]
-    await index.upsert(files, chunks, key)
+    await index.upsert(files, chunks, key, chunking)
     report.indexed = len(files)
     return report
 

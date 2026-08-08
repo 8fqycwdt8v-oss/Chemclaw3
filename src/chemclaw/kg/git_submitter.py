@@ -307,7 +307,7 @@ class GitNoteSubmitter:
         try:
             return await self._write_and_push(submission, workdir)
         finally:
-            await self._remove_worktree(workdir)
+            await self._release_worktree(workdir)
 
     async def _repair_parked_checkout(self) -> None:
         """Move the shared tree off a `note/` branch a previous version left it on.
@@ -373,13 +373,47 @@ class GitNoteSubmitter:
                 await self._remove_worktree(leftover)
         await self._run("worktree", "prune", "--expire", "now")
 
+    async def _release_worktree(self, workdir: Path) -> None:
+        """Dispose of a finished submission's worktree; **never** at the cost of its result.
+
+        This is the `finally` of `_submit_locked`, and it runs *after* the branch is on the remote.
+        Anything that escapes it replaces the pushed branch name with an exception, which is a lie
+        about what happened to the repository — and a consequential one: `propose_note` then records
+        the proposal `failed`, so the reviewer queue shows nothing to review while the branch is on
+        origin, and `close_merged_notes` never moves the row. Under `CancelledError` — a
+        `BaseException`, so `except Exception` around the caller does not see it — there was no
+        durable row at all: a pushed note nothing anywhere knows about.
+
+        So every failure is swallowed here, including cancellation. The obligation is genuinely one
+        sided: the branch is the product of a submission and it already exists, while an unremoved
+        scratch tree costs disk under `.git/` (where no reader looks) until the next submission's
+        sweep reclaims it. Cancellation is swallowed rather than re-raised for the same reason — a
+        caller that must record what was pushed cannot be told the call did not finish. Whoever
+        cancelled gets the return value of an operation that had already succeeded.
+        """
+        try:
+            await self._remove_worktree(workdir)
+        except BaseException as exc:  # noqa: BLE001 — see the docstring: nothing may escape here
+            log.warning(
+                "could not remove submission worktree %s (%s); leaving it for the "
+                "next submission's sweep",
+                workdir,
+                exc,
+            )
+
     async def _remove_worktree(self, workdir: Path) -> None:
-        """Dispose of a submission's worktree, best-effort, never masking a live exception.
+        """Remove one worktree: `git worktree remove`, falling back to deleting the directory.
 
         A different obligation from the `_return_to_base` it replaces: that had to *restore* a
         shared tree and a failure to do so was unrecoverable, while this disposes of a scratch tree
         whose only cost, if it survives, is disk — and the next submission's sweep reclaims it. The
         unreviewed bytes it holds sit under `.git/`, where no reader looks.
+
+        A non-zero git is handled here; anything *raised* is not, and reaches the
+        caller. That is right for `_sweep_leftover_worktrees`, which runs before anything is pushed
+        and where an unremovable leftover should fail the submission loudly rather than let
+        `worktree add -B` fail confusingly later. The post-push caller wraps this in
+        `_release_worktree` instead, because there the same raise would destroy a result.
 
         Never deletes the branch: the branch is the reviewable unit and the whole product of a
         submission.

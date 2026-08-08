@@ -117,31 +117,50 @@ class DocumentHit(BaseModel):
 class DocumentIndex(Protocol):
     """Persistence + dense/lexical search over one or more mounted shares."""
 
-    async def fingerprints(self, source: str, paths: list[str]) -> dict[str, str]:
-        """The stored `path -> fingerprint` for these paths of `source`.
+    async def fingerprints(
+        self, source: str, paths: list[str], chunking_key: str
+    ) -> dict[str, str]:
+        """The stored `path -> fingerprint` for these paths of `source`, chunked as `chunking_key`.
 
         What the sync diffs the current filesystem stat against to decide which files must be
         re-read. A path with no entry reads as "changed", exactly like a real mismatch. Scoped to
         the paths one bounded chunk actually crawled, because on a 500k-file share the unscoped
         answer is a dictionary nobody needs and every chunk would rebuild it.
+
+        Scoped to the chunking too, because that is the only gate that can see a chunk-size change:
+        the file's `mtime_ns:size` does not move when a setting does, so a row cut under different
+        boundaries has to read as "changed" or the document is never re-chunked at all.
         """
         ...
 
-    async def known_documents(self, doc_ids: set[str], key: str) -> set[str]:
-        """Which of these documents already have chunks embedded under `key`.
+    async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
+        """Which of these documents already have chunks under both configurations.
 
         Keyed on the embedding configuration, not merely on presence: a document indexed by a
         previous model must be re-embedded even though its content is unchanged, or a copy arriving
-        under a new path would inherit a vector nothing else in the corpus is comparable to.
+        under a new path would inherit a vector nothing else in the corpus is comparable to. And on
+        the chunking, because the boundaries decide what each vector describes — a document whose
+        content hash is unchanged still needs cutting again when they move.
         """
         ...
 
-    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
+    async def upsert(
+        self, files: list[FileRecord], chunks: list[ChunkRecord], key: str, chunking_key: str
+    ) -> None:
         """Insert or replace file rows by path and chunk rows by `(doc_id, ordinal)`.
 
         `key` is the embedding configuration these vectors were produced by
-        (`chemclaw.core.embeddings.embedding_config_key`); it is stored with them so a later run
-        can tell whether they are still comparable to a freshly embedded query.
+        (`chemclaw.core.embeddings.embedding_config_key`); `chunking_key` is the chunking that cut
+        them (`DocumentShareBinding.chunking_key`). Both are stored with the rows so a later run
+        can tell whether they are still usable — one answers "comparable to a fresh query", the
+        other "describing the text this document is now cut into".
+
+        **A document's chunks are replaced, not merged.** Every ordinal at or above the new chunk
+        count is deleted for each document written, because re-chunking the same text into fewer
+        pieces otherwise leaves the old chunking's tail behind: rows nothing points at any more,
+        which `reembed_stale` then re-embeds under the current key and makes indistinguishable
+        from live ones. Measured: re-cutting one document at 400 → 4000 chars left 19 such rows
+        beside its 2 real ones.
         """
         ...
 
@@ -242,6 +261,19 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return min(1.0, max(0.0, dot / norm)) if norm else 0.0
 
 
+def _chunk_counts(chunks: list[ChunkRecord]) -> dict[str, int]:
+    """How many chunks this write carries per document — the ordinal every backend truncates at.
+
+    `max(ordinal) + 1` rather than a count, because that is what "every ordinal at or above" means
+    and the two only agree while a write is complete and contiguous. One definition, so the
+    in-memory reference and the SQL backend cannot disagree about where a document now ends.
+    """
+    counts: dict[str, int] = {}
+    for chunk in chunks:
+        counts[chunk.doc_id] = max(counts.get(chunk.doc_id, 0), chunk.ordinal + 1)
+    return counts
+
+
 def _tokens(text: str) -> set[str]:
     """Lowercased alphanumeric tokens — the offline proxy of Postgres `to_tsvector`."""
     return set("".join(c if c.isalnum() else " " for c in text.lower()).split())
@@ -261,31 +293,51 @@ class InMemoryDocumentIndex:
         # unusual name, so two shares can carry it and a path-only key lets one evict the other.
         self._files: dict[tuple[str, str], FileRecord] = {}
         self._chunks: dict[tuple[str, int], ChunkRecord] = {}
-        # The embedding configuration each chunk's vector was made by — the in-memory mirror of
-        # `document_chunks.embedding_key`.
+        # The embedding configuration each chunk's vector was made by, and the chunking that cut
+        # it — the in-memory mirror of `document_chunks.embedding_key` / `.chunking_key`.
         self._keys: dict[tuple[str, int], str] = {}
+        self._chunkings: dict[tuple[str, int], str] = {}
+        # The chunking each *file* row was indexed under, mirroring `document_files.chunking_key`.
+        self._file_chunkings: dict[tuple[str, str], str] = {}
 
-    async def fingerprints(self, source: str, paths: list[str]) -> dict[str, str]:
-        """Stored fingerprints for these paths of one source."""
+    async def fingerprints(
+        self, source: str, paths: list[str], chunking_key: str
+    ) -> dict[str, str]:
+        """Stored fingerprints for these paths of one source, cut under this chunking."""
         wanted = set(paths)
         return {
             f.path: f.fingerprint
             for f in self._files.values()
-            if f.source == source and f.path in wanted
+            if f.source == source
+            and f.path in wanted
+            and self._file_chunkings.get((f.source, f.path)) == chunking_key
         }
 
-    async def known_documents(self, doc_ids: set[str], key: str) -> set[str]:
-        """Which of these documents have chunks embedded under the current configuration."""
-        current = {doc_id for (doc_id, _), stored in self._keys.items() if stored == key}
+    async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
+        """Which of these documents have chunks under the current embedding *and* chunking."""
+        current = {
+            doc_id
+            for (doc_id, ordinal), stored in self._keys.items()
+            if stored == key and self._chunkings.get((doc_id, ordinal)) == chunking_key
+        }
         return doc_ids & current
 
-    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
-        """Replace each file by path and each chunk by `(doc_id, ordinal)`."""
+    async def upsert(
+        self, files: list[FileRecord], chunks: list[ChunkRecord], key: str, chunking_key: str
+    ) -> None:
+        """Replace each file by path and each document's chunks, dropping any stranded tail."""
         for file in files:
             self._files[(file.source, file.path)] = file
+            self._file_chunkings[(file.source, file.path)] = chunking_key
+        for doc_id, count in _chunk_counts(chunks).items():
+            for stale in [k for k in self._chunks if k[0] == doc_id and k[1] >= count]:
+                del self._chunks[stale]
+                self._keys.pop(stale, None)
+                self._chunkings.pop(stale, None)
         for chunk in chunks:
             self._chunks[(chunk.doc_id, chunk.ordinal)] = chunk
             self._keys[(chunk.doc_id, chunk.ordinal)] = key
+            self._chunkings[(chunk.doc_id, chunk.ordinal)] = chunking_key
 
     async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
         """Chunks whose stored vector was made by a different configuration, oldest key first."""
@@ -444,23 +496,29 @@ class PostgresDocumentIndex:
         width = settings.embedding_dim
         self._upsert_file = (
             "INSERT INTO document_files "
-            "(path, source, doc_id, fingerprint, tags, modified_at, indexed_at) "
-            "VALUES (%(path)s, %(src)s, %(doc)s, %(fp)s, %(tags)s, %(mtime)s, now()) "
+            "(path, source, doc_id, fingerprint, tags, modified_at, indexed_at, chunking_key) "
+            "VALUES (%(path)s, %(src)s, %(doc)s, %(fp)s, %(tags)s, %(mtime)s, now(), %(chunking)s) "
             "ON CONFLICT (source, path) DO UPDATE SET "
             "doc_id = EXCLUDED.doc_id, "
             "fingerprint = EXCLUDED.fingerprint, tags = EXCLUDED.tags, "
-            "modified_at = EXCLUDED.modified_at, indexed_at = now()"
+            "modified_at = EXCLUDED.modified_at, indexed_at = now(), "
+            "chunking_key = EXCLUDED.chunking_key"
         )
         self._upsert_chunk = (
             "INSERT INTO document_chunks "
-            "(doc_id, ordinal, content, coordinate, embedding, lexeme, embedding_key) "
+            "(doc_id, ordinal, content, coordinate, embedding, lexeme, embedding_key, "
+            "chunking_key) "
             f"VALUES (%(doc)s, %(ord)s, %(content)s, %(coord)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(content)s), %(key)s) "
+            "to_tsvector('english', %(content)s), %(key)s, %(chunking)s) "
             "ON CONFLICT (doc_id, ordinal) DO UPDATE SET "
             "content = EXCLUDED.content, coordinate = EXCLUDED.coordinate, "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
-            "embedding_key = EXCLUDED.embedding_key"
+            "embedding_key = EXCLUDED.embedding_key, chunking_key = EXCLUDED.chunking_key"
         )
+        # The tail of a previous, finer chunking of the same document. Run per document written,
+        # in the same transaction as its chunks, so a re-chunk cannot leave rows behind that
+        # nothing points at and `reembed_stale` would then adopt as current.
+        self._drop_tail = "DELETE FROM document_chunks WHERE doc_id = %(doc)s AND ordinal >= %(n)s"
         # Re-embedding touches the vector and its key and nothing else: the content and coordinate
         # came from the document and did not change, and rewriting the tsvector would be work for
         # an identical result.
@@ -500,12 +558,16 @@ class PostgresDocumentIndex:
         ) as conn:
             yield conn
 
-    async def fingerprints(self, source: str, paths: list[str]) -> dict[str, str]:
+    async def fingerprints(
+        self, source: str, paths: list[str], chunking_key: str
+    ) -> dict[str, str]:
         """The stat signature each of these paths was last read at, for the ones on record.
 
         Scoped to the crawl chunk's own paths rather than to the whole source: the unscoped query
         on a 500k-file share returns a dictionary the caller has no use for and would rebuild on
-        every chunk of the drain.
+        every chunk of the drain. And to the chunking those rows were cut under, so a file whose
+        chunk boundaries are superseded reads as changed and is re-read (NULL — every row written
+        before migration 040 — matches no key, which is why the first sync after it re-parses).
         """
         if not paths:
             return {}
@@ -513,13 +575,13 @@ class PostgresDocumentIndex:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT path, fingerprint FROM document_files "
-                    "WHERE source = %s AND path = ANY(%s)",
-                    (source, sorted(paths)),
+                    "WHERE source = %s AND path = ANY(%s) AND chunking_key = %s",
+                    (source, sorted(paths), chunking_key),
                 )
                 rows = await cur.fetchall()
         return {row[0]: row[1] for row in rows}
 
-    async def known_documents(self, doc_ids: set[str], key: str) -> set[str]:
+    async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
         """Which of these documents have current-configuration chunks — asked before embedding."""
         if not doc_ids:
             return set()
@@ -527,13 +589,15 @@ class PostgresDocumentIndex:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT DISTINCT doc_id FROM document_chunks "
-                    "WHERE doc_id = ANY(%s) AND embedding_key = %s",
-                    (sorted(doc_ids), key),
+                    "WHERE doc_id = ANY(%s) AND embedding_key = %s AND chunking_key = %s",
+                    (sorted(doc_ids), key, chunking_key),
                 )
                 rows = await cur.fetchall()
         return {row[0] for row in rows}
 
-    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
+    async def upsert(
+        self, files: list[FileRecord], chunks: list[ChunkRecord], key: str, chunking_key: str
+    ) -> None:
         """Write the chunks first, then the file rows, in one transaction.
 
         Order matters on a crash: a file row whose chunks are missing would be skipped by the next
@@ -543,6 +607,8 @@ class PostgresDocumentIndex:
         if not files and not chunks:
             return
         async with self._connection() as conn:
+            for doc_id, count in _chunk_counts(chunks).items():
+                await conn.execute(self._drop_tail, {"doc": doc_id, "n": count})
             for chunk in chunks:
                 await conn.execute(
                     self._upsert_chunk,
@@ -553,6 +619,7 @@ class PostgresDocumentIndex:
                         "coord": chunk.coordinate,
                         "emb": _vector_literal(chunk.embedding),
                         "key": key,
+                        "chunking": chunking_key,
                     },
                 )
             for file in files:
@@ -565,6 +632,7 @@ class PostgresDocumentIndex:
                         "fp": file.fingerprint,
                         "tags": list(file.tags),
                         "mtime": file.modified_at,
+                        "chunking": chunking_key,
                     },
                 )
             await conn.commit()

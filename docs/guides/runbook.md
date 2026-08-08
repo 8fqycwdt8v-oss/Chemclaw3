@@ -512,8 +512,21 @@ reindex-full` once after upgrading past it.** The symptom of skipping it is not 
 and lexical search simply keep answering as if the change had not happened, while the substring
 leg answers as if it had.
 
-The same applies to `CHEMCLAW_EMBEDDING_MODEL`: changing it serves mixed-generation vectors until
-a full reindex, and nothing detects that either (it is a known open item, not a solved one).
+**`CHEMCLAW_EMBEDDING_MODEL` and `CHEMCLAW_LLM_BASE_URL` no longer need this**
+(D-2026-08-08-a-derived-index-must-record-what-derived-it). `note_index` records which embedding
+configuration made each row (migration 039, the column `document_chunks` already had), so the
+ordinary incremental `make reindex` — and the hourly workflow — re-embed exactly the rows a swap
+superseded. Nothing to remember and no flag to pass. What that does mean is that the *first* run
+after upgrading past this re-embeds the whole corpus once: every existing row has no key recorded,
+which reads as unknown, and unknown is never treated as current. Same for `document_chunks`, whose
+keys all change because the key now names the endpoint as well as the model.
+
+**A share's `chunk_chars` / `chunk_overlap_chars` now take effect, and they are not free.** The
+same migration set records which chunking cut each row (040), and both of the crawl's gates compare
+it — so changing either number re-reads and re-cuts every document of that share, off the mount,
+over the crawl's ordinary bounded passes. Before this the change was silently ignored, which was
+cheaper and wrong. The first sync after the upgrade pays it once for the same reason as above:
+nothing recorded what the existing rows were cut with.
 
 ## (vii) Read eval-drift alerts
 

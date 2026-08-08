@@ -31,7 +31,7 @@ table inventory in this repository sits in `docs/archive/` and is seventeen migr
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
 | `session_messages` | 008 (+022) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145), plus in-line compaction on write (D-151) |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
-| `note_index` | 012 (+035) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`); rows for deleted notes are not removed |
+| `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
 | `session_owners` | 013 (+021) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
 | `user_preferences` | 015 | `agent/preferences.py` | — |
 | `predictions` | 016 | `science/calc/calibration.py` | — |
@@ -48,8 +48,8 @@ table inventory in this repository sits in `docs/archive/` and is seventeen migr
 | `bo_suggestions` | 031 | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
 | `audit_anchors` | 032 | `agent/audit_anchor.py` | never — an anchor is the evidence a trailing truncation happened, so the runtime role cannot delete one |
 | `turn_costs` | 033 | `agent/turn_cost_store.py` | — |
-| `document_files` | 037 | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
-| `document_chunks` | 037 | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any chunk no remaining file points at. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
+| `document_files` | 037 (+040) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
+| `document_chunks` | 037 (+038, 040) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any chunk no remaining file points at. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
 
 ## Two things the shape of this table will not tell you
 

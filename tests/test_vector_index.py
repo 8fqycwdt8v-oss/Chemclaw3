@@ -17,7 +17,7 @@ import pytest
 import chemclaw.retrieval.vector_index as vector_index_module
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
-from chemclaw.core.embeddings import embed_texts
+from chemclaw.core.embeddings import embed_texts, embedding_config_key
 from chemclaw.retrieval.vector_index import (
     InMemoryNoteIndex,
     NoteRecord,
@@ -44,7 +44,8 @@ def test_inmemory_dense_ranks_by_cosine() -> None:
                 NoteRecord(note_id="aligned", text="x", embedding=[1.0, 0.0]),
                 NoteRecord(note_id="partial", text="y", embedding=[0.7, 0.7]),
                 NoteRecord(note_id="orthogonal", text="z", embedding=[0.0, 1.0]),
-            ]
+            ],
+            embedding_config_key(),
         )
         hits = await index.search_dense([1.0, 0.0], top_k=5)
         assert [h.note_id for h in hits] == ["aligned", "partial"]  # orthogonal dropped (cosine 0)
@@ -62,7 +63,8 @@ def test_inmemory_lexical_ranks_by_term_overlap() -> None:
                 NoteRecord(note_id="both", text="amide coupling epimerization", embedding=[0.0]),
                 NoteRecord(note_id="one", text="amide only here", embedding=[0.0]),
                 NoteRecord(note_id="none", text="distillation reflux", embedding=[0.0]),
-            ]
+            ],
+            embedding_config_key(),
         )
         hits = await index.search_lexical("amide coupling", top_k=5)
         assert [h.note_id for h in hits] == ["both", "one"]  # 'none' shares no terms
@@ -169,6 +171,91 @@ def test_reindex_full_re_embeds_every_note_regardless_of_fingerprint(
     assert calls["texts"] == 2
 
 
+def test_reindex_indexes_a_note_whose_filename_does_not_match_its_id(tmp_path: Path) -> None:
+    """The defect: such a note was never indexed at all, and `full=True` did not help either.
+
+    The two sides of the diff are keyed differently — the fingerprint scan by the file's stem, the
+    note list by the frontmatter id — so on a mismatch both lookups returned None, `None != None` is
+    False, and the note read as "unchanged" forever. `kg-validate` now refuses the mismatch, but a
+    tree a pod is serving is not a tree that passed a PR, so the indexer must still index it.
+    """
+    _write_note(tmp_path, "good-note", "a note whose filename matches its id")
+    (tmp_path / "renamed-file.md").write_text(
+        "---\nid: ethanol-facts\ntype: reaction\n---\nethanol boils at 78 C\n", encoding="utf-8"
+    )
+    index = InMemoryNoteIndex()
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 2
+    assert set(asyncio.run(index.fingerprints(embedding_config_key()))) == {"good-note"}
+    # The mismatched note has no fingerprint to store, so it costs an embedding every run — loud in
+    # the log, and cheap next to being absent from retrieval.
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 1
+
+    (query,) = embed_texts(["ethanol boils at 78 C"])
+    hits = asyncio.run(index.search_dense(query, top_k=1))
+    assert [h.note_id for h in hits] == ["ethanol-facts"]
+
+
+def test_reindex_re_embeds_every_note_when_the_embedding_model_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The defect: a model swap moves no file mtime, so the incremental diff saw nothing to do.
+
+    The corpus is untouched — only `embedding_model` changes — and every note must be re-embedded,
+    because a vector made by the previous model is not comparable to a query made by this one.
+    """
+    calls = _count_embed_calls(monkeypatch, vector_index_module)
+    _write_note(tmp_path, "note-a", "first note body")
+    _write_note(tmp_path, "note-b", "second note body")
+    index = InMemoryNoteIndex()
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 2
+
+    monkeypatch.setattr(settings, "embedding_model", "a-different-model")
+    calls["texts"] = 0
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 2
+    assert calls["texts"] == 2  # both re-embedded under the new configuration...
+
+    calls["texts"] = 0
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 0
+    assert calls["texts"] == 0  # ...and the run after that is free again
+
+
+def test_reindex_against_postgres_heals_a_model_swap_without_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The durable half, on real pgvector: `make reindex` (incremental) must heal a model swap.
+
+    The documented workaround named the incremental target and measured zero re-embeds against it,
+    which left the table holding two models' vectors with nothing saying so.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE note_index")
+            await conn.commit()
+
+        _write_note(tmp_path, "swap-a", "alpha body")
+        _write_note(tmp_path, "swap-b", "beta body")
+        index = PostgresNoteIndex()
+        assert await reindex_notes(index, notes_dir=str(tmp_path)) == 2
+        assert await _stored_embedding_keys() == {embedding_config_key()}
+
+        monkeypatch.setattr(settings, "embedding_model", "a-different-model")
+        assert await reindex_notes(index, notes_dir=str(tmp_path)) == 2
+        assert await _stored_embedding_keys() == {embedding_config_key()}  # no mixed generations
+        assert await reindex_notes(index, notes_dir=str(tmp_path)) == 0  # and then it is free
+
+    asyncio.run(_run())
+
+
+async def _stored_embedding_keys() -> set[str]:
+    """Every distinct `embedding_key` currently in `note_index` (NULL rendered as `""`)."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT DISTINCT coalesce(embedding_key, '') FROM note_index")
+            return {row[0] for row in await cur.fetchall()}
+
+
 def test_postgres_index_within_restricts_before_top_k() -> None:
     """`within` scopes the SQL query itself, so a filtered search keeps full top-k recall."""
 
@@ -186,7 +273,8 @@ def test_postgres_index_within_restricts_before_top_k() -> None:
             [
                 NoteRecord(note_id="rxn-1", text="amide coupling epimerization", embedding=close),
                 NoteRecord(note_id="play-1", text="amide coupling workup", embedding=far),
-            ]
+            ],
+            embedding_config_key(),
         )
         (query_embedding,) = await asyncio.to_thread(embed_texts, ["amide coupling epimerization"])
         # Unrestricted, the single top slot goes to the nearest note (rxn-1)...
@@ -217,7 +305,8 @@ def test_postgres_note_index_round_trip() -> None:
                 NoteRecord(
                     note_id="note-001", text="amide coupling epimerization", embedding=embedding
                 )
-            ]
+            ],
+            embedding_config_key(),
         )
         (query_embedding,) = await asyncio.to_thread(embed_texts, ["epimerization amide coupling"])
         dense = await index.search_dense(query_embedding, top_k=5)
@@ -229,7 +318,11 @@ def test_postgres_note_index_round_trip() -> None:
 
 
 def test_postgres_fingerprints_round_trip_and_omit_unset_rows() -> None:
-    """The durable `fingerprints()` read matches what was upserted; an unset one is left out."""
+    """The durable `fingerprints()` read matches what was upserted; an unset one is left out.
+
+    Also the key scope (D-2026-08-08-a-derived-index-must-record-what-derived-it): the same rows,
+    read under a different embedding key, report nothing — which is what makes a swap look changed.
+    """
 
     async def _run() -> None:
         await migrated_db_or_skip()
@@ -243,10 +336,12 @@ def test_postgres_fingerprints_round_trip_and_omit_unset_rows() -> None:
             [
                 NoteRecord(note_id="fp-set", text="t", embedding=set_emb, fingerprint="123:45"),
                 NoteRecord(note_id="fp-unset", text="t", embedding=unset_emb),  # no fingerprint
-            ]
+            ],
+            embedding_config_key(),
         )
-        stored = await index.fingerprints()
+        stored = await index.fingerprints(embedding_config_key())
         assert stored == {"fp-set": "123:45"}  # the unset row is absent, not an empty string
+        assert await index.fingerprints("some-other-model") == {}  # a superseded vector is not one
 
     asyncio.run(_run())
 

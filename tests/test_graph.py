@@ -203,6 +203,18 @@ def test_validate_reports_duplicate_id(tmp_path: Path) -> None:
     assert any("duplicate id 'dup'" in p for p in problems)
 
 
+def test_validate_reports_a_filename_that_disagrees_with_the_note_id(tmp_path: Path) -> None:
+    """A note whose file is not `<id>.md` is refused: the note index keys on that filename.
+
+    `note_file_fingerprints` reads the id out of `path.stem` while `reindex_notes` looks it up by
+    the frontmatter id, so a mismatch used to drop the note out of retrieval in silence. The
+    indexer now re-embeds it instead, and this is what stops one merging in the first place.
+    """
+    (tmp_path / "renamed-file.md").write_text(_note("ethanol-facts", []), encoding="utf-8")
+    problems = validate(tmp_path)
+    assert any("'ethanol-facts'" in p and "'renamed-file'" in p for p in problems)
+
+
 def test_validate_reports_malformed_note(tmp_path: Path) -> None:
     """A malformed note file is reported rather than aborting validation."""
     (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
-from chemclaw.ingest.eln.adapter import ElnAdapter
+from chemclaw.ingest.eln.adapter import ElnAdapter, entry_window
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.kg.graph import load_notes
@@ -53,7 +53,8 @@ class RejectedEntry(BaseModel):
 class IngestSummary(BaseModel):
     """The outcome of one sync run: what was ingested, what was rejected, the next cursor.
 
-    `next_cursor` is the newest entry timestamp seen, which the scheduler persists and
+    `next_cursor` is the newest *fetch window* seen (`entry_window` — the later of creation and
+    amendment, which is what the adapters filter on), which the scheduler persists and
     passes as `since` next run. Fetching is inclusive at the cursor (see `ElnAdapter`),
     so an entry stamped exactly at `next_cursor` may be re-fetched next run — harmless,
     because ingestion is idempotent (id-keyed upserts + idempotent note branch), and it
@@ -137,20 +138,32 @@ async def sync_entries(
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
     for raw in entries:
-        if raw.created_at > horizon:
+        # **The cursor advances on the timestamp the entry was *fetched* by**, which for a source
+        # that reports amendments is the later of the two (`entry_window`) — the one definition of
+        # "the timestamp an entry is filtered on", and until this the one place that did not use it.
+        # Advancing on `created_at` alone wedges a source permanently: the fetch filters, orders and
+        # truncates on the amendment watermark, so once more than one page of already-created rows
+        # has been amended, every fetch returns that same page, the cursor never moves past it, and
+        # reactions created afterwards are never ingested again. Nothing reports it — the batch is
+        # not truncated by the *workflow's* reckoning either, so the wedge guard in
+        # `durable/eln_sync.py` is never reached and the log reads `ingested=N rejected=0`.
+        window = entry_window(raw.created_at, raw.modified_at)
+        if window > horizon:
             # A timestamp beyond the wall clock (a typo'd year) must never become the
             # persisted high-water cursor: nothing ever lowers a stored cursor, so it
             # would silently skip every later real entry. Reject without advancing.
+            # Checked on the same value the cursor takes, or the guard would let a future
+            # *amendment* stamp through the one gate that exists to keep it out.
             rejected.append(
                 RejectedEntry(
                     entry_id=raw.entry_id,
-                    reason=f"timestamp {raw.created_at.isoformat()} is implausibly far "
+                    reason=f"timestamp {window.isoformat()} is implausibly far "
                     "in the future (beyond wall clock + tolerance)",
                     created_at=raw.created_at,
                 )
             )
             continue
-        cursor = max(cursor, raw.created_at)
+        cursor = max(cursor, window)
         # Whether this entry will come back on the next run: it is inside the replay window and
         # its note is not merged. Decided inside the try (it needs the mapped note) and recorded
         # after it, so an entry that then fails to ingest is only ever reported as rejected.

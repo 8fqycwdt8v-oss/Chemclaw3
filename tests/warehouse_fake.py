@@ -28,7 +28,7 @@ class FakeCursor:
         self._warehouse.executed.append((sql, list(params)))
         if self._warehouse.fail_with is not None:
             raise self._warehouse.fail_with
-        self._rows = self._warehouse.respond(sql)
+        self._rows = self._warehouse.respond(sql, list(params))
 
     async def fetchall(self) -> list[dict[str, Any]]:
         """The primed rows for the last statement."""
@@ -58,8 +58,13 @@ class FakeWarehouse:
         """The parameter marker the engine should emit for this connection."""
         return self._placeholder
 
-    def respond(self, sql: str) -> list[dict[str, Any]]:
-        """The rows of whichever primed relation this statement reads from."""
+    def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        """The rows of whichever primed relation this statement reads from.
+
+        Ignores the statement's WHERE, ORDER BY and LIMIT: most tests here assert *what statement
+        the engine emitted*, and answering them from a canned table keeps the row fixtures readable.
+        `WatermarkWarehouse` is the counterpart for the tests where those clauses are the subject.
+        """
         for relation, rows in self.tables.items():
             if f" {relation} " in sql or sql.endswith(f" {relation}"):
                 return [dict(row) for row in rows]
@@ -69,6 +74,50 @@ class FakeWarehouse:
     async def cursor(self) -> AsyncIterator[FakeCursor]:
         """A cursor for one statement."""
         yield FakeCursor(self)
+
+
+class WatermarkWarehouse(FakeWarehouse):
+    """A `FakeWarehouse` whose entry relation honours the statement's WHERE, ORDER BY and LIMIT.
+
+    Needed because the plain fake answers every statement with the whole primed table, so the one
+    failure mode that the paging contract exists to prevent — a cursor that does not advance past
+    the page the warehouse keeps returning — cannot be reproduced against it. A sync that has
+    wedged permanently and a sync with nothing to do look identical from the outside, and every
+    existing test here saw the second one.
+
+    It applies the *semantics* of those clauses rather than parsing them: the exact clause text is
+    already pinned by `test_the_cursor_filters_on_the_later_of_created_and_modified`, so restating
+    it as a parser here would only be a second place for the two to disagree. `params` is
+    `[since, limit]` — the engine binds both, which is itself asserted next door.
+    """
+
+    def __init__(
+        self,
+        tables: dict[str, list[dict[str, Any]]],
+        entry_relation: str,
+        created_at: str,
+        modified_at: str | None = None,
+    ) -> None:
+        """Serve `entry_relation` under its declared watermark columns; other tables as canned."""
+        super().__init__(tables)
+        self._entry_relation = entry_relation
+        self._created_at = created_at
+        self._modified_at = modified_at
+
+    def _watermark(self, row: dict[str, Any]) -> Any:
+        """The value the entry statement filters and orders on: COALESCE(modified, created)."""
+        if self._modified_at and row.get(self._modified_at) is not None:
+            return row[self._modified_at]
+        return row[self._created_at]
+
+    def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        """Rows at or after the bound cursor, oldest watermark first, cut to the bound limit."""
+        rows = super().respond(sql, params)
+        if f" {self._entry_relation} " not in sql:
+            return rows
+        since, limit = params[0], params[1]
+        keep = sorted((row for row in rows if self._watermark(row) >= since), key=self._watermark)
+        return keep[:limit]
 
 
 # The warehouse `open_fake` will hand out next. A module-level slot because `connection.driver` is
@@ -95,3 +144,10 @@ def prime(**tables: list[dict[str, Any]]) -> FakeWarehouse:
     global NEXT
     NEXT = FakeWarehouse(dict(tables))
     return NEXT
+
+
+def prime_warehouse(warehouse: FakeWarehouse) -> FakeWarehouse:
+    """Prime an already-built warehouse (a `WatermarkWarehouse`), and hand it back."""
+    global NEXT
+    NEXT = warehouse
+    return warehouse

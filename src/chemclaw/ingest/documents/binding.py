@@ -147,6 +147,20 @@ class DocumentShareBinding(BaseModel):
     # a crawler that follows one indexes a corpus nobody meant to publish.
     follow_symlinks: bool = False
 
+    @property
+    def chunking_key(self) -> str:
+        """Which chunking produced a stored row: the two settings that decide its boundaries.
+
+        The identity half of a chunk, and the counterpart to
+        `chemclaw.core.embeddings.embedding_config_key` — a stored chunk is only reusable for the
+        chunking that cut it, exactly as a vector is only reusable for the model that made it. Both
+        of the crawl's gates compare it (`DocumentIndex.fingerprints`, `known_documents`), because a
+        change here has to re-read the file *and* re-chunk it, and neither gate can see one from the
+        other's side. Defined on the binding because the binding is where these two numbers live;
+        one definition, so the file rows and the chunk rows cannot be written under two spellings.
+        """
+        return f"{self.chunk_chars}:{self.chunk_overlap_chars}"
+
     @model_validator(mode="after")
     def _is_coherent(self) -> Self:
         """Reject the bindings that would silently index nothing, or the wrong thing."""
