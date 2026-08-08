@@ -35,13 +35,18 @@ from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
-from agent_framework import Message, annotate_message_groups, included_messages
-from agent_framework._compaction import (
+# The five compaction names below came from `agent_framework._compaction` until 2026-08-08.
+# Measured against 1.11.0: every one is exported at the package top level and is the identical
+# object, so the private module path was reach the public one already gave.
+from agent_framework import (
     EXCLUDE_REASON_KEY,
     EXCLUDED_KEY,
     GROUP_ANNOTATION_KEY,
     SUMMARY_OF_MESSAGE_IDS_KEY,
     CompactionStrategy,
+    Message,
+    annotate_message_groups,
+    included_messages,
 )
 
 from chemclaw.agent.message_pairing import droppable_rows

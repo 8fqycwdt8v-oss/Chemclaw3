@@ -288,6 +288,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-07-one-bad-file-must-not-stop-the-corpus](D-2026-08-07-one-bad-file-must-not-stop-the-corpus.md) | The guard belongs at the boundary, not on the constructor |
 | [D-2026-08-07-the-mark-means-observed-not-processed](D-2026-08-07-the-mark-means-observed-not-processed.md) | The sweep reads the drain's own evidence |
 | [D-2026-08-08-a-degraded-check-must-not-clear-the-gate](D-2026-08-08-a-degraded-check-must-not-clear-the-gate.md) | The substitute was more generous |
+| [D-2026-08-08-a-rule-with-no-test-is-a-claim](D-2026-08-08-a-rule-with-no-test-is-a-claim.md) | The enforcement layer for rules this repository already states |
 | [D-2026-08-08-a-served-tool-is-a-reachable-tool](D-2026-08-08-a-served-tool-is-a-reachable-tool.md) | The allow-list guarded the agent, not the port |
 | [D-2026-08-08-a-slot-lives-as-long-as-its-response](D-2026-08-08-a-slot-lives-as-long-as-its-response.md) | A slot lives as long as its response, and a check that runs before the queue checks nothing |
 | [D-2026-08-08-an-outage-is-not-a-missing-job](D-2026-08-08-an-outage-is-not-a-missing-job.md) | Six durable failures that reported the wrong thing |

@@ -115,13 +115,6 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
     ),
-    # Non-zero means this process's log redaction is missing the per-connector bearer tokens, for
-    # as long as it runs. It is incremented once, at startup, so any non-zero value is permanent
-    # for that pod and the right response is a restart after fixing the manifest — which is why it
-    # is a counter to alert on rather than a line to read.
-    "chemclaw_redaction_inventory_failures_total": (
-        "Startups that could not resolve the connector bearer-token names for log redaction."
-    ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it
@@ -255,6 +248,23 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_history_rows_compacted_total": (
         "Stored conversation rows removed by durable compaction after a turn."
     ),
+    # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
+    # warning, continue with less. Measured: 42 such handlers across 35 modules, and exactly 3 of
+    # those modules counted anything — so a preference store that had stopped writing, a cost ledger
+    # losing every row and a redaction filter that never resolved its token names all read from
+    # outside exactly like a healthy service. Each is individually right to swallow — the
+    # alternative is failing a chemist's turn over telemetry — which is precisely why the swallow
+    # has to leave a number behind.
+    #
+    # One counter with a `subsystem` label rather than one counter per site: the operator question
+    # is "is anything degraded, and what", which is `sum by (subsystem)` over a single series
+    # family, and a per-site counter would make that a union of a dozen metric names that has to be
+    # edited every time a site is added. `agent/audit.py`'s dedicated
+    # `chemclaw_audit_sink_failures_total` stays as it is — a lost GxP record is a named
+    # regulatory fact with its own alert, not a member of a general family.
+    "chemclaw_degraded_total": (
+        "Operations that failed and were continued past with reduced function, by subsystem."
+    ),
 }
 
 # Latency histograms. Two, not more: a turn is the unit a chemist waits on, and a tool call is the
@@ -304,6 +314,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
     # profile) rather than anything a caller can name.
     "chemclaw_repeated_tool_calls_total": ("tool",),
+    # The tightest bound of any label here: a subsystem name is a string literal at a `degraded()`
+    # call site, so the whole value set is enumerable from the source and `tests/test_degraded.py`
+    # enumerates it. Nothing a request carries can reach this label.
+    "chemclaw_degraded_total": ("subsystem",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes

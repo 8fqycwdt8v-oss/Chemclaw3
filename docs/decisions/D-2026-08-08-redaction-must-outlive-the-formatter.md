@@ -77,7 +77,7 @@ tag.
   covers the entrypoint's `exec uvicorn` without the entrypoint knowing this module exists, and it
   covers the next library that configures its own logger.
 - The manifest-resolution failure logs at **ERROR** with the stable marker
-  `redaction_inventory_incomplete` and increments `chemclaw_redaction_inventory_failures_total`. A
+  `degraded[log_redaction]` and increments `chemclaw_degradations_total{subsystem="log_redaction"}`. A
   single WARNING in container startup output is the line nobody reads; the counter is the alertable
   surface, and any non-zero value is permanent for that pod.
 - `redact_secrets` gains a small set of **structural** rules alongside the value inventory, and

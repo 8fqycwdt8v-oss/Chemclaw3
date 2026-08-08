@@ -65,14 +65,62 @@ The three rows below are the API-robustness lane's residuals; what it fixed is i
       the same subprocess answer as the row above to be more than cosmetic.
       *Trigger:* a share sync that misses its schedule with one file named in the log.
 
-- [ ] **`deps-audit` runs in neither `make ci` nor `ci.yml`** — [S]. Only `image.yml`. So the
-      documented pre-push gate and every branch push go green against a lockfile with known CVEs —
-      which is how pypdf 6.14.2 sat in the lock — and `CLAUDE.md`'s "a green `make` locally means a
-      green CI" is false for the supply chain. Not fixed here because it is a CI-policy change with
-      a cost this lane cannot price: `pip-audit` needs network, so adding it to `make ci` makes the
-      gate fail offline.
-      *Trigger:* the next dependency CVE, or the first CI run that has a decided answer for the
-      offline case.
+## Open — Left by the enforcement lane (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-rule-with-no-test-is-a-claim.md`. Each row below is something
+the new tests now *record* as debt rather than something they fixed; each is a live row in
+`_KNOWN_LEAKS` / an unconverted site, so none of them is silent any more.
+
+- [ ] **One `durable/launch.py` `start_job()`, and the reuse policy it cannot flatten** — [M].
+      Five copies of the durable-launch idiom exist (`agent/durable_tools.py`,
+      `agent/interaction_tools.py`, `templates/registry.py`, and two in `connectors/`), and they are
+      what makes `chemclaw.agent → temporalio` and `chemclaw.templates → temporalio` real edges in
+      the tree — the clearest textual violation of CLAUDE.md's "durability lives only in Temporal,
+      never in MAF", now recorded in `tests/test_third_party_layering.py::_KNOWN_LEAKS` so it cannot
+      grow. The copies have already diverged once: `start_approval` omits the `id_reuse_policy` the
+      others pass. The blocker is not the extraction, it is the policy —
+      `D-2026-08-08-an-outage-is-not-a-missing-job` reverted an attempt to unify it because "closed
+      with a decision" and "closed without one" need different `WorkflowIDReusePolicy` values, so a
+      helper that forces one on all five callers is worse than five copies. Any helper must take the
+      policy from its caller.
+      *Trigger:* a sixth launch site, or the `interaction_tools` reuse-policy fix landing — whichever
+      comes first; both touch the same three lines in five places.
+
+- [ ] **Pin `agent-framework-core` below the next minor** — [S].
+      Two modules still import `agent_framework._harness._loop` for `ShouldContinueCallable` and
+      `ShouldContinueResult` (`agent/loop_cap.py`, `agent/plan_gate.py`), which are measured absent
+      from the package top level in 1.11.0 — against a `>=1.11.0` requirement with no upper bound,
+      so a patch release that moves them is an `ImportError` at process start of both the front door
+      and the worker. The risk is live: `FunctionCallContent`/`FunctionResultContent` are already
+      absent from that top level. `tests/test_third_party_layering.py` pins the two by
+      `(file, symbol)` so a third fails, which is containment, not the fix. (The review counted
+      five; three turned out to be unnecessary — `todos_remaining`, the three `_mode` names and all
+      five `_compaction` names are exported publicly and are the identical objects, so those
+      imports are public now and their rows are deleted.)
+      *Trigger:* touches `pyproject.toml`, so it belongs with the next dependency change.
+
+- [ ] **Twenty-nine warn-and-degrade sites still uncounted, in three groups** — [S].
+      Measured on the pre-lane tree: 42 `except` handlers that log a warning and do not re-raise,
+      across 35 modules, of which exactly 3 counted anything (`durable/publish.py`, `kg/graph.py`,
+      `kg/proposal.py`). `core/metrics_bridge.degraded` converted ten — the nine in `agent/` and
+      `core/logging.py`. Left: (a) **workflow code** — `durable/notify.py:108`,
+      `durable/report_workflow.py:92`, `connectors/qm/workflows.py:90,143` — a metric emitted from
+      inside a workflow re-counts on every replay, so each needs the
+      `if not workflow.unsafe.is_replaying():` guard `durable/publish.py` already demonstrates, and
+      a `core` helper may not import `temporalio` to know that; (b) **`cli/backfill_corpus.py:66`**
+      — a CLI process exits long before any scrape reaches its registry, so the counter would never
+      be read; (c) **`api/` (5), `ingest/` (10), `science/` (8), `evals/` (1)** — owned by other
+      lanes of this campaign, deliberately untouched to avoid conflicting edits.
+      *Trigger:* group (a) once someone decides whether the replay guard belongs at each site or in a
+      `durable`-side wrapper; group (c) once the campaign's lanes have merged.
+
+- [ ] **`template-validate` cannot check arguments for a template launcher or a skill tool** — [S].
+      The argument check resolves parameters from the in-process `@tool` registry and each bundle's
+      own server tools module, which covers every tool the shipped templates call. A `run_<name>`
+      template launcher takes a single generated pydantic model (`params`), and how MAF maps a
+      call's argument keys onto that has not been measured here, so those steps are skipped rather
+      than guessed at; skill tools are MAF's and not knowable offline at all.
+      *Trigger:* the first template whose step calls another template's launcher.
 
 ## Open — Left by the mounted-document-share build (2026-08-06)
 

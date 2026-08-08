@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from chemclaw.agent.authz import require_actor
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ class PreferenceStore:
                     await cur.execute(_UPSERT, (owner, key, value))
                 await conn.commit()
         except Exception:
-            logger.warning("could not persist preference %r for %s", key, owner, exc_info=True)
+            degraded(logger, "preferences", "could not persist preference %r for %s", key, owner)
             return False
         return True
 
@@ -137,7 +138,7 @@ class PreferenceStore:
                     await cur.execute(_DELETE, (owner, key))
                 await conn.commit()
         except Exception:
-            logger.warning("could not delete preference %r for %s", key, owner, exc_info=True)
+            degraded(logger, "preferences", "could not delete preference %r for %s", key, owner)
             return False
         return True
 

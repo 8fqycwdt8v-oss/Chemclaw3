@@ -36,6 +36,7 @@ from typing import Any
 from temporalio.client import WorkflowFailureError
 
 from chemclaw.agent.durable_tools import completed_job_status
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.connector_job import failure_reason
 
@@ -120,8 +121,9 @@ async def await_job_results(
         )
     except Exception:
         # Temporal being unreachable must degrade the turn to its pre-AGT-2 behavior, not fail an
-        # answer the model already has.
-        logger.warning("mid-turn resume could not reach the durable jobs", exc_info=True)
+        # answer the model already has — and be counted, because from outside a broker outage and
+        # a turn that simply had no jobs to collect produce the identical transcript.
+        degraded(logger, "job_resume", "mid-turn resume could not reach the durable jobs")
     missing = [job_id for job_id in job_ids if job_id not in collected]
     if missing:
         logger.info("mid-turn resume has no result yet for %s", ", ".join(missing))

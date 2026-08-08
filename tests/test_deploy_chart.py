@@ -1111,6 +1111,31 @@ def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
     # red build ambiguous, so it goes back on with its own change rather than riding along here.
 
 
+def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> None:
+    """A gate only `image.yml` runs is not a gate on the thing developers do all day.
+
+    The test above proves the audit exists and is blocking; it proved that of the *image* workflow,
+    which triggers on `push: main` and `pull_request` only. So every branch push went green against
+    the lockfile, and so did `make ci` — the target CLAUDE.md calls "the full pre-push gate" and
+    whose contract is "a green `make` locally means a green CI". Measured on the tree that found
+    this, that lockfile carried two known CVEs in `pypdf`. Both wirings are asserted here because
+    each is one word in a list, which is exactly the kind of thing a later edit drops silently.
+    """
+    ci_workflow = (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
+    assert "make deps-audit" in ci_workflow, (
+        "ci.yml does not run the dependency audit, so a branch push audits nothing"
+    )
+    assert 'branches: ["**"]' in ci_workflow, (
+        "ci.yml no longer runs on every branch, which is what made putting the audit here worth it"
+    )
+    ci_target = next(
+        line
+        for line in (DEPLOY.parent / "Makefile").read_text().splitlines()
+        if line.startswith("ci:")
+    )
+    assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
+
+
 def test_the_licence_decision_is_a_build_flag_rather_than_an_edit() -> None:
     """Shipping crest (GPL-3.0) is the product owner's call, not this file's.
 

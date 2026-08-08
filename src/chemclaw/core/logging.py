@@ -39,6 +39,7 @@ from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 
 
@@ -520,24 +521,22 @@ class SecretRedactingFilter(logging.Filter):
                 and isinstance(manifest.endpoint.auth, BearerAuth)
             )
         except Exception:
-            # ERROR and a counter, not a WARNING. The degraded state is unbounded in time (it lasts
-            # the process's life) and its trigger is *correlated with its consequence*: the thing
-            # that breaks this resolution is a bad connector manifest, and a bad connector manifest
-            # is exactly what produces the connector failures whose tracebacks then carry the
-            # bearer token in clear. A single WARNING in container startup output is the line
-            # nobody reads. `redaction_inventory_incomplete` is the stable marker to alert on.
-            logging.getLogger(__name__).error(
-                "redaction_inventory_incomplete: could not resolve connector bearer-token env "
-                "names for log redaction; connector credentials will NOT be scrubbed from log "
-                "lines for the life of this process",
-                exc_info=True,
-            )
-            # Imported here rather than at module scope: `filter` must not reach an import (see
-            # `ContextFilter`), and this branch runs at construction, once, only on failure.
-            from chemclaw.core.metrics_bridge import record_metric
-
-            record_metric(
-                lambda metrics: metrics.increment("chemclaw_redaction_inventory_failures_total")
+            # ERROR and counted, and the one degradation in this file that is a *security*
+            # degradation rather than a functional one: the process keeps logging, and keeps
+            # logging connector bearer tokens in the clear for its whole lifetime. The state is
+            # unbounded in time and its trigger is correlated with its consequence — what breaks
+            # this resolution is a bad connector manifest, and a bad connector manifest is exactly
+            # what produces the connector failures whose tracebacks carry the token. A WARNING in
+            # container startup output is the line nobody reads; `degraded[log_redaction]` is the
+            # stable marker to alert on. Safe to log from inside a filter's constructor: the filter
+            # is not installed yet, so there is no recursion, and `record_metric` swallows anything
+            # the registry could raise.
+            degraded(
+                logging.getLogger(__name__),
+                "log_redaction",
+                "could not resolve connector bearer-token env names for log redaction; "
+                "connector credentials will NOT be scrubbed from log lines for the life of "
+                "this process",
             )
 
     def filter(self, record: logging.LogRecord) -> bool:

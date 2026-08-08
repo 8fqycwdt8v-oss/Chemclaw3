@@ -40,13 +40,24 @@ async def beating(
     rather than a progress callback because there is genuinely nothing to report inside the
     wait: the honest signal is "still running", and pretending to know how far along it is would
     be a worse lie than saying nothing.
+
+    **Cancellation reaches the wrapped work.** The awaitable runs as a task so the timer can run
+    beside it, and `asyncio.wait` does *not* cancel what it was waiting on when the waiter is
+    cancelled — so without the handler below, a cancelled activity would return while its real
+    work carried on detached, still writing. Cancelling and re-raising is what keeps `beating(x)`
+    behave-alike to `await x`, which is the only thing a caller wrapping an existing `await` in it
+    can reasonably assume.
     """
     task = asyncio.ensure_future(awaitable)
     interval = max(1.0, heartbeat_timeout_seconds / _HEARTBEATS_PER_TIMEOUT)
     elapsed = 0.0
-    while True:
-        done, _ = await asyncio.wait({task}, timeout=interval)
-        if done:
-            return await task
-        elapsed += interval
-        activity.heartbeat(f"{what}: still running after {elapsed:.0f}s")
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=interval)
+            if done:
+                return await task
+            elapsed += interval
+            activity.heartbeat(f"{what}: still running after {elapsed:.0f}s")
+    except asyncio.CancelledError:
+        task.cancel()
+        raise

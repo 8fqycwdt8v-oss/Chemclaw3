@@ -61,8 +61,10 @@ from chemclaw.cli.mock_llm import Behaviour, ToolCall
 # "0 job_records row(s) written", spaced 12 rounds apart at a ~58 s round. Nothing was broken. The
 # payload had been computed in an earlier round, `ALLOW_DUPLICATE_FAILED_ONLY` correctly rejoined
 # the completed run rather than recomputing it, and no new record was written — D-011 working, read
-# as a failure. 100,000 values on a millikelvin grid puts the period at 27 hours, past any soak
-# that fits in this container, and keeps every value a temperature a chemist could ask about.
+# as a failure. 100,000 values on a 10-µK grid puts the period at 27.8 hours, past any soak that
+# fits in this container, and keeps every value a temperature a chemist could ask about. The same
+# modulus is now in all three copies (it had landed in this one only) and `tests/test_run_jitter.py`
+# evaluates each expression across a 24-hour window so a fourth copy cannot get a smaller one.
 _COLLISION_TEMPERATURE_K = 298.15 + (int(time.time()) % 100_000) / 100_000.0
 _COLLISION_PAYLOAD: dict[str, object] = {
     "kind": "reaction",

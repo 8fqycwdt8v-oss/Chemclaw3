@@ -200,26 +200,40 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 - [ ] **`eval-strict` cannot see a science gate that stops firing** — raising two thresholds to 1000
       dropped a by-design failure and CI stayed green with `regressions=0`.
 
-## Lane T9 — Make recurrence impossible (enforcement)
+## Lane T9 — Make recurrence impossible (enforcement) — MOSTLY DONE (D-2026-08-08-a-rule-with-no-test-is-a-claim)
 
-- [ ] **Third-party layering test** — `tests/test_layering.py:167` filters on `chemclaw.*`, so the
-      policy every architecture document actually states is unenforced. A working 208-line prototype
-      exists and flags the exact edges; land it with the allow-list.
-- [ ] **`durable/launch.py`** — one `start_job()`; five copies of the launch idiom exist and one has
-      already diverged (the `start_approval` bug above).
-- [ ] **Pin `agent-framework-core<1.12`** and funnel the five private-module imports through one shim.
-- [ ] **Default the statement timeout in `db.connection()`** — already prototyped: **23 files,
-      +76/−261, mypy --strict clean, 874 tests green**. Closes the real risk that a new store silently
-      gets no timeout.
-- [ ] **Apply the jitter fix to its two stale copies** — `live_jobs.py`'s `% 25` yields 25 distinct
-      temperatures that ever exist, so the lane goes permanently green while computing nothing.
-- [ ] **A `degraded()` helper + the 22 warn-and-degrade sites** — 17 modules, none referencing METRICS.
-- [ ] **Adopt `heartbeat.beating` in its three holdouts** — they use `timeout/3` with no floor vs
-      `max(1.0, timeout/4)`.
-- [ ] **`template-validate` should check step arguments**, not just names.
-- [ ] **A test that every metric string literal is declared** — converts the one INVISIBLE swallow into
-      a build-time failure.
-- [ ] **`deps-audit` into `make ci` and ci.yml** — today no branch push audits dependencies.
+- [x] **Third-party layering test** — `tests/test_third_party_layering.py`, keyed by *file* so a new
+      module joining an existing leak fails. Mutation-proved four ways, and it caught a real fifth
+      leak at merge time: `agent/job_results.py`, added by a parallel lane after the test was
+      drafted. `test_layering.py`'s `TYPE_CHECKING` skip was also dead code guarding zero imports
+      and is now a third checked scope.
+- [ ] **`durable/launch.py`** — not built. A single shared reuse policy cannot serve all five
+      callers (D-2026-08-08-an-outage-is-not-a-missing-job showed "closed with a decision" and
+      "closed without one" need different ones). The five sites are recorded in `_KNOWN_LEAKS` so
+      the debt cannot grow silently; BACKLOG carries the trigger.
+- [ ] **Pin `agent-framework-core<1.12`** — deferred: `pyproject.toml` was another lane's file this
+      wave. **Three of the five private imports turned out to be unnecessary**: measured against the
+      installed 1.11.0, `todos_remaining`, the agent-mode trio and all five `_compaction` names are
+      exported at the top level and are the identical objects, against a comment in
+      `chemclaw_agent.py` asserting the opposite. Two genuinely-private imports remain.
+- [ ] **Default the statement timeout in `db.connection()`** — held for the parent session
+      (23 files; conflicts with three lanes' packages this wave).
+- [x] **Apply the jitter fix to its two stale copies** — `tests/test_run_jitter.py` *evaluates* each
+      expression over a 24 h window rather than reading its modulus: 25 and 971 distinct values
+      before, 86,400 after. Pins the three files, so a fourth copy fails.
+- [x] **A `degraded()` helper + the warn-and-degrade sites** — the finding was re-measured and was
+      **worse than filed**: 42 handlers across 35 modules, of which 3 counted anything (filed as
+      22/17). Ten sites adopted, one labelled counter rather than ten counters; the remaining 12 are
+      in BACKLOG with triggers (4 need `is_replaying()`, 1 is a CLI, the rest are other lanes').
+- [x] **Adopt `heartbeat.beating` in its three holdouts** — and adoption exposed a defect *in the
+      helper*: `asyncio.wait` does not cancel what it waits on, so a cancelled activity left its
+      work running detached. Fixed. Two versions of that test passed against the unfixed helper
+      before the third one didn't; both failures are recorded in its docstring.
+- [x] **`template-validate` checks step arguments**, not just names.
+- [x] **A test that every metric string literal is declared** — both directions, so a typo in a
+      *loop-variable* metric name in `runner.py` is caught too.
+- [x] **`deps-audit` into `make ci` and ci.yml** — red when written (2 CVEs), green now that T7's
+      pypdf bump is merged. Verified in the merged tree: "No known vulnerabilities found".
 
 ## Lane T10 — Claims that are false
 

@@ -603,7 +603,12 @@ async def family_b_tool_truth(expect_tools: Sequence[str]) -> list[Finding]:
 #
 # The temperature varies per process for the reason `live_jobs._RUN_TEMPERATURE_K` does: the
 # workflow id is a hash of the payload, so a fixed one makes every rerun a rejoin of the first.
-_CHAOS_TEMPERATURE_K = 300.0 + (int(time.time()) % 971) / 100.0
+#
+# `% 971` recurred every 16.2 minutes — 1.35x the ~12-minute period that had already been *measured*
+# failing this harness (`cli/storm_behaviours.py` records 6 of 81 soak rounds reporting "0
+# job_records row(s) written", which was D-011's cache working correctly and being read as a
+# failure). Same modulus as the other two copies now: ~27.8 hours, past any soak this harness runs.
+_CHAOS_TEMPERATURE_K = 300.0 + (int(time.time()) % 100_000) / 100_000.0
 _CHAOS_PAYLOAD: dict[str, Any] = {
     "kind": "reaction",
     "reactants": ["c1ccccc1", "[H][H]", "[H][H]", "[H][H]"],

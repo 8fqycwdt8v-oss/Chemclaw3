@@ -314,6 +314,60 @@ def test_the_validator_catches_a_step_naming_a_tool_that_does_not_exist(
     assert any("unknown tool 'no_such_tool'" in problem for problem in problems)
 
 
+def test_the_validator_catches_arguments_the_named_tool_does_not_take(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checking the tool's *name* is half a reference; the arguments are the other half.
+
+    Measured on the unfixed validator, this exact file — `screen_hazards` with `smiles` misspelt
+    and a stray key beside it — printed "template validation passed." A pinned procedure that
+    validates and then fails at the first live step, inside an activity after the launch, is the
+    failure the gate exists to prevent, and the gate had it.
+    """
+    from chemclaw.cli.validate_templates import validate_templates
+
+    (tmp_path / "wrongargs.yaml").write_text(
+        "summary: x\nsteps:\n"
+        "  - id: one\n"
+        "    kind: tool\n"
+        "    tool: screen_hazards\n"
+        "    arguments:\n"
+        "      smilez: ['CCO']\n"
+        "      nonexistent_arg: 42\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
+    problems = validate_templates()
+    assert any("does not take" in p and "nonexistent_arg" in p for p in problems), problems
+    # And the other direction: dropping a required argument is the same class of run-time failure.
+    assert any("omits required argument(s) ['smiles']" in p for p in problems), problems
+
+
+def test_the_validator_accepts_a_correct_tool_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The argument check must not invent failures — the counterpart to the test above.
+
+    A gate that rejects correct input is worse than one that misses bad input, because the first
+    thing anyone does about it is switch it off. `top_k` is optional and deliberately omitted here,
+    so this also pins that "required" is read off the signature's defaults rather than from the
+    whole parameter list.
+    """
+    from chemclaw.cli.validate_templates import validate_templates
+
+    (tmp_path / "goodargs.yaml").write_text(
+        "summary: x\nsteps:\n"
+        "  - id: one\n"
+        "    kind: tool\n"
+        "    tool: similar_molecules\n"
+        "    arguments:\n"
+        "      smiles: 'CCO'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
+    assert validate_templates() == []
+
+
 # --- the run --------------------------------------------------------------------------
 
 

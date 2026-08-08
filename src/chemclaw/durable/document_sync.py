@@ -28,7 +28,6 @@ the comparison is meaningless — whereas a document not yet crawled is merely a
 pass reads stored chunk text, so it touches no share and runs even when every mount is down.
 """
 
-import asyncio
 from datetime import datetime, timedelta
 
 from temporalio import activity, workflow
@@ -51,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from chemclaw.ingest.sources.registry import active_retrieve_sources
 
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
 
 # Module-level indirection so tests swap the Postgres backend for the in-memory one.
@@ -111,19 +111,19 @@ async def plan_document_sync() -> DocumentSyncPlan:
     return DocumentSyncPlan(sources=sorted(share_sources()), started_at=await index.clock())
 
 
-async def _heartbeat_forever() -> None:
-    """Beat until cancelled, several times per heartbeat-timeout window (the usual margin).
-
-    One chunk is hundreds of files read off a network share and parsed — minutes of work with no
-    natural progress point to report. A sibling task beats while it runs so Temporal detects a dead
-    worker within the heartbeat timeout instead of waiting out the whole start-to-close.
-    """
-    # A third of the timeout is the conventional margin: two beats may be lost to scheduling or
-    # network delay before Temporal wrongly declares the worker dead.
-    interval = settings.document_sync_heartbeat_timeout_seconds / 3
-    while True:
-        activity.heartbeat()
-        await asyncio.sleep(interval)
+# One chunk is hundreds of files read off a network share and parsed — minutes of work with no
+# natural progress point to report — so liveness is time-based: something beats while the work
+# runs, and Temporal detects a dead worker within the heartbeat timeout instead of waiting out the
+# whole start-to-close.
+#
+# `durable.heartbeat.beating` is that something now. The two hand-rolled copies this file carried
+# derived their interval as `timeout / 3` with **no floor**, and the setting they divided is
+# declared as a bare `float` with no `Field(gt=0)` — so an ENV-set fraction of a second beat several
+# times a second against the Temporal server for the whole chunk, and a negative value made
+# `asyncio.sleep` return immediately and turned the sibling task into an unbounded busy loop.
+# `beating()` uses `max(1.0, timeout / 4)`, and that floor is exactly what it was written to
+# prevent. The eager pre-beat below is kept and is not redundant: `beating()` waits one interval
+# before its first beat, and a fast chunk may finish before that.
 
 
 @durable_activity("background")
@@ -134,17 +134,17 @@ async def sync_document_share(source: str, after: str) -> SyncReport:
     if share is None:  # names come from `plan_document_sync`, so this is a wiring bug
         raise ChemclawError(f"data source {source!r} carries no document share")
     activity.heartbeat()
-    heartbeater = asyncio.create_task(_heartbeat_forever())
-    try:
-        return await sync_share(
+    return await beating(
+        sync_share(
             source,
             share.share_binding(),
             _document_index(),
             after=after,
             limit=settings.document_sync_batch_size,
-        )
-    finally:
-        heartbeater.cancel()
+        ),
+        f"document share {source}",
+        settings.document_sync_heartbeat_timeout_seconds,
+    )
 
 
 @durable_activity("background")
@@ -152,11 +152,11 @@ async def sync_document_share(source: str, after: str) -> SyncReport:
 async def reembed_stale_documents() -> ReembedReport:
     """Refresh one bounded batch of vectors whose embedding configuration is superseded."""
     activity.heartbeat()
-    heartbeater = asyncio.create_task(_heartbeat_forever())
-    try:
-        return await reembed_stale(_document_index(), settings.document_reembed_batch_size)
-    finally:
-        heartbeater.cancel()
+    return await beating(
+        reembed_stale(_document_index(), settings.document_reembed_batch_size),
+        "document re-embed",
+        settings.document_sync_heartbeat_timeout_seconds,
+    )
 
 
 @durable_activity("background")

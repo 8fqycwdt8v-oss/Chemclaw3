@@ -53,7 +53,14 @@ mutant-results:  ## Show the survivors from the last `make mutants` run.
 
 check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
 
-ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate safety-validate helm-validate  ## The full pre-push gate: lint + type + coverage + all validators (what CI runs).
+# `deps-audit` is in this list and in `.github/workflows/ci.yml` for the same reason: it was in
+# neither. It ran only from `image.yml`, which triggers on `main` and on pull requests — so every
+# branch push, and the whole documented pre-push gate, went green against a lockfile with known
+# CVEs, and CLAUDE.md's "a green `make` locally means a green CI" was false for the supply chain
+# alone. Last in the list rather than first: a dependency finding is a real failure but not one
+# that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
+# in the diff under review.
+ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate safety-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin
