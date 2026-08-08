@@ -98,9 +98,13 @@ def _report_id(request: ReportRequest) -> str:
     report built from a corpus his AD group excludes him from. The mirror case is the defect this
     was all meant to fix: Bob first, and Alice silently receives the narrowed sweep.
 
-    The roles rather than the actor are what the corpus actually depends on, so two chemists with
-    the *same* entitlement still share a run and the idempotency argument survives where it is true.
-    The actor is included as well because it is what the draft is attributed to.
+    The roles are what the corpus actually depends on; the actor is in the key as well, because it
+    is what the draft is attributed to. So idempotency is **per actor**: the same chemist asking
+    twice gets one run, and two chemists with identical entitlements get two. An earlier version of
+    this paragraph claimed the second pair still share a run — measured false, since `requested_by`
+    is in the payload below. Sharing across actors would be the cheaper answer and it is not
+    available: the id is what `job_status()` hands a report out by, and that call applies no actor
+    check, so an id two principals can both derive is an id either can collect.
     """
     payload = [
         request.title,

@@ -761,22 +761,38 @@ def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> N
         assert secret not in redact_secrets(sample), sample
 
 
-def test_redaction_cannot_be_made_quadratic_by_a_log_line() -> None:
-    """Every pattern's tail is bounded, because this runs while the logging lock is held.
+@pytest.mark.parametrize(
+    "unit",
+    ["-eyJ", "password=", "PGPASSWORD=", "api_key=", "access_token=", "client_secret=", "Bearer "],
+    ids=["jwt", "password", "pgpassword", "api-key", "access-token", "client-secret", "bearer"],
+)
+def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
+    r"""Every pattern's cost is linear in the line, because this runs holding the logging lock.
 
-    Unbounded `{8,}` made the JWT rule quadratic: each `-eyJ` is a fresh word-boundary start whose
-    tail rescans the remainder. Measured at 46.7 ms for 10 KB rising to 11.78 s for 160 KB — a
-    denial of service on every thread's logging, reachable by anything that can get text into a log
-    line (an echoed request body, an httpx error, a turn's own content).
+    **This test used to name the whole class and exercise one member of it.** Its docstring
+    generalized over "every pattern's tail"; its body passed only `-eyJ`, the input that was already
+    fixed. A security review substituted the others into these same assertions and two of them
+    failed outright — `password=` at 63.9x and `api_key=` at 56.2x for an 8x input — because
+    `_HAS_DIGIT` was written `_OPAQUE*\d` and reintroduced, in a lookahead, exactly the unbounded
+    tail `_NOT_MID_TOKEN` had been added to remove. Measured then: 18 KB -> 0.5 s, 36 KB -> 2.0 s,
+    72 KB -> 8.1 s.
 
-    The bound is generous rather than tight: the assertion is that the cost is not quadratic, not
-    that it is fast, so this stays honest on a loaded CI box.
+    That mattered more than the earlier instance, because the reach is worse. `uvicorn.access` is a
+    non-propagating logger, so `_handlers_that_reach_an_output_stream` attaches this filter to it —
+    and it is the one logger that writes the raw request URL. A 115 KB request line stalled the pod
+    for 21 s, unauthenticated, on a 404, before any ASGI middleware ran.
+
+    Parametrized so a new pattern is covered by construction rather than by whoever remembers. The
+    bound is generous rather than tight: the claim is that the cost is not quadratic, not that it is
+    fast, so this stays honest on a loaded box.
     """
     import time
 
     from chemclaw.core.logging import redact_secrets
 
-    small, large = "-eyJ" * 2_500, "-eyJ" * 20_000  # 10 KB and 80 KB
+    small = unit * (10_240 // len(unit))
+    large = unit * (81_920 // len(unit))  # 8x
+
     start = time.monotonic()
     redact_secrets(small)
     small_seconds = time.monotonic() - start
@@ -784,11 +800,12 @@ def test_redaction_cannot_be_made_quadratic_by_a_log_line() -> None:
     redact_secrets(large)
     large_seconds = time.monotonic() - start
 
-    assert large_seconds < 2.0, f"80 KB of adversarial input took {large_seconds:.2f}s"
-    # 8x the input; quadratic would be ~64x. Allow a wide margin for a noisy machine, and floor the
-    # denominator so a fast small case cannot make the ratio meaningless.
+    assert large_seconds < 2.0, f"80 KB of adversarial {unit!r} took {large_seconds:.2f}s"
+    # 8x the input; quadratic would be ~64x. Wide margin for a noisy machine, and the denominator is
+    # floored so a fast small case cannot make the ratio meaningless.
     assert large_seconds / max(small_seconds, 1e-4) < 24, (
-        f"scaling looks quadratic: {small_seconds:.4f}s for 10 KB, {large_seconds:.4f}s for 80 KB"
+        f"scaling looks quadratic for {unit!r}: {small_seconds:.4f}s for 10 KB, "
+        f"{large_seconds:.4f}s for 80 KB"
     )
 
 

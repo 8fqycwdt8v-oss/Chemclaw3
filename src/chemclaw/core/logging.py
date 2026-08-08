@@ -323,7 +323,21 @@ _OPAQUE = r"[A-Za-z0-9_\-.~+/=]"
 # never by another token character, so this costs nothing and removes the amplifier.
 _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
 # "Contains a digit" — the cheap discriminator between a token and an identifier.
-_HAS_DIGIT = r"(?=" + _OPAQUE + r"*\d)"
+#
+# **Bounded, for the same reason `_NOT_MID_TOKEN` exists.** Written as `_OPAQUE*\d` this was the
+# JWT rule's defect wearing a different hat: `_OPAQUE` matches no whitespace, so a whitespace-free
+# run of `password=` gives an anchor every nine bytes and each anchor's lookahead rescans the whole
+# remainder — quadratic, and reached *unauthenticated* through the uvicorn access log, which puts
+# the raw request URL into a line this filter redacts. Measured before the bound: 18 KB → 0.5 s,
+# 36 KB → 2.0 s, 72 KB → 8.1 s (2x input, 4x time), and end to end a 115 KB request line stalled
+# the pod for 21 s — long enough for two consecutive readiness failures on the shipped chart, with
+# the stdlib logging lock held the whole time.
+#
+# The bound is what makes the work linear: every anchor scans at most 255 characters instead of the
+# rest of the line. It costs nothing real — a credential longer than 255 characters with its first
+# digit past position 255 is not a shape any of these rules is written for, and the rules' own
+# `{6,255}` / `{8,255}` tails already say so.
+_HAS_DIGIT = r"(?=" + _OPAQUE + r"{0,255}\d)"
 
 _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # GitHub tokens: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (classic, 36 chars) and the fine-grained

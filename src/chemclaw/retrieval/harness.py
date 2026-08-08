@@ -68,9 +68,13 @@ class SectionRequest(BaseModel):
     """One section to retrieve, plus the identity to retrieve it as.
 
     A pair rather than a field on `ReportSection`, because who asked is a property of the *run* and
-    not of the section: the same section spec re-used by a scheduled report has no requester, and
-    `_report_id` deliberately does not key on the actor so two chemists asking for the same report
-    still share one run.
+    not of the section: the same section spec is re-usable across runs with different requesters.
+
+    **Both halves of the original sentence here were falsified by later work in the same campaign**
+    and are corrected rather than left: `ReportRequest.requested_by` is now `min_length=1`, so a
+    request without a requester is rejected instead of being the ordinary scheduled case, and
+    `_report_id` *does* key on the actor — it had to, because two principals with different
+    entitlements were colliding on one id and one of them collected the other's report.
 
     It exists at all because the fan-out addresses each child workflow by its argument, so an
     identity that stops at the parent never reaches the activity that does the retrieving — which is
