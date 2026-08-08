@@ -6,6 +6,8 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
+from typing import Literal
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
@@ -124,6 +126,43 @@ class StoreSettings(BaseSettings):
     # every hit would turn each read into a write on the reuse hot path; at most one write per
     # blob per window is enough for an idle-based eviction decision.
     artifact_access_stamp_seconds: float = Field(default=3600.0, ge=0)
+
+    # --- Where dense vectors live (D-2026-08-08-a-vector-store-is-not-a-catalogue) ---
+    # `pgvector` (the default) keeps embeddings in the same Postgres as everything else and answers
+    # a search in one statement — ranking, eligibility and the citation join together. Any other
+    # provider means an external vector database, and then only the *dense* half moves: the file
+    # table, the fingerprint diff, the mark-and-sweep and the citation stay in Postgres, because
+    # they are relational work a vector store has no joins for and no clock to measure.
+    #
+    # Adding a provider is an adapter module plus a name here — the shape `embedding_provider` and
+    # `llm_provider` already have.
+    vector_store_provider: Literal["pgvector", "qdrant"] = "pgvector"
+    # Where the external store is. Unused by `pgvector`, which reads `postgres_dsn` like every
+    # other store here.
+    vector_store_url: str = "http://localhost:6333"
+    # Registered with the log-redaction inventory at startup by the package validator, so a client
+    # echoing its own configuration into a traceback cannot put the key in a log.
+    vector_store_api_key: str = ""
+    vector_store_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The collection the document corpus's chunks live in. Named rather than derived, because a
+    # cluster is often shared and "which collection is ours" is a deployment fact, not a constant.
+    vector_store_document_collection: str = "chemclaw_document_chunks"
+
+    @model_validator(mode="after")
+    def _external_vector_store_is_addressable(self) -> "StoreSettings":
+        """An external provider with no URL would fail on the first search, not at startup.
+
+        The same stance `_embedding_provider_config` takes for `openai_compatible`: a provider
+        selected without the address it needs is a misconfiguration that can be caught while
+        somebody is still looking at the deploy, and the alternative is a client library's
+        connection error surfacing from inside a worker hours later.
+        """
+        if self.vector_store_provider != "pgvector" and not self.vector_store_url:
+            raise ValueError(
+                f"vector_store_provider={self.vector_store_provider!r} needs `vector_store_url` "
+                "to point at the store; only 'pgvector' reads `postgres_dsn` instead"
+            )
+        return self
 
     @model_validator(mode="after")
     def _pool_bounds_are_orderable(self) -> "StoreSettings":

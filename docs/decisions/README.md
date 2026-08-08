@@ -288,3 +288,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-07-one-bad-file-must-not-stop-the-corpus](D-2026-08-07-one-bad-file-must-not-stop-the-corpus.md) | The guard belongs at the boundary, not on the constructor |
 | [D-2026-08-07-the-mark-means-observed-not-processed](D-2026-08-07-the-mark-means-observed-not-processed.md) | The sweep reads the drain's own evidence |
 | [D-2026-08-08-a-prefix-the-documents-never-carried](D-2026-08-08-a-prefix-the-documents-never-carried.md) | The string a gate matches on belongs to one definition, and the prose that teaches it is checked |
+| [D-2026-08-08-a-vector-store-is-not-a-catalogue](D-2026-08-08-a-vector-store-is-not-a-catalogue.md) | Only the dense half is pluggable, and the rest stays in Postgres |
