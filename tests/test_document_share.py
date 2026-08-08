@@ -26,7 +26,11 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import clear_embedding_cache, embed_texts, embedding_config_key
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.identity_context import (
+    GROUP_ROLE_PREFIX,
+    reset_current_identity,
+    set_current_identity,
+)
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
 from chemclaw.ingest.documents.chunk import chunk_document
@@ -939,6 +943,76 @@ def test_public_and_required_roles_together_are_refused() -> None:
         load_binding(
             {"mount": "/mnt/x", "roots": [{"path": "."}], "public": True, "required_roles": ["r"]}
         )
+
+
+def test_a_group_gated_share_answers_for_the_prefixed_claim_and_not_the_bare_one() -> None:
+    """An AD group entitlement is `group:<claim value>`, and the bare object-id is not one.
+
+    `api.auth` namespaces every group claim with `GROUP_ROLE_PREFIX` before it reaches the turn's
+    roles, because this same set gates every write tool and skill — an unprefixed directory group
+    named like an app role would silently grant it. The consequence for a share is what this test
+    pins: a binding written against the bare object-id matches nothing, and because a declining
+    retriever returns *no evidence* rather than an error, the whole failure is a corpus that
+    answers nothing with no log line and no exception anywhere.
+    """
+    group = "11111111-2222-3333-4444-555555555555"
+    claimed = f"{GROUP_ROLE_PREFIX}{group}"
+
+    def _share_gated_on(entitlement: str) -> ShareDocumentRetriever:
+        return ShareDocumentRetriever(
+            {"mount": "/mnt/x", "roots": [{"path": "."}], "required_roles": [entitlement]},
+            name=SOURCE,
+            index=InMemoryDocumentIndex(),
+        )
+
+    prefixed = _share_gated_on(claimed)
+    bare = _share_gated_on(group)
+    tokens = set_current_identity("chemist", frozenset({claimed}))
+    try:
+        assert prefixed._entitled() is True
+        assert bare._entitled() is False
+    finally:
+        reset_current_identity(tokens)
+
+
+def test_every_place_that_teaches_a_group_gate_names_the_real_prefix() -> None:
+    """The prose that tells an operator how to write a group entitlement must name `group:`.
+
+    Four hand-typed copies of one security-relevant string, and three of them were wrong: the
+    shipped manifest, this package's README and the retriever's own docstring all said to name the
+    group's *object-id*, while `api.auth` has always prefixed it. Only the operator guide was
+    right. An operator following the manifest's own comment configures a gate that matches nothing,
+    and the share then returns no evidence — silently, because declining is how the gate is
+    supposed to behave.
+
+    Checked as a claim rather than trusted as prose (D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-
+    can-check): the string these documents must agree on is now a constant, so the check is whether
+    each of them contains it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    teaches_the_gate = [
+        root / "src/chemclaw/ingest/sources/sharedrive/datasource.yaml",
+        root / "src/chemclaw/ingest/documents/README.md",
+        root / "src/chemclaw/ingest/documents/retriever.py",
+        root / "src/chemclaw/ingest/documents/binding.py",
+        root / "src/chemclaw/core/config/entra.py",
+        root / "docs/guides/sharedrive-concept.md",
+    ]
+    silent = [
+        path.relative_to(root).as_posix()
+        for path in teaches_the_gate
+        if GROUP_ROLE_PREFIX not in path.read_text(encoding="utf-8")
+    ]
+    assert not silent, (
+        f"these teach a group-gated entitlement without naming {GROUP_ROLE_PREFIX!r}: {silent}. "
+        "An operator following them writes the bare claim value, which matches nothing and fails "
+        "silently"
+    )
+
+    # And the refusal an operator actually hits carries it, rather than sending them to a guide.
+    with pytest.raises(DocumentShareError) as refusal:
+        load_binding({"mount": "/mnt/x", "roots": [{"path": "."}]})
+    assert GROUP_ROLE_PREFIX in str(refusal.value)
 
 
 def test_an_identical_vector_scores_one_and_does_not_raise() -> None:

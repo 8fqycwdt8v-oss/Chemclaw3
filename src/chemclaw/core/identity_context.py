@@ -23,6 +23,26 @@ in `chemclaw.agent` until the R2 layering move, where it was the single import t
 
 from contextvars import ContextVar
 
+# What a group-derived entitlement is named, so it can never collide with an app role.
+#
+# Entra app roles are values the API's own app registration defines; group claims are values the
+# *directory* defines, and a tenant may emit them as object-ids or as names
+# (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`, …). Merged into one flat
+# set, a directory group called `process-chemist` is indistinguishable from the app role of that
+# name — so enabling `entra_group_claims_as_roles` to give one file share its read entitlement would
+# also widen every write-tool and skill gate. The prefix keeps the two namespaces apart.
+#
+# **It lives here because it is part of the role vocabulary, not of the HTTP layer.** `api.auth`
+# stamps it onto the roles this module carries, and the places that *tell an operator how to write
+# a group-gated entitlement* have to name the same string — the shipped `sharedrive` manifest, the
+# binding's own refusal message, `docs/guides/sharedrive-concept.md`. While it sat in `api.auth`
+# those were four hand-typed copies of one security-relevant string, and three of them were wrong:
+# they told an operator to write the bare object-id, which matches nothing, so a correctly
+# configured tenant got an empty corpus and no error anywhere.
+# `tests/test_document_share.py::test_every_place_that_teaches_a_group_gate_names_the_real_prefix`
+# is what keeps them agreeing now.
+GROUP_ROLE_PREFIX = "group:"
+
 _current_actor: ContextVar[str | None] = ContextVar("chemclaw_current_actor", default=None)
 _current_roles: ContextVar[frozenset[str]] = ContextVar(
     "chemclaw_current_roles", default=frozenset()
