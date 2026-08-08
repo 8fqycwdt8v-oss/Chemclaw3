@@ -805,6 +805,18 @@ class PostgresDocumentIndex:
                 only *connect-time* failures to `ConnectionError`; anything `execute` raises came
                 straight through. This is the wrapper type `WarehouseQueryError` gives the retriever
                 that copied this pattern.
+
+                **The message carries none of the driver's text**, which is the contract
+                `SubsystemUnavailableError` states and this raiser did not keep: it was
+                `f"document search failed: {exc}"` around a `psycopg.Error`, whose string is
+                "connection to server at "…", port 5432 failed: …". `api/middleware`'s handler
+                relays a `SubsystemUnavailableError`'s message to the HTTP client verbatim,
+                precisely *because* the contract says there is nothing in it to leak. Nothing
+                reaches that handler from here today — both retrievers swallow this type — so this
+                was a contract one raiser did not keep rather than a live leak, and the fix is the
+                one line that makes the promise true wherever the type travels next. The detail is
+                not lost: it is the `__cause__`, which both handlers that see this type log with
+                `exc_info` — the retriever at DEBUG, `api/middleware` at WARNING.
         """
         try:
             async with self._connection() as conn:
@@ -812,7 +824,9 @@ class PostgresDocumentIndex:
                     await cur.execute(statement, params)
                     rows = await cur.fetchall()
         except psycopg.Error as exc:
-            raise DocumentIndexError(f"document search failed: {exc}") from exc
+            raise DocumentIndexError(
+                "the document index did not answer, so the search never ran"
+            ) from exc
         return [
             DocumentHit(
                 doc_id=row[0],

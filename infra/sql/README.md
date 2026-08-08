@@ -7,6 +7,14 @@ schema is **forward-only and additive** — no migration may drop, rename, trunc
 `tests/test_migrations_are_additive.py`). New SQL is a new numbered file; an applied file is never
 edited, because the ledger flags the changed checksum as drift.
 
+That check asks **two** questions, because destroying data and ending the rollback are different
+things with different answers (D-2026-08-08-a-rollback-that-is-not-a-schema-step). Destroying data
+is refused outright. Leaving the *previous image* unable to write — `SET NOT NULL` on an existing
+column, or a dropped or replaced key — is refused unless the migration is listed in
+`_REVIEWED_ROLLBACK_BREAKS` with the statements read and an ADR saying what an operator does
+instead of "deploy the previous image". Exactly one migration is: `041_document_chunk_identity.sql`,
+whose rollback procedure is in that ADR.
+
 `grants/` is not part of that set and is invisible to the runner's non-recursive glob by
 construction. See the note at the bottom.
 

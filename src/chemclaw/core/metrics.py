@@ -98,8 +98,24 @@ _COUNTERS: dict[str, str] = {
     # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
     # it reads `tool.is_connected` over connector tools and never names Temporal, so a broker
     # outage produced no server-side signal at all at the shipped log level.
+    # **Turns, not requests, and Temporal, not "a subsystem".** Both halves were briefly untrue: a
+    # second increment sat in `api/middleware._subsystem_unavailable`, which fires per *HTTP
+    # request* for any `SubsystemUnavailableError` — a family that includes `DocumentIndexError`,
+    # i.e. a pgvector failure with no Temporal in it. One series carried two populations with two
+    # different denominators, and `ChemclawDurableUnreachable` alerted on their sum while its
+    # summary said "Temporal is not answering its health probe". The request-path population has
+    # its own counter below; `tests/test_metric_declarations.py` holds this one to its one site.
     "chemclaw_durable_unreachable_total": (
         "Turns whose durable-subsystem health probe failed (Temporal did not answer)."
+    ),
+    # The request-path counterpart, and the sibling of `chemclaw_db_unavailable_total` — the same
+    # shape for the same reason: one counter per shedding handler, counting the requests that
+    # handler shed. Which subsystem was unavailable is in the `shedding` log line the handler
+    # writes; it is not a label, because the value would be an exception class name and a bounded
+    # label set that nobody enumerates is the cardinality trap `chemclaw_degraded_total` needed a
+    # dedicated test to stay out of.
+    "chemclaw_subsystem_unavailable_total": (
+        "HTTP requests shed with 503 because a subsystem they needed was unavailable."
     ),
     # Non-zero means the provider reported usage this process could not parse, so those turns were
     # metered at zero. The budget guard meters what this reports, so a non-zero rate here means the

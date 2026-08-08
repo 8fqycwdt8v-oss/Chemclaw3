@@ -1097,6 +1097,42 @@ def test_a_backend_failure_returns_no_evidence_rather_than_failing_the_turn(
     assert asyncio.run(retriever.retrieve("catalyst", {})) == []
 
 
+def test_a_backend_failure_is_reported_without_the_driver_s_connection_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`DocumentIndexError`'s message keeps `SubsystemUnavailableError`'s contract, at the raiser.
+
+    `api/middleware._subsystem_unavailable` relays a `SubsystemUnavailableError`'s message to the
+    HTTP client verbatim, and its docstring says why that is safe: the type "carries no hostname,
+    port or driver text — those live on `__cause__`". This raiser was built as
+    `f"document search failed: {exc}"` around a `psycopg.Error`, whose string is exactly
+    `connection to server at "…" (…), port 5432 failed: …`. Nothing reaches the handler from here
+    today — both retrievers swallow this type — so the defect was a contract one raiser did not
+    keep, which is the kind that becomes a leak the day a route stops swallowing.
+
+    Asserted at the raiser rather than at the handler for that reason: the promise belongs to the
+    exception, and the handler is only one of the places it travels.
+    """
+    import psycopg
+
+    leak = psycopg.OperationalError(
+        'connection to server at "chemclaw-pg.internal" (10.4.2.7), port 5432 failed: timeout'
+    )
+
+    def exploding(self: PostgresDocumentIndex) -> Any:
+        raise leak
+
+    monkeypatch.setattr(PostgresDocumentIndex, "_connection", exploding)
+    with pytest.raises(DocumentIndexError) as caught:
+        asyncio.run(PostgresDocumentIndex().search_lexical(SOURCE, "catalyst", 5, DocumentFilter()))
+
+    message = str(caught.value)
+    for secret in ("chemclaw-pg.internal", "10.4.2.7", "5432"):
+        assert secret not in message, f"{secret!r} reached the message a 503 body relays"
+    # The detail is not lost — it is where the contract says it is, for the log.
+    assert caught.value.__cause__ is leak
+
+
 def test_one_unembeddable_chunk_does_not_starve_the_corpus(
     share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

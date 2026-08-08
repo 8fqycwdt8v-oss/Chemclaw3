@@ -87,9 +87,22 @@ async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
     wording, because `SubsystemUnavailableError` is written for a human by contract
     (`core/errors.py`): it names the subsystem, says the work never began, and carries no hostname,
     port or driver text — those live on `__cause__`, for the log below.
+
+    **Counts its own requests, not the turn probe's.** This used to increment
+    `chemclaw_durable_unreachable_total`, whose declaration is "turns whose durable-subsystem health
+    probe failed (Temporal did not answer)" and whose alert says so — while the handler fires per
+    *request* for the whole `SubsystemUnavailableError` family, `DocumentIndexError` (a pgvector
+    failure) included. One series, two populations, two denominators, and an alert whose summary was
+    true of only one of them. The sibling above is the pattern: one counter per shedding handler.
     """
-    METRICS.increment("chemclaw_durable_unreachable_total")
-    logger.warning("shedding %s %s: %s", request.method, request.url.path, exc)
+    METRICS.increment("chemclaw_subsystem_unavailable_total")
+    # `exc_info` because the sentence above is only true if something logs the `__cause__`. The
+    # relayed message is deliberately free of hostname, port and driver text, so without the chain
+    # the operator's copy of this event says no more than the client's — the half of the contract
+    # that had no implementation.
+    logger.warning(
+        "shedding %s %s: %s", request.method, request.url.path, exc, exc_info=exc.__cause__
+    )
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 

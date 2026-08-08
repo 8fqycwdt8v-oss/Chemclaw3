@@ -27,6 +27,35 @@ landed; this is what the change surfaced and did not close.
 
 ## Open — Left by the review-and-hardening campaign (2026-08-08)
 
+- [ ] **The additive gate does not see data-dependent narrowings, and four merged migrations are
+      one** — [S]. `tests/test_migrations_are_additive.py` now asks two questions — does this
+      destroy data, and does it stop the previous image writing
+      (`D-2026-08-08-a-rollback-that-is-not-a-schema-step`) — and the second deliberately flags only
+      *unconditional* breaks: `SET NOT NULL` and a dropped or replaced key fail every write
+      regardless of what is in the table. A `CHECK` constraint or a `CREATE UNIQUE INDEX` on an
+      existing table rejects only *some* rows, and four merged migrations add one: `014`
+      (`session_events` dedupe), `016` (`predictions_identity`), `017` (`subscriptions_identity`)
+      and `037_bo_suggestion_provenance` (`bo_suggestions_job_idx`). Each is a real if
+      data-dependent rollback break — the previous image writes a duplicate, and after rollback the
+      write now fails — and each was added precisely because the duplicate was the bug. Flagging
+      them by pattern would be over-reach dressed as rigour and would need four exemptions saying
+      "this was fine"; not saying so at all is the omission D-2026-08-04 was written against.
+      *Trigger:* the first migration that adds a `CHECK` or a unique index to a table whose
+      previous-image writes are not already known to satisfy it — or the first real rollback
+      rehearsal against a populated cluster, which can measure these instead of reasoning about them.
+
+- [ ] **`WarehouseQueryError` embeds the driver's text in a message the model reads** — [S].
+      `ingest/eln/warehouse/snowflake.py:88` raises `f"warehouse rejected the query: {exc}"` around
+      the driver's exception, and `agent/tool_authz.surface_domain_errors` hands a `ChemclawError`'s
+      message to the model verbatim. The sibling defect in `DocumentIndexError` was fixed with this
+      campaign (the message names the subsystem, the detail is the `__cause__`), but that one is a
+      `SubsystemUnavailableError` with a written contract to keep; `ChemclawError`'s contract is
+      "this input is bad", which says nothing about what the message may carry. Deciding needs the
+      answer to a question the tree does not hold: whether a warehouse driver's error text is
+      account/host-bearing, which depends on the connector nobody has run against a live tenant.
+      *Trigger:* the first live Snowflake tenant (the same one `docs/planning/DEFERRED.md` waits on
+      for the ELN binding), or any decision to state a message contract on `ChemclawError` itself.
+
 - [ ] **A decided approval hold can be reopened, and the obvious fix is worse** — [M].
       `agent/interaction_tools.py::start_approval` passes no `id_reuse_policy`, so temporalio's
       ALLOW_DUPLICATE default lets a *closed* run's id be reused: re-surfacing a candidate whose

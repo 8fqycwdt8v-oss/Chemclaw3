@@ -180,6 +180,32 @@ def test_every_literal_label_set_matches_its_counter_declaration() -> None:
     assert not wrong, "label set(s) that do not match the declaration:\n" + "\n".join(wrong)
 
 
+def test_the_durable_counter_counts_only_the_durable_probe() -> None:
+    """`chemclaw_durable_unreachable_total` is incremented from its one declared population.
+
+    **The one thing in this file that checks a meaning**, and it is here because everything else
+    here checks a name. The counter is declared "turns whose durable-subsystem health probe failed
+    (Temporal did not answer)" and `ChemclawDurableUnreachable` alerts on it with the summary
+    "Temporal is not answering its health probe". A later lane added a second increment in
+    `api/middleware._subsystem_unavailable`, which fires per **HTTP request** for the whole
+    `SubsystemUnavailableError` family — `DocumentIndexError`, a pgvector failure with no Temporal
+    in it, included. Nothing failed: the name was declared and took no labels, so both checks above
+    were satisfied while the series carried two populations with two different denominators and the
+    alert summed them under a sentence true of only one.
+
+    Pinned to the module rather than the line so ordinary edits do not fail the build. The
+    request-path population is `chemclaw_subsystem_unavailable_total`, the sibling of
+    `chemclaw_db_unavailable_total`; a handler that sheds requests counts the requests it sheds.
+    """
+    sites = sorted(
+        f"{c.path}:{c.lineno}" for c in _CALLS if c.name == "chemclaw_durable_unreachable_total"
+    )
+    assert [site.rsplit(":", 1)[0] for site in sites] == ["src/chemclaw/api/runner.py"], (
+        "the durable counter is incremented outside the per-turn Temporal health probe it "
+        f"declares, so its series mixes populations and its alert reads their sum: {sites}"
+    )
+
+
 def test_the_walk_actually_found_the_call_sites() -> None:
     """A source walk that silently matches nothing passes every assertion above.
 

@@ -190,6 +190,24 @@ spec:
               Turns are being answered without these capabilities and nothing in the answer says
               so.
 
+        {{- /* The request-path sibling of ChemclawDurableUnreachable, and separate from it on
+               purpose (D-2026-08-08-a-rollback-that-is-not-a-schema-step): that alert reads a
+               per-turn Temporal probe, this one reads per-request shedding for *any* unavailable
+               subsystem — pgvector's `DocumentIndexError` among them. Summing them made one rate
+               out of two populations with two denominators. `for: 0m` because, unlike a probe that
+               only degrades a turn's stream, every increment here is a request already refused. */}}
+        - alert: ChemclawSubsystemUnavailable
+          expr: increase(chemclaw_subsystem_unavailable_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Requests are being shed because a subsystem is unavailable
+            description: >-
+              Callers are getting 503s because a dependency the route needed did not answer — the
+              durable broker or the document index. The `shedding` log line on the same pod names
+              the method, the path and the subsystem.
+
         - alert: ChemclawDatabaseUnavailable
           expr: increase(chemclaw_db_unavailable_total[5m]) > 0
           for: 0m
