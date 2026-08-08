@@ -1,61 +1,129 @@
-# Task: the embedding configuration is part of a vector's identity
+# Task: extensibility audit — what does it actually cost to add a thing?
 
-Branch: `claude/sharedrive-chemclaw3-access-3okznv` (restarted from `main`; #142 is merged).
-Decision: `docs/decisions/D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it.md`.
+Branch: `claude/codebase-extensibility-review-va7jmq`.
+Deliverable: **a report only** — no code changes, no backlog edits. Scope: **this repo**.
+Method: **measured**, not read. Prose about a seam is evidence about its author's belief.
 
-Follow-up to the mounted-share build. Reviewing its vectorization path afterwards turned up two
-gaps with one root: **the schema stores vectors and records nothing about which embedding
-configuration produced them.**
+## The question, made falsifiable
 
----
+For every part of the system that changes on a regular cadence — a new tool, a new agent,
+a new data source, a new skill, a new note type, a new eval, a config value, a user/role, a
+routine operation — the claim under test is *"adding one is a bounded, local, low-effort act."*
+
+That claim is only meaningful if it has a number. So each surface gets three:
+
+1. **Footprint** — files changed, and how many of them are *outside* the new unit's own
+   directory, taken from a real past addition in `git log`. A seam that works has a footprint
+   that is almost entirely inside the new folder.
+2. **Core-edit count** — how many of those files are in `core/`, `agent/`, `api/`, `durable/`,
+   or a shared registry. This is the number D-120 claims is zero for data sources; every
+   surface gets the same test.
+3. **Leak count** — occurrences of a *concrete instance name* (`xtb`, `bofire`, `eln-json`,
+   `sharedrive`, a profile name, a note type) in code that should only know the abstraction.
+   Every leak is a place the next addition must be edited into.
+
+Where a surface has no past addition to measure, the substitute is a **dry-run**: enumerate
+the exact edit list from the registry/validator code and count it. Stated as such, not as
+a measurement.
 
 ## Plan
 
-- [x] **One constant.** `_NOTE_INDEX_VECTOR_DIM` → `SCHEMA_VECTOR_DIM`: there is no coherent
-      deployment where two vector columns in one database have different widths, and two private
-      constants for one fact is how they come to disagree.
-- [x] **The width guard on the constructors**, not in config — a share's name is chosen by the
-      deployment, so no `NOTE_INDEX_SOURCES`-style name set can find one, and `core` may import no
-      sibling to ask. Residual stated: it fires at first use, not process start.
-- [x] **`embedding_config_key()`** extracted in `core/embeddings.py`, with the in-memory cache
-      rebuilt on top of it — one definition of "which configuration makes a vector".
-- [x] **Migration 038**: `document_chunks.embedding_key` + its index. NULL = unknown = stale.
-- [x] **`reembed_stale()`** reading stored `content`, drained by the workflow *before* the crawl
-      and by the CLI. Never touches the share.
-- [x] `known_documents()` keyed on the configuration too, so a copy arriving under a new path
-      cannot inherit a superseded model's vector.
-- [x] Config `document_reembed_batch_size`, `.env.example`, ADR + ledger, guide, package README.
+### A. Inventory the change surfaces
+- [ ] Enumerate every "add one of these" axis the system has, from the tree, the Makefile
+      validators, the config, and the Helm chart — not from the docs' list of them.
+- [ ] For each: name the discovery mechanism (registry? manifest? directory scan? hardcoded
+      list?), the declaration file, the validator that guards it, and the doc that explains it.
+
+### B. Measure the footprint of each past addition
+- [ ] `git log` archaeology: find the commit(s) that added the most recent connector, data
+      source, ingest document share, skill, note type, step template, eval metric, API route,
+      Temporal queue/workflow, component role, and profile.
+- [ ] Per commit, compute files-changed / inside-unit / outside-unit / core-edits, scripted so
+      the numbers are reproducible rather than eyeballed.
+- [ ] Where several additions of the same kind exist, check the trend: is the footprint
+      shrinking (the seam is being paid off) or flat (it is not)?
+
+### C. The leak sweep
+- [ ] For every concrete instance name in the system, grep the whole of `src/` and report every
+      hit outside its own bundle. Classify: legitimate (test fixture, default value, docs) vs
+      leak (a branch, an enum, a literal list, an `if name ==`).
+- [ ] Look specifically for the shapes that make a seam fake: string-literal registries,
+      `Literal[...]` unions of instance names, `match`/`if` chains on a kind, per-instance
+      config fields, per-instance Helm values, per-instance entrypoint cases.
+
+### D. Configuration
+- [ ] 358 `CHEMCLAW_*` settings and a 56 KB `.env.example`: measure the real shape — how many
+      settings, how many are required vs defaulted, how many an operator must set to stand the
+      system up, how many are per-instance (i.e. grow with the number of connectors/sources).
+- [ ] Check the three-way consistency: config model ↔ `.env.example` ↔ Helm `values.yaml`.
+      Is it enforced by a test, or by hand? What happens when someone adds a setting and forgets
+      one of the three?
+- [ ] Judge whether the config is *navigable*: can an operator find the setting they need, and
+      is the growth rate per new connector/source bounded?
+
+### E. Identity, users and roles
+- [ ] Trace the whole path: Entra group → role → entitlement → gate. Where is the mapping
+      declared, and is adding a role/entitlement/group a config act or a code act?
+- [ ] Adding a user, revoking one, granting a new capability to an existing role, onboarding a
+      new team, an emergency lockout — for each, the concrete steps and where they are written down.
+- [ ] The DB side: `core/grants.py`, `make db-grants` — what a new deployment or a new table costs.
+
+### F. Routine operations (day two)
+- [ ] Read `docs/guides/runbook.md` against the Makefile and the code: is every routine operation
+      an operator would need (migrate, reindex, re-embed, sync a share, rotate a secret, apply
+      schedules, roll a release, verify the audit chain, cost a share, explain a session) actually
+      a single documented command, and does it exist?
+- [ ] Find the operations that have code but no runbook entry, and the runbook entries whose
+      command no longer exists. Both are real failure modes on a live system.
+- [ ] Workflow versioning / migrations: what does changing a running durable workflow cost.
+
+### G. The enforcement layer itself
+- [ ] The validators (`connector-validate`, `datasource-validate`, `skill-validate`,
+      `template-validate`, `prose-validate`, `helm-validate`, …) are the mechanism that makes a
+      declaration safe to add. Test each one's *discrimination*: break a declaration deliberately
+      in a scratch copy and confirm the validator fails. A validator that passes everything is
+      the most expensive kind of false comfort, because additions are then unguarded while
+      appearing guarded.
+- [ ] Same for the structural tests (`test_repo_map`, `test_layering`, `test_packaging`,
+      `test_helm_chart`, `test_decision_log`, `test_deferred_register`).
+
+### H. Synthesis
+- [ ] One table: surface → discovery → declaration → validator → doc → measured footprint →
+      verdict (trivial / bounded / expensive / undefined).
+- [ ] Ranked gaps, each with the evidence that found it and the smallest fix that would close it.
+- [ ] Explicitly name what I could **not** measure and why, so the report's limits are on its face.
 
 ## Verify
 
-- [x] `tests/test_document_share.py` — 30 tests. The load-bearing one **deletes the share tree**
-      before re-embedding, so if the pass ever starts needing the mount, a test says so.
-      Plus: second pass is free (counted), a batch of 1 converges, a stale document is re-embedded
-      even when its content is already on record, and a bad `embedding_dim` is refused at
-      construction naming both numbers.
-- [x] **Counterfactual measured**, not assumed: reverting `known_documents` to key on presence
-      alone makes `test_a_stale_document_is_re_embedded_even_when_its_content_is_already_known`
-      fail. The test discriminates.
-- [x] `make lint type` green; `prose-validate`, `datasource-validate`, the migration and config
-      suites green.
-
----
+- [ ] Every number in the report is produced by a command recorded in the report, re-runnable.
+- [ ] Every "this is easy" claim is backed by a footprint, not by an ADR asserting it.
+- [ ] Every validator claimed to guard something has been shown to *fail* on a deliberate break.
+- [ ] No repo state left behind: scratch copies under the scratchpad, `git status` clean.
 
 ## Review
 
-**Why not the cheap fix.** A `--full` flag, or a documented "drop the two tables and re-run", is a
-manual step performed by someone who already knows about the problem — and this problem raises no
-error at all. A remedy gated on already knowing does not close a silent defect. Storing the key
-makes the corpus self-healing, which is the only shape that works when nobody is watching.
+Report: `tasks/extensibility-audit.md`. All eight phases run; every number in it comes from a
+command that was executed, and the two headline findings were reproduced rather than inferred.
 
-**Why the guard could not go where the last one went.** The note-index width check lives in the
-config validator because `vector`/`lexical` are shipped names it can enumerate. I assumed the same
-shape would work for shares and it cannot: the name is the deployment's, and asking "is a share
-enabled?" means importing its retrieve half, which `core` may not do. Naming that constraint took
-longer than writing the guard.
+**What the measurement changed about the answer.** The static read of this codebase says the seams
+are excellent, and the measurement agrees — a connector and a data source declared *outside the
+repository* both reach the live surface with zero repo edits, and seven connector names produce six
+hits across 64,200 lines of `src/`, all of them comments. That is a genuinely rare result and it is
+now evidence rather than a claim.
 
-**Fixed in passing:** the previous change had inserted the document-share config block between the
-vendored-dataset comment and the field it describes.
+The measurement also found what reading could not. Three docstrings state that the data-source
+registry passes a source's name to its retrieve half; `registry.py:147` passes only
+`**manifest.config`. Reading the ADR, the migration comment and the retriever docstring together
+produces a confident, wrong picture of a working two-share deployment. Running it produces:
+`share_sources()` collapsing two shares to one key, the second share's binding indexed under the
+first's name, and a sweep that deletes the first share's documents. `infra/sql/037`'s comment
+describes that exact failure as the thing its composite key prevents — the key is right, the value
+fed into it is not.
 
-**Still open** (`BACKLOG.md`, unchanged): identity propagation into scheduled reports, a run
-against a real CIFS mount, HNSW recall under a filtered search, and re-reading refused files.
+**A validator that passes everything is the expensive kind of false comfort**, so each was broken
+deliberately. Four of five breaks failed correctly. The fifth — two enabled shares reporting one
+name — reports `data source validation passed.` That is the invariant the whole `(source, path)`
+partition rests on, and nothing checks it.
+
+**No repo state left behind**: every experiment ran from `PATH`-style overrides pointing at the
+scratchpad. `git status` shows only these two documents.
