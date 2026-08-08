@@ -3,6 +3,44 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the review-and-hardening campaign (2026-08-08)
+
+- [ ] **A decided approval hold can be reopened, and the obvious fix is worse** — [M].
+      `agent/interaction_tools.py::start_approval` passes no `id_reuse_policy`, so temporalio's
+      ALLOW_DUPLICATE default lets a *closed* run's id be reused: re-surfacing a candidate whose
+      hold was already approved or rejected starts a fresh run under the same id and resets it to
+      pending, and a second click can flip a recorded GxP sign-off. The docstring promises "the hold
+      already exists — idempotent surface", which holds only while the prior run is open.
+      REJECT_DUPLICATE was tried and reverted, because expiry is *not* a decision:
+      `InteractionApprovalWorkflow` returns `status="expired"` after
+      `interaction_approval_timeout_seconds` to drop the candidate rather than pin the workflow, and
+      forbidding id reuse makes that candidate unofferable forever while `_announce` still shows a
+      button whose click fails. ALLOW_DUPLICATE_FAILED_ONLY does not help — an expired hold
+      *completes*. The distinction no policy expresses is "closed with a decision" versus "closed
+      without one", so the fix is to read the prior run's terminal outcome before starting.
+      *Trigger:* a reachable Temporal test server, so the closed-hold and expired-hold paths can be
+      exercised rather than reasoned about — they skip offline today.
+
+- [ ] **Seventeen junk anchors still hide a truncated audit trail** — [M].
+      `agent/audit_anchor.py::latest_anchor` now walks the newest `_LATEST_CANDIDATES` (16) rows and
+      returns the first that verifies, so one appended unsigned anchor no longer disables the
+      control. Past the bound it returns None again, and `durable/audit_chain.py` guards its tail
+      comparison with `if held_to is not None:` and records *nothing* in the else branch — so
+      `make audit-verify` prints "OK: the audit trail hash chain is intact" and exits 0 with the
+      tail check silently off. Measured: 17 junk rows, `verify_chain` returned `[]`, CLI exit 0.
+      The fix is in `verify_chain`, not here: when anchors were read and none verified, that is a
+      problem to report, not a reason to skip. *Trigger:* the next change to the audit-chain
+      verifier, or the first deployment that treats anchors as a compliance control.
+
+- [ ] **Inserting a command into an existing workflow path has no versioning convention** — [S].
+      `grep -rn 'workflow.patched|get_version' src/` returns nothing. D-2026-08-08-an-outage-is-not-a-missing-job
+      added a `resolve_notes_per_run` local activity between the build activity and `fan_out` in the
+      three synthesis workflows — the correct fix for a determinism bug, and itself an unguarded
+      history change: a run in flight across that deploy replays the new marker against a history
+      that lacks it and wedges in a workflow-task retry loop. The runbook needs either a
+      `workflow.patched` convention or an explicit "drain these schedules before deploying" step.
+      *Trigger:* the next change to a workflow's command sequence.
+
 ## Open — Left by the mounted-document-share build (2026-08-06)
 
 Record: `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`. The share is crawled,

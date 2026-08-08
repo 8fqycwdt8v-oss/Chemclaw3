@@ -149,7 +149,11 @@ async def surface_domain_errors(
     `SubsystemUnavailableError` (`chemclaw.core.errors`) is the second type, and qualifies as safe
     for the same *deliberate wording* reason rather than by inheritance — it is not a
     `ChemclawError`, because "the broker is down" is the opposite claim to "your data is invalid"
-    (see its docstring). It is raised in exactly one place, `chemclaw.core.temporal_client.connect`,
+    (see its docstring). It is raised by `chemclaw.core.temporal_client.connect` and by
+    `agent/durable_tools.py`'s two job handlers (a Temporal RPC status other than NOT_FOUND). A
+    count drifts — this one did, the moment those two were added — so the rule is a contract on
+    raisers rather than an inventory: every message is written for a chemist, names the subsystem
+    and what was lost, and keeps hostnames, ports and driver text on `__cause__`,
     with one hand-written sentence that names the subsystem and the consequence and nothing else:
     the driver text, the address and the port stay on `__cause__` for the log. A live finding again:
     an unreachable Temporal reached `request_development_report` as "Error: Function failed.", and

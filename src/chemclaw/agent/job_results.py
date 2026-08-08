@@ -93,7 +93,12 @@ async def await_job_results(
             collected[job_id] = {
                 "job_id": job_id,
                 "status": "failed",
-                "summary": failure_reason(exc),
+                # `exc.__cause__ or exc`, not `exc`. The client-side `WorkflowFailureError` wraps
+                # ChildWorkflowError → ActivityError → the product's own sentence; passing the
+                # wrapper stops at the first frame and reports "Workflow execution failed",
+                # discarding the diagnostic written for exactly this moment.
+                # `connectors/jobs.py` documents this in a comment, and I made the mistake anyway.
+                "summary": failure_reason(exc.__cause__ or exc),
             }
 
     try:

@@ -55,16 +55,36 @@ any length verified clean. Strictly less work than the tampering the anchors are
 ## Decision
 
 - Both `RPCError` handlers narrow to `RPCStatusCode.NOT_FOUND` and raise `SubsystemUnavailableError`
-  otherwise, which `surface_domain_errors` already relays to the chemist as an outage.
-- `start_approval` passes **REJECT_DUPLICATE** — not the `ALLOW_DUPLICATE_FAILED_ONLY` the four job
-  launchers use, because the cases differ: a failed *job* should be re-runnable, while a decided
-  *hold* is a GxP record and re-opening it is the defect whatever it decided.
-- The two MAF discriminators are pinned by a test built from MAF's own public constructors, so a
-  rename fails on the day of the upgrade rather than weeks later in a corpus.
-- A failed job is recorded as `{"status": "failed", "summary": failure_reason(exc)}` and reported in
-  the turn.
+  otherwise. `surface_domain_errors` relays that to the *model* for the two job tools — but
+  `cancel_job` is not a tool, and neither route had an HTTP handler, so narrowing alone turned a
+  wrong-but-quiet 404 into a bare 500 ("this request is broken, do not retry" — the opposite of the
+  truth). A `_subsystem_unavailable` handler answers 503 with the error's own chemist-safe message,
+  beside the `_database_unavailable` handler that makes the identical argument for Postgres.
+- **`start_approval` is unchanged, and that is a reverted fix.** REJECT_DUPLICATE was shipped and
+  removed: expiry is not a decision. `InteractionApprovalWorkflow` returns `status="expired"` after
+  seven days precisely to drop a candidate rather than pin the workflow, and forbidding id reuse
+  makes that candidate unofferable forever while `_announce` still shows a button whose click
+  fails — knowledge nobody got round to approving becomes unsavable. ALLOW_DUPLICATE_FAILED_ONLY
+  does not help either, because an expired hold *completes*. The distinction no policy expresses is
+  "closed with a decision" versus "closed without one", which needs the prior run's terminal outcome
+  read before starting — untestable offline here, so it is a BACKLOG row rather than a guess.
+- The two MAF discriminators get a named test built from MAF's own public constructors. Mutating
+  them already failed seven existing pairing tests, so this closes no gap — it replaces "an
+  unanswered call was not stripped" with "the discriminator moved", which sends the next reader to
+  the right place. Listing it as a fixed defect was an overclaim.
+- A failed job is recorded as `{"status": "failed", "summary": failure_reason(exc.__cause__ or exc)}`
+  and reported in the turn — **`__cause__`**, because the client-side `WorkflowFailureError` wraps
+  the product's own sentence and passing the wrapper reports the generic "Workflow execution
+  failed". `connectors/jobs.py` documents that in a comment; the first version of this change made
+  the mistake anyway. The resume preamble now says the jobs *finished* and instructs the model to
+  report any failed row, because a sentence asserting completion outranks a status word.
 - The note cap is resolved through a local activity, beside `resolve_fan_out_limit`.
-- `latest_anchor` walks the newest 16 and returns the first that verifies, logging each skip.
+- `latest_anchor` walks the newest 16 and returns the first that verifies, logging each skip. This
+  raises the attacker's cost from one INSERT to seventeen and **does not close the hole**: past the
+  bound it returns None and `verify_chain` still skips its tail comparison silently (measured: 17
+  junk rows, `verify_chain` returned `[]`, `make audit-verify` exit 0). The comment claiming the
+  control then "reports absent, loudly" was false and is corrected; the real fix belongs in
+  `verify_chain` and is a BACKLOG row.
 
 **On skipping versus stopping.** The anchor fix keeps the rotated-key tolerance that motivated the
 original behaviour — an invalid anchor is still not a verification failure, because the ordinary
@@ -74,14 +94,20 @@ one row can insert many, and scanning the table to find one valid anchor would t
 failure for a slow one; past that many consecutive invalid anchors the control reports absent,
 loudly, which is the honest answer.
 
-**On pinning strings we do not own.** The constants are not the guard — the test is. Pinning them in
-one place only gives the test somewhere to look. The same argument applies to the five private
+**On pinning strings we do not own.** Neither the constants nor the new test are the guard; the
+existing pairing tests already were. What the pinning buys is a legible failure. The same argument applies to the five private
 `agent_framework` imports the layering review found, which remain open.
 
 ## Consequences
 
 An outage now reports as an outage on the two paths where it read as a missing job, which changes
 what an operator does about it during a broker roll.
+
+**Inserting that local activity is itself an unguarded history change**, and the repository has no
+versioning convention at all (`grep -rn 'workflow.patched|get_version' src/` returns nothing): a
+synthesis run in flight across this deploy replays a marker its history lacks and wedges in exactly
+the retry loop this fix is about. Drain the three synthesis schedules before deploying it. That gap
+is a BACKLOG row.
 
 `_slice_for_this_run` takes its cap as a parameter, so the four tests that set the setting now pass
 it explicitly. That is not incidental: the setting is no longer readable from workflow code at all,

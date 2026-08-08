@@ -13,6 +13,7 @@ error — a database blip must not cost a chemist an answer the model already pr
 import asyncio
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import pytest
 from agent_framework import AgentSession
@@ -243,4 +244,66 @@ def test_the_wait_leaves_other_jobs_push_back_alone() -> None:
     assert asyncio.run(_run()) == ["job-b"], (
         "the mid-turn wait consumed a push-back for a job it was not waiting on; the front door's "
         "event stream will never deliver it"
+    )
+
+
+def test_a_failed_job_is_reported_with_the_products_own_reason() -> None:
+    """A failed job must arrive with the sentence written for a chemist, not the wrapper's.
+
+    Two defects, one line apart. `gather(return_exceptions=True)`'s result was never bound, so a
+    failed job was simply absent and the runner skipped the resume — leaving the model to finish the
+    turn on its pre-wait text, narrating a success that did not happen. And the first fix passed the
+    client-side `WorkflowFailureError` straight to `failure_reason`, which stops at the first frame
+    and yields "Workflow execution failed" — discarding "unknown ALPB solvent '2-MeTHF'; valid names
+    are …", the diagnostic that tells the chemist what to change. `connectors/jobs.py` documents
+    exactly that unwrapping in a comment.
+    """
+    from temporalio.client import WorkflowFailureError
+    from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
+
+    from chemclaw.agent.job_results import await_job_results
+
+    reason = "unknown ALPB solvent '2-MeTHF'; valid names are water, thf, dmso"
+    # The real chain a failed connector job produces:
+    # WorkflowFailureError -> ChildWorkflowError -> ActivityError -> ApplicationError.
+    activity = ActivityError(
+        "activity failed",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="worker",
+        activity_type="compute",
+        activity_id="a1",
+        retry_state=None,
+    )
+    activity.__cause__ = ApplicationError(reason)
+    child = ChildWorkflowError(
+        "child failed",
+        namespace="ns",
+        workflow_id="wf-1",
+        run_id="run-1",
+        workflow_type="ChildType",
+        initiated_event_id=1,
+        started_event_id=2,
+        retry_state=None,
+    )
+    child.__cause__ = activity
+    wrapper = WorkflowFailureError(cause=child)
+
+    class _Handle:
+        async def result(self) -> object:
+            raise wrapper
+
+    class _Client:
+        def get_workflow_handle(self, job_id: str) -> _Handle:
+            return _Handle()
+
+    async def _run() -> dict[str, dict[str, object]]:
+        with mock.patch("chemclaw.agent.job_results.connect", return_value=_Client()):
+            return await await_job_results("s-1", ["job-bad"], timeout_seconds=5)
+
+    collected = asyncio.run(_run())
+    assert "job-bad" in collected, "a failed job was dropped rather than reported"
+    assert collected["job-bad"]["status"] == "failed"
+    assert collected["job-bad"]["summary"] == reason, (
+        "the wrapper's generic sentence was reported instead of the product's own"
     )

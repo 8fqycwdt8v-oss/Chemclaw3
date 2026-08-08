@@ -73,6 +73,26 @@ async def _database_unavailable(request: Request, exc: Exception) -> Response:
     return JSONResponse(status_code=503, content={"detail": _AT_CAPACITY})
 
 
+async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
+    """Turn an unreachable durable subsystem into a retryable 503 instead of an unhandled 500.
+
+    `job_status` and `cancel_job` used to report *every* Temporal `RPCError` as "no such job", so a
+    broker roll during a cancel told an operator their runaway DFT run did not exist. Narrowing that
+    to NOT_FOUND was right and, without this handler, exchanged one wrong answer for another: with
+    no handler registered the raise became a bare HTTP 500, whose contract is "this request is
+    broken, do not retry" — the opposite of the truth, and a page for the on-call as an application
+    bug.
+
+    Unlike `_database_unavailable` this relays the exception's own message rather than the capacity
+    wording, because `SubsystemUnavailableError` is written for a human by contract
+    (`core/errors.py`): it names the subsystem, says the work never began, and carries no hostname,
+    port or driver text — those live on `__cause__`, for the log below.
+    """
+    METRICS.increment("chemclaw_durable_unreachable_total")
+    logger.warning("shedding %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 def _refuse_unauthenticated_exposure() -> None:
     """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
 

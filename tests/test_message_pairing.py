@@ -199,8 +199,12 @@ def test_the_maf_discriminators_still_match_what_maf_emits() -> None:
     `set()` — the partner correctly protected — to `{1}`, deleting the call and stranding its
     result, which this module calls "a bricked session with *no* self-heal path".
 
-    So the coupling is pinned here against real MAF objects rather than left to a comment. This
-    fails on the day of the upgrade, not weeks later when sessions start refusing to load.
+    **This is not the guard, and the commit that added it overclaimed.** Mutating the two constants
+    fails eight tests in this file, seven of which predate it — every pairing assertion turns on
+    `content.type == _CALL`, so the coupling was already covered. What this adds is a *named*
+    failure: the other seven report "an unanswered call was not stripped", which sends a reader to
+    the pairing logic, while this one says the discriminator moved. Worth keeping for that reason
+    and not worth claiming as a closed risk.
     """
     from chemclaw.agent.message_pairing import _CALL, _RESULT
 

@@ -54,6 +54,7 @@ from chemclaw.api.middleware import (
     _add_security_headers,
     _database_unavailable,
     _refuse_unauthenticated_exposure,
+    _subsystem_unavailable,
 )
 from chemclaw.api.routes import (
     approvals,
@@ -77,6 +78,7 @@ from chemclaw.api.state import (
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
@@ -212,6 +214,7 @@ def create_app(
     # connection in time" into `ConnectionError` precisely because a caller cannot act on the
     # difference. See `_database_unavailable`.
     app.add_exception_handler(ConnectionError, _database_unavailable)
+    app.add_exception_handler(SubsystemUnavailableError, _subsystem_unavailable)
     # One agent per process, built lazily on first use so importing the app needs no
     # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
     # session map with a durable store and wires job→session push-back. One agent per profile

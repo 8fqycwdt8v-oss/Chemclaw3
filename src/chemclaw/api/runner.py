@@ -802,8 +802,15 @@ async def _resume(
     """
     summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
     message = (
-        "The durable job(s) you started have completed. Their results follow as data; continue "
-        "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
+        # "finished", not "completed", and the failure instruction is explicit. A row carrying
+        # `status: failed` used to arrive under a sentence asserting the jobs had completed, and a
+        # direct assertion of success outranks an unexplained status word — so the model narrated
+        # the calculation as done, which is the outcome reporting failed jobs at all exists to
+        # prevent.
+        "The durable job(s) you started have finished. Some may have failed: report any result "
+        "whose status is 'failed' to the chemist, with its summary, rather than describing the "
+        "work as done. Their results follow as data; continue your answer using them.\n"
+        + frame_untrusted(summary, note_id="job-results")
     )
     async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
         turn_usage.add(usage_tokens(update))
