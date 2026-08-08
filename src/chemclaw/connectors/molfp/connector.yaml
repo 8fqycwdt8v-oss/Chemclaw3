@@ -1,8 +1,11 @@
 # The molecule-fingerprint capability: ECFP4 similarity and substructure search.
 #
-# `index_molecule` is deliberately absent from `tools`: it mutates the fingerprint index, and the
-# agent's surface is read/compute only (mutation goes through a job or a core PR-gate tool, D-029).
-# The server still exposes it, for the ingestion path that runs outside the conversation.
+# The agent's surface is read/compute only: mutation goes through a job or a core PR-gate tool
+# (D-029). The index is written by `ingest/eln/ingest.py` calling `FingerprintStore.add()` in
+# process, under `ElnSyncWorkflow` — not over MCP. The server used to serve an `index_molecule`
+# tool "for the ingestion path", which nothing called and no manifest declared, and because a
+# connector authenticates nothing it was a write into the fingerprint corpus for anything that
+# could reach the pod. `connector-validate` now refuses a served tool this file does not declare.
 name: molfp
 description: >-
   Molecule fingerprints over the indexed corpus: ECFP4 Tanimoto similarity search and SMARTS/SMILES
@@ -20,8 +23,7 @@ endpoint:
   tools:
     - similar_molecules
     - substructure_matches
-  # Searches over the fingerprint index. The tools that *write* that index (`index_molecule`,
-  # `index_reaction`) are deliberately not on this allow-list at all (D-029).
+  # Searches over the fingerprint index; writing it is not an MCP capability at all.
   read_only:
     - similar_molecules
     - substructure_matches

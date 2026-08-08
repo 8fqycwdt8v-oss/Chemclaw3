@@ -246,3 +246,96 @@ def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
         ).correlation_id
         == ""
     )
+
+
+# --- The other half of the credential: something that checks it -------------------------------
+
+
+def test_a_bearer_connector_refuses_an_unauthenticated_mcp_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mode: bearer` was send-only — this file tested the sending half and nothing tested a check.
+
+    `_EnvBearerAuth` above puts an `Authorization` header on every call, and no connector ever read
+    one: `connector_app` took no manifest, the string "Authorization" did not appear in
+    `connectors/server.py`, and `connector-validate` raised no objection. A deployment following
+    the manifest's own advice ("bearer for everything in-cluster") mounted a secret, recorded the
+    control as enabled, and served every tool to anything that could reach the pod. Proved before
+    the fix by completing an unauthenticated MCP handshake against the real app.
+
+    Enforced as middleware rather than a route dependency, and that is why the gap was easy to
+    miss: `/mcp` is `app.mount`ed, and a mount bypasses the enclosing app's dependencies — anything
+    written as `Depends(...)` would have guarded the two routes that need it least.
+
+    `/healthz` stays open deliberately (a kubelet probe carries no identity), so both halves are
+    asserted here or the fix would be a liveness outage rather than a control.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.setenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", "s3cret-token-value")
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
+    )
+    # A context manager so the app's lifespan runs: `/mcp` is the mounted MCP transport and its
+    # session manager is started there, so a bare `TestClient` would fail on the accepted request
+    # for a reason unrelated to authorization.
+    with TestClient(connector_app(FastMCP("probe"), name="probe")) as client:
+        assert client.get("/healthz").status_code == 200, "probes must stay open"
+        assert client.post("/mcp", json={}).status_code == 401
+        assert (
+            client.post(
+                "/mcp", json={}, headers={"Authorization": "Bearer wrong-token"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/mcp", json={}, headers={"Authorization": "Bearer s3cret-token-value"}
+            ).status_code
+            != 401
+        ), "the configured token must reach the MCP transport"
+
+
+def test_a_bearer_connector_with_no_token_configured_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing secret must refuse, not compare against `""` and accept every caller.
+
+    The failure mode this rules out is the one that looks like success: an unset variable making
+    `expected` empty, an empty `Authorization` header matching it, and the connector serving
+    everything while the deployment believes the credential is in force.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.delenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
+    )
+    client = TestClient(connector_app(FastMCP("probe"), name="probe"))
+    assert client.post("/mcp", json={}).status_code == 401
+    assert client.post("/mcp", json={}, headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_a_mode_none_connector_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every shipped bundle declares `auth: mode: none`; the middleware must not appear for them.
+
+    The boundary for those is the NetworkPolicy, which is a deployment decision, not a code one —
+    so adding a check where none is declared would break `make connectors` and the transport tests
+    without any manifest asking for it.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.setattr("chemclaw.connectors.server._declared_bearer_env", lambda name: None)
+    with TestClient(connector_app(FastMCP("probe"), name="probe")) as client:
+        assert client.post("/mcp", json={}).status_code != 401

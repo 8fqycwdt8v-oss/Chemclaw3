@@ -23,40 +23,40 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 
 ---
 
-## Lane T1 — Secrets reach the log stream (security, ship first)
+## Lane T1 — Secrets reach the log stream — DONE (b8ddd16, D-2026-08-08-redaction-must-outlive-the-formatter)
 
-- [ ] **`JsonFormatter` re-renders the traceback, undoing redaction** — `core/logging.py:468`.
+- [x] **`JsonFormatter` re-renders the traceback, undoing redaction** — `core/logging.py:468`.
       log_json=false → `key=*** dsn=***`; log_json=true → API key + DSN password verbatim. The chart
       sets JSON on, so **the leak exists only in production and is absent in the tests**. Falsifies
       D-2026-08-06-a-redactor-that-only-reads-the-message §1 ("including under a deployment's own
       formatter"). Fix: `record.exc_text or self.formatException(...)`; add `stack_info`; parametrize
       the existing redaction test over both formatters.
-- [ ] **Front door's uvicorn logs bypass the filter entirely** — `core/logging.py:61`.
+- [x] **Front door's uvicorn logs bypass the filter entirely** — `core/logging.py:61`.
       `uvicorn.error` has `propagate: false` and its own handler; it logs every unhandled ASGI
       exception with `exc_info`. `worker_http.py` and `connectors/server_entry.py` both pass
       `log_config=None` for this reason; `deploy/entrypoint.sh:40` — the one process holding user
       traffic, the LLM key and every DSN — does not.
-- [ ] **One bad connector manifest silently unredacts every bearer token** — `core/logging.py:371`.
+- [x] **One bad connector manifest silently unredacts every bearer token** — `core/logging.py:371`.
       Degrades to `_connector_token_envs=()` for the process lifetime after a single boot WARNING.
       The leak and its trigger are correlated. Fix: refuse to boot, or ERROR + counter.
-- [ ] **`framing_envelope_secret` has no Secret slot and no redaction** — absent from the chart
+- [x] **`framing_envelope_secret` has no Secret slot and no redaction** — absent from the chart
       entirely, so its only home is `.Values.config` → a **plaintext ConfigMap** (`view` role reads it).
       It derives ENVELOPE_TAG, so leaking it defeats the prompt-injection mitigation it exists to make
       durable.
-- [ ] **`redact_secrets` only matches this process's own configured values** — ghp_/github_pat_/JWT/
+- [x] **`redact_secrets` only matches this process's own configured values** — ghp_/github_pat_/JWT/
       libpq `password=`/Azure/sk-proj-/sk-ant-/PEM/`?access_token=` all pass through. Add a small set
       of high-confidence structural patterns that cannot collide with a molecule id or note slug.
 
-## Lane T2 — Connector surface is wider than declared (security)
+## Lane T2 — Connector surface is wider than declared — DONE (D-2026-08-08-a-served-tool-is-a-reachable-tool)
 
-- [ ] **Undeclared write tools served unauthenticated on `/mcp`** — `connectors/molfp/server/tools.py:64`
+- [x] **Undeclared write tools served unauthenticated on `/mcp`** — `connectors/molfp/server/tools.py:64`
       and rxnfp. Proved by completing an anonymous MCP handshake and writing a row to
       `molecule_fingerprints`, the table that backs the report path — a route to citing attacker-chosen
       SMILES as lab precedent, around the PR-gate. The manifests' justification ("for the ingestion
       path") is false: the only writers call `FingerprintStore.add()` in-process.
       Fix: delete both wrappers; make `connector-validate` diff the **live** FastMCP tool set against
       the manifest so served and declared cannot drift again.
-- [ ] **`auth: mode: bearer` is send-only** — nothing server-side reads `Authorization`, and
+- [x] **`auth: mode: bearer` is send-only** — nothing server-side reads `Authorization`, and
       `connector-validate` raises no objection. Either implement the check or reject the mode.
 
 ## Lane T3 — Identity and authorization

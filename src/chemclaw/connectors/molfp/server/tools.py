@@ -20,7 +20,6 @@ from chemclaw.science.fingerprints.molfp.search import (
     MoleculeHit,
     find_similar_molecules,
     find_substructure_matches,
-    record_for,
 )
 from chemclaw.science.fingerprints.store import (
     FingerprintSearch,
@@ -58,13 +57,6 @@ async def substructure_matches(query: str) -> FingerprintSearch[MoleculeHit]:
     holds nothing and the question was not answered — not that no molecule bears the fragment.
     """
     return await find_substructure_matches(_store, query)
-
-
-@server.tool()
-async def index_molecule(record_id: str, smiles: str) -> str:
-    """Add or replace a molecule in the fingerprint index; return its id."""
-    await _store.add(record_for(record_id, smiles))
-    return record_id
 
 
 async def report_index_size() -> None:

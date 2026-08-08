@@ -24,7 +24,11 @@ from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 def test_server_advertises_the_capability_tools() -> None:
     """The three fingerprint tools are registered with input schemas."""
     tools = {t.name: t for t in asyncio.run(server.list_tools())}
-    assert {"similar_molecules", "substructure_matches", "index_molecule"} <= set(tools)
+    assert {"similar_molecules", "substructure_matches"} <= set(tools)
+    assert "index_molecule" not in tools, (
+        "the write tool was served on the unauthenticated /mcp port while no manifest named "
+        "it and nothing in the tree called it; the ingestion path uses FingerprintStore.add()"
+    )
     # The similarity tool takes a smiles argument (the capability's entry point).
     assert "smiles" in tools["similar_molecules"].inputSchema["properties"]
 

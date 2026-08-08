@@ -9,7 +9,7 @@ running the capability by hand. Judgment stays out (G6) — see the `molfp` twin
 from mcp.server.fastmcp import FastMCP
 
 from chemclaw.kg.note import note_id_for_reaction
-from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import (
     FingerprintSearch,
     FingerprintStore,
@@ -48,13 +48,6 @@ async def similar_reactions(
 async def report_index_size() -> None:
     """Log this connector's index size at startup (see the `molfp` twin for the full note)."""
     await log_index_size(_store, "reaction")
-
-
-@server.tool()
-async def index_reaction(record_id: str, reaction_smiles: str) -> str:
-    """Add or replace a reaction in the fingerprint index; return its id."""
-    await _store.add(record_for_reaction(record_id, reaction_smiles))
-    return record_id
 
 
 def main() -> None:

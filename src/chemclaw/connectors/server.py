@@ -21,8 +21,10 @@ cannot be forgotten per connector:
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
+from hmac import compare_digest
 from typing import Any
 
 from fastapi import FastAPI
@@ -47,6 +49,81 @@ from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.tracing import continue_trace
 
 logger = logging.getLogger(__name__)
+
+
+def _declared_bearer_env(name: str) -> str | None:
+    """The env var holding this bundle's bearer token, or `None` if it declares `mode: none`.
+
+    Imported lazily and failure-tolerant on purpose: `connector_app` is called at import time by
+    seven bundle modules, and a bundle must still be constructible when the manifest directory is
+    not readable (a unit test importing `app.py`, a dev process pointed elsewhere). The cost of
+    that tolerance is that an unreadable manifest serves *unauthenticated*, which is the
+    pre-existing behaviour and is why `connector-validate` checks the declaration separately — a
+    gate that can be disabled by an unreadable file is not a gate, so the file is validated in CI.
+    """
+    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
+    from chemclaw.connectors.registry import discovered
+
+    try:
+        found = discovered()
+    except Exception:
+        logger.warning("connector %s: could not read manifests to resolve its auth mode", name)
+        return None
+    for _bundle, manifest in found.values():
+        if manifest.name == name and isinstance(manifest.endpoint, HttpEndpoint):
+            auth = manifest.endpoint.auth
+            return auth.token_env if isinstance(auth, BearerAuth) else None
+    return None
+
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Verify the bearer token a `mode: bearer` manifest says this connector requires.
+
+    `BearerAuth` existed only on the *sending* side: `connectors/identity.py` set an
+    `Authorization` header and no connector ever read one, while `connector-validate` raised no
+    objection. A deployment that followed the manifest's own advice ("bearer for everything
+    in-cluster") therefore mounted a secret, believed the pod was credential-gated, and served
+    every tool to anything that could reach it — a control the deployment records as enabled and
+    that does not exist. Proved by completing an unauthenticated MCP handshake against the real app.
+
+    **Middleware, not a route dependency, and that is the whole reason this was missable**: `/mcp`
+    is `app.mount`ed, and a mount bypasses the enclosing app's dependencies entirely. Anything
+    written as `Depends(...)` would have guarded the two routes that need it least and none of the
+    surface that matters.
+
+    `/healthz` and `/metrics` stay open, matching the front door's probe allowlist: a kubelet probe
+    and a Prometheus scrape happen independently of any identity, and the exposition carries counts
+    only. The MCP surface is what the credential is for.
+
+    Comparison is `compare_digest`, and a missing/short token is refused rather than compared, so a
+    misconfigured deployment fails closed instead of accepting the empty string.
+    """
+
+    def __init__(self, app: Any, *, token_env: str, connector: str) -> None:
+        """Bind the variable name to read per request (never the value — it may be rotated)."""
+        super().__init__(app)
+        self._token_env = token_env
+        self._connector = connector
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Refuse anything but `/healthz` and `/metrics` without the configured bearer token."""
+        if request.url.path in ("/healthz", "/metrics"):
+            return await call_next(request)
+        expected = os.environ.get(self._token_env, "")
+        presented = request.headers.get("authorization", "")
+        scheme, _, offered = presented.partition(" ")
+        if (
+            not expected
+            or scheme.lower() != "bearer"
+            or not compare_digest(offered.strip(), expected)
+        ):
+            logger.warning(
+                "connector %s refused an unauthenticated MCP request to %s",
+                self._connector,
+                request.url.path,
+            )
+            return Response(status_code=401, content="unauthorized")
+        return await call_next(request)
 
 
 class CallerLogMiddleware(BaseHTTPMiddleware):
@@ -154,10 +231,13 @@ def connector_app(
     """Build the FastAPI app that serves one connector's MCP capability.
 
     Args:
-        server: The `FastMCP` instance holding the capability's tools. Its tools are served as-is;
-            which of them the agent may call is decided by the manifest's `tools` allow-list in
-            core, not here, so the same server can also expose index/write tools for the ingestion
-            path.
+        server: The `FastMCP` instance holding the capability's tools. Which of them the *agent*
+            may call is decided by the manifest's `tools` allow-list in core, not here — but every
+            tool served is reachable by anything that can open a socket to this pod, so the served
+            set is not a free surface. This docstring used to say the server "can also expose
+            index/write tools for the ingestion path"; it did, nothing in the tree called them, and
+            an anonymous MCP handshake wrote a row into the fingerprint corpus. `connector-validate`
+            now refuses a served tool the manifest does not declare.
         name: The connector's name (must match its bundle folder and manifest `name`), used in the
             health payload and the request log.
         on_start: Optional coroutine started once at startup — the hook a bundle uses to report
@@ -203,6 +283,11 @@ def connector_app(
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
     app.add_middleware(CallerLogMiddleware, connector=name)
+    # Enforce whatever this bundle's own manifest says it requires. Read from the registry rather
+    # than taken as an argument, so the seven `app.py` modules stay one line each and no bundle can
+    # forget to pass it — the declaration is in the manifest and the enforcement follows it.
+    if (token_env := _declared_bearer_env(name)) is not None:
+        app.add_middleware(BearerAuthMiddleware, token_env=token_env, connector=name)
     # Added *after* `CallerLogMiddleware`: Starlette wraps in add-order with the most recently
     # added outermost, so this one now sits outside it and refuses an oversized body before any
     # handler — including the logging middleware's own `dispatch` — ever reads it (Sec-5: `/mcp`
