@@ -12,14 +12,38 @@ Evidence for every item: `/tmp/claude-0/-home-user-Chemclaw3/19bd112e-beec-51d2-
 
 ### Gate state before any change (measured, not assumed)
 
-`tests/test_pka.py` has **two pre-existing failures** on unchanged `origin/main` with a clean tree:
-`test_predicted_pkah_ranks_aromatic_bases_correctly` and
-`test_in_sample_pkah_errors_are_far_below_the_acid_calibrations`. They reproduce with the database
-**unreachable** as well as live (2 failed, 362.94s), so they are not caused by standing up Postgres and
-not caused by this campaign — they are an environment difference in the tblite numerics. Any coverage
-or suite claim in this session must be stated as a delta against that baseline, never as "green".
-The two are plausibly the same root cause the pKa-key finding names: an optimizer setting that moves
-the number is absent from the cache key, so "which optimizer ran" is not pinned anywhere.
+**This section was wrong for most of the campaign. Corrected 2026-08-08, with the measurement.**
+
+It said `tests/test_pka.py` had **two pre-existing failures** on unchanged `origin/main`
+(`test_predicted_pkah_ranks_aromatic_bases_correctly` and
+`test_in_sample_pkah_errors_are_far_below_the_acid_calibrations`), attributed them to "an environment
+difference in the tblite numerics", and suggested they shared a root cause with the pKa cache-key
+finding. All three claims are false, and the error was mine: I read a red suite and never read the
+failure text.
+
+Both are `Failed: Timeout (>180.0s) from pytest-timeout`. **The assertions never run.** Nothing about
+a pKa value is wrong, and the cache key cannot be the cause — neither test touches a store (T8
+measured this independently). Decisive measurement, merged tree, same box, timeout lifted:
+
+```
+pytest tests/test_pka.py::…ranks_aromatic_bases_correctly \
+       tests/test_pka.py::…errors_are_far_below_the_acid_calibrations --timeout=0
+-> 2 passed in 1071.49s (0:17:51)
+```
+
+Seventeen minutes for two tests against a 180 s marker, on a box running four other agents. They are
+timeout expiries under CPU contention, and they pass whenever given the time.
+
+**The cost of getting this wrong:** I briefed six lane agents to ignore these as known-bad, so the
+campaign ran for hours against a baseline that was not real, and one lane spent effort refuting a
+claim I had made carelessly. The same failure class covers every other "environmental" red this
+campaign wrote off — `test_bo_constraints.py`, `test_bo_predict.py` ×2, `test_reizman.py` — all
+hard `@pytest.mark.timeout` markers, which **override `--timeout` on the command line** and so cannot
+be relaxed for a contended run. It is item 10 of lane T11.
+
+The standing rule survives the correction, for a better reason: any coverage or suite claim in this
+session is a delta against a stated baseline, never a bare "green" — and a red test's *message* gets
+read before it is characterised.
 
 ---
 
