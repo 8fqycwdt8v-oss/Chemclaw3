@@ -57,9 +57,13 @@ precisely what produces the connector failures whose tracebacks then carry the t
 It is a value inventory plus one URL-userinfo pattern. Everything that merely *passes through* was
 outside it. Measured, eleven realistic shapes reached the stream verbatim: `ghp_`/`github_pat_`
 tokens, a JWT (the inbound Entra token's shape), a libpq `password=` connection string, `sk-ant-`,
-`sk-proj-`, `?access_token=`, an `Authorization` header repr. Separately, `framing_envelope_secret`
-was in neither the inventory nor the chart's `secrets.keys` — so its only home was `.Values.config`,
-which renders into a **ConfigMap**, readable by the OpenShift `view` role.
+`sk-proj-`, `?access_token=`, an `Authorization` header repr. Separately, `framing_envelope_secret` was in
+neither the redaction inventory nor the chart at all — not in `secrets.keys` and **not in
+`.Values.config` either**. The finding that raised it said `config` was "the only slot left", which
+is true of where it *would* have to go and was written up here as where it *was*. It was in neither,
+so no credential was ever rendered into a ConfigMap; what existed was an unredacted setting with no
+Secret slot, which in-cluster means it could only ever be the empty string — a predictable envelope
+tag.
 
 ## Decision
 
@@ -77,24 +81,41 @@ which renders into a **ConfigMap**, readable by the OpenShift `view` role.
   single WARNING in container startup output is the line nobody reads; the counter is the alertable
   surface, and any non-zero value is permanent for that pod.
 - `redact_secrets` gains a small set of **structural** rules alongside the value inventory, and
-  `framing_envelope_secret` joins `_SECRET_SETTINGS` and the chart's `secrets.keys`.
+  `framing_envelope_secret` joins `_SECRET_SETTINGS` and gains a chart slot under a new
+  `secrets.optionalKeys`.
 
 **On pattern matching, which this codebase rejected once and was right to.** A false positive
 corrupts a log line, and a rule that ate a SMILES, an InChIKey, a note slug or an ADR id would be
 worse than the leak it closed. So every rule is anchored on a vendor-assigned prefix (`ghp_`,
 `github_pat_`, `sk-ant-`, `eyJ`) or an explicit key name (`password=`, `access_token=`, `Bearer`),
-and each requires a long opaque tail. None can match this system's own identifiers, and
-`test_the_structural_rules_never_touch_ordinary_content` pins that with six strings it logs
-routinely. The rules are compiled at module scope and substituted with a *callable*, not a template,
+and each requires a long opaque tail.
+
+The first version of those rules got this wrong in the most instructive way available: it ate the
+**source lines of this repository**, which are the one text guaranteed to appear inside the
+tracebacks the mechanism exists to protect. `access_token = response.json().get("access_token")`
+became `access_token = ***"access_token")`; `Basic` is an English word. The innocent-content test
+passed the whole time, because it pinned *identifiers* — SMILES, note slugs, ADR ids — and no source
+line and no prose, so it passed for a much narrower reason than it appeared to.
+
+A key-name anchor is therefore not sufficient on its own; the *value* has to look like a credential
+too. Two requirements do that: a character class that excludes the quotes, parentheses and commas
+that code and prose put around a value, and a required digit, which every randomly-generated
+credential has and almost no English word or attribute path does. The cost is a hypothetical
+all-letter token, which the value inventory still covers whenever this process holds it. That trade
+is the right way round — an unreadable traceback is a permanent loss of the incident evidence. The rules are compiled at module scope and substituted with a *callable*, not a template,
 because a template compiles lazily and that compilation imports — on the logging path, which
 `test_filtering_a_record_never_imports_anything` forbids after an import from inside a filter
 re-entered the filter under Temporal's sandbox and wedged the worker.
 
-`framing_envelope_secret` is the only one of the seven chart secrets added because it was in the
-*wrong place* rather than missing. It is not a credential to an external system, which is how it came
-to have no slot — and it is the HMAC key `ENVELOPE_TAG` derives from, so anyone who reads it and can
-place text into any retrieval source closes the envelope from inside and has their text read as
-instructions instead of as data.
+`framing_envelope_secret` gets `secrets.optionalKeys` rather than `secrets.keys`, and that
+distinction is the fix for a defect this change introduced and an adversarial review caught.
+`chemclaw.env` renders `secrets.keys` as a **required** `secretKeyRef`; `secrets.create` defaults to
+false, so the Secret is operator-managed and predates any chart version naming a new key. Adding a
+required key therefore takes every pod of an existing release into `CreateContainerConfigError` on
+`helm upgrade` — a full outage from a chart bump. `chemclaw.migrationEnv` already used
+`optional: true` for exactly this reason, in a comment two helpers below the one being edited.
+Required is right for a credential whose absence silently breaks a capability; this one defaults to
+`""` and starts either way, so it belongs in the optional map.
 
 ## Consequences
 
@@ -114,7 +135,19 @@ Secret. Four new guards keep it there:
   this codebase has declared too sensitive for a log line must not sit in a ConfigMap, which is more
   durable than a log line. A name-shaped heuristic would have missed `framing_envelope_secret`; this
   catches it.
-- All eleven measured pass-through shapes are pinned, alongside the six innocent strings.
+- All eleven measured pass-through shapes are pinned, and the innocent-content parametrization now
+  carries this repository's own source lines and ordinary English prose alongside the identifiers —
+  the cases whose absence let the first version through.
+- Every pattern's tail is bounded. Unbounded `{8,}` made the JWT rule quadratic (46.7 ms for 10 KB
+  of `-eyJ`, 11.78 s for 160 KB), and it runs inside `handler.handle()`, which holds the logging
+  lock — a denial of service on every thread's logging, reachable by anything that can get text into
+  a log line.
+- `configure_logging()` is idempotent again: it skips a handler that already carries the filter and
+  shares one filter pair across the sweep. Without that, non-propagating handlers accumulated a pair
+  per call (measured 2 -> 4 -> 6) and the startup counter incremented once per handler per call.
+- The `loggerDict` sweep snapshots under the logging module's lock. Iterating the live view raised
+  `RuntimeError: dictionary changed size during iteration` in 64 of 4000 attempts against concurrent
+  `getLogger()`, which would abort startup with filters on only some handlers.
 
 The structural rules are a redaction *floor*, not a replacement for the inventory: they cannot see a
 site-specific credential with no recognisable shape, and the value inventory remains the mechanism.

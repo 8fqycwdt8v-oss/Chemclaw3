@@ -406,12 +406,6 @@ secrets:
     # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
     # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
-    # The HMAC key `agent/framing.py` derives the retrieved-content envelope tag from. It belongs
-    # here rather than in `config` below because `config` renders into a ConfigMap, which the
-    # OpenShift `view` role can read — a far wider grant than `get secrets`. Anyone who learns this
-    # value can compute the tag, close the envelope from inside a document they can place in any
-    # retrieval source, and have their text read as instructions instead of as data.
-    framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
     # The shared secret the git host signs its post-merge webhook with. Without it
     # `/events/knowledge-merged` can still force a reindex but may not close a proposal as merged
     # (D-2026-07-31-a-proposal-is-a-record-not-a-branch), so every reviewed note would stay in the
@@ -425,6 +419,20 @@ secrets:
     # modification, reordering, interior deletion and prefix truncation — and a point-in-time
     # restore stays what it was: an undetectable trailing deletion of the compliance trail.
     auditAnchorSecret: "CHEMCLAW_AUDIT_ANCHOR_SECRET"
+  # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
+  # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
+  optionalKeys:
+    # The HMAC key `agent/framing.py` derives the retrieved-content envelope tag from. It gets a
+    # Secret slot rather than a `config` entry because `config` renders into a ConfigMap, which the
+    # OpenShift `view` role can read — a far wider grant than `get secrets`. Anyone who learns this
+    # value can compute the tag, close the envelope from inside a document they can place in any
+    # retrieval source, and have their text read as instructions instead of as data.
+    #
+    # Optional rather than required: the setting defaults to `""` and the app starts either way, so
+    # a required key would only buy a mandatory Secret edit for every existing deployment. Unset,
+    # the envelope tag is derived from the empty string — predictable, which is the weakness this
+    # slot exists to let an operator close, not a new one it introduces.
+    framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the

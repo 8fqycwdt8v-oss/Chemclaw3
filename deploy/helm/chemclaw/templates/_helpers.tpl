@@ -45,6 +45,24 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       name: {{ $.Values.secrets.name }}
       key: {{ $secretEnv }}
 {{- end }}
+{{- /* `optional: true`, and a separate map rather than more entries above, because these two
+       properties do not go together. A key in `secrets.keys` is *required*: absent, the pod does
+       not start, which is right for a credential whose absence silently breaks a capability (an
+       LLM key, the knowledge-repo push token). But `secrets.create` defaults to false, so the
+       Secret is operator-managed and predates the chart version that names a new key — adding one
+       to the required map takes every pod in an existing release into CreateContainerConfigError
+       on `helm upgrade`. That is a full outage caused by a chart bump.
+
+       So a setting that is *safe when unset* goes here instead. It still gets a Secret slot rather
+       than living in the ConfigMap, and an existing release keeps starting. */ -}}
+{{- range $configKey, $secretEnv := .Values.secrets.optionalKeys }}
+- name: {{ $secretEnv }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $.Values.secrets.name }}
+      key: {{ $secretEnv }}
+      optional: true
+{{- end }}
 {{- end -}}
 
 {{- /* The migration hook Job's own secrets, deliberately a second helper rather than more keys in

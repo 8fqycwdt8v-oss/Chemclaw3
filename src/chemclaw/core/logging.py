@@ -58,9 +58,19 @@ def configure_logging() -> None:
     # logger is not consulted for records that propagate up from a child — and every module here
     # logs through `getLogger(__name__)`, so almost every record is a propagated one. On the
     # handler, nothing reaches an output stream unfiltered.
+    # One filter pair, constructed once and shared. `SecretRedactingFilter.__init__` walks the
+    # connector registry off disk, so a pair per handler would repeat that work — and, when the
+    # registry is broken, would log the ERROR and increment the failure counter once per handler
+    # per call rather than once per startup, which `core/metrics.py` says it means.
+    context, redaction = ContextFilter(), SecretRedactingFilter()
     for handler in _handlers_that_reach_an_output_stream():
-        handler.addFilter(ContextFilter())
-        handler.addFilter(SecretRedactingFilter())
+        # `force=True` above resets the *root's* handlers, so a second `configure_logging()` starts
+        # them clean — but a non-propagating logger's handlers are not ours to reset and would
+        # otherwise accumulate a pair per call, running redaction N times per record on the front
+        # door's hot path. Measured 2 -> 4 -> 6 filters over three calls before this guard.
+        if not any(isinstance(existing, SecretRedactingFilter) for existing in handler.filters):
+            handler.addFilter(context)
+            handler.addFilter(redaction)
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
 
@@ -82,7 +92,17 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
     without either of them having to know this module exists.
     """
     handlers: list[logging.Handler] = list(logging.getLogger().handlers)
-    for existing in logging.root.manager.loggerDict.values():
+    # Snapshot under the logging module's own lock. `loggerDict` is mutated by `getLogger()`, and
+    # this runs in the app factory while worker startup, a lazy connector import or OTel's first use
+    # may be creating loggers on another thread — iterating the live view raised
+    # `RuntimeError: dictionary changed size during iteration` in 64 of 4000 measured attempts, and
+    # the raise would abort `configure_logging()` with filters attached to only some handlers.
+    # `list()` of the values view is a single C-level copy that does not release the GIL, so it
+    # cannot observe a concurrent insertion mid-iteration. A comprehension over the live view can,
+    # and did.
+    known = list(logging.root.manager.loggerDict.values())
+    for existing in known:
+        # `PlaceHolder` entries are not loggers and carry no handlers.
         if isinstance(existing, logging.Logger) and not existing.propagate:
             handlers.extend(existing.handlers)
     return handlers
@@ -233,7 +253,9 @@ _REDACTED = "***"
 # so the more common credential form passed through verbatim. The user is still kept in the
 # two-part form, so a redacted line says which remote and which principal failed; in the one-part
 # form there is no principal to keep and the whole of it is the credential.
-_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s:@]*)(?::([^/\s@]*))?@")
+_URL_USERINFO = re.compile(
+    r"([a-zA-Z][a-zA-Z0-9+.\-]{0,63}://)([^/\s:@]{0,512})(?::([^/\s@]{0,512}))?@"
+)
 
 
 # Credentials this process does **not** hold, matched by shape rather than by value.
@@ -245,38 +267,86 @@ _URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s:@]*)(?::([^/\s@
 # stream verbatim.
 #
 # Pattern matching was rejected once, for a good reason — a false positive corrupts a log line, and
-# an over-eager rule that ate molecule ids or note slugs would be worse than the leak. So every
-# rule below is anchored on a vendor-assigned prefix or an explicit key name, and each requires a
-# long opaque tail. None of them can match a SMILES, an InChIKey, a note slug or a `D-NNN` id: those
-# carry no `ghp_`/`sk-`/`eyJ` prefix and no `password=`/`token=` label.
+# an over-eager rule that ate molecule ids or note slugs would be worse than the leak. The first
+# version of these rules proved the point on itself: `[^\s&,;"']{8,}` after a key name ate the
+# *source lines of this repository*, which is the one text guaranteed to appear inside the
+# tracebacks the whole mechanism exists to protect —
+#
+#     access_token = response.json().get("access_token")   ->  access_token = ***"access_token")
+#     api_key=settings.llm_api_key or _KEYLESS_PLACEHOLDER  ->  api_key=*** or _KEYLESS_PLACEHOLDER
+#     Basic authentication rejected by the proxy            ->  Basic *** rejected by the proxy
+#
+# and `password=None)` became `password=***`. The innocent-content test passed throughout, because
+# it pinned *identifiers* (SMILES, note slugs, ADR ids) and no source line and no prose.
+#
+# So a key-name anchor is not enough on its own: the value has to look like a credential too. Two
+# extra requirements do that, and they are what separates a token from an expression:
+#
+# 1. `_OPAQUE` excludes the characters code and prose put there — quotes, parentheses, commas,
+#    semicolons — so `response.json().get(` and `settings.llm_api_key or` cannot match.
+# 2. A digit is required somewhere in the value. Real credentials are drawn from a random alphabet
+#    and effectively always contain one; English words and Python attribute paths do not.
+#
+# The cost is a token of pure letters (rare, and still covered by the value inventory when this
+# process holds it). That trade is the right way round: an unreadable traceback is a permanent loss
+# of the incident evidence, while this floor is a backstop under the inventory, not the mechanism.
+#
+# `Basic` is dropped entirely. It is an ordinary English word, and unlike `Bearer` it is not
+# followed by anything with usable structure.
+#
+# Every tail is *bounded*. Unbounded `{8,}` made the JWT rule quadratic — each `-eyJ` in the input
+# is a fresh word-boundary start whose tail rescans the remainder — measured at 46.7 ms for 10 KB
+# of `-eyJ` rising to 11.78 s for 160 KB. This runs inside `handler.handle()`, which holds the
+# logging lock, so that is a denial of service on every thread's logging, reachable by anything that
+# can get text into a log line.
 #
 # `(?P<keep>...)` is the part a reader still needs — the label, so a redacted line says *which*
 # credential failed rather than becoming an anonymous `***`.
+#
+# The characters a credential is made of. No quotes, parens, commas or semicolons: those are what a
+# repr, a call expression or a libpq string puts around a value, never inside one.
+_OPAQUE = r"[A-Za-z0-9_\-.~+/=]"
+# Not preceded by a token character. `\b` is not enough: it matches between `-` and `e`, so every
+# `-eyJ` in a hostile string is a fresh start position whose tail rescans the remainder — which is
+# what made the JWT rule quadratic. A real credential is preceded by a space, a quote, `=` or `:`,
+# never by another token character, so this costs nothing and removes the amplifier.
+_NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
+# "Contains a digit" — the cheap discriminator between a token and an identifier.
+_HAS_DIGIT = r"(?=" + _OPAQUE + r"*\d)"
+
 _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # GitHub tokens: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (classic, 36 chars) and the fine-grained
-    # `github_pat_` form. Both are vendor-assigned prefixes that occur in nothing else.
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    # `github_pat_` form. Both are vendor-assigned prefixes that occur in nothing else, so these
+    # two need no digit requirement — the prefix alone is decisive.
+    re.compile(_NOT_MID_TOKEN + r"gh[pousr]_[A-Za-z0-9]{20,255}"),
+    re.compile(_NOT_MID_TOKEN + r"github_pat_[A-Za-z0-9_]{20,255}"),
     # Anthropic and OpenAI keys, including the project-scoped spellings.
-    re.compile(r"\bsk-(?:ant|proj|svcacct)-[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"\bsk-[A-Za-z0-9]{32,}"),
+    re.compile(_NOT_MID_TOKEN + r"sk-(?:ant|proj|svcacct)-[A-Za-z0-9_\-]{16,255}"),
+    re.compile(_NOT_MID_TOKEN + r"sk-[A-Za-z0-9]{32,255}"),
     # A JWT — three base64url segments separated by dots, the first starting `eyJ` because a JOSE
     # header always begins `{"`. This is the inbound Entra access token's shape.
-    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+"),
-    # libpq key/value connection strings: `host=... password=... dbname=...`. The URL form is
-    # covered by `_URL_USERINFO`; this is the spelling a warehouse driver uses.
-    re.compile(r"(?P<keep>\bpassword\s*=\s*)(?!\s)[^\s;'\"]{4,}", re.IGNORECASE),
-    # A credential in a query string or a header/JSON rendering. Anchored on the key name so the
-    # bare words "token" or "secret" in prose cannot trigger it — the `=`/`:` and a long opaque
-    # value are both required.
     re.compile(
-        r"(?P<keep>\b(?:access_token|refresh_token|api[_-]?key|client_secret)\s*[=:]\s*[\"']?)"
-        r"[^\s&,;\"']{8,}",
+        _NOT_MID_TOKEN + r"eyJ[A-Za-z0-9_\-]{8,1024}\.[A-Za-z0-9_\-]{8,4096}\."
+        r"[A-Za-z0-9_\-]{1,1024}"
+    ),
+    # libpq key/value connection strings and the environment spelling: `password=`, `PGPASSWORD=`,
+    # and the `repr` of a config dict (`'password': '...'`). The URL form is `_URL_USERINFO`'s.
+    re.compile(
+        r"(?P<keep>\b(?:PG)?PASSWORD[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{6,255}",
         re.IGNORECASE,
     ),
-    # `Authorization: Bearer <opaque>` — the JWT rule covers the common case, but an opaque bearer
-    # or a Basic credential has no internal structure to match, so the scheme is the anchor.
-    re.compile(r"(?P<keep>\b(?:Bearer|Basic)\s+)[A-Za-z0-9_\-.~+/=]{12,}"),
+    # A credential in a query string, a header, or a rendered dict. Anchored on the key name so the
+    # bare words "token" or "secret" in prose cannot trigger it, and on the value's shape so an
+    # assignment in a source line cannot.
+    re.compile(
+        r"(?P<keep>\b(?:access_token|refresh_token|api[_-]?key|client_secret)"
+        r"[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
+        re.IGNORECASE,
+    ),
+    # `Authorization: Bearer <opaque>` / `Token <opaque>` — the JWT rule covers the structured case;
+    # an opaque bearer has no internal structure, so the scheme is the anchor and the digit
+    # requirement is what keeps "Bearer token was rejected" intact.
+    re.compile(r"(?P<keep>\b(?:Bearer|Token)\s+)" + _HAS_DIGIT + _OPAQUE + r"{16,4096}"),
 )
 
 
@@ -564,7 +634,7 @@ class JsonFormatter(logging.Formatter):
             "time": self.formatTime(record),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_secrets(record.getMessage()),
             "correlation_id": getattr(record, "correlation_id", "-"),
             "actor": getattr(record, "actor", "-"),
             "session_id": getattr(record, "session_id", "-"),
@@ -574,5 +644,9 @@ class JsonFormatter(logging.Formatter):
         elif record.exc_info:
             payload["exception"] = redact_secrets(self.formatException(record.exc_info))
         if record.stack_info:
-            payload["stack"] = record.stack_info
+            # Redacted here as well as by the filter. Without this, adding the field created a
+            # *new* unredacted channel in exactly the no-filter case the `exception` fallback was
+            # added for — before this commit `stack_info` was dropped entirely, so the fix would
+            # have introduced the leak it was closing.
+            payload["stack"] = redact_secrets(record.stack_info)
         return json.dumps(payload, default=str)

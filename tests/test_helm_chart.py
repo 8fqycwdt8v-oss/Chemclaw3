@@ -131,6 +131,7 @@ def _chart_env_keys() -> set[str]:
     return (
         set(_VALUES["config"])
         | set(_VALUES["secrets"]["keys"].values())
+        | set(_VALUES["secrets"]["optionalKeys"].values())
         | _TLS_ENV
         | _helper_env_keys()
         | _derived_config_keys()
@@ -221,17 +222,22 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     modification, reordering, interior deletion and prefix truncation, and a point-in-time restore
     stays what it has always been: a trailing deletion nothing can see.
 
-    The framing envelope key is the seventh, and it is the only one added because it was in the
-    *wrong place* rather than missing. It is not a credential to an external system, which is how it
-    came to have no slot here at all — so the only place left to set it was `.Values.config`, which
-    renders into a ConfigMap. A ConfigMap is readable by the OpenShift `view` role, a far wider
-    grant than `get secrets`, and the value is the HMAC key `agent/framing.py` derives
-    `ENVELOPE_TAG` from. The agent instructions say only an envelope carrying exactly that tag marks
-    retrieved content as data, so anyone who reads it and can place text into any retrieval source —
-    a knowledge note, the mounted share, ELN data — closes the envelope from inside and has their
-    text read as instructions. It shares the webhook secret's polarity in the narrow sense that an
-    empty value still starts, but not its safety: an unset key means a *predictable* tag, which is
-    the state the secret exists to leave behind.
+    The framing envelope key is the seventh, and it is the first to land in `optionalKeys` rather
+    than `keys` — a distinction that exists because putting it in `keys` broke every upgrade.
+    `chemclaw.env` renders `keys` as a **required** `secretKeyRef`, and `secrets.create` defaults to
+    false, so the Secret is operator-managed and predates any chart version naming a new key: a
+    required addition takes every pod of an existing release into `CreateContainerConfigError` on
+    `helm upgrade`. `chemclaw.migrationEnv` had already made that argument, two helpers below.
+
+    Required is right for a credential whose absence silently breaks a capability — the four above.
+    This one is the HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from, it defaults to `""`,
+    and the app starts either way; unset, the tag is merely *predictable*, which is the weakness the
+    slot exists to let an operator close rather than a new one it introduces. So it gets a Secret
+    slot (not a `config` entry, which would render into a ConfigMap the `view` role can read) and an
+    `optional: true` reference.
+
+    Both maps are asserted, because "which secrets does this chart name" is one question and
+    splitting the answer across two values is exactly how a key comes to be in neither.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -240,6 +246,8 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
         "CHEMCLAW_AUDIT_ANCHOR_SECRET",
+    }
+    assert set(_VALUES["secrets"]["optionalKeys"].values()) == {
         "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
     }
 

@@ -694,21 +694,163 @@ def test_an_opaque_bearer_credential_is_redacted_and_the_scheme_kept() -> None:
 @pytest.mark.parametrize(
     "innocent",
     [
+        # Identifiers this system logs constantly.
         "CC(=O)Oc1ccccc1C(=O)O",
         "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
         "playbook-suzuki-coupling-optimisation",
         "D-2026-08-06-a-share-is-mounted-not-called",
         "calculation cache token count 1234567890 for reaction-aaa1",
         "chemclaw_turn_tokens_total 4096",
+        # Source lines of this repository. These are the cases whose absence let the first version
+        # of these rules through: they appear verbatim inside the tracebacks the whole mechanism
+        # exists to protect, and an over-eager rule destroyed the evidence an engineer needs.
+        'access_token = response.json().get("access_token")',
+        "api_key=settings.llm_api_key or _KEYLESS_PLACEHOLDER,",
+        "password=None)",
+        'client_secret = settings.entra_client_secret or ""',
+        "api_key=self._api_key,",
+        # Ordinary English prose. `Basic` is a word before it is an auth scheme.
+        "Basic authentication rejected by the upstream proxy",
+        "Bearer token was rejected by the identity provider",
+        "the access_token field was absent from the response body",
+        "no api_key configured for this provider",
     ],
 )
 def test_the_structural_rules_never_touch_ordinary_content(innocent: str) -> None:
-    """The reason pattern matching was rejected once, held to.
+    r"""The reason pattern matching was rejected once, held to — and the way it first failed.
 
     A false positive corrupts a log line, and a rule that ate a SMILES, an InChIKey, a note slug or
-    an ADR id would be worse than the leak it closed. Each of these is a string this system logs
-    routinely, and none carries a vendor prefix or a credential label.
+    an ADR id would be worse than the leak it closed. The first version of these rules did something
+    worse still: an over-broad value class after a key name ate this repository's own source lines,
+    which are the one text guaranteed to appear in a traceback. An adversarial review measured 41
+    changed lines across the tree, four of them executable source.
+
+    That version passed the earlier form of this test, which carried only the six identifiers above.
+    The source lines and the prose are here because their absence is what made it pass.
     """
     from chemclaw.core.logging import redact_secrets
 
     assert redact_secrets(innocent) == innocent
+
+
+def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> None:
+    """Narrowing must not have removed the floor it was added for.
+
+    The digit requirement and the opaque character class were added to stop the rules eating source
+    lines. This is the other half: the eleven measured pass-through shapes must still be redacted,
+    including the two spellings the first version missed entirely (`PGPASSWORD=` and a `repr`'d
+    config dict), which the narrowing pass folded in.
+    """
+    from chemclaw.core.logging import redact_secrets
+
+    for secret, sample in [
+        (
+            "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+            "push failed: ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+        ),
+        (
+            "eyJhbGciOiJIUzI1NiJ9.eyJvaWQiOiJhIn0.c2lnbmF0dXJl",
+            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJvaWQiOiJhIn0.c2lnbmF0dXJl",
+        ),
+        ("S3cr3tP4ssw0rd", "host=wh password=S3cr3tP4ssw0rd dbname=eln"),
+        ("S3cr3tP4ssw0rd", "PGPASSWORD=S3cr3tP4ssw0rd"),
+        ("hunter2000hunter", "{'password': 'hunter2000hunter'}"),
+        ("abcdef0123456789ghijkl", "GET /rows?access_token=abcdef0123456789ghijkl&limit=10"),
+        ("w7Fq2xLpNv8sTr4Kd1Zy", "Authorization: Bearer w7Fq2xLpNv8sTr4Kd1Zy"),
+    ]:
+        assert secret not in redact_secrets(sample), sample
+
+
+def test_redaction_cannot_be_made_quadratic_by_a_log_line() -> None:
+    """Every pattern's tail is bounded, because this runs while the logging lock is held.
+
+    Unbounded `{8,}` made the JWT rule quadratic: each `-eyJ` is a fresh word-boundary start whose
+    tail rescans the remainder. Measured at 46.7 ms for 10 KB rising to 11.78 s for 160 KB — a
+    denial of service on every thread's logging, reachable by anything that can get text into a log
+    line (an echoed request body, an httpx error, a turn's own content).
+
+    The bound is generous rather than tight: the assertion is that the cost is not quadratic, not
+    that it is fast, so this stays honest on a loaded CI box.
+    """
+    import time
+
+    from chemclaw.core.logging import redact_secrets
+
+    small, large = "-eyJ" * 2_500, "-eyJ" * 20_000  # 10 KB and 80 KB
+    start = time.monotonic()
+    redact_secrets(small)
+    small_seconds = time.monotonic() - start
+    start = time.monotonic()
+    redact_secrets(large)
+    large_seconds = time.monotonic() - start
+
+    assert large_seconds < 2.0, f"80 KB of adversarial input took {large_seconds:.2f}s"
+    # 8x the input; quadratic would be ~64x. Allow a wide margin for a noisy machine, and floor the
+    # denominator so a fast small case cannot make the ratio meaningless.
+    assert large_seconds / max(small_seconds, 1e-4) < 24, (
+        f"scaling looks quadratic: {small_seconds:.4f}s for 10 KB, {large_seconds:.4f}s for 80 KB"
+    )
+
+
+def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`configure_logging` is documented as safe to call more than once — for every handler.
+
+    `force=True` resets the *root's* handlers, so the root was always fine. A non-propagating
+    logger's handlers are not ours to reset, and the sweep added a fresh pair to each on every call:
+    measured 2 -> 4 -> 6 filters over three calls. Every record on the front door's hot path would
+    then be redacted N times, and `SecretRedactingFilter.__init__` walks the connector registry off
+    disk, so the startup-only ERROR and counter fired once per handler per call instead.
+    """
+    from chemclaw.core.logging import SecretRedactingFilter, configure_logging
+
+    private = logging.getLogger("chemclaw.test.repeat_configure")
+    private.propagate = False
+    handler = logging.StreamHandler()
+    private.addHandler(handler)
+    try:
+        for _ in range(3):
+            configure_logging()
+        redactors = [f for f in handler.filters if isinstance(f, SecretRedactingFilter)]
+        assert len(redactors) == 1, f"filters stacked across calls: {handler.filters}"
+    finally:
+        private.removeHandler(handler)
+        private.propagate = True
+
+
+def test_the_logger_sweep_survives_concurrent_getlogger() -> None:
+    """Snapshotting `loggerDict` under the logging lock, not iterating the live view.
+
+    `configure_logging()` runs in the app factory while worker startup, a lazy connector import or
+    OTel's first use may be creating loggers on another thread. Iterating the live mapping raised
+    `RuntimeError: dictionary changed size during iteration` in 64 of 4000 measured attempts — and
+    the raise aborts configuration with filters attached to only some handlers, which is the worst
+    of the three outcomes.
+    """
+    import threading
+
+    from chemclaw.core.logging import _handlers_that_reach_an_output_stream
+
+    stop = threading.Event()
+    failures: list[BaseException] = []
+
+    def churn(index: int) -> None:
+        counter = 0
+        while not stop.is_set():
+            logging.getLogger(f"chemclaw.test.churn{index}.mod{counter}")
+            counter += 1
+
+    workers = [threading.Thread(target=churn, args=(i,), daemon=True) for i in range(4)]
+    for worker in workers:
+        worker.start()
+    try:
+        for _ in range(2_000):
+            try:
+                _handlers_that_reach_an_output_stream()
+            except RuntimeError as exc:  # pragma: no cover - the defect this pins
+                failures.append(exc)
+                break
+    finally:
+        stop.set()
+        for worker in workers:
+            worker.join(timeout=5)
+    assert not failures, f"the sweep raced against getLogger(): {failures[0]}"
