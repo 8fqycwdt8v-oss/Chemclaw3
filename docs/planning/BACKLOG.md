@@ -100,9 +100,12 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       *Trigger:* touches `pyproject.toml`, so it belongs with the next dependency change.
 
 - [ ] **Twenty-nine warn-and-degrade sites still uncounted, in three groups** — [S].
-      Measured on the pre-lane tree: 42 `except` handlers that log a warning and do not re-raise,
-      across 35 modules, of which exactly 3 counted anything (`durable/publish.py`, `kg/graph.py`,
-      `kg/proposal.py`). `core/metrics_bridge.degraded` converted ten — the nine in `agent/` and
+      Measured on `391b6ec^`, counting one `ast.ExceptHandler` whose subtree calls
+      `.warning()`/`.warn()` and contains no `raise`: 41 such handlers across 34 modules, of which
+      exactly 4 counted anything (`api/routes/turns.py:173`, `api/state.py:237`,
+      `durable/publish.py:151`, `kg/graph.py:155`). Two of those four are in group (c) below, so
+      that group's "`api/` (5)" is five handlers of which two already count.
+      `core/metrics_bridge.degraded` converted ten — the nine in `agent/` and
       `core/logging.py`. Left: (a) **workflow code** — `durable/notify.py:108`,
       `durable/report_workflow.py:92`, `connectors/qm/workflows.py:90,143` — a metric emitted from
       inside a workflow re-counts on every replay, so each needs the
@@ -116,10 +119,59 @@ the new tests now *record* as debt rather than something they fixed; each is a l
 
 - [ ] **`template-validate` cannot check arguments for a template launcher or a skill tool** — [S].
       The argument check resolves parameters from the in-process `@tool` registry and each bundle's
-      own server tools module, which covers every tool the shipped templates call. A `run_<name>`
+      own server tools module: **50 of the 61 advertised tools**. "Covers every tool the shipped
+      templates call" is true and worth little — one template ships, with two steps. A `run_<name>`
       template launcher takes a single generated pydantic model (`params`), and how MAF maps a
       call's argument keys onto that has not been measured here, so those steps are skipped rather
-      than guessed at; skill tools are MAF's and not knowable offline at all.
+      than guessed at; skill tools are MAF's and not knowable offline at all. The eleven
+      unresolvable ones include every job-launcher — the most expensive things to fail at run time.
+
+- [ ] **`prose-validate` resolves a *bare* metric name only in the operator corpus, not in
+      `docs/decisions/`** — [S].
+      Rule 9 (a PromQL selector, `chemclaw_<name>{…}`) does run over the ADRs and is what would have
+      caught `chemclaw_degradations_total`; rule 8 (a bare backticked metric name) does not, and
+      the reason is measured rather than cautious. `docs/decisions/` holds five undeclared
+      backticked `chemclaw_*` spans and **four are correct prose**: a module (`chemclaw_agent`),
+      the Postgres role (`chemclaw_app`), a log marker (`chemclaw_plans_consumed`), and
+      `chemclaw_tool_latency_seconds` inside D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose,
+      an ADR whose *subject* is that the runbook named a stale metric. A gate that fails the build
+      for correctly quoting the name an ADR exists to report is not a gate, and its only remedy
+      would be editing a merged decision, which CLAUDE.md forbids. So a bare mention of a renamed
+      metric in an ADR stays unchecked, deliberately.
+      *Trigger:* the first metric *rename*, which is when a bare citation in a merged ADR goes
+      stale and someone has to decide whether a "historical" marker in the ADR body (rather than a
+      corpus exclusion) is the right shape.
+
+- [ ] **The two layering policies do not compose hops, so a stack can be reached in two legal
+      steps** — [M].
+      `from chemclaw.core.temporal_client import Client` inside `science/` passes everything:
+      `tests/test_third_party_layering.py` records only third-party targets so it never sees the
+      import, and `tests/test_layering.py` sees a declared `science → core` edge. `core → temporal`
+      is separately declared. Measured — the import passes all 8 stack tests, where a direct
+      `import temporalio` in `science/` correctly fails. Closing it needs a **re-export policy**
+      ("which first-party symbols carry a stack with them"), which is a design decision rather than
+      a walk, and a wrong version of it would fail on every legitimate `from chemclaw.core.db
+      import …`. `importlib.import_module("temporalio")` is invisible for the same family of
+      reasons and is deliberately not chased: an AST walk cannot resolve a string. Both are stated
+      as limits in that file's docstring rather than left implied.
+      *Trigger:* the first time a `science/`, `kg/` or `ingest/` module needs something from
+      `core` that is a third-party object rather than a first-party one — that is the case the
+      policy would have to name, and until it exists there is nothing to write the rule against.
+
+- [ ] **`_ALLOWED_MODULE_STACKS` rows are package-keyed while `_KNOWN_LEAKS` rows are
+      file-keyed** — [S].
+      Measured: a new `connectors/safety/server/_zz.py` importing `agent_framework`, `temporalio`
+      *and* `fastapi` at module scope passes all 8 stack tests, because `chemclaw.connectors` owns
+      all three. One row covers 54 files; `chemclaw.agent` covers 43. Where a row's stated *reason*
+      names one file — `("chemclaw.connectors", "maf")` says "connectors/transport.py builds the
+      MAF tool objects — the one adapter point" — the row licenses 54 and the sentence is true of
+      one. The distinction is defensible (an allowed edge is a design decision about a *layer*; a
+      leak is debt about a *file*) and is now written into the module docstring, so this row is
+      about whether the two or three rows whose reason names specific files should be narrowed to
+      them. Not done here because narrowing them makes ordinary growth *inside* a layer that owns
+      a stack fail the build, and that trade needs a case rather than an argument.
+      *Trigger:* the first second file in a bundle that reaches for MAF, or the first review that
+      finds a package-keyed row hiding a violation.
       *Trigger:* the first template whose step calls another template's launcher.
 ## Open — Left by the science lane of the 2026-08-08 review campaign
 

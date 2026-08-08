@@ -65,6 +65,12 @@ from chemclaw.cli.mock_llm import Behaviour, ToolCall
 # fits in this container, and keeps every value a temperature a chemist could ask about. The same
 # modulus is now in all three copies (it had landed in this one only) and `tests/test_run_jitter.py`
 # evaluates each expression across a 24-hour window so a fourth copy cannot get a smaller one.
+#
+# **The base temperature differs per harness and must.** Each grid spans base + [0, 1) K, so two
+# copies sharing a base share the whole set — which is what happened when `cli/live_jobs.py` took
+# this modulus and kept 298.15, giving two independent harnesses byte-identical payloads and one
+# workflow id. This one keeps 298.15; `live_jobs` is 301.15 and `live_storm` 300.0, and
+# `tests/test_run_jitter.py` asserts the union is disjoint rather than trusting the arithmetic.
 _COLLISION_TEMPERATURE_K = 298.15 + (int(time.time()) % 100_000) / 100_000.0
 _COLLISION_PAYLOAD: dict[str, object] = {
     "kind": "reaction",

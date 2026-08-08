@@ -48,13 +48,32 @@ lane is green forever while computing nothing — the exact failure its own comm
 remove.
 
 **5. Warn-and-degrade sites that count nothing.** The review reported 22 across 17 modules; a
-broader re-measurement here — every `except` handler that logs a warning and does not re-raise —
-finds **42 across 35 modules, of which exactly 3 count anything** (`durable/publish.py`,
-`kg/graph.py`, `kg/proposal.py`). Each swallow is individually right; the alternative is failing a
-chemist's turn because a preference did not persist. From outside, a preference store that has
-stopped writing, a cost ledger losing every row and a redaction filter that never resolved its
-connector token names are indistinguishable from a healthy service. `agent/audit.py:307` had already
-established the house pattern — count it, then log it under a stable marker — for exactly one site.
+broader re-measurement — every `except` handler that logs a warning and does not re-raise — finds
+**41 across 34 modules, of which exactly 4 count anything** (`api/routes/turns.py:173`,
+`api/state.py:237`, `durable/publish.py:151`, `kg/graph.py:155`). Each swallow is individually
+right; the alternative is failing a chemist's turn because a preference did not persist. From
+outside, a preference store that has stopped writing, a cost ledger losing every row and a
+redaction filter that never resolved its connector token names are indistinguishable from a healthy
+service. `agent/audit.py:307` had already established the house pattern — count it, then log it
+under a stable marker — for exactly one site.
+
+**Those numbers are a correction, and the correction is the point of this section.** The first
+version of this ADR — and five other places, including the commit message, which cannot be
+edited — said *42 across 35, of which exactly 3*, and named `kg/proposal.py` as one of the three.
+An adversarial review re-derived them; this section carries the re-derivation, run against
+`391b6ec^` under a definition stated so the ±1 is arguable rather than mysterious: one
+`ast.ExceptHandler` whose subtree calls `.warning()`/`.warn()` and contains no `raise`, with a
+nested handler counted both as its own unit and as part of its parent's subtree.
+
+- 41/34 vs 42/35 is that definitional ±1 and changes nothing.
+- **3 vs 4 does.** `kg/proposal.py` does *not* count in its handler: the handler logs and
+  `return`s, and the `record_metric` below it is on the success path. Two sites that *do* count
+  were unnamed, `api/routes/turns.py:173` and `api/state.py:237` — both inside the "`api/` (5)"
+  group `BACKLOG.md` lists as uncounted, so two of those five already counted.
+- The argument for `degraded()` was written as "32 of 35 modules were invisible". It is **30 of
+  34** at handler level, or 27 at the looser module level ("does this module count anywhere"). The
+  argument survives the correction, which is why it is stated rather than quietly repaired: a
+  number nobody re-derives is a claim, and this ADR's whole subject is claims nobody checks.
 
 **6. `durable/heartbeat.beating` had three holdouts that disagreed with it.**
 `durable/document_sync.py` (twice) and `durable/eln_sync.py` hand-rolled the beat loop with
@@ -113,13 +132,71 @@ check in the file; those imports are now a third scope, declared like any other.
 
 **`tests/test_metric_declarations.py`** checks metric names in both directions. Forward: a literal
 at an `increment`/`observe`/`bind_gauge` call site is in the matching registry. Backward: every
-declared metric appears as a literal somewhere in `src/` — which is what covers the one call site
-whose name is a variable (`api/runner.py` loops over the four priced token counters), because a typo
-there shows up as the real name losing its last mention. Literal `labels={…}` key sets are checked
-against `_COUNTER_LABELS` for the same reason: that `KeyError` is swallowed too.
+declared metric appears as a literal somewhere in `src/` — which is what covers the call sites
+whose name is a variable, because a typo there shows up as the real name losing its last mention.
+Literal `labels={…}` key sets are checked against `_COUNTER_LABELS` for the same reason: that
+`KeyError` is swallowed too.
+
+There are **two** such call sites, not one as this ADR and that file's docstring first said:
+`api/runner.py` loops over the four priced token counters, and `core/metrics_bridge.py` increments
+the `_DEGRADED_COUNTER` constant — added by this same commit, so the counter this diff introduced
+sits in the forward check's blind spot of the test this diff introduced. Not a live risk (the
+constant's *value* is a literal in that module, so the backward direction holds it, and
+`tests/test_degraded.py` drives `degraded()` against the real registry), and stated because "the
+one variable call site" was true for about as long as it took to write down.
+
+**`make prose-validate` resolves metric names too** (rules 8 and 9), because this lane's own ADR
+proved the gap it argues about. `D-2026-08-08-redaction-must-outlive-the-formatter` told an
+operator to alert on `chemclaw_degradations_total`, a counter that has never existed — and unlike
+a wrong path, a wrong series name does not fail: the alert renders, matches nothing, and reads as
+healthy forever. Neither rule 5 (paths) nor `tests/test_metric_declarations.py` (which walks `src/`
+only) could see it.
+
+Two rules with deliberately different reach, and the split is measured rather than cautious:
+
+- **Rule 8** — a whole backticked span that *is* a metric name — over the operator corpus, where
+  13 candidates yield 11 declared names and two `chemclaw_app`, the Postgres role.
+- **Rule 9** — a PromQL *series selector*, `name{…}` — over every Markdown document outside
+  `docs/archive/`, **including `docs/decisions/`**. A label matcher means "query this", which no
+  module path, database role or log marker is ever written as. Ten selectors exist in the whole
+  tree; nine resolve and the tenth was the defect.
+
+Rule 8 deliberately does not get rule 9's reach. `docs/decisions/` holds five undeclared backticked
+`chemclaw_*` spans and **four of them are correct prose** — a module name, the Postgres role, a log
+marker, and `chemclaw_tool_latency_seconds` inside
+D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose, an ADR whose subject *is* that the
+runbook named a stale metric. A rule that fails the build for correctly quoting the name an ADR
+exists to report is not a rule, and its only remedy would be editing a merged decision.
 
 **`deps-audit` joins `make ci` and the `check` job in `ci.yml`**, last in both so a dependency
 finding cannot mask a broken test, and `tests/test_deploy_chart.py` pins both wirings.
+
+**And it classifies its own failure, because `make ci` is a pre-push gate that has to work with no
+network.** The `DEFERRED.md` row this change deleted had said, correctly, that adding `deps-audit`
+to `make ci` makes the gate fail offline and that the cost had not been priced. The first version
+of this change deleted the row, took the change, and recorded no answer. This is the answer.
+
+`pip-audit` exits **1 both when it finds a vulnerability and when it cannot reach the advisory
+database**, so the exit status cannot separate the two events and the output has to be read.
+Measured under `unshare -rn` (note for anyone re-running it: `HTTPS_PROXY=127.0.0.1:1` proves
+nothing — `uv` and `pip-audit` ignore it and reach the network anyway):
+
+```
+uvx cannot fetch pip-audit itself       -> error: Failed to fetch ...    make error 2
+pip-audit runs, dies in requests        -> ConnectionError: pypi.org     make error 1
+a real finding                          -> Found N known vulnerabilities make error 1
+```
+
+The rule is asymmetric on purpose. **Offline, unreachable is reported and tolerated** — the
+developer keeps a usable gate and loses only the check that has no local answer; the target says
+loudly that the lockfile was *not* audited. **In CI, unreachable is a failure** — the network is a
+given there, and a silent skip would be a supply-chain hole reading as a green build forever, which
+is the exact shape this target was added to close. `CI` is the switch because every runner sets it.
+A found vulnerability is matched first and never excused, so an advisory whose text mentions a
+connection failure cannot buy an exemption. Four tests in `tests/test_deploy_chart.py` drive the
+target against a stubbed `pip-audit` for each of the four outcomes — a stub rather than an
+unplugged cable, because `pip-audit` caches its responses and an offline run after an online one
+legitimately succeeds.
 
 **The jitter modulus is applied to the two stale copies and no helper is built.** The three lanes
 legitimately want different base temperatures (298.15 K, 300.0 K), and a shared helper would hide
@@ -127,6 +204,23 @@ which modulus each got — which is how one of them came to have `% 25`.
 `tests/test_run_jitter.py` finds the expressions rather than being told where they are and
 *evaluates* each across a 24-hour window, so it pins the property ("no payload repeats within the
 longest soak") rather than the literal.
+
+**Applying the modulus is only half of it, and the first version of this change did the other half
+wrong.** Copying `storm_behaviours`'s expression into `live_jobs` also copied its base temperature,
+over payloads that were otherwise byte-identical — so at `t = 1700000123` both derived 298.15123
+and the payloads compared equal. Before the change the two grids intersected in exactly one value;
+after it they were the same set, and a `make live-jobs` launched during a soak round hashed to the
+storm's workflow id, rejoined its completed run and wrote no `job_records` row: the exact "0
+job_records row(s) written" false failure, now reachable *between* harnesses. Per-expression
+distinctness never implied it and the test never checked it. `live_jobs` now bases at 301.15 K
+(`live_storm` 300.0, `storm_behaviours` 298.15); each grid spans base + [0, 1) K, so the bases must
+stay ≥ 1 K apart and the test asserts the **union** is disjoint over the same window.
+
+The walk also matched only `ast.Assign`: a probe carrying `_T: float = 298.15 + (int(time.time())
+% 7)` passed the file, while the same line without the annotation failed two of its tests. It now
+matches `ast.AnnAssign` too and reads `time_ns`/`monotonic` as clocks, and what it still cannot see
+— an unassigned inline derivation, a non-`%` derivation, a clock imported under an alias — is
+written into its docstring as a limit instead of being claimed away.
 
 **`core/metrics_bridge.degraded(logger, subsystem, message, …)`** is the house pattern with one
 owner. It lives beside `record_metric` rather than in `core/metrics.py` because it is called from
@@ -149,22 +243,66 @@ Adopting it turned up a defect *in the helper*, which had to be fixed for the ad
 regression. `beating()` runs the awaitable as a task so the timer can run beside it, and
 `asyncio.wait` does not cancel what it was waiting on when the waiter is cancelled — so a cancelled
 activity returned while its real work carried on detached, still committing. The two sync
-activities previously awaited their work directly, where cancellation propagates. `beating()` now
-cancels the inner task and re-raises, which is what makes `beating(x)` behave-alike to `await x`
-and is the only thing a caller wrapping an existing `await` in it can reasonably assume. This is a
-fix for the three connector call sites too.
+activities previously awaited their work directly, where cancellation propagates.
 
-Two versions of the test for that fix passed against the unfixed helper before the third one did,
-and both failures are recorded in its docstring rather than deleted: the first asserted the work had
-not *finished* 50 ms after cancellation, which a 5-second sleep satisfies either way; the second
-asserted after `asyncio.run`, which cancels every pending task on its way out. The property has to
-be asked of the wrapped coroutine, inside the loop.
+**The first fix for that was `except asyncio.CancelledError: task.cancel(); raise`, and it was
+incomplete in two ways an adversarial review measured.** Both are corrected here rather than in a
+superseding ADR, because this record had not been merged when they were found.
+
+- `task.cancel()` only *files* the request; `raise` unwinds the caller without awaiting the task.
+  Measured on one loop, with the work holding a 50 ms cleanup in its `except` block:
+
+  ```
+  cancel + raise  : ['wrapper-returned', 'cleanup-start', 'cleanup-done']
+  plain `await x` : ['cleanup-start', 'cleanup-done', 'wrapper-returned']
+  ```
+
+  So the window shrank from unbounded to "the length of the work's cleanup" — which is where the
+  DB commit lives — rather than closing, and the claim that `beating(x)` was then behave-alike to
+  `await x` was false. Worse, adopting it in `eln_sync`/`document_sync`, which had been awaiting
+  directly, would have been a small **regression** for them.
+- Cancellation was not the only way out of the loop. `activity.heartbeat` raises outside an
+  activity context and can raise inside one if the details payload fails to serialise; keyed on
+  `CancelledError`, that exception left the wrapper with the task still running. Measured: the
+  wrapper raised `RuntimeError: Not in activity context` and the work then ran to completion
+  detached — the same defect through a different door.
+
+The helper now uses `try/finally`: cancel the task if it is not done, `await` it with
+`CancelledError` suppressed, and let whatever was unwinding continue. That covers both exits and
+makes the behave-alike claim true. It inherits `await x`'s limit unchanged — work that refuses
+cancellation blocks here exactly as it would there.
+
+Four versions of the test for that fix passed against a helper that had the defect, and each
+failure is recorded rather than deleted: the first asserted the work had not *finished* 50 ms after
+cancellation, which a 5-second sleep satisfies either way; the second asserted after `asyncio.run`,
+which cancels every pending task on its way out; the third asked the right question of the right
+object but slept 50 ms first, and that sleep was doing the waiting the helper should have been
+doing — it passes with `task.cancel(); raise` and with the correct helper alike. Only asserting the
+**order** of the work's cleanup against the caller's unwinding separates them.
+
+**On the details payload.** `eln_sync` and `document_sync` previously called `activity.heartbeat()`
+with no arguments; `beating()` sends `"<what>: still running after Ns"` on every beat, which
+Temporal persists and replays into `activity.info().heartbeat_details` on a retry. Checked rather
+than assumed: **nothing in this tree reads `heartbeat_details`** — no activity resumes from it — so
+the payload has no resumption semantics to change, and the three connector call sites already sent
+one. It is accepted as-is: a string per beat, the same shape the rest of the tree already pays for.
 
 **`template-validate` checks argument keys** for every tool whose implementation is a function in
-this tree — the in-process `@tool` registry and each bundle's own server tools module, which covers
-every tool the shipped templates call. Keys only, never values: a template argument may be a
-`${…}` reference whose type is known only at substitution. An unresolvable tool (a template
-launcher's generated params model, a skill tool) is skipped rather than guessed at.
+this tree — the in-process `@tool` registry and each bundle's own server tools module. Keys only,
+never values: a template argument may be a `${…}` reference whose type is known only at
+substitution. An unresolvable tool (a template launcher's generated params model, a skill tool) is
+skipped rather than guessed at.
+
+Two corrections to how that was first written up. It resolves **50 of 61** advertised tools; "it
+covers every tool the shipped templates call" is true and worth little, because exactly one
+template ships and it has two steps — and the eleven unresolvable ones include every job-launcher,
+the most expensive things to fail at run time. And the in-process half of those 50 arrived by
+accident: `registered_tools()` is populated as an import side effect of the agent package, which
+`_step_problems` happened to trigger two lines earlier. Measured in a fresh interpreter,
+`_resolvable_signatures()` alone returned **30** signatures with 31 tools uncovered. Reordering
+those two lines would have dropped 20 tools from the check with no failure — the validator would
+have printed "template validation passed" and checked less. The import is now explicit inside the
+function that needs it, and a subprocess test pins that the coverage does not depend on call order.
 
 ## Consequences
 
@@ -183,10 +321,12 @@ launcher's generated params model, a skill tool) is skipped rather than guessed 
   belonged to another lane of the same campaign. Both are now merged, and `make deps-audit`
   reports "No known vulnerabilities found". The finding stands: the pre-push gate every branch
   push ran had no supply-chain check at all, which is how 6.14.2 sat in the lock.
-- Ten log sites moved from `logger.warning` to `degraded(...)`, eight of them therefore from WARNING
-  to ERROR. That is a deliberate operational change: a degradation is not a caution about something
-  that might matter later. Two sites pass `level=logging.WARNING` and each says why where it passes
-  it (a cosmetic mode badge; a skill manifest already gated by `make skill-validate`).
+- Ten log sites moved to `degraded(...)` and **eight are now at ERROR, of which seven moved there
+  from WARNING**. That is a deliberate operational change: a degradation is not a caution about
+  something that might matter later. Two of the ten pass `level=logging.WARNING` and each says why
+  where it passes it (a cosmetic mode badge; a skill manifest already gated by
+  `make skill-validate`). The tenth, `core/logging.py:534`, was already `logger.error` on
+  `391b6ec^` — this ADR first said "eight of them therefore moved", which double-counted it.
 - `chemclaw_degraded_total` is a new exported series family. Its label space is nine values, all
   string literals at call sites, and `tests/test_degraded.py` enumerates them from the source.
 - Ten of the fifteen uncounted sites in this lane's packages are converted. The five left, and the
@@ -194,7 +334,9 @@ launcher's generated params model, a skill tool) is skipped rather than guessed 
   different reasons: four are **workflow code** and need the `workflow.unsafe.is_replaying()` guard
   `durable/publish.py` already demonstrates (a `core` helper may not import `temporalio` to know
   about replay); one is a **CLI**, whose process exits before any scrape reaches its registry; and
-  the rest are in `api/`, `ingest/`, `science/`, `retrieval/`, `evals/` and `memory/`, which other
-  lanes of this campaign were editing in parallel.
+  the rest are in `api/` (5, two of which already count), `ingest/` (10), `science/` (8) and
+  `evals/` (1), which other lanes of this campaign were editing in parallel. This list first also
+  named `retrieval/` and `memory/`; measured on `391b6ec^`, both contain **zero** such handlers,
+  which is why `BACKLOG.md` — counted rather than recalled — correctly omits them.
 - `template-validate` now imports each bundle's server tools module, which pulls `mcp` and the
   science engines into that CI step. Seconds, on a gate that already imports the agent package.

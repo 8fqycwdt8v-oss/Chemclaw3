@@ -23,7 +23,11 @@ checks a per-file schema cannot make, because each is about the rest of the syst
 its implementation is a function in this tree: the in-process `@tool` registry, and each connector
 bundle's own server tools module (the declared endpoint tool names are that module's function
 names — the same convention `cli/connectors_dev.py` and `connectors/server_entry.py` resolve by).
-That covers every tool the shipped templates call. It does *not* cover a template launcher's
+
+That resolves 50 of the 61 tools a template could name. It covers every tool the shipped templates
+call — a claim worth less than it sounds, since exactly one template ships and it has two steps.
+The eleven it cannot resolve are the interesting ones: they include every job-launcher, which are
+the most expensive things to discover broken at run time. It does *not* cover a template launcher's
 generated `params` model or a skill tool, and those are skipped rather than guessed at — an
 unresolvable tool leaves the argument check silent, which is what keeps it from inventing failures
 about surfaces that only exist at run time. `job` steps are left to the launch itself: a connector
@@ -69,7 +73,16 @@ def _resolvable_signatures() -> dict[str, inspect.Signature]:
     module does not define are both skipped — whether a bundle serves what it declares is
     `make connector-validate`'s question, and answering it twice, differently, here would be worse
     than not answering it.
+
+    **The agent import is load-bearing, not incidental.** `registered_tools()` is populated as an
+    import side effect of `chemclaw.agent.chemclaw_agent`, so without it this returns the connector
+    half only: measured, 30 signatures and 31 advertised tools uncovered, against 50 and 11 with it.
+    It used to be supplied by `_step_problems` happening to call `_available_tools()` two lines
+    earlier — so reordering those lines, or calling this function from anywhere else, would have
+    dropped 20 in-process tools from the argument check **with no failure at all**; the validator
+    would simply have checked less and still printed "template validation passed".
     """
+    importlib.import_module("chemclaw.agent.chemclaw_agent")
     signatures = {fn.__name__: inspect.signature(fn) for fn in registered_tools()}
     for name, (_bundle, manifest) in discovered_connectors().items():
         endpoint = manifest.endpoint

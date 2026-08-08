@@ -94,7 +94,18 @@ SMOKE_JOB = "compute_reaction_energy"
 # landed in one of the three copies. 100,000 values on a 10-µK grid puts the recurrence at ~27.8
 # hours, past any soak this harness runs, and every value is still a temperature a chemist could
 # ask about. `tests/test_run_jitter.py` pins all three periods so a fourth copy cannot regress it.
-_RUN_TEMPERATURE_K = 298.15 + (int(time.time()) % 100_000) / 100_000.0
+#
+# **The base is 301.15 K and not 298.15 K, and that is the second half of the same guarantee.**
+# Copying the reasoned modulus here left this module and `cli/storm_behaviours.py` carrying the
+# identical expression over otherwise byte-identical payloads — measured at `t = 1700000123`, both
+# derived 298.15123 and the two payloads compared equal. Before that they had one value in common;
+# after it they had all of them, so a `make live-jobs` launched during a soak round hashed to the
+# storm's workflow id, rejoined its completed run and wrote no `job_records` row: the same "0
+# job_records row(s) written" false failure, now reachable *between* harnesses. Each grid spans
+# base + [0, 1) K, so the three bases (298.15, 300.0 in `live_storm`, 301.15 here) have to stay at
+# least 1 K apart; `tests/test_run_jitter.py` asserts the union is disjoint rather than trusting
+# that. 301.15 K is 28 °C — still a temperature a chemist could have asked for.
+_RUN_TEMPERATURE_K = 301.15 + (int(time.time()) % 100_000) / 100_000.0
 
 # Ammonia synthesis at the quick level: three species, small, and its symmetry numbers are the
 # textbook ones — so a wrong answer is recognisable as wrong.

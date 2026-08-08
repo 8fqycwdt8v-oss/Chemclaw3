@@ -17,9 +17,16 @@ executed on the path a test happens to take.
 
 **Two directions, and the second is not decoration.** Forward: a literal at a call site must be
 declared in the matching registry. Backward: a declared metric must appear as a literal somewhere
-in `src/` — which is what covers the one call site whose name is a variable
-(`api/runner.py` loops over a tuple of the four priced token counters). Typo one of those and the
-forward check sees nothing, while the backward check sees the real name lose its last mention.
+in `src/` — which is what covers the **two** call sites whose name is a variable: `api/runner.py`
+loops over a tuple of the four priced token counters, and `core/metrics_bridge.py` increments
+`_DEGRADED_COUNTER`, a module constant. Typo either and the forward check sees nothing, while the
+backward check sees the real name lose its last mention.
+
+The second of those was added by the same commit as this file, which is worth saying plainly: the
+counter this diff introduced sits in the blind spot of the test this diff introduced. It is not a
+live risk — `_DEGRADED_COUNTER`'s value is still a literal in that module, so the backward check
+holds it, and `tests/test_degraded.py` drives `degraded()` against the real registry — but "the one
+variable call site" was true for about as long as it took to write it down.
 """
 
 from __future__ import annotations
@@ -142,10 +149,10 @@ def test_every_metric_name_at_a_call_site_is_declared() -> None:
 def test_every_declared_metric_is_named_somewhere_in_the_source() -> None:
     """The backward direction: a declaration nothing names emits nothing, and hides a typo.
 
-    This is what covers the one call site whose name is not a literal — `api/runner.py` increments
-    the four priced token counters from a loop variable. Misspelling one of those tuple entries is
-    invisible to the forward check above and shows up here as the correct name losing its last
-    mention in the tree.
+    This is what covers the two call sites whose name is not a literal — `api/runner.py` increments
+    the four priced token counters from a loop variable, and `core/metrics_bridge.py` increments
+    the `_DEGRADED_COUNTER` constant. Misspelling either is invisible to the forward check above
+    and shows up here as the correct name losing its last mention in the tree.
     """
     literals = _metric_name_literals()
     unnamed = sorted((set(_COUNTERS) | set(_GAUGES) | set(_HISTOGRAMS)) - set(literals))

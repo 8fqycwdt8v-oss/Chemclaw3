@@ -504,9 +504,12 @@ class SecretRedactingFilter(logging.Filter):
         A broken connector manifest is a real misconfiguration and every other consumer of
         `connectors.registry.enabled()` fails loudly on it — but that failure belongs to whichever
         of those consumers hits it first, not to logging setup. So this degrades to redacting
-        nothing *extra* rather than blocking `configure_logging()`, and says so at WARNING: a
-        redaction inventory that quietly stopped covering connectors would be a worse outcome than
-        a boot that proceeds without them.
+        nothing *extra* rather than blocking `configure_logging()`, and says so at **ERROR**, under
+        the marker `degraded[log_redaction]` and on a counter: a redaction inventory that quietly
+        stopped covering connectors would be a worse outcome than a boot that proceeds without
+        them, and it is the one *security* degradation in this file. The comment beside the handler
+        argues the severity in full. (This sentence said "at WARNING" for one commit after the
+        handler below stopped doing that — prose is evidence about what its author believed.)
         """
         super().__init__()
         self._connector_token_envs: tuple[str, ...] = ()

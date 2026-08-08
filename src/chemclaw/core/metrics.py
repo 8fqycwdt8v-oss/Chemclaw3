@@ -249,10 +249,11 @@ _COUNTERS: dict[str, str] = {
         "Stored conversation rows removed by durable compaction after a turn."
     ),
     # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
-    # warning, continue with less. Measured: 42 such handlers across 35 modules, and exactly 3 of
-    # those modules counted anything — so a preference store that had stopped writing, a cost ledger
-    # losing every row and a redaction filter that never resolved its token names all read from
-    # outside exactly like a healthy service. Each is individually right to swallow — the
+    # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
+    # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,
+    # `durable/publish.py`, `kg/graph.py`) — so a preference store that had stopped writing, a cost
+    # ledger losing every row and a redaction filter that never resolved its token names all read
+    # from outside exactly like a healthy service. Each is individually right to swallow — the
     # alternative is failing a chemist's turn over telemetry — which is precisely why the swallow
     # has to leave a number behind.
     #
@@ -316,7 +317,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_repeated_tool_calls_total": ("tool",),
     # The tightest bound of any label here: a subsystem name is a string literal at a `degraded()`
     # call site, so the whole value set is enumerable from the source and `tests/test_degraded.py`
-    # enumerates it. Nothing a request carries can reach this label.
+    # enumerates it — across both call spellings (`degraded(...)` and `<module>.degraded(...)`) and
+    # both argument forms, since its first version saw only the bare-name positional one and a
+    # per-connector f-string label went past it silently. Nothing a request carries reaches here.
     "chemclaw_degraded_total": ("subsystem",),
 }
 
@@ -358,6 +361,18 @@ _GAUGES: dict[str, str] = {
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
     ),
 }
+
+
+def declared_metric_names() -> frozenset[str]:
+    """Every metric name this registry declares — counters, histograms and gauges together.
+
+    Public because a metric name is a contract with things *outside* this process, and the only
+    other place it is written down is prose: `docs/guides/runbook.md` tells an operator what to
+    query, and an ADR tells them what to alert on. `make prose-validate` resolves those citations
+    against this set (D-2026-08-08). Exposed as one function rather than three tables so a fourth
+    kind of metric cannot be added without every reader of "what is declared" seeing it.
+    """
+    return frozenset(_COUNTERS) | frozenset(_HISTOGRAMS) | frozenset(_GAUGES)
 
 
 class Metrics:

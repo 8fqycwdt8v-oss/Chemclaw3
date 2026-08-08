@@ -36,6 +36,31 @@ next author who reaches for it. `test_layering.py` does the same for its `_CYCLE
 meaning are mapped; `pydantic`, `numpy`, `yaml`, `networkx`, `pypdf` create no layer edge and are
 absent on purpose. That is a real limit — a stack nobody named cannot be policed — so a new
 architecturally-significant dependency belongs in `_STACKS` at the same time it enters the lockfile.
+
+**The other limits, each measured rather than supposed.** A review enumerated what this policy
+provably cannot see, and every item below is written down because a limit nobody states reads as
+coverage:
+
+- **A composed hop.** `from chemclaw.core.temporal_client import Client` in `science/` passes: it
+  is a first-party import, so this file never sees it, and `test_layering.py` sees a declared
+  `science → core` edge. `core → temporal` is separately declared. Neither policy composes hops,
+  so a science module can obtain a live Temporal `Client` through two individually-legal steps.
+  This is the sharpest hole and it is **not** closed here — closing it means a re-export policy
+  ("which first-party symbols carry a stack with them"), which is a design decision, not a walk.
+  Tracked in `BACKLOG.md`.
+- **A dynamic import.** `importlib.import_module("temporalio")` in `science/` passes. An AST walk
+  cannot resolve a string, and a rule banning `importlib` outright would be a different rule.
+- **An aliased clock of a root** — anything that reaches a stack without naming its distribution
+  root in an `import` statement.
+- **Package-keyed allowed rows against file-keyed leaks.** `_KNOWN_LEAKS` is keyed by file so a
+  leak cannot grow quietly, and `_ALLOWED_MODULE_STACKS` is keyed by package on purpose: an
+  allowed edge is a *design decision about a layer* ("layer 1 IS MAF"), where a leak is *debt
+  about a file*. The cost is real and worth naming: `("chemclaw.connectors", "maf")` says
+  "connectors/transport.py builds the MAF tool objects — the one adapter point", and that sentence
+  is true of one file out of 54 while the row licenses all of them. Narrowing those rows to files
+  would mean re-deciding, per file, what is currently one architectural sentence — and would make
+  ordinary growth inside a layer that owns a stack fail the build. The row's *reason* is prose
+  about intent; the row itself is about the layer.
 """
 
 from __future__ import annotations
@@ -69,6 +94,25 @@ _STACKS: dict[str, str] = {
     "openai": "llm",
     "anthropic": "llm",
     "snowflake": "warehouse",
+    # Added after a review measured what `_STACKS` was leaving unpoliced. Three roots present in
+    # `src/` carry a layering meaning the first version missed; the rest of what it flagged
+    # (`pydantic`, `numpy`, `yaml`, `networkx`, `frontmatter`, `openpyxl`, `pypdf`, …) is correctly
+    # absent for the reason the module docstring gives.
+    #
+    # `jwt` is the most consequential of the three. F4's architecture is "one authorization gate,
+    # `require_actor` reject-if-absent": a second module that validates a token is the worst
+    # layering violation this system can have, and `import jwt` in `science/`, `connectors/` or
+    # `kg/` is exactly what that looks like in source.
+    "jwt": "token",
+    # Key material. One site, `ingest/eln/warehouse/snowflake.py`, deserialising a private key for
+    # the warehouse's key-pair auth. (The review that asked for this row placed it in
+    # `api/auth.py` alongside `jwt`; measured, it is not there and never was — `api/auth.py`
+    # imports `jwt` only. The two are separate concerns and get separate stacks.)
+    "cryptography": "crypto",
+    # The xTB engine itself: the `science/` half of the `science/` ↔ `connectors/` pair CLAUDE.md
+    # says must never merge. `import tblite` inside `connectors/` is the mirror image of the
+    # "Temporal imports inside the physics" the same sentence forbids.
+    "tblite": "xtb",
 }
 
 Edge = tuple[str, str]  # (chemclaw package, stack)
@@ -94,6 +138,10 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.api", "http"): "api/ IS the FastAPI + SSE front door",
     ("chemclaw.api", "maf"): "it serves agent/ over HTTP and holds the runner's MAF types",
     ("chemclaw.api", "postgres"): "routes/ops.py reads readiness straight off the pool",
+    ("chemclaw.api", "token"): (
+        "api/auth.py is the one place an inbound bearer token is validated — F4's 'one "
+        "authorization gate'. Every other layer receives an already-resolved actor"
+    ),
     # durable: layer 2. "Temporal — durable execution" is the definition of the layer.
     ("chemclaw.durable", "temporal"): "layer 2 IS Temporal",
     ("chemclaw.durable", "postgres"): "job records and the retention sweep own their tables",
@@ -117,12 +165,20 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.connectors", "rdkit"): "bundle tools validate and depict structures",
     # science: pure computation. Its README forbids Temporal/MCP/FastAPI and permits the rest.
     ("chemclaw.science", "rdkit"): "the cheminformatics toolkit is the engine",
+    ("chemclaw.science", "xtb"): (
+        "science/calc/xtb_engine.py IS the GFN2-xTB engine; `connectors/calc` is its durable-job "
+        "and MCP wrapper and must never import the physics itself"
+    ),
     ("chemclaw.science", "ml"): "science/bo is BoFire on BoTorch on torch",
     ("chemclaw.science", "postgres"): "the calculation cache is a table (D-011)",
     # the leaf packages: each owns its own tables and nothing else.
     ("chemclaw.kg", "postgres"): "the note-proposal store",
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
+    ("chemclaw.ingest", "crypto"): (
+        "the Snowflake binding's key-pair auth deserialises a PEM private key; the only place in "
+        "the tree that handles key material outside the identity path"
+    ),
     ("chemclaw.memory", "postgres"): "the memory layers are tables",
     ("chemclaw.retrieval", "postgres"): "the vector index is pgvector",
     ("chemclaw.evals", "httpx"): "the live probe drives the real front door over HTTP",
@@ -280,8 +336,24 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level == 0:  # a relative import is first-party by construction
-            self._record(node.module or "", node.lineno)
+        """Record the module, or — when private names are pulled from it — each of those.
+
+        `from agent_framework import _compaction` reaches into private API exactly as
+        `from agent_framework._compaction import x` does, and recording only `node.module` made
+        the first form invisible to `_private_imports`: measured, it passed the whole file. It is
+        also the form MAF actually re-exports its internals as, so it is the likely one. The
+        target is spelled `<module>.<name>` so `(file, target)` still identifies the import, and
+        the `(package, stack)` edge is unchanged either way — the distribution root is the same.
+        """
+        if node.level != 0:  # a relative import is first-party by construction
+            self.generic_visit(node)
+            return
+        module = node.module or ""
+        private = [alias.name for alias in node.names if alias.name.startswith("_")]
+        for name in private:
+            self._record(f"{module}.{name}", node.lineno)
+        if not private:
+            self._record(module, node.lineno)
         self.generic_visit(node)
 
 

@@ -15,7 +15,10 @@ None of these are visible to `mypy`/`pytest` on the Python tree, and all of them
 silently rather than loudly, which is why they earn a test of their own.
 """
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -1134,6 +1137,101 @@ def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> No
         if line.startswith("ci:")
     )
     assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
+
+
+def _run_deps_audit(
+    tmp_path: Path, stdout: str, exit_code: int, *, ci: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Run `make deps-audit` against a stubbed `uvx pip-audit`, with `CI` set or unset.
+
+    The tool is stubbed rather than the network blocked because the two events under test — a
+    found vulnerability and an unreachable advisory database — are distinguished by `pip-audit`'s
+    *output*, and only one of them can be produced by unplugging a cable. `pip-audit` also caches
+    its responses, so an offline run after an online one legitimately succeeds; a stub is the only
+    way to ask the question deterministically.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "uv").write_text("#!/bin/sh\necho '# stub export'\n")
+    (stub_dir / "uvx").write_text(f"#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n")
+    for stub in ("uv", "uvx"):
+        (stub_dir / stub).chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "CI"}
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+    if ci is not None:
+        env["CI"] = ci
+    return subprocess.run(
+        [
+            "make",
+            "deps-audit",
+            f"AUDIT_REQUIREMENTS={tmp_path / 'requirements.txt'}",
+            f"AUDIT_LOG={tmp_path / 'audit.log'}",
+        ],
+        cwd=DEPLOY.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_UNREACHABLE = (
+    "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='pypi.org', port=443): "
+    "Max retries exceeded"
+)
+_FOUND = "Found 2 known vulnerabilities in 1 package\nName  Version ID\npypdf 6.14.2   GHSA-xxxx"
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_an_unreachable_advisory_database_does_not_fail_a_developers_offline_gate(
+    tmp_path: Path,
+) -> None:
+    """`make ci` runs `deps-audit`, and a laptop with no network must still get a usable gate.
+
+    `pip-audit` exits 1 both when it finds a vulnerability and when it cannot reach the advisory
+    database, so the exit status alone cannot separate them. Measured under `unshare -rn` before
+    this classification existed: `uvx` failing to fetch the tool gave make error 2, and `pip-audit`
+    dying inside `requests` gave make error 1 — the same 1 a real finding gives. The row this
+    lane's commit deleted from `BACKLOG.md` said this cost was unpriced; this is the price.
+    """
+    result = _run_deps_audit(tmp_path, _UNREACHABLE, 1, ci=None)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SKIPPED" in result.stdout, result.stdout
+    assert "NOT audited" in result.stdout, "an unaudited lockfile must say so, loudly"
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_an_unreachable_advisory_database_fails_in_ci(tmp_path: Path) -> None:
+    """The other half, and the half that makes the tolerance safe.
+
+    In CI the network is a given, so "unreachable" is a real failure — tolerating it there would
+    be a supply-chain hole that reads as a green build forever, which is the exact shape
+    `deps-audit` was wired into `ci.yml` to close.
+    """
+    result = _run_deps_audit(tmp_path, _UNREACHABLE, 1, ci="true")
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "cannot be skipped" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_a_real_finding_fails_even_offline(tmp_path: Path) -> None:
+    """A vulnerability is never excused, and never mistaken for an outage.
+
+    Checked before the unreachable patterns precisely so an advisory whose text mentions a
+    connection failure cannot buy an exemption — the failure mode of classifying output.
+    """
+    noisy = f"{_FOUND}\n{_UNREACHABLE}"
+    result = _run_deps_audit(tmp_path, noisy, 1, ci=None)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "SKIPPED" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_a_clean_audit_passes(tmp_path: Path) -> None:
+    """The control: exit 0 is exit 0, and the classification never sees it."""
+    result = _run_deps_audit(tmp_path, "No known vulnerabilities found", 0, ci="true")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SKIPPED" not in result.stdout
 
 
 def test_the_licence_decision_is_a_build_flag_rather_than_an_edit() -> None:

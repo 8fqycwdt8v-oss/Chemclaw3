@@ -138,13 +138,98 @@ def test_cancelling_the_wrapper_cancels_the_work_it_wraps(monkeypatch: pytest.Mo
         wrapped.cancel()
         with pytest.raises(asyncio.CancelledError):
             await wrapped
-        await asyncio.sleep(0.05)  # let the inner task act on its cancellation
+        # No sleep here, deliberately. A third version of this test had one — "let the inner task
+        # act on its cancellation" — and that sleep was doing the waiting the helper should do:
+        # `task.cancel()` only *requests* cancellation, so the wrapper was unwinding while the
+        # work was still in its `except`/`finally`. The helper now awaits the cancelled task, so
+        # by the time `await wrapped` returns the work has already finished unwinding.
         # Asserted *inside* the loop, deliberately: `asyncio.run` cancels every pending task on
         # its way out, so a check placed after it sees the work cancelled either way. That was the
         # second version of this test, and it also passed against the unfixed helper.
         assert reached_cancel, "the wrapped work was left running after the wrapper was cancelled"
 
     asyncio.run(_cancel_mid_flight())
+
+
+def test_cancellation_waits_for_the_work_to_finish_unwinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order, not just the fact: the work's cleanup completes *before* the caller unwinds.
+
+    `task.cancel()` alone only files a request. Measured on the same loop, with the work holding a
+    50 ms cleanup in its `except` block:
+
+        cancel + raise    -> ['wrapper-returned', 'cleanup-start', 'cleanup-done']
+        plain `await x`   -> ['cleanup-start', 'cleanup-done', 'wrapper-returned']
+
+    That difference is the whole reason `eln_sync` and `document_sync` adopting this helper had to
+    be checked: both previously awaited their work directly, where a cancelled activity does not
+    return until the chunk's `finally` — the DB commit — is done. Anything less makes the window
+    "the length of the work's cleanup" instead of closing it.
+    """
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: None)
+    events: list[str] = []
+
+    async def _slow() -> str:
+        try:
+            await asyncio.sleep(5.0)
+        except asyncio.CancelledError:
+            events.append("cleanup-start")
+            await asyncio.sleep(0.05)  # stands in for the chunk's commit
+            events.append("cleanup-done")
+            raise
+        return "done"
+
+    async def _cancel_mid_flight() -> None:
+        wrapped = asyncio.ensure_future(beating(_slow(), "interrupted", 600.0))
+        await asyncio.sleep(0.05)
+        wrapped.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await wrapped
+        events.append("wrapper-returned")
+        assert events == ["cleanup-start", "cleanup-done", "wrapper-returned"], events
+
+    asyncio.run(_cancel_mid_flight())
+
+
+def test_a_failing_heartbeat_does_not_leave_the_work_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation is not the only way out of the loop, and the other way leaked the same work.
+
+    `activity.heartbeat` raises outside an activity context, and can raise inside one if the
+    details payload fails to serialise. With the handler keyed on `CancelledError`, that exception
+    left the wrapper while the wrapped task ran on detached — measured, the work printed
+    "completed" a second *after* the wrapper had already raised, which is the exact defect the
+    cancellation fix was written to close, reached through a different door. `finally` covers both.
+    """
+
+    def _boom(*_: object) -> None:
+        raise RuntimeError("Not in activity context")
+
+    monkeypatch.setattr(activity, "heartbeat", _boom)
+    outcome: list[str] = []
+
+    async def _slow() -> str:
+        try:
+            await asyncio.sleep(1.4)
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+        outcome.append("ran to completion after the wrapper raised")
+        return "done"
+
+    async def _run() -> None:
+        # 4 s timeout -> a 1 s beat interval, so the first beat lands while the work is still
+        # waiting and takes the wrapper out through the non-cancellation path. The work then
+        # outlives the wrapper by 0.4 s, which is what makes "still running" observable rather
+        # than a wall-clock guess — the trap the two earlier versions of the sibling test fell in.
+        with pytest.raises(RuntimeError, match="Not in activity context"):
+            await beating(_slow(), "interrupted", 4.0)
+        await asyncio.sleep(0.8)
+        assert outcome == ["cancelled"], outcome
+
+    asyncio.run(_run())
 
 
 def test_the_beat_interval_has_exactly_one_derivation_in_the_tree() -> None:

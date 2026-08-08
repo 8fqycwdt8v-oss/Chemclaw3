@@ -268,9 +268,14 @@ the one left standing.
       expression over a 24 h window rather than reading its modulus: 25 and 971 distinct values
       before, 86,400 after. Pins the three files, so a fourth copy fails.
 - [x] **A `degraded()` helper + the warn-and-degrade sites** — the finding was re-measured and was
-      **worse than filed**: 42 handlers across 35 modules, of which 3 counted anything (filed as
-      22/17). Ten sites adopted, one labelled counter rather than ten counters; the remaining 12 are
-      in BACKLOG with triggers (4 need `is_replaying()`, 1 is a CLI, the rest are other lanes').
+      **worse than filed**: re-derived twice under a stated definition (one `ast.ExceptHandler`
+      whose subtree logs a warning and does not re-raise) as **41 handlers across 34 modules, of
+      which 4 counted anything** — filed as 22/17, and the lane's own first answer of 42/35/3 named
+      the wrong three modules (`kg/proposal.py` logs and `return`s before its `record_metric`, while
+      `api/routes/turns.py` and `api/state.py` do count and were not named). So "32 of 35 invisible"
+      is really 30 of 34. Ten sites adopted, one labelled counter rather than ten counters; the
+      remaining **29** are in BACKLOG with triggers (4 need `is_replaying()`, 1 is a CLI, 24 are
+      other lanes').
 - [x] **Adopt `heartbeat.beating` in its three holdouts** — and adoption exposed a defect *in the
       helper*: `asyncio.wait` does not cancel what it waits on, so a cancelled activity left its
       work running detached. Fixed. Two versions of that test passed against the unfixed helper

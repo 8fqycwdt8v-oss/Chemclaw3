@@ -77,9 +77,19 @@ tag.
   covers the entrypoint's `exec uvicorn` without the entrypoint knowing this module exists, and it
   covers the next library that configures its own logger.
 - The manifest-resolution failure logs at **ERROR** with the stable marker
-  `degraded[log_redaction]` and increments `chemclaw_degradations_total{subsystem="log_redaction"}`. A
+  `degraded[log_redaction]` and increments `chemclaw_degraded_total{subsystem="log_redaction"}`. A
   single WARNING in container startup output is the line nobody reads; the counter is the alertable
   surface, and any non-zero value is permanent for that pod.
+
+  Two notes for whoever builds that alert. The counter name above is a **correction**: a merge
+  resolution wrote `chemclaw_degradations_total`, which has never existed, into the only document
+  telling an operator what to alert on for the one *security* degradation in this tree — an alert
+  built from it would have queried an empty series forever and read as healthy. `make
+  prose-validate` now resolves metric names cited in prose against `core/metrics.py`, which is the
+  gate that would have caught it (D-2026-08-08-a-rule-with-no-test-is-a-claim). And the marker
+  `degraded[log_redaction]` is assembled at `core/metrics_bridge.py` as `"degraded[%s]: "` plus the
+  subsystem, so the literal string never appears in the source and grepping for it finds nothing;
+  grep for `"log_redaction"` instead.
 - `redact_secrets` gains a small set of **structural** rules alongside the value inventory, and
   `framing_envelope_secret` joins `_SECRET_SETTINGS` and gains a chart slot under a new
   `secrets.optionalKeys`.

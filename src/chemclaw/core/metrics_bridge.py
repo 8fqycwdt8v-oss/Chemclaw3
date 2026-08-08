@@ -60,10 +60,13 @@ def degraded(
     Every call site is a deliberate swallow — a preference that did not persist, a cost row that
     was lost, a connector token list that could not be resolved — and each is right to swallow,
     because the alternative is failing a chemist's turn over telemetry. What was missing is the
-    number. Measured on the tree this was written against: **42 `except` handlers that log a
-    warning and do not re-raise, across 35 modules, of which 3 counted anything** (`durable/
-    publish.py`, `kg/graph.py`, `kg/proposal.py`). The other 32 modules were invisible to anything
-    but a log search nobody runs.
+    number. Measured on `391b6ec^`, counting one `ast.ExceptHandler` whose subtree calls
+    `.warning()`/`.warn()` and contains no `raise`: **41 such handlers across 34 modules, of which
+    4 counted anything** (`api/routes/turns.py:173`, `api/state.py:237`, `durable/publish.py:151`,
+    `kg/graph.py:155`). The other 30 modules were invisible to anything but a log search nobody
+    runs. (An earlier revision of this docstring said 42/35/3 and named `kg/proposal.py` as one of
+    the three; its handler logs and `return`s, and the `record_metric` beside it is on the success
+    path. The re-derivation is in D-2026-08-08-a-rule-with-no-test-is-a-claim.)
 
     `logger` is the **caller's**, deliberately: a helper that logged under its own name would put
     `chemclaw.core.metrics_bridge` on every degradation line and throw away the one field that says

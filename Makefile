@@ -6,6 +6,18 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
+# `deps-audit`'s scratch files and the two patterns that classify its output. Named here rather
+# than inlined in the recipe so `tests/test_deploy_chart.py` can assert the classification against
+# the same strings the target uses, instead of a second copy that can drift from it.
+AUDIT_REQUIREMENTS ?= /tmp/chemclaw-requirements.txt
+AUDIT_LOG ?= /tmp/chemclaw-pip-audit.log
+# A real finding. Checked first and never excused, so an advisory whose text mentions a connection
+# failure cannot be read as one.
+AUDIT_FOUND := Found [0-9]+ known vulnerabilit
+# The advisory database (or `pip-audit` itself) could not be reached. Both observed forms:
+# `uvx` failing to fetch the tool, and `pip-audit` dying inside `requests`.
+AUDIT_UNREACHABLE := ConnectionError|Failed to fetch|Max retries exceeded|Temporary failure in name resolution|Name or service not known|Network is unreachable
+
 # Enforce exit-on-error and pipefail for all recipes: a failing command in a pipeline does not
 # pass silently when followed by a successful command. This is critical for the helm-validate
 # target: if `helm template` fails and emits empty output, `kubeconform` would otherwise see no
@@ -139,8 +151,39 @@ deps-audit:  ## Check the locked dependency closure for known vulnerabilities (s
 	@# already the fully-resolved set — re-resolving would audit a different closure than ships.
 	@# `.github/workflows/image.yml` runs exactly this, blocking, so a finding is a red build
 	@# rather than a report nobody opens.
-	uv export --no-hashes --no-dev --format requirements-txt > /tmp/chemclaw-requirements.txt
-	uvx pip-audit --no-deps --disable-pip -r /tmp/chemclaw-requirements.txt
+	@#
+	@# **A found vulnerability and an unreachable advisory database are different events, and
+	@# `pip-audit` gives them the same exit code (1).** So the output is classified rather than the
+	@# status trusted. This target joining `make ci` is what forced the question: `make ci` is the
+	@# documented pre-push gate, a laptop on a train has no network, and failing it there teaches
+	@# people to skip the gate. Measured under `unshare -rn`: `uvx` cannot fetch `pip-audit` itself
+	@# (make error 2) or `pip-audit` runs and dies on `requests.exceptions.ConnectionError` (make
+	@# error 1) — the same 1 a real finding exits with.
+	@#
+	@# The answer is asymmetric on purpose. Offline, unreachable is reported and tolerated: the
+	@# developer keeps a usable gate and loses only the check that has no local answer anyway. In
+	@# CI, where the network is a given, unreachable is a **failure** — a silent skip there is a
+	@# supply-chain hole that reads as a green build forever, which is exactly the shape this
+	@# target was added to close. `CI` is the signal because every runner sets it and nothing else
+	@# has to be kept in sync.
+	@#
+	@# A real finding is never mistaken for an outage: `Found N known vulnerabilities` is checked
+	@# first and fails unconditionally, so a connection string appearing in an advisory's text
+	@# cannot buy an exemption.
+	@uv export --no-hashes --no-dev --format requirements-txt > $(AUDIT_REQUIREMENTS)
+	@set +e; uvx pip-audit --no-deps --disable-pip -r $(AUDIT_REQUIREMENTS) 2>&1 | tee $(AUDIT_LOG); \
+	rc=$${PIPESTATUS[0]}; set -e; \
+	if [ $$rc -ne 0 ]; then \
+	  if grep -qE '$(AUDIT_FOUND)' $(AUDIT_LOG); then exit $$rc; fi; \
+	  if ! grep -qE '$(AUDIT_UNREACHABLE)' $(AUDIT_LOG); then exit $$rc; fi; \
+	  if [ -n "$${CI:-}" ]; then \
+	    echo "deps-audit: the advisory database is unreachable and this is CI — the supply-chain"; \
+	    echo "deps-audit: check cannot be skipped where the network is a given. Failing."; \
+	    exit 1; \
+	  fi; \
+	  echo "deps-audit: SKIPPED - the advisory database is unreachable and CI is unset."; \
+	  echo "deps-audit: the lockfile was NOT audited. Re-run with a network before you push."; \
+	fi
 
 explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }

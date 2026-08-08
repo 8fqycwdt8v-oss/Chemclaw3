@@ -1,8 +1,9 @@
 """Warn-and-degrade sites leave a number behind, and the subsystem label set stays enumerable.
 
-Measured on the tree this was written against: **42 `except` handlers that log a warning and do not
-re-raise, across 35 modules, and exactly 3 of those modules counted anything** (`durable/publish`,
-`kg/graph.py`, `kg/proposal.py`). Every swallow is individually right — the alternative is failing a
+Measured on `391b6ec^`, under a stated definition — one `ast.ExceptHandler` whose subtree calls
+`.warning()`/`.warn()` and contains no `raise`: **41 such handlers across 34 modules, and exactly 4
+of them counted anything** (`api/routes/turns.py:173`, `api/state.py:237`, `durable/publish.py:151`,
+`kg/graph.py:155`). Every swallow is individually right — the alternative is failing a
 chemist's turn because a preference did not persist — which is exactly why each has to leave a count
 behind: from outside, a preference store that has stopped writing, a cost ledger losing every row,
 and a redaction filter that never resolved its connector token names all look identical to a healthy
@@ -45,20 +46,44 @@ _EXPECTED_SUBSYSTEMS = {
 }
 
 
+def _subsystem_argument(node: ast.Call) -> ast.expr | None:
+    """The `subsystem` argument of a `degraded(...)` call, in either form it can be written.
+
+    Keyword before positional, because a call may pass `logger` positionally and `subsystem=` by
+    name. Returns None only for a call that passes no subsystem at all, which `mypy` rejects.
+    """
+    keyword = next((kw.value for kw in node.keywords if kw.arg == "subsystem"), None)
+    if keyword is not None:
+        return keyword
+    return node.args[1] if len(node.args) > 1 else None
+
+
+def _is_degraded_call(node: ast.AST) -> bool:
+    """Whether `node` calls the helper — `degraded(...)` or `<module>.degraded(...)`.
+
+    Both spellings, because matching only the bare name is not a narrowing, it is a hole:
+    `metrics_bridge.degraded(logger, f"conn_{n}", "x")` passed this whole file while a computed
+    label reached the metric. Matched on the attribute name alone for the same reason
+    `test_metric_declarations.py` matches `increment` that way — pinning the receiver would stop
+    covering whichever import form a new call site chose.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    return (isinstance(node.func, ast.Name) and node.func.id == "degraded") or (
+        isinstance(node.func, ast.Attribute) and node.func.attr == "degraded"
+    )
+
+
 def _call_site_subsystems() -> dict[str, list[str]]:
-    """Read the literal first-label argument of every `degraded(...)` call under `src/chemclaw`."""
+    """Read the literal subsystem argument of every `degraded(...)` call under `src/chemclaw`."""
     found: dict[str, list[str]] = {}
     for f in sorted(_SRC_ROOT.rglob("*.py")):
         tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
         for node in ast.walk(tree):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "degraded"
-                and len(node.args) >= 2
-            ):
+            if not _is_degraded_call(node):
                 continue
-            subsystem = node.args[1]
+            assert isinstance(node, ast.Call)
+            subsystem = _subsystem_argument(node)
             assert isinstance(subsystem, ast.Constant) and isinstance(subsystem.value, str), (
                 f"{f}:{node.lineno}: degraded()'s subsystem must be a literal — it is a metric "
                 "label value, and a computed one cannot be bounded by reading the source"
@@ -75,6 +100,31 @@ def test_the_subsystem_label_space_is_exactly_what_is_declared() -> None:
     assert set(observed) == _EXPECTED_SUBSYSTEMS, (
         f"the `subsystem` label value set changed. Sites: {dict(sorted(observed.items()))}"
     )
+
+
+def test_the_enumeration_sees_both_call_spellings_and_both_argument_forms() -> None:
+    """The extractor itself, pinned — because two ways past it were found by measurement.
+
+    `metrics_bridge.degraded(logger, f"conn_{n}", "x")` and
+    `degraded(logger, subsystem=f"conn_{n}", message="x")` each passed this whole file while
+    putting a computed value on a metric label, which is the one thing `core/metrics.py` says
+    cannot happen ("nothing a request carries can reach this label"). A per-connector or per-actor
+    f-string would have reached it silently, bounded only by `_MAX_SERIES_PER_COUNTER`.
+    """
+    calls = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                'degraded(logger, "a", "m")\n'
+                'metrics_bridge.degraded(logger, "b", "m")\n'
+                'degraded(logger, subsystem="c", message="m")\n'
+            )
+        )
+        if _is_degraded_call(node)
+    ]
+    assert len(calls) == 3, "a call spelling the source walk cannot see"
+    seen = [_subsystem_argument(call) for call in calls if isinstance(call, ast.Call)]
+    assert [s.value for s in seen if isinstance(s, ast.Constant)] == ["a", "b", "c"]
 
 
 def test_the_counter_is_declared_with_its_label() -> None:
