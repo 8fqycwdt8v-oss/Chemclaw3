@@ -193,7 +193,16 @@ read before it is characterised.
       Migration **041** makes a chunk row's identity `(doc_id, chunking_key, ordinal)` and the
       tail-drop is deleted outright: within one cutting the chunking is a pure function, so it could
       never fire. What supersedes a cutting is that no file row claims it — one `_CLAIMED` predicate
-      shared by `upsert` and `prune_stale`. Proved on a populated pre-041 table.
+      shared by `upsert` and `prune_stale`. Proved on a populated pre-041 table. **Its downgrade
+      path was the open half**, and is now measured rather than assumed: after 041 the previous
+      image cannot write the document index at all (`chunking_key` NOT NULL rejects the file
+      upsert, and the old `ON CONFLICT (doc_id, ordinal)` no longer resolves), so rollback is a
+      documented degradation — a *frozen* index, not a damaged one, because the crawl aborts
+      before its own sweep and deletes nothing. The alternative shapes were disproved rather than
+      argued: keeping a unique `(doc_id, ordinal)` re-permits the destruction 041 exists to stop,
+      restoring the old primary key fails outright once two chunkings exist, and folding the
+      chunking into `doc_id` makes a rollback delete 17 of 17 chunk rows. Recorded in
+      D-2026-08-08-a-rollback-that-is-not-a-schema-step, which supersedes D-2026-08-04.
 - [x] **The upgrade embedded the document corpus twice, not once** — `reembed_stale` runs ahead of
       the crawl and refreshed a cutting the crawl was about to replace: **17 embedding calls for a
       document worth 1**. `stale_chunks` now takes the chunkings the enabled shares actually use.
@@ -466,6 +475,12 @@ go red, then reverting it and watching it go green. The mutations are quoted ver
 - Per-key in-flight dedup in the calculation store (already a DEFERRED row; now measured).
 
 ## Refuted by measurement — do not re-open
+
+- The additive-migration gate was itself wrong in both directions until Phase 5: it flagged
+  `DROP CONSTRAINT` on a primary-key rebuild as data destruction, and was blind to the
+  `SET NOT NULL` that actually ends rollback-by-redeploy. It now asks the two questions
+  separately — destroying data is refused outright with no exemption available; breaking the
+  previous image is exemptable only by naming the exact statements and the ADR that reviewed them.
 
 - Duplicate `037` migration prefix is harmless: filename-keyed, deterministic, idempotent (tested with
   a third `037_*`).
