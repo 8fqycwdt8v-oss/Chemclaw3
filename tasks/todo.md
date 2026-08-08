@@ -315,24 +315,66 @@ gate-state section at the top of this file.
 - [x] **`deps-audit` into `make ci` and ci.yml** — red when written (2 CVEs), green now that T7's
       pypdf bump is merged. Verified in the merged tree: "No known vulnerabilities found".
 
-## Lane T10 — Claims that are false
+## Lane T10 — Claims that are false — DONE (D-2026-08-08-the-inventory-that-vouched-for-itself)
 
-- [ ] **"Every result is persisted once — never recomputed"** (CLAUDE.md:94, ARCHITECTURE.md:17-18,
-      unqualified). 8 concurrent `cached_compute` calls on one fresh key → **8 computes**. The gap is
-      in DEFERRED; the two files CLAUDE.md tells you to internalize do not qualify it.
-- [ ] **"the only place a finished job's result is collected"** — there are three; two produce
-      different exception types for the same bad input, one of which reaches a chemist verbatim.
-- [ ] **`infra/sql/README.md` Migration column wrong for 5 of 27 tables** — and
-      `test_schema_inventory.py` compares table *names* only, so the column its own "an inventory
-      nobody verifies" paragraph vouches for is the one part nothing verifies. Extend the test.
-- [ ] **"--admin bypasses auth"** — it bypasses authentication, not authorization.
-- [ ] **"No durable state lives here"** — the module defines durable identity; `_report_id` is
-      order- and case-sensitive, so the advertised idempotency holds only for a byte-identical request
-      from an LLM that reorders freely. Canonicalize it.
-- [ ] **`known_documents` answers "any chunk", not "all chunks"** — both backends agree with each other
-      and disagree with the docstring.
-- [ ] Two `connectors/server.py` / `caller.py` docstrings claim a per-request guarantee that
-      measurement disproves (identity is frozen at MCP handshake).
+Every claim was **re-measured against the tree as it now is** before being touched, because the
+other lanes had edited the code these claims are about. That rule earned its keep: one item was
+already true and one was half true, and in both cases the correct action was to leave the corrected
+part alone. Two claims are now defended by tests rather than by prose.
+
+- [x] **"Every result is persisted once — never recomputed"** (`CLAUDE.md`, `ARCHITECTURE.md`) —
+      **still misleading, corrected.** Live store, 8 concurrent `cached_compute` on one fresh key →
+      **8 computes, `was_cached` all False**; 4 more after the write landed → **0 computes**. Both
+      files now state the condition the claim holds under (a *persisted* result), carry the numbers,
+      and point at the `DEFERRED.md` row. In-flight dedup deliberately **not** implemented.
+- [x] **"the only place a finished job's result is collected"** — **still false, corrected, and the
+      divergence fixed.** Three sites collect one. On one identical bad result, path A raised
+      `ValueError: durable job 'job-1' completed but did not return the connector job envelope…`
+      and path C (`connectors/jobs._await_briefly`) raised `ValidationError: 2 validation errors for
+      ConnectorJobResult` — which reaches the model verbatim, because a `ValidationError` *is* a
+      `ValueError` and that is the family `_sanitize_tool_errors` passes through untouched.
+      `durable/connector_job.envelope_from_result` is now the one decode; both paths produce the
+      identical type and sentence. Two tests, one behavioural, one structural (`model_validate` on
+      the envelope may appear in `connector_job.py` and nowhere else).
+- [x] **`infra/sql/README.md` Migration column** — **wrong for 4 of 27 (not 5: T6 had fixed
+      `document_chunks`), corrected AND enforced.** `bo_suggestions` omitted 037,
+      `calculation_results` omitted 019, `note_proposals` omitted 036, `session_messages` omitted
+      026 — each a later `ALTER TABLE`, each confirmed against the live database (41 applied).
+      `tests/test_schema_inventory.py` now derives the column from the SQL and checks it, matching
+      *constructs* rather than bare identifiers (`observations` is both a table and a column of
+      `bo_suggestions`, which a mention-based rule got wrong on exactly one file of 42). A second
+      test refuses to pass over a statement shape the rule cannot classify — proved by introducing
+      `GRANT SELECT ON note_index TO chemclaw_app`, which it named and refused.
+- [x] **"--admin bypasses auth"** — **the two docstrings were already fixed by an earlier lane;
+      the `--help` string was not.** Measured on the shipped config: `entra_required=False`,
+      `skill_role_gates={}`, `cli_admin_roles=[]` → roles `[]`. The `--help` line said "bypasses
+      Entra auth; advertises all skills" — the one sentence a human reads — and now says
+      authentication only, with authorization still applying and roles empty by default.
+- [x] **"No durable state lives here"** — **corrected, and `_report_id` canonicalised.** The module
+      *defines* durable identity (three workflow ids + the reuse policy); the docstring now says so.
+      Before: sections swapped / title re-cased / heading re-cased / a trailing space on a query
+      each produced a different id and so a second unbounded research run. After: all rejoin.
+      Canonicalisation covers the half a model writes only — `requested_by`, `requested_roles` and
+      `memory_layer` stay byte-exact, because they are the access-control half and folding two
+      spellings of a principal is the cross-actor merge they exist to prevent. A test pins each side.
+- [x] **`known_documents` answers "any chunk", not "all chunks"** — **already true; "any" is the
+      right predicate.** T6 had rewritten the docstrings. Measured on one document with 1 of 5
+      chunks moved to a new key: in-memory and live Postgres both report it known, both find the
+      other 4 stale. Correct, because this gate answers "must the crawl re-read this file" and the
+      remaining 4 are the per-chunk drain's job, which runs first. Docstring now states "at least
+      one" with the measurement; the `BACKLOG.md` row stopped describing a docstring since fixed.
+- [x] **Two `connectors/server.py` / `caller.py` docstrings** — **disproved again, and fixed rather
+      than reworded.** Handshake with alice's headers, `tools/call` with bob's on one
+      `mcp-session-id`: tool body read `('alice-oid', 'sess-alice', 'corr-alice')`. The serving
+      request *is* reachable (`request_ctx` carries it), so `_bind_caller_per_tool_call` binds and
+      resets around each tool call at the interception `_sanitize_tool_errors` already owns; the
+      same probe now reads `('bob-oid', 'sess-bob', 'corr-bob')`. Both docstrings corrected; the
+      regression test drives the real transport and fails by name under the mutation.
+
+**Left, each a `BACKLOG.md` row with a trigger:** per-key in-flight dedup (a `DEFERRED.md` row,
+untouched by design); per-document completeness in `known_documents`; and **migration 041's
+`DROP CONSTRAINT`, which `tests/test_migrations_are_additive.py` refuses** — an inherited red test,
+byte-identical to what T10 branched from, whose resolution belongs to the lane that wrote 041.
 
 ## Lane T11 — tests that do not constrain behaviour
 

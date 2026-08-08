@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.lowlevel.server import request_ctx
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -216,11 +217,66 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
             with continue_trace(request.headers):
                 return await call_next(request)
         finally:
-            # Defensive rather than load-bearing, and worth being honest about: each request runs
-            # in its own task context, so a `ContextVar` set here is already invisible to the next
-            # one. The reset costs nothing and holds if that ever stops being true — but no test
-            # can fail without it, so it is not claimed as a guarantee.
+            # This used to say "each request runs in its own task context, so a `ContextVar` set
+            # here is already invisible to the next one", and measurement disproved it in the
+            # direction that mattered: a *tool body* does not run in this task at all, so what it
+            # read was the handshake's identity rather than the call's, for the whole life of the
+            # MCP session. `_bind_caller_per_tool_call` is what makes a tool see its own caller.
+            # This binding stays for everything else on the request path, and the reset with it.
             reset_caller(tokens)
+
+
+def _bind_caller_per_tool_call(server: FastMCP) -> None:
+    """Re-bind the caller from the request the tool call is *serving*, not the one that connected.
+
+    `CallerLogMiddleware` binds the contextvars in `dispatch`, which is an ASGI task. An MCP tool
+    body does not run there: it runs in the session-manager task created by `initialize`, so the
+    contextvar it reads is whatever the *handshake* set. Measured over the real streamable-HTTP
+    transport — handshake carrying alice's headers, then `tools/call` carrying bob's on the same
+    `mcp-session-id` — the tool body read `('alice-oid', 'sess-alice', '')`. The middleware log
+    line for that call says bob, because it reads the headers directly; a durable row stamped by
+    the same call said alice. The two artifacts this feature exists to reconcile disagreed.
+
+    Not a cross-user *leak*: a second, independent MCP session showed no bleed, so the scope is
+    "frozen at the handshake within one session". It is a mis-attribution, and it becomes a live
+    one the moment a connection is pooled or reused across turns.
+
+    The serving request is reachable — `request_ctx` is set per JSON-RPC message and carries the
+    ASGI request — so the fix is to read it here rather than to weaken the docstrings. When there
+    is no request context (a stdio transport, a tool called directly in a test) this falls through
+    to whatever the middleware bound, which is today's behaviour and the right one.
+
+    Wrapped around `_sanitize_tool_errors`'s interception of the same method rather than merged
+    into it: two concerns, two functions, one patch point each.
+    """
+    manager = server._tool_manager  # noqa: SLF001 - the only interception point this mcp version offers
+    wrapped_call_tool = manager.call_tool
+
+    async def _call_tool(
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: Any = None,
+        convert_result: bool = False,
+    ) -> Any:
+        request = getattr(request_ctx.get(None), "request", None)
+        headers = getattr(request, "headers", None)
+        if headers is None:
+            return await wrapped_call_tool(
+                tool_name, arguments, context=context, convert_result=convert_result
+            )
+        tokens = bind_caller(
+            headers.get(HEADER_ACTOR, ""),
+            headers.get(HEADER_SESSION, ""),
+            headers.get(HEADER_CORRELATION, ""),
+        )
+        try:
+            return await wrapped_call_tool(
+                tool_name, arguments, context=context, convert_result=convert_result
+            )
+        finally:
+            reset_caller(tokens)
+
+    manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
 
 
 def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
@@ -298,6 +354,8 @@ def connector_app(
         A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
     """
     _sanitize_tool_errors(server, name=name)
+    # Outermost, so the identity a tool stamps on a durable row is bound before anything else runs.
+    _bind_caller_per_tool_call(server)
     mcp_app = server.streamable_http_app()
 
     @asynccontextmanager

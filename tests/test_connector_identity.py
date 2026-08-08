@@ -434,3 +434,90 @@ def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(
 
     for raw in (b"Bearer \xff", b"Bearer s3cret-token-valu\xe9", b"Bearer \xc3\xa9"):
         assert asyncio.run(_status_for(raw)) == 401, f"{raw!r} did not produce a clean refusal"
+
+
+def test_a_tool_reads_the_caller_of_the_call_it_serves_not_of_the_handshake() -> None:
+    """The identity a connector stamps on a durable row must be the one that asked for the row.
+
+    `CallerLogMiddleware` binds the caller in `dispatch`, an ASGI task — but a tool body runs in
+    the MCP session-manager task created by `initialize`, so the contextvar it read was whatever
+    the *handshake* set, for the whole life of the MCP session. Measured over the real
+    streamable-HTTP transport, handshaking with alice's headers and then calling the tool with
+    bob's on the same `mcp-session-id`: the tool body read
+    `('alice-oid', 'sess-alice', 'corr-alice')`. The middleware's own log line for that same call
+    printed bob, because it reads the headers directly — so the log and the durable row this
+    feature exists to reconcile disagreed with each other.
+
+    Two docstrings asserted the opposite ("each request runs in its own task context, so a
+    ContextVar set here is already invisible to the next one"; "so one request's identity cannot
+    leak into the next"). Both are corrected, and this is the test that keeps the corrected
+    version true.
+
+    Not a cross-user leak today — two independent MCP sessions showed no bleed — so what this
+    pins is attribution, which is exactly what `caller_provenance` exists to provide.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.caller import caller_provenance
+    from chemclaw.connectors.server import connector_app
+
+    seen: list[tuple[str, str, str]] = []
+    server = FastMCP("probe")
+
+    @server.tool()
+    def whoami() -> str:
+        """Record the caller the tool body sees."""
+        seen.append(caller_provenance())
+        return "ok"
+
+    def who(name: str) -> dict[str, str]:
+        return {
+            HEADER_ACTOR: f"{name}-oid",
+            HEADER_SESSION: f"sess-{name}",
+            HEADER_CORRELATION: f"corr-{name}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+
+    # `base_url` on a loopback host because `FastMCP`'s transport ships its own DNS-rebinding
+    # guard (`allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"]`), and TestClient's default
+    # `testserver` host is refused with 421 before any of this is reached.
+    with TestClient(
+        connector_app(server, name="probe"), base_url="http://127.0.0.1:8000"
+    ) as client:
+        opened = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "probe", "version": "1"},
+                },
+            },
+            headers=who("alice"),
+        )
+        session_id = opened.headers["mcp-session-id"]
+        client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            headers={**who("alice"), "mcp-session-id": session_id},
+        )
+        client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "whoami", "arguments": {}},
+            },
+            headers={**who("bob"), "mcp-session-id": session_id},
+        )
+
+    assert seen == [("bob-oid", "sess-bob", "corr-bob")], (
+        "a tool called by bob on a session alice opened must be attributed to bob; "
+        f"got {seen} — the caller is frozen at the MCP handshake again"
+    )

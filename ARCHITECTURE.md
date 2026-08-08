@@ -14,8 +14,11 @@ merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the parts
 1. **MAF** (Microsoft Agent Framework) — conversation orchestration and short reasoning steps.
 2. **Temporal** — durable execution of long or expensive jobs. Durability lives here and *only*
    here, never in MAF. Two kinds of task queue: `background-jobs` (light: sync, re-index, reports)
-   and one per connector bundle that owns durable work, each sized for that work. Every result is
-   persisted once and never recomputed.
+   and one per connector bundle that owns durable work, each sized for that work. Once a result is
+   persisted it is never recomputed — but the store's lookup-before-compute is a check-then-act, so
+   concurrent misses on the *same* key all compute: eight together measured eight computes, and
+   four more after the write landed measured none. Per-key in-flight dedup is a `docs/planning/DEFERRED.md`
+   row, not a bug the code hides.
 3. **Agent Skills** (`SKILL.md`) — "how do I do X" (judgment), loaded on demand.
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data and relations).
 

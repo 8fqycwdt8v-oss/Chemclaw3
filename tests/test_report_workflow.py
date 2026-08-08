@@ -189,6 +189,69 @@ def test_a_report_run_is_not_shared_across_entitlements() -> None:
     ), "role order is not a different entitlement"
 
 
+def test_re_asking_for_a_report_rejoins_the_run_when_the_model_rephrases_it() -> None:
+    """The idempotency this tool advertises has to survive its actual caller, which is an LLM.
+
+    `_report_id` was byte-exact over model-written text, so "re-requesting the same title and
+    sections returns the existing job" held only for a byte-identical request. Measured before the
+    fix, against one base request: sections swapped -> different id, title re-cased -> different,
+    a heading re-cased -> different, a trailing space on a query -> different. Every one of those
+    starts a second unbounded multi-section research run, which is the cost
+    `CORE_EXPENSIVE_ACTIONS` gates this tool to avoid.
+    """
+    base = ReportRequest(
+        title="Route X",
+        sections=[
+            ReportSection(heading="Scope", query="what is known", memory_layer="evidence"),
+            ReportSection(heading="Cost", query="what does it cost", memory_layer="episodic"),
+        ],
+        requested_by="alice@corp",
+        requested_roles=["r"],
+    )
+    rephrased = ReportRequest(
+        # Re-cased title, sections swapped, a heading re-cased, a query with stray whitespace.
+        title="route  x ",
+        sections=[
+            ReportSection(heading="cost", query="what does it cost", memory_layer="episodic"),
+            ReportSection(heading="Scope", query=" what is  known", memory_layer="evidence"),
+        ],
+        requested_by="alice@corp",
+        requested_roles=["r"],
+    )
+    assert _report_id(base) == _report_id(rephrased)
+
+
+def test_canonicalising_a_report_id_does_not_reach_the_entitlement_key() -> None:
+    """The canonicalisation must stop at the free text, or it undoes the test above it.
+
+    Folding case over `requested_by` or the roles would merge two spellings of a principal or a
+    role name into one run — which is exactly the cross-user merge that putting them in the id
+    prevents. `memory_layer` is a closed set and is left exact for the same reason: a fold there
+    could only ever collapse two layers, never rescue a typo.
+    """
+    sections = [ReportSection(heading="Scope", query="what is known", memory_layer="evidence")]
+
+    def _request(actor: str, roles: list[str]) -> ReportRequest:
+        return ReportRequest(
+            title="Route X", sections=sections, requested_by=actor, requested_roles=roles
+        )
+
+    assert _report_id(_request("alice@corp", ["r"])) != _report_id(_request("Alice@Corp", ["r"]))
+    assert _report_id(_request("alice@corp", ["r"])) != _report_id(_request("alice@corp", ["R"]))
+    layers = [
+        _report_id(
+            ReportRequest(
+                title="Route X",
+                sections=[ReportSection(heading="Scope", query="q", memory_layer=layer)],
+                requested_by="alice@corp",
+                requested_roles=["r"],
+            )
+        )
+        for layer in ("evidence", "episodic", "semantic")
+    ]
+    assert len(set(layers)) == 3, "two memory layers are two different reports"
+
+
 def test_a_report_carries_its_requester_into_retrieval() -> None:
     """The gap: a gated source contributed nothing to a report, and the draft said so nowhere.
 

@@ -154,13 +154,22 @@ class DocumentIndex(Protocol):
         ...
 
     async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
-        """Which of these documents already have chunks under both configurations.
+        """Which of these documents have **at least one** chunk under both configurations.
 
         Keyed on the embedding configuration, not merely on presence: a document indexed by a
         previous model must be re-embedded even though its content is unchanged, or a copy arriving
         under a new path would inherit a vector nothing else in the corpus is comparable to. And on
         the chunking, because the boundaries decide what each vector describes — a document whose
         content hash is unchanged still needs cutting again when they move.
+
+        "At least one", not "all", and both backends agree on that: measured, a document with one
+        of five chunks moved to a new key reports as known, leaving four stale. That is correct
+        *here* because this gate answers "must the crawl re-read and re-embed this file", and the
+        remaining four are the per-chunk drain's job — `stale_chunks` found exactly those four, and
+        `DocumentSyncWorkflow` drains before it crawls. A caller that reordered the two phases, or
+        made the drain partial, would inherit a real bug; that is a `docs/planning/BACKLOG.md` row
+        with a trigger rather than a stronger predicate here, because per-document completeness
+        would re-embed a whole file to fix one chunk.
         """
         ...
 

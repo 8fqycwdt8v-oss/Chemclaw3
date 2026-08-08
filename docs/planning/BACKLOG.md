@@ -401,9 +401,11 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       key can see that, and only a re-embed fixes it.
 
 - [ ] **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
-      whether *some* chunk of a document carries the current key, while `index.py`'s docstring
-      states the stronger invariant. Transient in the shipped workflow, because the re-embed drain
-      completes before the crawl — but any caller that reorders the two phases inherits a real bug.
+      whether *some* chunk of a document carries the current key. The docstrings said the stronger
+      thing and now say this one, with the measurement (one of five chunks moved to a new key ->
+      the document reports as known, `stale_chunks` finds the other four). Transient in the shipped
+      workflow, because the re-embed drain completes before the crawl — but any caller that
+      reorders the two phases inherits a real bug.
       *Trigger:* reordering those phases, or making the drain partial.
 
 - [ ] **The citation tie-break is collation-dependent** — [S]. In-memory picks the smallest path
@@ -411,6 +413,31 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       For a document at `Projects/Report.pdf` and `Projects/acme report.pdf` the two disagree, so
       the "deterministic citation" is a property of the deployment's collation rather than of the
       code. *Trigger:* a corpus with duplicate content under mixed-case paths.
+
+## Open — Left by lane T10 of the 2026-08-08 review campaign
+
+Record: `D-2026-08-08-the-inventory-that-vouched-for-itself`.
+
+- [ ] **Migration 041 drops a constraint, and the additive guard refuses it** — [M].
+      `tests/test_migrations_are_additive.py::test_a_migration_destroys_nothing[041_document_chunk_identity.sql]`
+      fails: `041` runs `ALTER TABLE document_chunks DROP CONSTRAINT IF EXISTS document_chunks_pkey`
+      to replace the primary key with `(doc_id, chunking_key, ordinal)`. Inherited red, not caused
+      by T10 — the migration and the guard are both byte-identical to what T10 branched from. The
+      open question is which one is wrong: replacing a primary key loses no data, so either the
+      forward-only rule admits `DROP CONSTRAINT` and the guard's `ALTER TABLE … DROP` substring is
+      too coarse to tell a constraint from a column, or the pkey swap has to be a reviewed
+      operation outside the migration set. It is a decision for the lane that wrote 041.
+      *Trigger:* immediately — this is a failing test on the campaign branch's gate.
+
+- [ ] **`_report_id` canonicalisation is a policy about free text only** — [S]. Title, headings and
+      queries are casefolded and whitespace-collapsed and the section list is sorted;
+      `requested_by`, `requested_roles` and `memory_layer` are deliberately byte-exact, because
+      those three are the access-control half (D-2026-08-08-identity-must-travel-with-the-work) and
+      folding two spellings of a principal together is the cross-actor merge they exist to prevent.
+      The cost accepted: two requests differing only in casing or section order share one run, so
+      the first requester's rendering is what the draft shows.
+      *Trigger:* a report request whose *meaning* depends on section order, or a directory where
+      two distinct principals differ only by case.
 
 ## Open — Left by the whole-codebase security sweep (2026-08-06)
 

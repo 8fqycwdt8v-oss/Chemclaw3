@@ -256,8 +256,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--admin",
         action="store_true",
-        help="Run unauthenticated as the admin actor (bypasses Entra auth; advertises all "
-        "skills). Required — this terminal tool has no front-door OIDC token to check.",
+        help="Run unauthenticated as the admin actor. Bypasses Entra *authentication* only — "
+        "authorization still applies, and the roles come from CHEMCLAW_CLI_ADMIN_ROLES, empty by "
+        "default, so this confers identity and no entitlement. Required — this terminal tool has "
+        "no front-door OIDC token to check.",
     )
     parser.add_argument(
         "--actor",

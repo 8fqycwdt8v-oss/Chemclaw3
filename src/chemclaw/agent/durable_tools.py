@@ -4,9 +4,14 @@
 background worker with **no caller anywhere** — no agent tool, no HTTP route, no Schedule — so
 the only way to start it in a running deployment was the Temporal CLI. This is the missing
 adapter, in the thin shape the QM launcher established (D-002): authorize → stamp the ambient
-actor → deterministic workflow id → return the id immediately. No durable state
-lives here; the agent never blocks. Completion reaches the chat through the existing push-back
-channel (F3-T3).
+actor → deterministic workflow id → return the id immediately. Nothing here *stores* durable state
+and the agent never blocks; completion reaches the chat through the existing push-back channel
+(F3-T3).
+
+It does, however, **define** durable identity, and that is not a lesser thing than storing it: the
+workflow ids for three workflows and the reuse policy that decides whether a repeat re-executes or
+rejoins are all written here, so "who gets whose run" is settled in this module. `_report_id` is
+where that is subtle enough to argue about; read it before changing what goes into an id.
 
 **This shape is superseded and this module is shrinking.** The BO campaign that used to be its
 second tool now lives in the `bo` connector bundle, declared as one `jobs:` entry over the
@@ -20,16 +25,23 @@ reads: without it the report was the one durable job a chemist could poll to `co
 have no tool that hands over the answer.
 
 `get_durable_job_status` stays here for good: it is generic over every durable job,
-connector-owned or not, and it is now the **only** place a finished job's result is collected.
-The QM/HPC job was the last one with a status tool of its own; it is a `qm` connector job as of
-D-118, `agents/job_status.py` is gone, and so is the envelope-shaped exception this tool made
-for it.
+connector-owned or not, and it is the only *status tool* — the QM/HPC job was the last one with
+one of its own; it is a `qm` connector job as of D-118, `agents/job_status.py` is gone, and so is
+the envelope-shaped exception this tool made for it.
+
+It is **not** the only place a finished job's result is collected, and the sentence that said so
+was wrong in a way that showed: three call sites collect one — this tool,
+`chemclaw.agent.job_results` (the mid-turn resume), and the in-turn wait in
+`chemclaw.connectors.jobs`, which is a different subsystem and cannot route through an agent
+tool. What is genuinely single is the *decode*:
+`chemclaw.durable.connector_job.envelope_from_result` is the one place raw becomes an envelope or
+an error, and all three go through it.
 """
 
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -43,7 +55,7 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
-from chemclaw.durable.connector_job import ConnectorJobResult
+from chemclaw.durable.connector_job import envelope_from_result
 from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, search_job_records
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
@@ -83,6 +95,15 @@ _TERMINAL = {
 }
 
 
+def _canonical(text: str) -> str:
+    """Model-written free text, reduced to what it means: whitespace collapsed, case folded.
+
+    Only for building a durable id. The request itself keeps the words the chemist chose, because
+    they are what the draft renders.
+    """
+    return " ".join(text.split()).casefold()
+
+
 def _report_id(request: ReportRequest) -> str:
     """A deterministic id for a report request, so re-asking is idempotent (D-011 discipline).
 
@@ -105,10 +126,31 @@ def _report_id(request: ReportRequest) -> str:
     is in the payload below. Sharing across actors would be the cheaper answer and it is not
     available: the id is what `job_status()` hands a report out by, and that call applies no actor
     check, so an id two principals can both derive is an id either can collect.
+
+    **The model-written half is canonicalised; the entitlement half is not.** The requester of this
+    tool is an LLM emitting a section list, and it reorders and re-cases freely, so a byte-exact
+    key made "re-asking is idempotent" true only for a byte-identical request: measured, swapping
+    two sections, re-casing the title, re-casing a heading and a trailing space on a query each
+    produced a *different* id and therefore a second unbounded multi-section research run — the
+    cost `CORE_EXPENSIVE_ACTIONS` gates this tool to avoid. Title, headings and queries are
+    therefore whitespace-collapsed and casefolded, and the section list is sorted.
+
+    What that costs is real and small: two requests differing only in casing or section order share
+    one run, so the *first* requester's casing and ordering are what the draft renders. The second
+    is not misled — `get_durable_job_status` reports the run's own summary, which names the title
+    actually drafted — and a PR-gated draft is edited by a human before it becomes knowledge.
+
+    `requested_by`, `requested_roles` and `memory_layer` are deliberately left byte-exact, and that
+    is the same argument as the paragraph above rather than a separate one: they are not free text
+    a model composes. Folding two spellings of a principal or a role together is precisely the
+    cross-actor merge this key exists to prevent, and `memory_layer` is a closed set.
     """
     payload = [
-        request.title,
-        *(f"{s.heading}|{s.query}|{s.memory_layer}" for s in request.sections),
+        _canonical(request.title),
+        *sorted(
+            f"{_canonical(s.heading)}|{_canonical(s.query)}|{s.memory_layer}"
+            for s in request.sections
+        ),
         request.requested_by,
         *sorted(request.requested_roles),
     ]
@@ -123,7 +165,8 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
     source, then opens the assembled draft as a PR-gated `report` note for human review.
     Long-running and resumable — it survives restarts — so this returns a job id rather than the
     report; poll it with `get_durable_job_status`. Re-requesting the same title and sections
-    returns the existing job.
+    returns the existing job — matched on meaning, not on bytes, so re-ordered sections and
+    differences of case or spacing rejoin the run rather than starting a second one.
 
     Each section declares the memory layer it draws on, which keeps evidenced history and
     transferred analogy structurally apart in the draft:
@@ -284,11 +327,11 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
     """Decode a finished durable job's raw result into the status this system reports.
 
-    Extracted so that "a finished job's result is collected in exactly one place" — which this
-    module's docstring claims and which D-118 made true — survives having a second waiter. The
-    other caller is `chemclaw.agent.job_results`, the mid-turn resume: it waits on the workflow
-    handle rather than polling a status, but what it must do with the answer is identical, and a
-    second copy of this decode is how the two would come to disagree about what "completed" means.
+    This is the agent layer's share of that job: `envelope_from_result` does the decode — the
+    same one `chemclaw.connectors.jobs` needs for its in-turn wait — and this wraps it in the
+    status model only the agent reports. The two waiters here are `get_durable_job_status`, which
+    polls, and `chemclaw.agent.job_results`, the mid-turn resume that waits on the handle instead;
+    what they must do with the answer is identical.
 
     Args:
         job_id: The job the result belongs to, for the status and for the error message.
@@ -297,18 +340,7 @@ def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
     Raises:
         ValueError: When the result is not the connector envelope.
     """
-    try:
-        envelope = ConnectorJobResult.model_validate(raw)
-    except ValidationError as exc:
-        # Hard, not a degraded status. The single exception this branch tolerated was the QM/HPC
-        # job, which is a connector job now — so every launcher this system exposes produces the
-        # envelope, and a result that is not one is a foreign workflow id. Returning "completed"
-        # with no result for it would report a finished calculation while withholding the answer,
-        # which is the failure mode the envelope was adopted to end (D-118).
-        raise ValueError(
-            f"durable job {job_id!r} completed but did not return the connector job envelope; "
-            "the id does not belong to a job any launcher in this system started"
-        ) from exc
+    envelope = envelope_from_result(job_id, raw)
     return DurableJobStatus(
         job_id=job_id, status="completed", summary=envelope.summary, result=envelope.data
     )
