@@ -12,15 +12,19 @@ implementation with two callers — the format allowlist, the structural-extract
 by-name refusal of a scanned PDF are all documented there.
 
 What remains here is what is genuinely about an *upload*: the size limit, the sanitized handle the
-model uses, and the session-scoped store.
+model uses, the session-scoped store, and — because parsing untrusted bytes is real work and the
+front door runs one uvicorn worker — the bounded worker-thread wrapper the route parses through
+(`parse_attachment_off_loop`).
 
 Attachments are **session-scoped and in-memory**: they are working material for a conversation, not
 knowledge. Anything worth keeping goes through `propose_knowledge_note` and the PR-gate like every
 other machine-written note — routing uploads straight into the graph would bypass the GxP line.
 """
 
+import asyncio
 import logging
 import re
+from functools import partial
 
 from pydantic import BaseModel, Field
 
@@ -45,9 +49,11 @@ __all__ = [
     "AttachmentError",
     "AttachmentStore",
     "AttachmentSummary",
+    "AttachmentUnavailable",
     "content_type_for",
     "list_attachments",
     "parse_attachment",
+    "parse_attachment_off_loop",
     "read_attachment",
 ]
 
@@ -96,6 +102,113 @@ def parse_attachment(name: str, raw: bytes, declared_type: str | None = None) ->
     return Attachment(
         name=name, content_type=parsed.content_type, text=parsed.text, rows=parsed.rows
     )
+
+
+class AttachmentUnavailable(RuntimeError):
+    """Every parse slot on this process is busy — a *retryable* refusal, unlike `AttachmentError`.
+
+    Its own type because the two say opposite things to the client: `AttachmentError` is about the
+    file (sending it again changes nothing), this one is about the moment (sending it again in a
+    second probably works). The route maps them to 422 and 503 accordingly.
+    """
+
+
+class _ParseSlots:
+    """How many uploads may be parsed in worker threads at once, across this whole process.
+
+    A counter rather than an `asyncio.Semaphore` for two reasons. It is released by the worker's
+    *completion callback*, never by the waiting request: a request whose parse timed out has
+    stopped waiting, but Python cannot stop its thread, and handing the slot back while that thread
+    still runs would let the cap be exceeded without bound — exactly the case the cap exists for.
+    And a counter has no event loop bound to it, so nothing here has to be rebuilt per loop.
+
+    Every mutation happens on the event loop thread: `take` is called from the request, and
+    `give_back` arrives through `Future.add_done_callback`, which asyncio dispatches with
+    `call_soon`. There is therefore no lock, and no window between the test and the increment.
+    """
+
+    def __init__(self) -> None:
+        """Start idle; the cap itself is read from config at each `take`, so it stays tunable."""
+        self.in_flight = 0
+
+    def take(self) -> bool:
+        """Claim a parse slot, or report that the process is already at its cap."""
+        if self.in_flight >= settings.attachment_max_concurrent_parses:
+            return False
+        self.in_flight += 1
+        return True
+
+    def give_back(self, future: "asyncio.Future[Attachment]") -> None:
+        """Return the slot once the worker thread has actually finished.
+
+        `future.exception()` is read and dropped on purpose: when the awaiting request has already
+        timed out, nothing else will ever retrieve it, and an unretrieved exception surfaces at
+        collection time as a bare `Future exception was never retrieved` traceback with nothing
+        tying it to an upload. The failure is not lost — the request that timed out was told.
+        """
+        self.in_flight -= 1
+        if not future.cancelled():
+            future.exception()
+
+
+# One ledger per process, mirroring the attachment store beside it: the bound is a property of the
+# pod's CPU, not of a session.
+_PARSE_SLOTS = _ParseSlots()
+
+
+async def parse_attachment_off_loop(
+    name: str, raw: bytes, declared_type: str | None = None
+) -> Attachment:
+    """Parse an upload in a worker thread, bounded in concurrency and in how long a caller waits.
+
+    `parse_attachment` is CPU-bound work by third-party libraries over untrusted bytes, and it used
+    to run inline in an `async def` route. `Settings` pins the front door to one uvicorn worker, so
+    a single document that parses slowly — a decompression bomb inside the 2 MB cap, or the
+    `/ToUnicode` bomb that took the previously locked pypdf 33.8 s and 1.9 GB — froze *every*
+    session, SSE stream and health probe on the pod for its whole duration. Nothing else bounded
+    it: `service_max_concurrent_turns` meters LLM turns, and `BodySizeLimit` meters bytes, not
+    parse cost.
+
+    Shed rather than queued past the cap (`attachment_max_concurrent_parses`), the same discipline
+    the turn admission uses: queueing would let a burst of hostile uploads pile up threads in the
+    default executor — which is where `chemclaw.api.auth` validates every bearer token — and turn
+    an upload flood into a whole-pod outage one layer removed.
+
+    Raises:
+        AttachmentUnavailable: Every parse slot is busy (retryable).
+        AttachmentError: The file is unsupported, unreadable, or still parsing after
+            `attachment_parse_timeout_seconds`.
+    """
+    if not _PARSE_SLOTS.take():
+        raise AttachmentUnavailable(
+            f"{settings.attachment_max_concurrent_parses} uploads are already being parsed on "
+            "this replica; retry in a moment"
+        )
+    loop = asyncio.get_running_loop()
+    # The default executor, kept honest by the cap above rather than by a pool of its own: a
+    # dedicated pool would bound the threads and still let an unbounded queue of abandoned work
+    # accumulate behind them.
+    future = loop.run_in_executor(None, partial(parse_attachment, name, raw, declared_type))
+    future.add_done_callback(_PARSE_SLOTS.give_back)
+    try:
+        # Shielded, and that is what makes the cap true: `wait_for` cancels what it waits on, and
+        # cancelling this future would fire the release callback while the thread it stands for is
+        # still running. The shield takes the cancellation instead, so the slot comes back exactly
+        # when the thread does.
+        return await asyncio.wait_for(
+            asyncio.shield(future), timeout=settings.attachment_parse_timeout_seconds
+        )
+    except TimeoutError as exc:
+        logger.warning(
+            "parsing %s exceeded %ss; the upload was refused and its worker thread runs on",
+            name,
+            settings.attachment_parse_timeout_seconds,
+        )
+        raise AttachmentError(
+            f"{name} was still being read after "
+            f"{settings.attachment_parse_timeout_seconds:g}s and was refused; a smaller or "
+            "simpler file will work"
+        ) from exc
 
 
 class AttachmentStore:

@@ -15,11 +15,15 @@ refused. The cap described what the parser would accept, never what the process 
 """
 
 import asyncio
+import threading
 
+import httpx
 import pytest
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
+from chemclaw.agent import attachments
+from chemclaw.agent.attachments import Attachment
 from chemclaw.api.app import create_app
 from chemclaw.api.rate_limit import RateLimited, RequestLimiter, reset_limiter
 
@@ -290,3 +294,148 @@ def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
 
     assert not reached, "the app ran for a request already known to be too large"
     assert sent[0]["status"] == 413
+
+
+# --- parsing an upload is work, and work on the event loop is an outage -------------------------
+
+
+class _SlowParse:
+    """Stands in for a hostile document: real blocking work, released only when the test says so.
+
+    `threading.Event().wait()` rather than a sleep, because the thing under test is *when* a slot
+    comes back, and a sleep would make that a race against a duration instead of a fact. It blocks
+    a real thread, exactly like the CPU-bound library call it replaces — a fake that awaited would
+    prove nothing, since an await is precisely what the defect lacked.
+    """
+
+    def __init__(self) -> None:
+        """Start blocked, with nothing parsed yet."""
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.calls = 0
+
+    def __call__(self, name: str, raw: bytes, declared_type: str | None = None) -> Attachment:
+        """Block until released, then return a plausible parse of the upload."""
+        self.calls += 1
+        self.started.set()
+        self.release.wait(timeout=10)
+        return Attachment(name=name, content_type="text/csv", text="a,b", rows=1)
+
+
+async def _upload(client: httpx.AsyncClient, session_id: str) -> httpx.Response:
+    """POST one small CSV to a session's attachment route."""
+    return await client.post(
+        f"/sessions/{session_id}/attachments",
+        files={"file": ("runs.csv", b"a,b\n1,2\n", "text/csv")},
+    )
+
+
+def test_a_slow_upload_does_not_stall_every_other_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finding: `upload_attachment` is `async def` and parsed inline, on one uvicorn worker.
+
+    Size is not cost. A decompression bomb or a hostile font map well inside `attachment_max_bytes`
+    holds a CPU for tens of seconds (measured: 33.8 s for a 201 KB PDF on the previously locked
+    pypdf), and every session, SSE stream and health probe on the pod waited for it —
+    `service_max_concurrent_turns` meters turns, `BodySizeLimit` meters bytes, and neither meters
+    parse cost.
+
+    Counterfactual, measured: call `parse_attachment` inline in the route again and this test's
+    probe cannot even be *reached* until the parse has finished — the assertion that the upload is
+    still in flight is what discriminates, and it fails. A latency bound alone would not have: with
+    the loop blocked, the probe still answers quickly once it finally runs.
+    """
+    parse = _SlowParse()
+    monkeypatch.setattr(attachments, "parse_attachment", parse)
+
+    async def _drive() -> None:
+        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            upload = asyncio.create_task(_upload(client, session_id))
+            await asyncio.to_thread(parse.started.wait, 5)
+
+            # The pod is mid-parse. A liveness probe now decides whether the container is killed.
+            async with asyncio.timeout(2):
+                probe = await client.get("/healthz")
+            assert probe.status_code == 200
+            assert not upload.done(), (
+                "the probe answered only because the parse had already finished — this run does "
+                "not exercise the window at all"
+            )
+
+            parse.release.set()
+            assert (await upload).status_code == 200
+
+    asyncio.run(_drive())
+
+
+def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A burst of hostile uploads must not pile threads into the pool that validates tokens.
+
+    Queuing would move the outage one layer out: `chemclaw.api.auth` validates every bearer token
+    through `asyncio.to_thread`, so uploads that hog the default executor stall authentication for
+    everyone. Shed with a retryable 503 instead — the same answer the turn admission gives.
+    """
+    from chemclaw.core.config import settings
+
+    parse = _SlowParse()
+    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
+
+    async def _drive() -> None:
+        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            first = asyncio.create_task(_upload(client, session_id))
+            await asyncio.to_thread(parse.started.wait, 5)
+
+            shed = [(await _upload(client, session_id)).status_code for _ in range(3)]
+            assert shed == [503, 503, 503], shed
+            assert parse.calls == 1, "a shed upload was parsed anyway"
+
+            parse.release.set()
+            assert (await first).status_code == 200
+
+    asyncio.run(_drive())
+
+
+def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two halves of one contract, and the second is what makes the cap true.
+
+    The client stops waiting after `attachment_parse_timeout_seconds` and is told so (422 — the
+    file is unreadable *here*, and sending it again would do the same thing). But Python cannot
+    kill the thread, so the slot must stay taken until that thread actually ends: releasing it when
+    the request gives up would let one attacker hold every CPU while the counter reads zero.
+    """
+    from chemclaw.core.config import settings
+
+    parse = _SlowParse()
+    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
+
+    async def _drive() -> None:
+        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            refused = await _upload(client, session_id)
+            assert refused.status_code == 422
+            assert "0.2s" in refused.json()["detail"]
+
+            # The thread is still running, so the slot it stands for is still taken.
+            assert attachments._PARSE_SLOTS.in_flight == 1
+
+            parse.release.set()
+            async with asyncio.timeout(5):
+                while attachments._PARSE_SLOTS.in_flight:
+                    await asyncio.sleep(0.01)
+
+    asyncio.run(_drive())

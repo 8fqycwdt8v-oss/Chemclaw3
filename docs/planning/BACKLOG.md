@@ -41,6 +41,36 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       `workflow.patched` convention or an explicit "drain these schedules before deploying" step.
       *Trigger:* the next change to a workflow's command sequence.
 
+- [ ] **A timed-out attachment parse still runs to completion** — [M]. `parse_attachment_off_loop`
+      bounds how long a *caller* waits and how many parses run at once, and it cannot bound the
+      thread: Python has no way to stop one. So a document past
+      `attachment_parse_timeout_seconds` keeps burning a CPU and holding one of
+      `attachment_max_concurrent_parses` until it finishes on its own. The cap is what makes that
+      survivable rather than fatal, and the pypdf 6.15.0 bump removes the one known input that
+      reaches it. Closing it properly means parsing in a killable **subprocess**, which buys a hard
+      kill and costs a process pool, pickling the bytes, and a second failure mode (a child OOM
+      inside the pod's cgroup) to reason about.
+      *Trigger:* a measured parse that exceeds the timeout in production, or a second CVE in a
+      parser library whose fix is not a version bump.
+
+- [ ] **The share sync's parse has no timeout** — [S]. `ingest/documents/sync.py:200` already runs
+      `_read_and_parse` under `asyncio.to_thread`, so a hostile document cannot wedge the crawler's
+      event loop (the front-door defect does not exist there — measured, not assumed). What it
+      lacks is a wall clock: one pathological file can hold the sync activity for as long as it
+      likes, and Temporal's heartbeat is what notices. That is a throughput concern in a background
+      activity rather than an availability one, so it is recorded instead of changed — and it needs
+      the same subprocess answer as the row above to be more than cosmetic.
+      *Trigger:* a share sync that misses its schedule with one file named in the log.
+
+- [ ] **`deps-audit` runs in neither `make ci` nor `ci.yml`** — [S]. Only `image.yml`. So the
+      documented pre-push gate and every branch push go green against a lockfile with known CVEs —
+      which is how pypdf 6.14.2 sat in the lock — and `CLAUDE.md`'s "a green `make` locally means a
+      green CI" is false for the supply chain. Not fixed here because it is a CI-policy change with
+      a cost this lane cannot price: `pip-audit` needs network, so adding it to `make ci` makes the
+      gate fail offline.
+      *Trigger:* the next dependency CVE, or the first CI run that has a decided answer for the
+      offline case.
+
 ## Open — Left by the mounted-document-share build (2026-08-06)
 
 Record: `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`. The share is crawled,

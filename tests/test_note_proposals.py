@@ -516,6 +516,26 @@ def test_without_a_secret_a_reindex_still_works_but_decides_nothing(
     assert stored is not None and stored.state is ProposalState.OPEN
 
 
+def test_a_malformed_signed_body_is_a_422_not_a_500(
+    client: TestClient, store: InMemoryProposalStore
+) -> None:
+    """A body the schema rejects is the caller's mistake, and must be answered as one.
+
+    `model_validate_json` was called on the raw bytes inside the handler — the one place FastAPI's
+    request-validation layer cannot see — so a `ValidationError` escaped as an unhandled 500.
+    Repeatable at will by anyone who can sign a body (a misconfigured proxy will do it by
+    accident), which also makes it a way to move the 5xx rate operators alert on.
+
+    The signature gate is untouched and still runs first: the body below is correctly signed, so
+    the 422 is reached only *after* authentication, and an unsigned malformed body is still a 401
+    (pinned by the tests around this one).
+    """
+    for body in (b"{not json at all", b'{"note_ids": "reaction-1"}', b'{"note_ids": [1, 2]}'):
+        response = client.post("/events/knowledge-merged", content=body, headers=_signed(body))
+        assert response.status_code == 422, (body, response.status_code)
+        assert "note_ids" in response.json()["detail"] or "JSON" in response.json()["detail"]
+
+
 def test_a_tampered_signature_is_refused(client: TestClient, store: InMemoryProposalStore) -> None:
     """The check must actually reject a MAC computed over different bytes."""
     body = b'{"note_ids": ["reaction-1"]}'

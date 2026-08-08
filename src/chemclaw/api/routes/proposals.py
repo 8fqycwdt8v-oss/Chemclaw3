@@ -15,6 +15,7 @@ import hashlib
 import hmac
 
 from fastapi import FastAPI, HTTPException
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -168,7 +169,24 @@ async def knowledge_merged(
     signed = _webhook_signature_ok(raw, request.headers.get(_WEBHOOK_SIGNATURE_HEADER, ""))
     if settings.note_webhook_secret and not signed:
         raise HTTPException(status_code=401, detail="invalid or missing webhook signature")
-    merged = KnowledgeMergedIn.model_validate_json(raw) if raw else KnowledgeMergedIn()
+    try:
+        merged = KnowledgeMergedIn.model_validate_json(raw) if raw else KnowledgeMergedIn()
+    except ValidationError as exc:
+        # The body is read raw (the signature covers bytes, not a parsed model), which puts this
+        # parse *inside* the handler — where FastAPI's request-validation layer, the thing that
+        # turns a bad body into a 422, cannot see it. Left alone, a malformed body was an
+        # unhandled `ValidationError`: a 500 for what is plainly the caller's mistake, repeatable
+        # at will and therefore also a way to move the 5xx rate an operator alerts on.
+        #
+        # Location and message only, never `errors()` whole: that carries the offending `input`
+        # back, so a 2 MB malformed body would be echoed into the response (and the access log).
+        faults = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or 'body'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise HTTPException(
+            status_code=422, detail=f"the webhook body does not match the expected shape: {faults}"
+        ) from exc
     closed = 0
     if merged.note_ids:
         if not signed:

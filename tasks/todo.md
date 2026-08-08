@@ -157,19 +157,27 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
       `gather` without `return_exceptions` — `warehouse/retriever.py:109`.
 - [ ] Migration 038's btree cannot serve its own `IS DISTINCT FROM` scan — measured Seq Scan at 1M rows.
 
-## Lane T7 — API robustness
+## Lane T7 — API robustness — DONE (D-2026-08-08-a-slot-lives-as-long-as-its-response)
 
-- [ ] **Push-back stream slot leaks permanently on disconnect** — `api/routes/streams.py:95`. A
+- [x] **Push-back stream slot leaks permanently on disconnect** — `api/routes/streams.py:95`. A
       never-started async generator runs no `finally`; 5 stalled connects → an honest 6th gets 429
-      "close one and retry" with nothing open to close. `api/state.py:171` solves the identical window
-      with an expiring lease.
-- [ ] **Token budget overshoots by the concurrent-request count** — `api/routes/turns.py:188`.
-      Documented bound 8, measured 40.
-- [ ] **pypdf 6.14.2 → 6.15.0** (CVE-2026-71852, CVE-2026-71870), reachable from the authenticated
-      upload route; measured 8.59 s / 1.9 GB RSS from a 200 KB input, inline on the event loop with
-      uvicorn pinned to one worker.
-- [ ] **Parse attachments off the event loop** with a timeout — independent of any specific CVE.
-- [ ] Malformed webhook body is a 500, not a 422.
+      "close one and retry" with nothing open to close. Fixed by **response-scope release, not the
+      expiring lease** `api/state.py:171` uses: a turn has a widest wall clock, but a push-back
+      stream polls until the client leaves, so any deadline that clears a leak also evicts a healthy
+      stream's accounting. See the ADR's *Alternatives rejected*.
+- [x] **Token budget overshoots by the concurrent-request count** — `api/routes/turns.py:188`.
+      Documented bound 8, measured 40. Re-checked after the admission permit; 10 concurrent POSTs
+      against a 1-turn cap now yield 1 answer, not 10.
+- [x] **pypdf 6.14.2 → 6.15.0** (CVE-2026-71852, CVE-2026-71870). Re-measured in-process on a
+      crafted 201 KB PDF: 33.83 s / 1948 MB RSS → 0.00 s / 36 MB / `LimitReachedError`.
+      `make deps-audit` went from 2 findings to "No known vulnerabilities found".
+- [x] **Parse attachments off the event loop** with a timeout — `parse_attachment_off_loop`, bounded
+      by two new config fields, shedding with 503 rather than queueing (the default executor is where
+      `api/auth` validates every token). *Refuted for `ingest/documents/crawl.py`: it opens no files;
+      the share's parse at `sync.py:200` has always run under `asyncio.to_thread`. Its missing
+      timeout is a throughput concern and is now a backlog row.*
+- [x] Malformed webhook body is a 500, not a 422. Now 422 with `loc`/`msg` only — never `errors()`
+      whole, which echoes the body back. The signature gate is untouched and still runs first.
 
 ## Lane T8 — Science correctness
 
