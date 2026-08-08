@@ -189,14 +189,41 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "playbook",  # a transferable rule distilled across projects (memory/playbook.py)
         "interaction",  # a chemist-confirmed answer (memory/interaction.py)
         "report",  # a drafted development report (report/harness.py)
-        "job-result",  # a durable calculation's result (connectors/qm/knowledge.py)
-        "bo-candidate",  # a BO campaign's recommendation (connectors/bo/knowledge.py)
+        # `job-result` and `bo-candidate` used to sit here. They are minted by the `qm` and `bo`
+        # bundles, so they now live in those bundles' `connector.yaml` `note_types:` and reach the
+        # vocabulary through `known_note_types()` — a bundle's contribution should not require a
+        # line in core, which is the whole claim of the connector seam.
         # The agent's reasoned proposal for the next run in a series, argued from the record
         # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
     }
 )
+
+
+def known_note_types() -> frozenset[str]:
+    """Core's note types plus those the enabled connector bundles declare.
+
+    **The vocabulary belongs to the deployment, not to this file.** Two of the types above are
+    minted by bundles rather than by core — `job-result` by `connectors/qm/` and `bo-candidate` by
+    `connectors/bo/` — and were added to the frozenset by hand. That made "contribute a note type"
+    the one connector contribution that required editing core, inside the seam whose whole claim is
+    that a capability is a folder and nothing else (D-118). A bundle now declares `note_types:` in
+    its manifest and this unions them in.
+
+    The set stays *closed*, which is the property worth keeping: a name no manifest and no core
+    entry declares still fails `make kg-validate`, so a typo cannot reach the graph and make a note
+    invisible to every filter keyed on its type.
+
+    The connector registry is imported **inside the function**, deliberately. `chemclaw.kg` is
+    layer 4 and `chemclaw.connectors` is layer 2/3, so a module-scope import would make the graph
+    depend on the capability layer at import time — for a set that only two validators ever ask
+    for. The same shape, and the same reason, as `core.logging`'s lazy resolution of connector
+    token names; both are declared in `tests/test_layering.py::_ALLOWED_LAZY_EDGES`.
+    """
+    from chemclaw.connectors.registry import declared_note_types
+
+    return KNOWN_NOTE_TYPES | declared_note_types()
 
 
 class TemporalWindow(BaseModel):

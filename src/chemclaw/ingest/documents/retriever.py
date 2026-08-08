@@ -68,13 +68,22 @@ class ShareDocumentRetriever:
     """A `SourceRetriever` over one mounted share's indexed documents. One per data source."""
 
     def __init__(
-        self, binding: dict[str, Any], name: str | None = None, index: DocumentIndex | None = None
+        self, binding: dict[str, Any], name: str, index: DocumentIndex | None = None
     ) -> None:
         """Validate the binding at startup; `name` is the id every chunk is cited under.
 
+        **`name` is required, and it used to default to `"sharedrive"`.** That default was the
+        whole of a data-loss bug: the registry builds a half from `**manifest.config`, which
+        carries no name, so *every* share took the literal — two mounted shares both answered
+        `sharedrive`, `share_sources()` collapsed them to one entry, and the survivor's sweep
+        deleted the other's rows. `chemclaw.ingest.sources.registry._build_retrieve_half` now
+        stamps the manifest's name over whatever is passed here, so the production path cannot
+        disagree with the folder; requiring it as well means a *direct* construction cannot
+        silently claim to be a share it is not.
+
         Args:
             binding: The share's declared layout, from the manifest's `config:` block.
-            name: The retriever id; the registry passes the source's name.
+            name: The data-source name this share is indexed and cited under.
             index: The backend, injected by tests; production resolves the Postgres one lazily so
                 importing this module opens no connection.
         """
@@ -84,7 +93,7 @@ class ShareDocumentRetriever:
         # column learns it from a message naming both numbers rather than from pgvector rejecting
         # every chunk inside a worker, hours after a deploy that looked clean.
         require_schema_vector_width()
-        self.name = name or "sharedrive"
+        self.name = name
         self._index = index
 
     def share_binding(self) -> DocumentShareBinding:

@@ -1,6 +1,24 @@
 # Extensibility audit: what does it actually cost to add a thing?
 
-**Date**: 2026-08-08 · **Scope**: this repository · **Method**: measured, not read · **Status**: report only, no code changed.
+**Date**: 2026-08-08 · **Scope**: this repository · **Method**: measured, not read.
+
+**Status: all five findings fixed in the same branch.** The audit below is kept as written — it is
+the evidence, and rewriting it into the past tense would lose the measurements that motivated each
+change. What each finding became:
+
+| # | Fix | Record |
+| --- | --- | --- |
+| 1 | The registry passes `name=manifest.name` to every retrieve half; two shares are two corpora | D-2026-08-08-a-source-is-named-by-its-folder-not-by-its-half |
+| 2 | Runbook §(xv): onboard / entitle / revoke / offboard, the gate inventory, and `make user-erase` | D-2026-08-08-the-conversation-is-erasable-the-record-is-not |
+| 3 | `note_types:` / `relations:` in `connector.yaml`, unioned into the closed vocabulary | D-2026-08-08-a-bundle-may-extend-a-closed-vocabulary |
+| 4 | Runbook §(xvi) for `audit-verify`, `share-sync`, `safety-validate` | (in the same ADR as #2) |
+| 5 | `validate_connectors` catches the shared base, so the report survives | (in the same ADR as #2) |
+
+**One correction to the analysis below.** Finding 5 names `_job_problems`'s `except ValueError` as
+the cause. That was wrong: `ConnectorJobError` *is* a `ValueError`, so that arm catches it. The
+escape is a later, separate `job_tools()` call guarded by `except ConnectorError` — a *sibling*
+class, not a parent — which re-raised after the clean sentence had already been computed and put in
+the report. The finding was real and the diagnosis was not; the fix addresses the actual site.
 
 The question was whether every part of the system that changes on a regular cadence — a new tool, a
 new agent, a new data source, a new skill, configuration, user management, routine operations — is

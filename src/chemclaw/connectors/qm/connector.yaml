@@ -29,3 +29,11 @@ jobs:
 
 skills:
   - qm-job-submission
+
+# The note type this bundle's `publish_to_graph` job mints (`connectors/qm/knowledge.py`). It was a
+# hand-written line in `chemclaw.kg.note.KNOWN_NOTE_TYPES`, which made a bundle's vocabulary the one
+# connector contribution that needed a core edit. Declared here, it is discovered with the bundle
+# and disappears with it — `make kg-validate` accepts `job-result` in a deployment that runs this
+# connector and rejects it in one that does not, which is the honest answer either way.
+note_types:
+  - job-result

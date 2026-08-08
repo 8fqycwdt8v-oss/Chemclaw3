@@ -49,15 +49,26 @@ from chemclaw.ingest.sources.registry import (
 
 
 def _check_half(name: str, field: str, reference: str, config: dict[str, object]) -> list[str]:
-    """Resolve one half and bind the manifest's config against its signature (rules 1 and 2)."""
+    """Resolve one half and bind the manifest's config against its signature (rules 1 and 2).
+
+    Bound against **exactly what the registry passes**, which is not the same for the two halves: a
+    retrieve half additionally receives `name=<the manifest's name>` (see
+    `chemclaw.ingest.sources.registry._build_retrieve_half` for why every retrieve half is told
+    which source it is). Binding the config alone would report a retriever that correctly requires
+    `name` as broken, and would pass one that refuses it — in both directions the opposite of the
+    truth, which is the only thing worse than not checking.
+    """
     try:
         factory = resolve_half(reference)
     except DataSourceError as exc:
         return [f"{name}: {field}: {exc}"]
+    passed: dict[str, object] = dict(config)
+    if field == "retrieve":
+        passed["name"] = name
     try:
-        inspect.signature(factory).bind(**config)
+        inspect.signature(factory).bind(**passed)
     except TypeError as exc:
-        return [f"{name}: {field}: {reference} will not accept config {sorted(config)}: {exc}"]
+        return [f"{name}: {field}: {reference} will not accept config {sorted(passed)}: {exc}"]
     return []
 
 

@@ -127,3 +127,57 @@ partition rests on, and nothing checks it.
 
 **No repo state left behind**: every experiment ran from `PATH`-style overrides pointing at the
 scratchpad. `git status` shows only these two documents.
+
+---
+
+## Part two: fixing all five
+
+- [x] **Finding 1** — `_build_retrieve_half` passes `name=manifest.name` to every retrieve half.
+      Passed rather than stamped after construction, because stamping accepts a half that refuses
+      to be named, which is exactly how the defect survived. Passed to *every* half rather than
+      only the parameterised ones, because a conditional pass is a rule the next half can fall
+      outside of. Required (no default) on `ShareDocumentRetriever` and `WarehouseVectorRetriever`,
+      whose old defaults were right for the first instance and wrong for every other.
+- [x] **Finding 2** — runbook §(xv): the two ways a tenant expresses membership, the five gates that
+      read a role, onboard/entitle/revoke, and offboarding via `chemclaw.agent.leaver` +
+      `make user-erase`. The conversation is erasable; the GxP record is retained, counted and
+      explained. No kill switch, recorded as a decision rather than left as a silence.
+- [x] **Finding 3** — `note_types:`/`relations:` in `connector.yaml`; `known_note_types()` unions
+      core's closed set with the *enabled* bundles'. `job-result` and `bo-candidate` moved out of
+      core into the `qm` and `bo` manifests. Lazy `kg -> connectors` edge declared in the layering
+      policy beside the `core.logging` precedent it copies.
+- [x] **Finding 4** — runbook §(xvi) for `audit-verify`, `share-sync`, `safety-validate`, and why
+      `schedules-apply` is deliberately not an operator step.
+- [x] **Finding 5** — the escape was `job_tools()` under `except ConnectorError`, a sibling of
+      `ConnectorJobError`, not the `_job_problems` arm the report named. Widened to the shared base
+      and de-duplicated against what was already reported.
+- [x] Three ADRs, ledger rows in sorted position.
+
+## Verify (part two)
+
+- [x] **The original repro re-run**: two shares now index under two names, and the sweep of one
+      removes nothing from the other.
+- [x] **Counterfactual measured**: reverting the one-line pass makes all three new seam tests fail;
+      restoring it makes them pass. They discriminate.
+- [x] **Postgres stood up locally** (with pgvector 0.8 built from source, since 0.6 cannot create
+      one migration's `bit_jaccard_ops` index) so the eight leaver tests *run* instead of skipping.
+      Five of them had been skipping silently — an offboarding command proven by nothing.
+- [x] **`tests/test_database_privileges.py` caught a real gap in this change**: the new DELETE on
+      `session_owners` had no matching grant. Fixed in `app_privileges.sql`, on its own line because
+      insert-and-delete-but-not-update matches no other group there.
+- [x] `make lint type test` green — 3602 passed, 36 skipped (xtb/crest binaries only). All eight
+      validators green.
+
+## Review
+
+The audit's value was concentrated in the two places where running the code disagreed with reading
+it. Three docstrings, an ADR and a migration comment all described a working two-share deployment;
+the registry never passed the name, so the second share overwrote and then swept the first. And the
+fix's own verification repeated the lesson one level down: five leaver tests reported success by
+skipping, which is what "no database reachable" looks like from a green suite. Standing Postgres up
+turned three of them red — and then the repo's existing privileges test found a missing grant that
+no amount of reading the new module would have surfaced.
+
+The one thing I would flag for a reviewer: `kg -> connectors` is the second declared lazy edge in
+the layering policy. Two is still legible. A third would be the signal that the vocabulary wants to
+live somewhere neither package owns.

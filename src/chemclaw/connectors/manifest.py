@@ -41,6 +41,7 @@ Adding a transport or an auth mode is one variant plus one branch at the single 
 never a widening of one model with optional fields that only apply sometimes.
 """
 
+import re
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -339,6 +340,43 @@ class ConnectorManifest(BaseModel):
     # instead of a silently-shipped skill (`scripts.validate_connectors`).
     skills: list[str] = Field(default_factory=list)
     profiles: list[str] = Field(default_factory=list)
+    # The knowledge-graph vocabulary this bundle's `publish_to_graph` jobs mint, unioned into
+    # `KNOWN_NOTE_TYPES`/`KNOWN_RELATIONS` by `chemclaw.kg.note.known_note_types` and its sibling.
+    #
+    # **Why a bundle may extend a closed vocabulary.** Those two frozensets are closed on purpose:
+    # a typo makes a note or an edge unfindable by every filter keyed on it, so the vocabulary is
+    # checked at the PR-gate rather than left open. But the vocabulary is not core's alone —
+    # `job-result` and `bo-candidate` are both minted by bundles (`connectors/qm/knowledge.py`,
+    # `connectors/bo/knowledge.py`) and were written into core's frozenset by hand. That made a
+    # bundle contributing a note type the one connector contribution needing a core edit, in the
+    # seam whose whole claim is that a capability is a folder (D-118).
+    #
+    # Declaring it here keeps both properties: the set is still closed (an undeclared name still
+    # fails `make kg-validate`), a human still sees a genuinely new type at the gate that reviews
+    # the bundle, and the deployment's effective vocabulary is exactly what its enabled bundles say
+    # it is. Names are validated for shape here and for *existence* nowhere — a type nothing has
+    # minted yet is a declaration, not an error.
+    note_types: list[str] = Field(default_factory=list)
+    relations: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _vocabulary_is_well_formed(self) -> Self:
+        """Reject a note type or relation that is not a lowercase hyphenated token.
+
+        The same shape the shipped vocabulary uses (`bo-candidate`, `computed-from`). Enforced
+        because these names become path segments (`knowledge/<type>/<id>.md`) and frontmatter keys:
+        a name with a slash, a space or an uppercase letter would produce a note that validates and
+        then cannot be found by the filters keyed on it — the exact failure the closed vocabulary
+        exists to prevent, arriving through the door opened for extending it.
+        """
+        for field, values in (("note_types", self.note_types), ("relations", self.relations)):
+            bad = sorted(v for v in values if not re.fullmatch(r"[a-z][a-z0-9-]*", v))
+            if bad:
+                raise ValueError(
+                    f"connector {self.name!r}: {field} entries must be lowercase hyphenated "
+                    f"tokens (e.g. 'job-result'); got {bad}"
+                )
+        return self
 
     @model_validator(mode="after")
     def _contributes_capability(self) -> Self:

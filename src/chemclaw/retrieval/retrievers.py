@@ -112,11 +112,16 @@ async def _conflict_index(directory: Path) -> dict[str, NoteConflicts]:
 class GraphRetriever:
     """Retrieve evidence from the Markdown knowledge graph. A `SourceRetriever`."""
 
-    name = "graph"
+    def __init__(self, notes_dir: str | None = None, name: str = "graph") -> None:
+        """Read notes from the given directory, or the configured `knowledge_dir`.
 
-    def __init__(self, notes_dir: str | None = None) -> None:
-        """Read notes from the given directory, or the configured `knowledge_dir`."""
+        `name` is the data-source name this retriever is cited under, passed by
+        `chemclaw.ingest.sources.registry` from the manifest. It defaults to the name of the
+        folder that ships this retriever, so direct construction in a test or a script keeps
+        working without repeating it.
+        """
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
+        self.name = name
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks from notes matching every term of `query`, ranked best first.
@@ -342,12 +347,20 @@ class VectorRetriever:
     manifest passes construction *config*, not pre-built objects.
     """
 
-    name = "vector"
+    def __init__(
+        self,
+        index: NoteIndex | None = None,
+        notes_dir: str | None = None,
+        name: str = "vector",
+    ) -> None:
+        """Search `index` (the production note index by default); excerpts from `notes_dir`.
 
-    def __init__(self, index: NoteIndex | None = None, notes_dir: str | None = None) -> None:
-        """Search `index` (the production note index by default); excerpts from `notes_dir`."""
+        `name` is the data-source name, passed by the registry from the manifest — see
+        `GraphRetriever.__init__` for why every retrieve half takes one.
+        """
         self._index = index if index is not None else default_note_index()
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
+        self.name = name
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for the notes most cosine-similar to `query` under the type/tag filters."""
@@ -373,12 +386,20 @@ class LexicalRetriever:
     defaults to the production one for the same reason as `VectorRetriever`.
     """
 
-    name = "lexical"
+    def __init__(
+        self,
+        index: NoteIndex | None = None,
+        notes_dir: str | None = None,
+        name: str = "lexical",
+    ) -> None:
+        """Search `index` (the production note index by default); excerpts from `notes_dir`.
 
-    def __init__(self, index: NoteIndex | None = None, notes_dir: str | None = None) -> None:
-        """Search `index` (the production note index by default); excerpts from `notes_dir`."""
+        `name` is the data-source name, passed by the registry from the manifest — see
+        `GraphRetriever.__init__` for why every retrieve half takes one.
+        """
         self._index = index if index is not None else default_note_index()
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
+        self.name = name
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for the notes best matching `query`'s terms under the type/tag filters."""

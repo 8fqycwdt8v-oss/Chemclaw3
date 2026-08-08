@@ -47,12 +47,20 @@ logger = logging.getLogger(__name__)
 class WarehouseVectorRetriever:
     """A `SourceRetriever` running its similarity search in the warehouse. One per data source."""
 
-    def __init__(self, binding: dict[str, Any], name: str | None = None) -> None:
-        """Validate the binding at startup; `name` is the retriever id chunks are attributed to.
+    def __init__(self, binding: dict[str, Any], name: str) -> None:
+        """Validate the binding at startup; `name` is the source chunks are attributed to.
 
-        The same signature as `WarehouseElnAdapter` because the registry splats one `config:` block
-        into whichever half it builds — a source declaring both halves would fail
-        `make datasource-validate` if they disagreed about their keyword arguments.
+        `binding` comes from the manifest's `config:` block, which the registry splats into
+        whichever half it builds — so a source declaring both halves would fail
+        `make datasource-validate` if they disagreed about their `config` keys. `name` is the extra
+        argument the *retrieve* path adds on top of that block (`_build_retrieve_half`), which the
+        ingest adapter does not take and does not need: the ELN sync already keys its cursors on the
+        manifest name.
+
+        **It is required, and it used to default to `"warehouse"`.** A default is only ever right
+        for the first instance — a second warehouse ELN would have been indistinguishable from the
+        first in every citation and every source weight, which is the same defect that let two
+        mounted shares share one document-index partition.
         """
         self._binding: WarehouseBinding = load_binding(binding)
         if self._binding.vector is None:
@@ -60,7 +68,7 @@ class WarehouseVectorRetriever:
                 "this data source declares a retrieve half, but its binding has no 'vector' section"
             )
         self._vector: VectorBinding = self._binding.vector
-        self.name = name or "warehouse"
+        self.name = name
         self._warehouse: Warehouse | None = None
 
     def _connection(self) -> Warehouse:
