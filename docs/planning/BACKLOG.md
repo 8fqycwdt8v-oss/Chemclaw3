@@ -41,6 +41,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       `workflow.patched` convention or an explicit "drain these schedules before deploying" step.
       *Trigger:* the next change to a workflow's command sequence.
 
+The three rows below are the API-robustness lane's residuals; what it fixed is in
+`docs/decisions/D-2026-08-08-a-slot-lives-as-long-as-its-response.md`.
+
 - [ ] **A timed-out attachment parse still runs to completion** — [M]. `parse_attachment_off_loop`
       bounds how long a *caller* waits and how many parses run at once, and it cannot bound the
       thread: Python has no way to stop one. So a document past

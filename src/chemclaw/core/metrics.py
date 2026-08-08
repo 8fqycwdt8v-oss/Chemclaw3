@@ -182,6 +182,13 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
     ),
+    # The upload cap's own shed, counted separately from the turn admission because the resource
+    # is different: parse slots meter CPU in worker threads, permits meter LLM turns. A pod
+    # refusing every upload and a pod being sent none look identical without this.
+    "chemclaw_attachment_parses_shed_total": (
+        "Uploads refused with 503 because every parse slot was still busy after "
+        "`attachment_parse_queue_seconds`."
+    ),
     # The two refusals that happen *before* a turn exists, and so were invisible to every counter
     # above: they are per-request, not per-turn. Unlabelled deliberately — a per-principal series
     # would key a metric on user identity, which `/metrics` is unauthenticated and must not carry

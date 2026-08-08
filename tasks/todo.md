@@ -166,8 +166,11 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
       stream polls until the client leaves, so any deadline that clears a leak also evicts a healthy
       stream's accounting. See the ADR's *Alternatives rejected*.
 - [x] **Token budget overshoots by the concurrent-request count** — `api/routes/turns.py:188`.
-      Documented bound 8, measured 40. Re-checked after the admission permit; 10 concurrent POSTs
-      against a 1-turn cap now yield 1 answer, not 10.
+      Documented bound 8, measured 40. Re-checked after the admission permit, so the overshoot is
+      now bounded by the permit count as documented: at the shipped `service_max_concurrent_turns`
+      of 8, 40 concurrent POSTs against a 1-turn cap answered 40 before and 8 after. (An earlier
+      write-up of this said "1 answer, not 10" — that is the *test's* one-permit setting, not the
+      shipped default.)
 - [x] **pypdf 6.14.2 → 6.15.0** (CVE-2026-71852, CVE-2026-71870). Re-measured in-process on a
       crafted 201 KB PDF: 33.83 s / 1948 MB RSS → 0.00 s / 36 MB / `LimitReachedError`.
       `make deps-audit` went from 2 findings to "No known vulnerabilities found".

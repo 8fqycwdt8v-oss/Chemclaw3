@@ -79,8 +79,13 @@ would also evict a healthy long-lived stream's accounting and let one user excee
 ledger exists to enforce. Response scope is exact where a deadline can only be a guess.
 
 Residual, stated rather than hidden: if the request task is cancelled between the handler returning
-the response and Starlette awaiting it, nothing runs. There is no `await` in that gap on this path,
-and the process is being torn down in the cases that produce it.
+the response and Starlette awaiting it, nothing runs. This first said "there is no `await` in that
+gap on this path", which is **wrong** — `fastapi/routing.py` awaits `function_stack.__aexit__()`
+between `response = await f(request)` and `await response(scope, receive, send)`. It does not
+suspend *today* only because nothing on this route is a `yield`-dependency (`require_principal` and
+`resolve_session` are both plain `async def`), so the conclusion stands on a fact about this
+route's dependencies rather than about the framework, and it stops holding the moment a
+`yield`-dependency is added anywhere on that chain.
 
 ### The budget is checked again after the permit
 
@@ -104,16 +109,31 @@ the refusal. `parse_document`'s boundary net (D-2026-08-07-one-bad-file-must-not
 already turns the library's `LimitReachedError` into the same 422-shaped `AttachmentError` every
 other unreadable file gets, so no route change was needed for it.
 
-### Uploads are parsed in a bounded worker thread, and shed rather than queued
+### Uploads are parsed in a bounded worker thread, queued briefly, then shed
 
-`parse_attachment_off_loop` runs `parse_attachment` through `run_in_executor` under two config
-bounds: `attachment_max_concurrent_parses` (2) and `attachment_parse_timeout_seconds` (30).
+`parse_attachment_off_loop` runs `parse_attachment` through `run_in_executor` under three config
+bounds: `attachment_max_concurrent_parses` (2), `attachment_parse_queue_seconds` (10) and
+`attachment_parse_timeout_seconds` (30).
 
 The concurrency cap is the load-bearing half, and it is a *cap on the default executor's
 occupancy*: that pool is where `chemclaw.api.auth` validates every bearer token, so uploads allowed
-to fill it would move the outage one layer out rather than fix it. Past the cap an upload is shed
-with a retryable **503** — never queued, the same discipline the turn admission uses. A queue would
-let an attacker accumulate work that keeps burning CPU long after every requester has gone.
+to fill it would move the outage one layer out rather than fix it. Past the cap an upload waits for
+a slot and is then shed with a retryable **503**, the same discipline the turn admission uses.
+
+**The wait was added by this lane's own review, which measured the cap failing the ordinary case.**
+Shipped first as shed-at-the-cap with no wait at all, on the argument that "a queue would let an
+attacker accumulate work that keeps burning CPU long after every requester has gone". That argument
+is about queued *threads* and was applied to a design that queues *futures* — a waiter holds no
+thread, so no number of waiters can crowd the executor. What the strict version did do was refuse
+ordinary work: an unremarkable 482 KB spreadsheet parses in ~1.3 s, and four dropped on the UI at
+once measured `[200, 200, 503, 503]` against `[200, 200, 200, 200]` before the change. Shedding is
+the right answer to sustained overload and the wrong one to a burst; a clock is what tells them
+apart. A freed slot is handed straight from the finishing worker to the longest-waiting request
+rather than released and re-taken, so a later arrival cannot barge the queue.
+
+The shed is counted (`chemclaw_attachment_parses_shed_total`). It was invisible from outside the
+pod as first shipped — the same defect `chemclaw_turns_shed_total` exists for, on the other
+resource, in a commit that quoted that lesson four files away.
 
 Two details are the difference between a cap and a decoration:
 
@@ -129,12 +149,24 @@ limit runs to completion against the cap. That is the honest ceiling of an in-pr
 CVE bump is what removes the known way to reach it, and a killable subprocess is the thing that
 would remove the rest (BACKLOG).
 
-### The webhook answers 422 for a body it cannot parse
+### The webhook answers 422 for a body it cannot parse, in constant size
 
-`ValidationError` becomes an `HTTPException(422)` naming the failing locations. The signature gate
-is untouched and still runs first — an unsigned malformed body is still a 401 — and the detail
-carries `loc` and `msg` only, never `errors()` whole, which would echo a 2 MB malformed body back
-into the response and the access log.
+`ValidationError` becomes an `HTTPException(422)`. The signature gate is untouched and still runs
+first — an unsigned malformed body is still a 401.
+
+The detail carries a validation-error **count** and the expected shape, both constant. This too was
+corrected by review: as first shipped it rendered `loc` and `msg` per error, under a comment saying
+it avoided `errors()` — while calling `errors()` to do it. Pydantic materialises one error object
+per bad list element, so that made the response a linear function of the attacker's body. Measured
+on the merged code: a 2 MB `{"note_ids": [1, 1, ...]}` produces 683,520 errors, ~32 MB of rendered
+detail and ~4 s of uninterruptible CPU on the pod's single uvicorn worker — the same whole-pod
+freeze this ADR moves attachment parsing off the loop to prevent, reintroduced two sections later
+and handed to the caller as a response as well. `note_webhook_secret` defaults to empty, so the
+signature gate does not fire and any authenticated principal reaches the parse.
+
+`error_count()` is answered on pydantic's Rust side without building the errors at all (0.0000 s
+for those same 683,520). Two properties are now pinned by a test, because either alone admits a
+wrong fix: the detail must not grow with the input, and must not contain it.
 
 ## Consequences
 

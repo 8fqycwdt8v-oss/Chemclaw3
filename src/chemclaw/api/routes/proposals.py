@@ -178,14 +178,21 @@ async def knowledge_merged(
         # unhandled `ValidationError`: a 500 for what is plainly the caller's mistake, repeatable
         # at will and therefore also a way to move the 5xx rate an operator alerts on.
         #
-        # Location and message only, never `errors()` whole: that carries the offending `input`
-        # back, so a 2 MB malformed body would be echoed into the response (and the access log).
-        faults = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or 'body'}: {error['msg']}"
-            for error in exc.errors()
-        )
+        # A *count*, never the errors themselves. Pydantic materialises one error object per bad
+        # list element, so rendering them is an amplifier keyed on the attacker's body: a 2 MB
+        # `{"note_ids": [1, 1, …]}` produces 683,520 errors, 32 MB of detail and ~4 s of
+        # uninterruptible CPU on the pod's single uvicorn worker — the same whole-pod freeze this
+        # module's sibling fix moved attachment parsing off the loop to prevent, handed to the
+        # caller as a response as well. `error_count()` is answered on pydantic's Rust side
+        # without building any of it (measured: 0.0000 s for those same 683,520 errors), and the
+        # expected shape is a constant, because the model is one field.
         raise HTTPException(
-            status_code=422, detail=f"the webhook body does not match the expected shape: {faults}"
+            status_code=422,
+            detail=(
+                f"the webhook body does not match the expected shape "
+                f"({exc.error_count()} validation error(s)); expected "
+                f'{{"note_ids": ["<note-id>", ...]}}'
+            ),
         ) from exc
     closed = 0
     if merged.note_ids:

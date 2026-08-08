@@ -140,9 +140,14 @@ class MemorySettings(BaseSettings):
     # (`chemclaw.agent.attachments.parse_attachment_off_loop`). The concurrency cap is what keeps
     # a burst of hostile uploads from occupying the whole default thread pool — the same pool
     # `chemclaw.api.auth` validates every bearer token in — so it is deliberately small: the front
-    # door runs one uvicorn worker, and parsing is not what the pod is for. Excess uploads are shed
-    # (503, retryable), never queued, matching the turn admission's shed-don't-queue discipline.
+    # door runs one uvicorn worker, and parsing is not what the pod is for. Past the cap an upload
+    # waits `attachment_parse_queue_seconds` for a slot and is then shed (503, retryable) — the
+    # turn admission's queue-briefly-then-shed discipline, and for the same reason: shedding at
+    # the cap itself punishes the ordinary burst (four spreadsheets dropped on the UI at once
+    # measured as two 200s and two 503s) while doing nothing extra against a sustained flood.
+    # Queueing is safe here only because a waiter holds a future rather than a thread.
     # The timeout bounds the *wait*, not the thread: Python cannot kill one, so a parse past this
     # limit is refused to its client while the thread runs to completion against the cap.
     attachment_parse_timeout_seconds: float = Field(default=30.0, gt=0)
+    attachment_parse_queue_seconds: float = Field(default=10.0, ge=0)
     attachment_max_concurrent_parses: int = Field(default=2, ge=1)

@@ -377,15 +377,24 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
 ) -> None:
     """A burst of hostile uploads must not pile threads into the pool that validates tokens.
 
-    Queuing would move the outage one layer out: `chemclaw.api.auth` validates every bearer token
-    through `asyncio.to_thread`, so uploads that hog the default executor stall authentication for
-    everyone. Shed with a retryable 503 instead — the same answer the turn admission gives.
+    Queuing *threads* would move the outage one layer out: `chemclaw.api.auth` validates every
+    bearer token through `asyncio.to_thread`, so uploads that hog the default executor stall
+    authentication for everyone. Shed with a retryable 503 instead — the same answer the turn
+    admission gives.
+
+    The queue window is set to zero here **because this test used to encode the whole policy and
+    now encodes only half of it**. Shedding at the cap with no wait at all was measured to fail the
+    ordinary case (four spreadsheets dropped on the UI at once came back as two 200s and two 503s),
+    so a bounded wait was added; what must still hold under sustained load is that the wait ends in
+    a shed rather than an unbounded queue, which is what this asserts with the wait removed. The
+    burst half is `test_a_burst_inside_the_queue_window_is_served_rather_than_shed` below.
     """
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
     monkeypatch.setattr(attachments, "parse_attachment", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
     async def _drive() -> None:
         app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
@@ -403,6 +412,74 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
             assert (await first).status_code == 200
 
     asyncio.run(_drive())
+
+
+def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary case the bare cap got wrong: several files dropped on the UI at once.
+
+    An unremarkable 482 KB spreadsheet takes about 1.3 s to parse, so with a cap of two, four
+    simultaneous uploads measured as `[200, 200, 503, 503]` — a chemist selecting four files got
+    two hard failures out of a system that was working normally. Shedding is the right answer to
+    sustained overload and the wrong one to a burst, and a clock is what tells them apart.
+
+    Every upload is released together, so the claim is that the last two *waited* rather than were
+    refused: with no queue they could not have been.
+    """
+    from chemclaw.core.config import settings
+
+    parse = _SlowParse()
+    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 2)
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 10)
+
+    async def _drive() -> None:
+        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            uploads = [asyncio.create_task(_upload(client, session_id)) for _ in range(4)]
+            await asyncio.to_thread(parse.started.wait, 5)
+            parse.release.set()
+            codes = sorted(response.status_code for response in await asyncio.gather(*uploads))
+            assert codes == [200, 200, 200, 200], codes
+            assert parse.calls == 4, "an upload was answered without being parsed"
+            assert attachments._PARSE_SLOTS.in_flight == 0, "a queued upload kept its slot"
+
+    asyncio.run(_drive())
+
+
+def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shedding is the cap working, and it was invisible from outside the pod until now.
+
+    Without a counter an operator cannot distinguish a replica refusing every upload from one
+    nobody is uploading to — the lesson `chemclaw_turns_shed_total` already exists for, applied to
+    the other resource. Asserted as a delta rather than an absolute, so the test does not depend on
+    what else in the session incremented it.
+    """
+    from chemclaw.core.config import settings
+    from chemclaw.core.metrics import METRICS
+
+    parse = _SlowParse()
+    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
+
+    async def _drive() -> float:
+        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            before = METRICS.value("chemclaw_attachment_parses_shed_total")
+            first = asyncio.create_task(_upload(client, session_id))
+            await asyncio.to_thread(parse.started.wait, 5)
+            assert (await _upload(client, session_id)).status_code == 503
+            parse.release.set()
+            await first
+            return METRICS.value("chemclaw_attachment_parses_shed_total") - before
+
+    assert asyncio.run(_drive()) == 1
 
 
 def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread_ends(
