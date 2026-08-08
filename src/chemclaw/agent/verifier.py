@@ -49,7 +49,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from chemclaw.agent.framing import ENVELOPE_TAG, frame_untrusted
+from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_id
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import cited_ids
@@ -111,7 +111,11 @@ class VerificationResult(BaseModel):
     # *stronger* than the working one, on exactly the answers a judge exists to catch, and no field
     # on the result differed. `_deterministic_result` is right about what it measures; the defect
     # was that nothing said which measurement had been taken.
-    verified_by: Literal["judge", "citation-gate"] = "judge"
+    # **Defaults to the value that does not clear the gate.** It defaulted to "judge", which made
+    # the fail-open value the default: any construction site that did not know which check ran —
+    # a cached verdict, a new fallback, a deserialised row — would certify the judge had. The
+    # judge's own path stamps "judge" explicitly, which is the only place that claim is earned.
+    verified_by: Literal["judge", "citation-gate"] = "citation-gate"
 
     @property
     def unsupported(self) -> list[ClaimCheck]:
@@ -175,16 +179,44 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     )
 
 
+def _framed(content: str, note_id: str) -> str:
+    """Frame `content` unless it already carries this process's envelope.
+
+    `research_tools.gather_evidence` and `graph_tools.expand_note` already frame what they return,
+    and `turn_evidence` reads those tool outputs — so wrapping unconditionally put an envelope
+    around an envelope and `_defang` escaped the inner one, leaving `&lt;retrieved-note-…&gt;` noise
+    interleaved with the prose the judge is scoring. Measured on a 20-note turn: 40 escaped
+    pseudo-tags and 2.4 KB of added prompt, on entirely ordinary traffic.
+
+    The tag is per-process and unguessable, so content that carries a *matching* pair was framed by
+    this process and needs no second wrapping.
+    """
+    body = content.strip()
+    if body.startswith(f"<{ENVELOPE_TAG} ") and body.endswith(f"</{ENVELOPE_TAG}>"):
+        return body
+    return frame_untrusted(content, note_id=note_id)
+
+
 def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     """Build the judge prompt: evidence framed as data, then the answer to check against it.
 
-    Each chunk is wrapped in an `<evidence note="…">` envelope so the model reads note bodies as
-    material to check, not as instructions to follow (the same trust-boundary marking the retrieval
-    tools apply). The instruction names the exact structured output required. This is framing
-    discipline, not a hard boundary: a note body is not escaped, so it is adequate for the internal
-    graph (the current, trusted evidence source), not for untrusted external text — when a source
-    carrying such text lands (the deferred literature/Snowflake connectors), the envelope must move
-    to escaped or randomized delimiters.
+    Every span of retrieved text is wrapped in `framing.ENVELOPE_TAG` — the same nonce'd, defanged
+    envelope the conversation prompt uses — so the model reads note bodies as material to check,
+    not as instructions to follow. The instruction names the exact structured output required.
+
+    This used to be a hand-rolled `<evidence note="…">` tag, described here as "framing discipline,
+    not a hard boundary" and adequate "for the internal graph", with the escalation to escaped or
+    randomised delimiters deferred until "a source carrying such text lands". It had landed:
+    `framing.py` names attachments, and D-2026-08-06 indexes a mounted share's documents as cited
+    evidence. Measured, retrieved text containing `</evidence>` escaped the block and its remainder
+    reached the judge at top level, in the prompt that decides `confidence` and `review_required`.
+
+    Three channels reach this prompt and all three are now closed. The **content** is framed. The
+    **id list** is reduced by `framing.safe_id` — the first fix closed the content channel and left
+    this one open, and a note id is retrieved data like any other. The **answer** is defanged rather
+    than framed: it is the span under review, not evidence, but this prompt names `ENVELOPE_TAG` as
+    the mark of authoritative evidence, and the answering model's own instructions name the same
+    tag, so an answer able to spell it could claim to be some.
 
     **One envelope per distinct content, naming every id it grounds — not one per chunk.**
     `turn_evidence` emits a chunk per *(tool output x cited id)* pair, because the citation gate
@@ -216,8 +248,8 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     # return "the id of the evidence note it relies on". So the list stays readable and outside the
     # untrusted span, and the envelope carries the first id.
     blocks = "\n".join(
-        f"evidence from: {' '.join(dict.fromkeys(ids))}\n"
-        + frame_untrusted(content, note_id=ids[0])
+        f"evidence from: {' '.join(safe_id(note) for note in dict.fromkeys(ids))}\n"
+        + _framed(content, ids[0])
         for content, ids in by_content.items()
     )
     return (
@@ -228,7 +260,12 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
         "the evidence note it relies on (or null). Return an overall confidence in [0, 1] equal to "
         "the fraction of claims that are supported.\n\n"
         f"EVIDENCE:\n{blocks or '(none)'}\n\n"
-        f"ANSWER:\n{answer}"
+        # Defanged, not framed. The answer is the span under review, not evidence — but this prompt
+        # now names `ENVELOPE_TAG` as the mark of authoritative evidence, so any span able to spell
+        # it can claim to be some. The answering model's own instructions name the same tag, so it
+        # can spell it, and injected retrieval content can induce it to. Measured before this line:
+        # a forged envelope in the answer reached the judge verbatim.
+        f"ANSWER:\n{defang(answer)}"
     )
 
 
@@ -256,11 +293,13 @@ async def verify_answer(
     disabled (the default), runs the deterministic `verify_claims` citation check offline. The
     `client` is injected in tests; in production it is built once from the one provider seam.
 
-    The fallback no longer needs a `degraded` flag. It used to, because the deterministic gate
-    called an uncited answer *supported*, so a judge that could not be reached produced
-    `confidence=1.0` on every answer in the deployment — a broken verifier reading stronger than a
-    working one. An uncited answer is unverified now whoever asks, so the degraded case and the
-    ordinary case want the same verdict and there is nothing left to distinguish.
+    **The fallback is marked, via `verified_by`.** This docstring used to argue no such flag was
+    needed: the deterministic gate had called an *uncited* answer supported, that was fixed, and so
+    "the degraded case and the ordinary case want the same verdict". The argument was sound for the
+    uncited branch and covered only it. For a *cited* answer the two checks measure different
+    things — resolvability against faithfulness — and measured, the substitute is the more generous:
+    the same cited-but-contradicted answer scored 1.0/supported degraded against 0.0/unsupported
+    judged. A caller cannot be asked to treat those alike, so the result says which check ran.
     """
     if not settings.verifier_enabled:
         return _deterministic_result(answer, evidence)

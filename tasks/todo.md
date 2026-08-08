@@ -78,17 +78,23 @@ the number is absent from the cache key, so "which optimizer ran" is not pinned 
 - [x] `/approve` records `cli_admin_actor`, not the run's actor — `cli/chat.py:228`. GxP sign-off names
       someone who took no action.
 
-## Lane T4 — Answers that look right when they are not — DONE (D-2026-08-08-a-degraded-check-must-not-clear-the-gate)
+## Lane T4 — Answers that look right when they are not — DONE except the budget-refusal half (D-2026-08-08-a-degraded-check-must-not-clear-the-gate)
 
 - [x] **Judge outage raises confidence to 1.0** — `agent/verifier.py:249`. A cited-but-contradicted
       answer scores **1.0/supported** when the judge is down vs **0.0/unsupported** when it works, and
       `review_required` flips False. The docstring argues no flag is needed — that argument covers only
       the *uncited* branch. Fix: `verified_by` on the result, cap the deterministic gate below the
       review threshold when standing in, add `chemclaw_verifier_degraded_total`.
-- [x] **Zero token metering silently disarms the budget guard** — `api/runner_usage.py:62`. Duck-typed
+- [~] **Zero token metering silently disarms the budget guard** — `api/runner_usage.py:62`. Duck-typed
       on MAF keys; a rename meters 0 forever. Proved: 50 turns × 15,000 real tokens booked as 0 against
-      a 1,000-token cap, and `check()` still allowed the next turn. Cheap automatic guard: answer text
-      with `total == 0` is a self-detectable contradiction.
+      a 1,000-token cap, and `check()` still allowed the next turn.
+      **Instrumented, not fixed** — and the distinction matters, because a review caught me marking
+      it done. A usage content that is present and unreadable now logs at ERROR, increments
+      `chemclaw_usage_unreadable_total` and pages via `ChemclawUsageUnreadable`. The guard itself is
+      unchanged: those turns still meter zero and are still admitted. Making the budget *refuse* on
+      unreadable usage is the real fix and is a deliberate deferral — it would turn an upstream key
+      rename into a full outage, which needs a decision about which failure a deployment prefers.
+      *Trigger:* the first deployment that runs with a real cost ceiling it cannot afford to exceed.
 - [x] **Temporal outage detected every turn, reported to no operator** — `api/runner.py:683`. The
       rationale comment ("open_reachable already counts it") is checkable and false — that counter is
       over connector tools. At the shipped INFO level: no log line, no metric change.

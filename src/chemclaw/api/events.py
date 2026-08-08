@@ -169,8 +169,13 @@ class AnswerEvent(BaseModel):
       and leaves `confidence` at `None`: it found something or it did not, and that is not a
       score. So `review_required` can be `True` while `confidence is None`.
 
-    With both knobs off — the default — all three stay `None`/`False`/empty and the event is
-    byte-for-byte today's answer.
+    A third condition sets the flag, and it is not a score: a verdict the LLM judge did not produce
+    (`verified_by == "citation-gate"` while verification was on) means the check that earns
+    confidence did not run, so the turn is routed to review with an explicit reason appended to
+    `unsupported_claims` rather than a bare flag beside a high `confidence`.
+
+    With every knob off — the default — the scored fields stay `None`/`False`/empty, `verified_by`
+    stays `None`, and the event is byte-for-byte today's answer.
     """
 
     type: Literal["answer"] = "answer"

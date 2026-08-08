@@ -101,7 +101,9 @@ def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
 
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(
-            claims=[ClaimCheck(text="Yield was 90%", supported=False)], confidence=0.2
+            claims=[ClaimCheck(text="Yield was 90%", supported=False)],
+            confidence=0.2,
+            verified_by="judge",
         )
 
     monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
@@ -119,7 +121,7 @@ def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
 
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
-        return VerificationResult(claims=[], confidence=1.0)
+        return VerificationResult(claims=[], confidence=1.0, verified_by="judge")
 
     monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
@@ -135,7 +137,7 @@ def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.Monk
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
 
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
-        return VerificationResult(claims=[], confidence=0.7)
+        return VerificationResult(claims=[], confidence=0.7, verified_by="judge")
 
     monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
@@ -673,7 +675,13 @@ def test_a_citation_the_turn_never_retrieved_is_unsupported_though_the_note_exis
     _offline_verification(monkeypatch)
     answer = _verified_answer(_CitingAgent("THF was the solvent [[compound-thf]]."))
     assert answer.confidence == 0.0
-    assert answer.unsupported_claims == ["THF was the solvent [[compound-thf]]."]
+    # Two entries, and the second is not noise: this verdict came from the citation gate standing
+    # in for an unreachable judge, so the event carries *why* it is flagged as well as what failed.
+    # A bare `review_required` beside `confidence=1.0` is a flag a reviewer cannot act on.
+    assert answer.unsupported_claims == [
+        "THF was the solvent [[compound-thf]].",
+        "verified by the citation gate only; the judge did not run",
+    ]
     assert answer.review_required is True
 
 

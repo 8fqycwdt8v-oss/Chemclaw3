@@ -77,7 +77,19 @@ async def build_answer_event(
             # more generously: measured, the same cited-but-contradicted answer scored 1.0/supported
             # degraded against 0.0/unsupported judged. A verdict that could not be taken must not
             # clear the review gate on the strength of a check that was never run.
-            if result.verified_by != "judge":
+            if result.verified_by != "judge" and answer.strip():
+                # A reason, not a bare flag. `confidence` is the citation gate's score and the
+                # event documents the flag as "confidence fell below the threshold", so a 1.0 next
+                # to a review affordance and an empty `unsupported_claims` is a contradiction a
+                # reviewer cannot act on. `verified_by` carries the detail; this carries the why.
+                #
+                # `answer.strip()` because an empty turn already emits its own `empty_answer`
+                # error event, and "review this empty answer, maximum confidence" is not a
+                # judgement anyone can use.
+                unsupported = [
+                    *unsupported,
+                    "verified by the citation gate only; the judge did not run",
+                ]
                 review = True
     if settings.answer_shape_gate_enabled:
         shapes = [

@@ -45,6 +45,46 @@ spec:
               trail is incomplete. Tool calls keep succeeding, which is why this is invisible
               without an alert. Check the `audit_sink_failure` log marker for the affected trail.
 
+        {{- /* The three counters D-2026-08-08-a-degraded-check-must-not-clear-the-gate added. All
+               three share one shape: a working-as-designed fallback that produced no signal, so
+               the failing state and the healthy state were byte-identical on every dashboard.
+               Declaring a counter and not alerting on it would have reproduced exactly that. */}}
+        - alert: ChemclawVerifierDegraded
+          expr: increase(chemclaw_verifier_degraded_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Answers are being scored by the citation gate, not the judge
+            description: >-
+              The LLM judge is unreachable, so answers are scored for citation *resolvability*
+              rather than *faithfulness* — the weaker of the two checks. Every affected turn is
+              routed to human review, so this is also a review-queue load signal. Check the
+              `verifier_degraded` log marker and the "verifier" model route.
+        - alert: ChemclawUsageUnreadable
+          expr: increase(chemclaw_usage_unreadable_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: Token usage is unparseable, so the cost guard is not binding
+            description: >-
+              The model provider reported usage this build cannot read, so affected turns meter
+              zero tokens: the budget guard admits them regardless of spend and every cost
+              dashboard reads low. Critical because the failure mode is an unbounded bill that
+              looks like an idle deployment. Usually an upstream rename of the usage keys.
+        - alert: ChemclawDurableUnreachable
+          expr: increase(chemclaw_durable_unreachable_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Temporal is not answering its health probe
+            description: >-
+              Chemists are being told durable jobs are unavailable. `for: 5m` because a single
+              broker blip is reported on the turn's own stream and needs no page; a sustained rate
+              is an outage nothing else surfaces server-side.
+
         {{- /* The PR-gate publish is best-effort by design (a dead git remote must not fail a
                finished calculation), so this counter is the only signal that knowledge is being
                dropped. Nothing else distinguishes it from an idle system. */}}

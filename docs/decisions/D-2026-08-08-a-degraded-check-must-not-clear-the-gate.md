@@ -57,7 +57,11 @@ share's documents as cited evidence. It had landed.
   sets it too with an explicit `"verification did not run"` claim, rather than emitting the same
   event a clean verdict produces.
 - `usage_tokens` counts usage contents that carried no readable total. A turn with any of them logs
-  at ERROR and increments `chemclaw_usage_unreadable_total`.
+  at ERROR and increments `chemclaw_usage_unreadable_total`. **This instruments the defect; it does
+  not fix it.** The guard still meters those turns at zero and still admits them. Making the budget
+  *refuse* on unreadable usage turns an upstream key rename into a full outage, which is a decision
+  about which failure a deployment prefers rather than an obvious improvement — so it is a backlog
+  row with a trigger, not a silent omission.
 - The durable probe increments `chemclaw_durable_unreachable_total`, and the false comment is gone.
 - The judge's evidence goes through `framing.frame_untrusted` — the same nonce'd envelope the
   conversation prompt uses.
@@ -81,8 +85,9 @@ envelope, and the envelope carries a single clean id.
 
 ## Consequences
 
-Three counters that did not exist now cover three failure classes that were invisible:
-verifier degradation, unreadable metering, and broker reachability. All three are the same shape —
+Three counters that did not exist now cover three failure classes that were invisible: verifier
+degradation, unreadable metering, and broker reachability — each with a `PrometheusRule` alert,
+because a declared counter nobody alerts on reproduces the exact defect it was added for. All three are the same shape —
 a working-as-designed fallback with no signal — and the campaign's inventory found 23 more like them.
 
 `test_the_same_citation_is_supported_when_a_tool_in_the_turn_returned_it` and its sibling changed
