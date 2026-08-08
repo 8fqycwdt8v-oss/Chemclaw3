@@ -10,6 +10,28 @@ were *refuted* by measurement; those are recorded at the bottom so they are not 
 
 Evidence for every item: `/tmp/claude-0/-home-user-Chemclaw3/19bd112e-beec-51d2-adff-7a9bfb21d523/scratchpad/findings_*.md`
 
+### Gate state at the end (measured, 2026-08-08)
+
+The campaign's exit baseline, run on the merged tree with a live Postgres:
+
+```
+CHEMCLAW_TEST_TIMEOUT_SCALE=6 make cov
+-> 3844 passed, 36 skipped, 0 failed in 1732.77s (28:52)
+-> TOTAL 19274 stmts, 2386 miss, 4282 branch, 424 partial, 86%
+-> Required test coverage of 84.0% reached. Total coverage: 85.69%
+```
+
+Stated as a delta, per this file's own rule: the last genuine measurement before the campaign was
+**85.30% on 2026-08-04**, so coverage is **+0.39 points** across roughly +3,200 source and +6,000
+test lines. `make cov` had never once completed on this branch before now — both earlier attempts
+were killed mid-`test_pka.py` by a timeout, which is the same defect the gate-state note below is
+about.
+
+Ten of eleven validators pass, plus `audit-verify` ("the audit trail hash chain is intact") and
+`deps-audit` ("No known vulnerabilities found"). `helm-validate` fails for one reason only — no
+`helm` binary in this environment — which is the plan's stated exception and now carries a BACKLOG
+row with a trigger.
+
 ### Gate state before any change (measured, not assumed)
 
 **This section was wrong for most of the campaign. Corrected 2026-08-08, with the measurement.**
