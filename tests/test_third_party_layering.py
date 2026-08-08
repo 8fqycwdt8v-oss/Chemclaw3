@@ -255,13 +255,13 @@ _KNOWN_LEAKS: dict[Site, str] = {
 # Those three imports are now public ones and their rows are gone; what is left is the two symbols
 # that genuinely are not exported.
 _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
-    ("src/chemclaw/agent/loop_cap.py", "agent_framework._harness._loop"): (
-        "`ShouldContinueCallable`/`ShouldContinueResult` — the harness loop's own protocol types, "
-        "measured absent from `agent_framework`'s top level in 1.11.0"
-    ),
-    ("src/chemclaw/agent/plan_gate.py", "agent_framework._harness._loop"): (
-        "the same two protocol types, for the plan gate's continue predicate"
-    ),
+    # Empty, and that is the point of keeping it: the two rows that lived here —
+    # `ShouldContinueCallable`/`ShouldContinueResult` from `agent_framework._harness._loop`, in
+    # `agent/loop_cap.py` and `agent/plan_gate.py` — were removed rather than re-blessed. Both are
+    # pure type aliases with no runtime behaviour, so `chemclaw.agent.harness_types` declares them
+    # and `tests/test_harness_types.py` fails if MAF's shape drifts from ours. The dict stays
+    # because the ratchet above is what deleted these rows: a private import that gains a public
+    # home, or goes away, loses its row on the next run.
 }
 
 
