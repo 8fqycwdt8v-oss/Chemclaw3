@@ -157,8 +157,12 @@ read before it is characterised.
       configuration, so a superseded row has no fingerprint to match and the *incremental*
       `make reindex` re-embeds it. Pinned on live pgvector: model swap → 2 of 2 re-embedded, one
       distinct key in the table, next run 0.
-- [x] **`embedding_config_key` omits the endpoint** — the key now names the endpoint for
-      `openai_compatible` (`rstrip("/")`), empty slot for `hash`. Both BACKLOG rows closed.
+- [x] **`embedding_config_key` omits the endpoint** — the key now *identifies* the endpoint rather
+      than naming it: `ep-<12-hex digest>` of the normalized URL (`rstrip("/")`), empty slot for
+      `hash`. The verbatim first version persisted `llm_base_url` — a bare `str` with no validator
+      forbidding userinfo, and absent from `_SECRET_SETTINGS` — into two durable columns nothing
+      prunes, one copy per row. Invalidation re-proven: three endpoints, three keys. Both BACKLOG
+      rows closed.
 - [x] **Pushed note recorded FAILED, or not at all** — `_release_worktree` swallows everything the
       cleanup raises, `CancelledError` included; three tests (error, cancelled, and the leftover the
       next sweep reclaims) fail against the old `finally` and pass now.
@@ -166,17 +170,35 @@ read before it is characterised.
       k rows. Re-measured, EXPLAIN ANALYZE at N=20,000, median of 5: shipped **243.05 ms** (Seq
       Scan) → **3.58 ms** (Index Scan + 10-row sort); ids identical to the no-tie-break form.
       Consequence measured and filed: the search is approximate again — recall@10 vs an exact scan
-      is 1.0000 clustered, 0.116 uniform-random (new BACKLOG row for `hnsw.ef_search`).
+      is 1.0000 clustered, 0.116 uniform-random (new BACKLOG row for `hnsw.ef_search`). The same
+      defect was then found and fixed in `document_chunks.search_dense` — the table designed to hold
+      millions of rows — at **228.25 ms → 2.47 ms** on a synthetic 20,000-chunk corpus. Two prose
+      claims were corrected with it: "identical ids in identical order" is corpus-specific rather
+      than general, and `within=` does *not* bound the search before the LIMIT (it is a post-filter
+      over the ef_search candidates, so the query can return fewer than k — measured 5/8).
 - [x] **A note whose filename stem ≠ its id is never indexed at all** — absent now means unknown
       means embed it (with a WARNING naming the file), and `kg.validate` refuses the mismatch.
       Old logic reproduced first: indexed 1 of 2, and `full=True` also 1.
-- [x] **Warehouse sync wedges permanently** — the cursor advances on `entry_window(...)`, and the
-      future-timestamp guard checks the same value. `tests/warehouse_fake.WatermarkWarehouse`
+- [x] **Warehouse sync wedges permanently** — the cursor advances on `entry_window(...)`. The
+      future-timestamp guard was untested (a mutation to `raw.created_at` left 73 tests green) and
+      had silently changed behaviour; now decided and split: a future *creation* stamp rejects the
+      entry, a future *amendment* stamp costs only the cursor and ingests with a WARNING, because
+      rejecting outright dropped a real experiment forever over a metadata typo. `tests/warehouse_fake.WatermarkWarehouse`
       honours WHERE/ORDER BY/LIMIT; the new test fails against the old cursor.
 - [x] **Chunking params are outside document identity** — migration **040** adds `chunking_key` to
-      both `document_files` and `document_chunks` (two gates, both must see it), and `upsert`
-      deletes every ordinal at or above the new count. Three tests, including the first test the
-      Postgres backend has ever had.
+      both `document_files` and `document_chunks` (two gates, both must see it). **Its tail-drop
+      then destroyed a second share's chunks**: `doc_id` is a content hash shared across sources by
+      design, `chunking_key` comes from the per-share binding, so one share's re-chunk deleted the
+      other's rows — and the victim never repaired, because its own fingerprint had not moved.
+      Migration **041** makes a chunk row's identity `(doc_id, chunking_key, ordinal)` and the
+      tail-drop is deleted outright: within one cutting the chunking is a pure function, so it could
+      never fire. What supersedes a cutting is that no file row claims it — one `_CLAIMED` predicate
+      shared by `upsert` and `prune_stale`. Proved on a populated pre-041 table.
+- [x] **The upgrade embedded the document corpus twice, not once** — `reembed_stale` runs ahead of
+      the crawl and refreshed a cutting the crawl was about to replace: **17 embedding calls for a
+      document worth 1**. `stale_chunks` now takes the chunkings the enabled shares actually use.
+      ADR and runbook §vi-b corrected, including the drain window and why search deliberately does
+      not filter on the embedding key.
 - [x] **Warehouse retriever embeds on the event loop** — offloaded, plus an `except Exception`
       backstop. The same backstop went into `documents/retriever.py`, whose "never raises"
       docstring was untrue for the identical provider-error case.

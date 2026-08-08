@@ -26,6 +26,7 @@ from functools import lru_cache
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.ids import stable_hash
 
 # Tokenizer for the hash embedder: lowercase alphanumeric runs. Deliberately trivial — the hash
 # embedder is a deterministic dev stand-in, not a linguistic model.
@@ -66,9 +67,20 @@ def embedding_config_key() -> str:
     stays in the key (empty) rather than disappearing, so the key has one shape for every provider.
     A trailing slash is stripped because `.../v1` and `.../v1/` address the same endpoint, and a
     corpus-wide re-embed is too expensive to trigger on a spelling.
+
+    **The endpoint is *identified*, not reproduced.** The slot holds a digest of the URL rather than
+    the URL, because this key is written into `document_chunks.embedding_key` and
+    `note_index.embedding_key` — one copy per row, in tables nothing prunes and the runtime role can
+    read. `llm_base_url` is a plain `str` with no validator forbidding userinfo, so
+    `https://svc:token@llm.internal/v1` is a configuration this deployment accepts and the verbatim
+    form persisted the password; even without one, an internal hostname does not belong in every row
+    of a corpus. A digest keeps the only property the key needs — two endpoints differ, one endpoint
+    does not — and the readable part (provider, model, dimension) is what an operator reads a key
+    for anyway. Twelve hex characters, because the population being distinguished is the handful of
+    endpoints one deployment has ever pointed at, not an adversarially chosen set.
     """
     endpoint = (
-        settings.llm_base_url.rstrip("/")
+        f"ep-{stable_hash(settings.llm_base_url.rstrip('/'), chars=12)}"
         if settings.embedding_provider == "openai_compatible"
         else ""
     )

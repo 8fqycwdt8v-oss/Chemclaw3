@@ -148,22 +148,39 @@ async def sync_entries(
         # not truncated by the *workflow's* reckoning either, so the wedge guard in
         # `durable/eln_sync.py` is never reached and the log reads `ingested=N rejected=0`.
         window = entry_window(raw.created_at, raw.modified_at)
-        if window > horizon:
-            # A timestamp beyond the wall clock (a typo'd year) must never become the
-            # persisted high-water cursor: nothing ever lowers a stored cursor, so it
-            # would silently skip every later real entry. Reject without advancing.
-            # Checked on the same value the cursor takes, or the guard would let a future
-            # *amendment* stamp through the one gate that exists to keep it out.
+        # **A timestamp beyond the wall clock costs the cursor, and only sometimes the entry.**
+        # Nothing ever lowers a stored cursor, so an implausible value that became one would
+        # silently skip every later real entry — that is the whole of what this guard is for.
+        #
+        # A *creation* stamp past the horizon says the record is not about anything that has
+        # happened, so the entry is rejected and reported. An *amendment* stamp past it says
+        # somebody typed a year wrong in a metadata field of an entry whose chemistry is real: the
+        # earlier form of this guard checked `entry_window` and so rejected that entry outright,
+        # and — because the fetch filters on the same watermark — re-fetched and re-rejected it on
+        # every run, forever, costing the corpus a real experiment for a typo. So the entry ingests
+        # and only the cursor refuses the value. It is re-fetched each run and, once its note is
+        # merged, skipped by the body comparison below at the cost of one lookup.
+        if raw.created_at > horizon:
             rejected.append(
                 RejectedEntry(
                     entry_id=raw.entry_id,
-                    reason=f"timestamp {window.isoformat()} is implausibly far "
+                    reason=f"created_at {raw.created_at.isoformat()} is implausibly far "
                     "in the future (beyond wall clock + tolerance)",
                     created_at=raw.created_at,
                 )
             )
             continue
-        cursor = max(cursor, window)
+        if window > horizon:
+            logger.warning(
+                "eln entry %s reports an amendment at %s, beyond the wall clock: ingesting it, "
+                "but the sync cursor stays at %s and this entry is re-fetched every run until "
+                "the source is corrected",
+                raw.entry_id,
+                window.isoformat(),
+                cursor.isoformat(),
+            )
+        else:
+            cursor = max(cursor, window)
         # Whether this entry will come back on the next run: it is inside the replay window and
         # its note is not merged. Decided inside the try (it needs the mapped note) and recorded
         # after it, so an entry that then fails to ingest is only ever reported as rejected.

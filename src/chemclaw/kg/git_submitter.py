@@ -390,6 +390,15 @@ class GitNoteSubmitter:
         sweep reclaims it. Cancellation is swallowed rather than re-raised for the same reason — a
         caller that must record what was pushed cannot be told the call did not finish. Whoever
         cancelled gets the return value of an operation that had already succeeded.
+
+        **`BaseException` means every one of them, and two consequences follow that are worth
+        naming rather than discovering.** An operator's Ctrl-C that lands inside this window is
+        logged as a warning and goes no further — the process finishes the submission it was in the
+        middle of recording and exits on the *next* one. And a task cancelled at this instant goes
+        on to run `record_proposal_submitted`: that is a single bounded database write with the
+        connection's statement timeout on it, so a cancelled task cannot hang here, but it does do
+        one more thing after being cancelled. Both are the intended price of the branch never being
+        recorded as `failed`; neither is a way for shutdown to become unbounded.
         """
         try:
             await self._remove_worktree(workdir)

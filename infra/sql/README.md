@@ -48,8 +48,8 @@ table inventory in this repository sits in `docs/archive/` and is seventeen migr
 | `bo_suggestions` | 031 | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
 | `audit_anchors` | 032 | `agent/audit_anchor.py` | never — an anchor is the evidence a trailing truncation happened, so the runtime role cannot delete one |
 | `turn_costs` | 033 | `agent/turn_cost_store.py` | — |
-| `document_files` | 037 (+040) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
-| `document_chunks` | 037 (+038, 040) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any chunk no remaining file points at. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
+| `document_files` | 037 (+040, 041) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
+| `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
 
 ## Two things the shape of this table will not tell you
 

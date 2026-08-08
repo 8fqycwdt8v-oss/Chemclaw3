@@ -171,13 +171,14 @@ def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
     return _Parsed(ref_path=ref.path, doc_id=doc_id, text=parsed.text)
 
 
-def _file_record(source: str, ref: FileRef, doc_id: str) -> FileRecord:
-    """The index row for one path: its document, its stat signature, and what its path means."""
+def _file_record(source: str, ref: FileRef, doc_id: str, chunking_key: str) -> FileRecord:
+    """The index row for one path: its document, its cutting, its stat signature, its meaning."""
     return FileRecord(
         path=ref.path,
         source=source,
         doc_id=doc_id,
         fingerprint=ref.fingerprint,
+        chunking_key=chunking_key,
         tags=list(ref.tags),
         modified_at=datetime.fromtimestamp(ref.mtime_ns / 1_000_000_000, tz=UTC),
     )
@@ -245,6 +246,7 @@ def _chunks_for(documents: list[_Parsed], binding: DocumentShareBinding) -> list
     return [
         ChunkRecord(
             doc_id=doc_id,
+            chunking_key=binding.chunking_key,
             ordinal=ordinal,
             content=content,
             coordinate=coordinate,
@@ -324,13 +326,15 @@ async def sync_share(
     chunks = await asyncio.to_thread(_chunks_for, fresh, binding)
     report.embedded_chunks = len(chunks)
 
-    files = [_file_record(source, by_path[d.ref_path], d.doc_id) for d in parsed]
-    await index.upsert(files, chunks, key, chunking)
+    files = [_file_record(source, by_path[d.ref_path], d.doc_id, chunking) for d in parsed]
+    await index.upsert(files, chunks, key)
     report.indexed = len(files)
     return report
 
 
-async def reembed_stale(index: DocumentIndex, limit: int = 500) -> ReembedReport:
+async def reembed_stale(
+    index: DocumentIndex, chunkings: set[str], limit: int = 500
+) -> ReembedReport:
     """Re-embed up to `limit` chunks whose vectors were made by a superseded configuration.
 
     **Reads the database, never the share.** The chunk's text was stored beside its vector, so
@@ -339,15 +343,23 @@ async def reembed_stale(index: DocumentIndex, limit: int = 500) -> ReembedReport
     than being a flag somebody has to remember at the moment they change a setting — and the
     failure it prevents is silent, so a flag would not have been run.
 
+    **And never for text the crawl is about to re-cut.** `chunkings` names the cuttings the enabled
+    shares currently use; a row cut under any other one is superseded, and the crawl will re-parse,
+    re-cut and re-embed it. Refreshing it here would be paid for and then discarded — measured at
+    17 embedding calls for a document worth 1 on the run after an upgrade, because migrations 038
+    and 040 move both keys at once. The chunkings are passed in rather than read here because this
+    module is deliberately dependency-injected: the caller owns which shares are enabled.
+
     Args:
         index: The document index to refresh.
+        chunkings: The chunking keys of the currently enabled shares.
         limit: How many chunks one pass may re-embed.
 
     Returns:
         The count refreshed and whether more stale chunks remain.
     """
     key = embedding_config_key()
-    stale = await index.stale_chunks(key, limit)
+    stale = await index.stale_chunks(key, limit, chunkings)
     if not stale:
         return ReembedReport()
     try:
@@ -368,6 +380,7 @@ async def reembed_stale(index: DocumentIndex, limit: int = 500) -> ReembedReport
             [
                 ChunkRecord(
                     doc_id=chunk.doc_id,
+                    chunking_key=chunk.chunking_key,
                     ordinal=chunk.ordinal,
                     content=chunk.content,
                     embedding=embedding,

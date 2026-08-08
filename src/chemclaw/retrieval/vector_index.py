@@ -217,9 +217,25 @@ class PostgresNoteIndex:
         # unconditionally, so a small corpus would surface unrelated notes as cited evidence — a
         # ranking the tests never see. (A zero query vector is short-circuited in `search_dense`
         # before the query, so `<=>` never produces a NaN distance to order by.)
-        # The `within` scope lives in the SQL itself (NULL = unrestricted), so a caller's
-        # eligibility set bounds the search *before* the LIMIT — the top-k slots are never spent
-        # on notes the caller would drop afterwards (the same semantics the InMemory backend has).
+        # The `within` scope lives in the SQL itself (NULL = unrestricted) rather than being applied
+        # to the result, so the top-k slots are mostly not spent on notes the caller would drop.
+        #
+        # **On the dense path that is a tendency, not the guarantee this comment used to claim.**
+        # With the HNSW index actually in use (see the tie-break below), the predicate is a *post*
+        # filter over the ef_search candidate list, not a bound on what the index scan considers:
+        # measured, `Index Scan using note_index_embedding_idx` with `Rows Removed by Filter: 29`
+        # above it. So a selective `within` can leave fewer than k candidates surviving and the
+        # query returns short. At N=20,000, k=8, clustered embeddings and a random eligible subset,
+        # the planner falls back to a Seq Scan once the filter is selective enough and the search is
+        # exact again — but forcing the index at `within=0.10` returned **5 of 8**. `GraphRetriever`
+        # always passes a `within`, so this is the only path production takes, and a `type=` filter
+        # that *correlates* with the embedding clusters will be worse than the random subset
+        # measured here. No knob trades latency back for recall; the `hnsw.ef_search` row in
+        # `docs/planning/BACKLOG.md` is where one would come from.
+        #
+        # The lexical statement below carries no such caveat: `ts_rank` over the GIN index is exact,
+        # and there `within` really is a bound before the LIMIT. So is the InMemory backend, which
+        # is why a two-row unit test cannot see any of this.
         scope = "AND (%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[])) "
         # **The tie-break sorts the k rows, not the table.** `note_id` as a secondary key mirrors
         # the InMemory reference's `(-score, note_id)`, so equal-similarity notes order

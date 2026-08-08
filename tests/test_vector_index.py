@@ -256,8 +256,16 @@ async def _stored_embedding_keys() -> set[str]:
             return {row[0] for row in await cur.fetchall()}
 
 
-def test_postgres_index_within_restricts_before_top_k() -> None:
-    """`within` scopes the SQL query itself, so a filtered search keeps full top-k recall."""
+def test_postgres_index_within_is_a_predicate_not_a_filter_over_the_result() -> None:
+    """`within` scopes the SQL query itself, so an eligible note past the global top-k is found.
+
+    What this **cannot** show is full top-k recall, which an earlier version of this docstring
+    claimed. Two rows are scanned exactly, so the approximation never appears: on a real corpus the
+    dense path's `within` is a *post*-filter over the HNSW candidate list, and a selective one can
+    return fewer than k (measured at N=20,000, k=8, index forced, a tenth of the corpus eligible:
+    5 of 8). See the comment on `_dense` in `retrieval/vector_index.py` and the `hnsw.ef_search`
+    row in `docs/planning/BACKLOG.md`. The lexical half below is exact.
+    """
 
     async def _run() -> None:
         await migrated_db_or_skip()

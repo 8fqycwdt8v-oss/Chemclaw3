@@ -150,10 +150,17 @@ async def sync_document_share(source: str, after: str) -> SyncReport:
 @durable_activity("background")
 @activity.defn
 async def reembed_stale_documents() -> ReembedReport:
-    """Refresh one bounded batch of vectors whose embedding configuration is superseded."""
+    """Refresh one bounded batch of vectors whose embedding configuration is superseded.
+
+    Scoped to the chunkings the enabled shares actually use: a chunk cut under a superseded one is
+    about to be re-cut and re-embedded by the crawl, so refreshing it here is work thrown away.
+    Read from the live bindings here, in the activity, because that is where a non-deterministic
+    read belongs.
+    """
     activity.heartbeat()
+    chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
     return await beating(
-        reembed_stale(_document_index(), settings.document_reembed_batch_size),
+        reembed_stale(_document_index(), chunkings, settings.document_reembed_batch_size),
         "document re-embed",
         settings.document_sync_heartbeat_timeout_seconds,
     )

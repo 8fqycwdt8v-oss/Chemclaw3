@@ -12,6 +12,14 @@ optimization, it is the difference between an affordable corpus and an unafforda
 the rule `chemclaw.cli.backfill_corpus` already follows ("the id is derived from the content, not
 the filename"), so a renamed or moved file costs nothing either.
 
+**A chunk's identity is its content *and* its boundaries.** `doc_id` says which text a chunk came
+from; `chunking_key` says where it was cut. Both are in the chunk row's key (`infra/sql/041`),
+because two shares can hold one document and chunk it differently, and keying on the content alone
+made them fight over the same rows — the coarser share's write took ordinal 0 and deleted the finer
+share's remaining fifteen. Two chunkings of one document coexist; four copies at *one* chunking
+still share one set of chunks and one embedding call, which is the property the two-table split
+exists for. A cutting no file row claims any more is an orphan, and is swept.
+
 **A hit is cited by path, not by hash.** `doc-9f2a...` is not something a chemist can open, so the
 search resolves each hit back to a file path. When several paths hold the same content the smallest
 one is cited deterministically — an arbitrary choice, but a stable one, which is what a citation
@@ -57,6 +65,9 @@ class FileRecord(BaseModel):
     doc_id: str = Field(min_length=1)
     # "mtime_ns:size" — what makes the next crawl able to skip this file without reading it.
     fingerprint: str = Field(min_length=1)
+    # The chunking this path's content was cut under (`DocumentShareBinding.chunking_key`). It is
+    # what makes a chunk set *claimed*: the sweep keeps exactly the cuttings some file row names.
+    chunking_key: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
     modified_at: datetime | None = None
     # When this run saw the file — the mark half of `prune_stale`'s mark-and-sweep. The Postgres
@@ -67,9 +78,15 @@ class FileRecord(BaseModel):
 
 
 class ChunkRecord(BaseModel):
-    """One retrievable piece of a document, with its embedding and its structural coordinate."""
+    """One retrievable piece of a document, with its embedding and its structural coordinate.
+
+    `(doc_id, chunking_key, ordinal)` is the whole identity — the text it came from, the boundaries
+    that cut it, and where it sits in that cutting. The chunking travels on the record rather than
+    beside the call because it is part of *which row this is*, not a property of the write.
+    """
 
     doc_id: str = Field(min_length=1)
+    chunking_key: str = Field(min_length=1)
     ordinal: int = Field(ge=0)
     content: str = Field(min_length=1)
     coordinate: str = ""
@@ -80,10 +97,13 @@ class StaleChunk(BaseModel):
     """A stored chunk whose vector was made by a configuration that is no longer current.
 
     Carries its `content`, which is why re-embedding never touches the file share: the text was
-    kept beside the vector, so a model swap is a database-to-database operation.
+    kept beside the vector, so a model swap is a database-to-database operation. And its
+    `chunking_key`, because that is part of the row's identity and re-embedding has to address the
+    row it read — without it a re-embed of one share's cutting would overwrite another's.
     """
 
     doc_id: str
+    chunking_key: str
     ordinal: int
     content: str
 
@@ -144,32 +164,39 @@ class DocumentIndex(Protocol):
         """
         ...
 
-    async def upsert(
-        self, files: list[FileRecord], chunks: list[ChunkRecord], key: str, chunking_key: str
-    ) -> None:
-        """Insert or replace file rows by path and chunk rows by `(doc_id, ordinal)`.
+    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
+        """Insert or replace file rows by path and chunk rows by `(doc_id, chunking_key, ordinal)`.
 
         `key` is the embedding configuration these vectors were produced by
-        (`chemclaw.core.embeddings.embedding_config_key`); `chunking_key` is the chunking that cut
-        them (`DocumentShareBinding.chunking_key`). Both are stored with the rows so a later run
-        can tell whether they are still usable — one answers "comparable to a fresh query", the
-        other "describing the text this document is now cut into".
+        (`chemclaw.core.embeddings.embedding_config_key`) and is stored with each chunk, so a later
+        run can tell whether it is still comparable to a fresh query. The chunking is on the rows
+        themselves, because it is part of which row each one *is*.
 
-        **A document's chunks are replaced, not merged.** Every ordinal at or above the new chunk
-        count is deleted for each document written, because re-chunking the same text into fewer
-        pieces otherwise leaves the old chunking's tail behind: rows nothing points at any more,
-        which `reembed_stale` then re-embeds under the current key and makes indistinguishable
+        **A cutting nothing claims any more is deleted, in the same write.** After the file rows
+        land, every chunk set of the documents just written that no file row names is removed:
+        re-chunking a document leaves its previous cutting behind otherwise — rows nothing points
+        at, which `reembed_stale` then re-embeds under the current key and makes indistinguishable
         from live ones. Measured: re-cutting one document at 400 → 4000 chars left 19 such rows
-        beside its 2 real ones.
+        beside its 2 real ones. Scoped to *unclaimed* cuttings rather than to "this document's
+        other ordinals", because another share may hold the same document at its own chunk size and
+        deleting by content alone destroyed that share's chunks permanently.
         """
         ...
 
-    async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
-        """Up to `limit` chunks whose stored vector was not made by `key`.
+    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+        """Up to `limit` chunks cut by one of `chunkings` whose vector was not made by `key`.
 
         NULL counts as stale — a row written before the key column existed is "unknown", and
         unknown must never read as "current" (the argument `infra/sql/035` makes for its own
         added column).
+
+        `chunkings` is the set of chunkings the *enabled* shares currently use, and it is what
+        keeps an upgrade from paying twice. A row cut under any other chunking is already going to
+        be re-parsed, re-cut and re-embedded by the crawl, so re-embedding it here is work that is
+        then thrown away — measured at 17 embedding calls for a document worth 1 on a run where
+        both the model and the chunk size moved, which is exactly what 038 and 040 do together.
+        It is not fixable by stamping the chunking during a re-embed: the chunking is part of the
+        row's identity (041) and a re-embed does not re-cut anything.
         """
         ...
 
@@ -187,7 +214,7 @@ class DocumentIndex(Protocol):
         ...
 
     async def prune_stale(self, source: str, before: datetime) -> int:
-        """Delete `source` rows not seen since `before`, and any chunk left with no file.
+        """Delete `source` rows not seen since `before`, and any chunk set no file row claims.
 
         The sweep half. **Only ever called after a complete crawl with no failed roots** — see the
         prune-safety rule in `sync.py`, because an unmounted share presents as an empty one and
@@ -261,19 +288,6 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return min(1.0, max(0.0, dot / norm)) if norm else 0.0
 
 
-def _chunk_counts(chunks: list[ChunkRecord]) -> dict[str, int]:
-    """How many chunks this write carries per document — the ordinal every backend truncates at.
-
-    `max(ordinal) + 1` rather than a count, because that is what "every ordinal at or above" means
-    and the two only agree while a write is complete and contiguous. One definition, so the
-    in-memory reference and the SQL backend cannot disagree about where a document now ends.
-    """
-    counts: dict[str, int] = {}
-    for chunk in chunks:
-        counts[chunk.doc_id] = max(counts.get(chunk.doc_id, 0), chunk.ordinal + 1)
-    return counts
-
-
 def _tokens(text: str) -> set[str]:
     """Lowercased alphanumeric tokens — the offline proxy of Postgres `to_tsvector`."""
     return set("".join(c if c.isalnum() else " " for c in text.lower()).split())
@@ -288,17 +302,29 @@ class InMemoryDocumentIndex:
     """
 
     def __init__(self) -> None:
-        """Start empty; files keyed by `(source, path)`, chunks by `(doc_id, ordinal)`."""
+        """Start empty; files keyed by `(source, path)`, chunks by `(doc_id, chunking, ordinal)`."""
         # `(source, path)` mirrors the table's primary key: `Projects/report.pdf` is not an
         # unusual name, so two shares can carry it and a path-only key lets one evict the other.
         self._files: dict[tuple[str, str], FileRecord] = {}
-        self._chunks: dict[tuple[str, int], ChunkRecord] = {}
-        # The embedding configuration each chunk's vector was made by, and the chunking that cut
-        # it — the in-memory mirror of `document_chunks.embedding_key` / `.chunking_key`.
-        self._keys: dict[tuple[str, int], str] = {}
-        self._chunkings: dict[tuple[str, int], str] = {}
-        # The chunking each *file* row was indexed under, mirroring `document_files.chunking_key`.
-        self._file_chunkings: dict[tuple[str, str], str] = {}
+        # `(doc_id, chunking_key, ordinal)` mirrors the chunk table's primary key (041) for the
+        # same class of reason: two shares can hold one document and cut it at different sizes.
+        self._chunks: dict[tuple[str, str, int], ChunkRecord] = {}
+        # The embedding configuration each chunk's vector was made by — the in-memory mirror of
+        # `document_chunks.embedding_key`. The chunking is in the key itself.
+        self._keys: dict[tuple[str, str, int], str] = {}
+
+    @staticmethod
+    def _row(chunk: ChunkRecord) -> tuple[str, str, int]:
+        """The identity of one chunk row: its document, its cutting, and its place in it."""
+        return (chunk.doc_id, chunk.chunking_key, chunk.ordinal)
+
+    def _claimed(self) -> set[tuple[str, str]]:
+        """Every `(doc_id, chunking_key)` some file row names — the live chunk sets.
+
+        The in-memory mirror of `_CLAIMED`. A chunk set outside it belongs to no path on any share:
+        a superseded chunk size, or a document whose last file row was swept.
+        """
+        return {(f.doc_id, f.chunking_key) for f in self._files.values()}
 
     async def fingerprints(
         self, source: str, paths: list[str], chunking_key: str
@@ -308,56 +334,58 @@ class InMemoryDocumentIndex:
         return {
             f.path: f.fingerprint
             for f in self._files.values()
-            if f.source == source
-            and f.path in wanted
-            and self._file_chunkings.get((f.source, f.path)) == chunking_key
+            if f.source == source and f.path in wanted and f.chunking_key == chunking_key
         }
 
     async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
         """Which of these documents have chunks under the current embedding *and* chunking."""
         current = {
             doc_id
-            for (doc_id, ordinal), stored in self._keys.items()
-            if stored == key and self._chunkings.get((doc_id, ordinal)) == chunking_key
+            for (doc_id, chunking, _), stored in self._keys.items()
+            if stored == key and chunking == chunking_key
         }
         return doc_ids & current
 
-    async def upsert(
-        self, files: list[FileRecord], chunks: list[ChunkRecord], key: str, chunking_key: str
-    ) -> None:
-        """Replace each file by path and each document's chunks, dropping any stranded tail."""
+    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
+        """Replace each file by path and each chunk by its row, then drop unclaimed cuttings."""
+        for chunk in chunks:
+            self._chunks[self._row(chunk)] = chunk
+            self._keys[self._row(chunk)] = key
         for file in files:
             self._files[(file.source, file.path)] = file
-            self._file_chunkings[(file.source, file.path)] = chunking_key
-        for doc_id, count in _chunk_counts(chunks).items():
-            for stale in [k for k in self._chunks if k[0] == doc_id and k[1] >= count]:
-                del self._chunks[stale]
-                self._keys.pop(stale, None)
-                self._chunkings.pop(stale, None)
-        for chunk in chunks:
-            self._chunks[(chunk.doc_id, chunk.ordinal)] = chunk
-            self._keys[(chunk.doc_id, chunk.ordinal)] = key
-            self._chunkings[(chunk.doc_id, chunk.ordinal)] = chunking_key
+        # Written *after* the file rows, so "claimed" is read against what this write just said.
+        # Scoped to the documents it touched: a re-chunk supersedes its own previous cutting, and
+        # every other share's cutting of the same document is still claimed and survives.
+        touched = {file.doc_id for file in files} | {chunk.doc_id for chunk in chunks}
+        claimed = self._claimed()
+        for row in [k for k in self._chunks if k[0] in touched and (k[0], k[1]) not in claimed]:
+            del self._chunks[row]
+            self._keys.pop(row, None)
 
-    async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
-        """Chunks whose stored vector was made by a different configuration, oldest key first."""
+    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+        """Chunks of a live cutting whose vector was made by a different configuration."""
         stale = [
-            StaleChunk(doc_id=chunk.doc_id, ordinal=chunk.ordinal, content=chunk.content)
-            for chunk_key, chunk in sorted(self._chunks.items())
-            if self._keys.get(chunk_key) != key
+            StaleChunk(
+                doc_id=chunk.doc_id,
+                chunking_key=chunk.chunking_key,
+                ordinal=chunk.ordinal,
+                content=chunk.content,
+            )
+            for row, chunk in sorted(self._chunks.items())
+            if self._keys.get(row) != key and chunk.chunking_key in chunkings
         ]
         return stale[:limit]
 
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
         """Replace the vector and key of chunks already stored, leaving the rest of the row."""
         for chunk in chunks:
-            existing = self._chunks.get((chunk.doc_id, chunk.ordinal))
+            existing = self._chunks.get(self._row(chunk))
             if existing is None:
                 continue
-            self._chunks[(chunk.doc_id, chunk.ordinal)] = existing.model_copy(
+            self._chunks[self._row(chunk)] = existing.model_copy(
                 update={"embedding": chunk.embedding}
             )
-            self._keys[(chunk.doc_id, chunk.ordinal)] = key
+            self._keys[self._row(chunk)] = key
 
     async def touch(self, source: str, paths: list[str]) -> None:
         """Restamp these paths as seen now, so the sweep does not take them."""
@@ -372,7 +400,7 @@ class InMemoryDocumentIndex:
         return datetime.now(UTC)
 
     async def prune_stale(self, source: str, before: datetime) -> int:
-        """Drop this source's rows unseen since `before`, then any chunk left with no file."""
+        """Drop this source's rows unseen since `before`, then any chunk set no file row claims."""
         stale = [
             key
             for key, file in self._files.items()
@@ -382,18 +410,27 @@ class InMemoryDocumentIndex:
             del self._files[key]
         # Orphans across every source, not just this one's documents: identical content reachable
         # through a copy on another share must stay indexed (the SQL `NOT EXISTS` says the same).
-        live = {f.doc_id for f in self._files.values()}
-        for chunk_key in [key for key in self._chunks if key[0] not in live]:
-            del self._chunks[chunk_key]
-            self._keys.pop(chunk_key, None)
+        claimed = self._claimed()
+        for row in [key for key in self._chunks if (key[0], key[1]) not in claimed]:
+            del self._chunks[row]
+            self._keys.pop(row, None)
         return len(stale)
 
-    def _citation(self, doc_id: str, source: str, filters: DocumentFilter) -> str:
-        """The smallest path in `source` holding this document and matching `filters`, or `""`."""
+    def _citation(
+        self, doc_id: str, chunking_key: str, source: str, filters: DocumentFilter
+    ) -> str:
+        """The smallest path in `source` holding this cutting of this document, or `""`.
+
+        The chunking is part of the match, not only the document: a share that cuts a document at
+        its own size must cite its own chunks, never another share's cutting of the same text.
+        """
         candidates = sorted(
             f.path
             for f in self._files.values()
-            if f.doc_id == doc_id and f.source == source and _matches(f, filters)
+            if f.doc_id == doc_id
+            and f.chunking_key == chunking_key
+            and f.source == source
+            and _matches(f, filters)
         )
         return candidates[0] if candidates else ""
 
@@ -405,7 +442,7 @@ class InMemoryDocumentIndex:
         for chunk, score in scored:
             if score <= 0.0:
                 continue
-            path = self._citation(chunk.doc_id, source, filters)
+            path = self._citation(chunk.doc_id, chunk.chunking_key, source, filters)
             if not path:
                 continue
             hits.append(
@@ -460,11 +497,21 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(str(component) for component in embedding) + "]"
 
 
+# What makes a chunk row live at all: some file row, on any share, names both its document *and*
+# its cutting. One definition, used by the sweep and by the per-write cleanup, because "orphan"
+# has to mean the same thing in both or one of them deletes rows the other keeps.
+_CLAIMED = (
+    "EXISTS (SELECT 1 FROM document_files f "
+    "WHERE f.doc_id = c.doc_id AND f.chunking_key = c.chunking_key)"
+)
 # The file-row predicate both searches share: a chunk is eligible when at least one path in this
-# source holds it and satisfies the filters. `EXISTS` rather than a join, so a document copied into
-# four folders contributes one row rather than four competing for the same top-k slots.
+# source holds it, was indexed under the same chunking, and satisfies the filters. `EXISTS` rather
+# than a join, so a document copied into four folders contributes one row rather than four
+# competing for the same top-k slots. The chunking clause is what keeps a share citing its own
+# cutting when another share holds the same document at a different chunk size.
 _ELIGIBLE = (
     "EXISTS (SELECT 1 FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
+    "AND f.chunking_key = c.chunking_key "
     "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
     "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
     "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)) "
@@ -473,6 +520,7 @@ _ELIGIBLE = (
 # repeated question cites the same file rather than alternating between copies.
 _CITATION = (
     "(SELECT min(f.path) FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
+    "AND f.chunking_key = c.chunking_key "
     "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
     "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
     "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)) AS path "
@@ -510,37 +558,60 @@ class PostgresDocumentIndex:
             "chunking_key) "
             f"VALUES (%(doc)s, %(ord)s, %(content)s, %(coord)s, %(emb)s::vector({width}), "
             "to_tsvector('english', %(content)s), %(key)s, %(chunking)s) "
-            "ON CONFLICT (doc_id, ordinal) DO UPDATE SET "
+            "ON CONFLICT (doc_id, chunking_key, ordinal) DO UPDATE SET "
             "content = EXCLUDED.content, coordinate = EXCLUDED.coordinate, "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
-            "embedding_key = EXCLUDED.embedding_key, chunking_key = EXCLUDED.chunking_key"
+            "embedding_key = EXCLUDED.embedding_key"
         )
-        # The tail of a previous, finer chunking of the same document. Run per document written,
-        # in the same transaction as its chunks, so a re-chunk cannot leave rows behind that
-        # nothing points at and `reembed_stale` would then adopt as current.
-        self._drop_tail = "DELETE FROM document_chunks WHERE doc_id = %(doc)s AND ordinal >= %(n)s"
+        # The previous cutting of a document this write re-chunked. Run once at the end of the same
+        # transaction — *after* the file rows, so `_CLAIMED` reads what this write just said — so a
+        # re-chunk cannot leave rows behind that nothing points at and `reembed_stale` would then
+        # adopt as current. Scoped to the documents written, so it is a primary-key range rather
+        # than the table scan the sweep does.
+        self._drop_unclaimed = (
+            f"DELETE FROM document_chunks c WHERE c.doc_id = ANY(%(docs)s) AND NOT {_CLAIMED}"
+        )
         # Re-embedding touches the vector and its key and nothing else: the content and coordinate
         # came from the document and did not change, and rewriting the tsvector would be work for
-        # an identical result.
+        # an identical result. Addressed by the whole primary key, so re-embedding one share's
+        # cutting cannot overwrite another share's row for the same text.
         self._store_embedding = (
             f"UPDATE document_chunks SET embedding = %(emb)s::vector({width}), "
-            "embedding_key = %(key)s WHERE doc_id = %(doc)s AND ordinal = %(ord)s"
+            "embedding_key = %(key)s "
+            "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s"
         )
         # `IS DISTINCT FROM`, not `<>`: NULL is every row written before the key column existed,
         # and `<>` would silently pass over exactly those.
         self._stale = (
-            "SELECT doc_id, ordinal, content FROM document_chunks "
-            "WHERE embedding_key IS DISTINCT FROM %(key)s ORDER BY doc_id, ordinal LIMIT %(k)s"
+            "SELECT doc_id, chunking_key, ordinal, content FROM document_chunks "
+            "WHERE embedding_key IS DISTINCT FROM %(key)s "
+            "AND chunking_key = ANY(%(chunkings)s) "
+            "ORDER BY doc_id, chunking_key, ordinal LIMIT %(k)s"
         )
         # The `> 0` floor mirrors the in-memory reference: a zero or negatively-correlated chunk is
         # not a hit. Without it pgvector returns the top-k nearest unconditionally, so a narrow
         # corpus would surface unrelated documents as cited evidence.
+        # **The tie-break sorts the k rows, not the table** — the same correction `note_index`
+        # needed, and it matters more here: this is the table designed to hold millions of chunks
+        # from a 500k-file share, where `note_index` holds thousands. `(doc_id, ordinal)` as a
+        # secondary key mirrors the in-memory reference's ordering so the two backends agree, but
+        # written into the *inner* `ORDER BY` it makes the ordering underivable from the vector
+        # index and the planner abandons `document_chunks_embedding_idx` for a Seq Scan + Sort.
+        # As an outer sort over the k rows the inner query already returned, the HNSW index is used
+        # and ten rows are quicksorted. Measured on a synthetic 20,000-chunk corpus (one file row
+        # each, migrations applied), median of 5: `Limit → Sort → Seq Scan` **228.25 ms** →
+        # `Sort → Limit → Index Scan` **2.47 ms**, returning the same ids in the same order on that
+        # corpus. "The same ids" is a measurement, not a guarantee: HNSW is approximate, so what the
+        # tie-break pins is that the two backends agree on the order of the hits they *do* return,
+        # never which rows win a tie at the k-th place — and the inner form did not pin that either.
         self._dense = (
+            "SELECT doc_id, ordinal, content, coordinate, score, path FROM ("
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
             f"1 - (c.embedding <=> %(q)s::vector({width})) AS score, {_CITATION}"
             "FROM document_chunks c WHERE c.embedding IS NOT NULL "
             f"AND 1 - (c.embedding <=> %(q)s::vector({width})) > 0 AND {_ELIGIBLE}"
-            f"ORDER BY c.embedding <=> %(q)s::vector({width}), c.doc_id, c.ordinal LIMIT %(k)s"
+            f"ORDER BY c.embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
+            ") AS hits ORDER BY score DESC, doc_id, ordinal"
         )
         self._lexical = (
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
@@ -595,20 +666,18 @@ class PostgresDocumentIndex:
                 rows = await cur.fetchall()
         return {row[0] for row in rows}
 
-    async def upsert(
-        self, files: list[FileRecord], chunks: list[ChunkRecord], key: str, chunking_key: str
-    ) -> None:
-        """Write the chunks first, then the file rows, in one transaction.
+    async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
+        """Write the chunks first, then the file rows, then sweep unclaimed cuttings — one txn.
 
         Order matters on a crash: a file row whose chunks are missing would be skipped by the next
         crawl (its fingerprint matches) and would contribute nothing forever. Chunks with no file
-        row are merely invisible until the file row lands.
+        row are merely invisible until the file row lands. The cleanup comes last for a different
+        reason — it asks which cuttings are still claimed, and the answer must include the file
+        rows this very write moved to a new chunking.
         """
         if not files and not chunks:
             return
         async with self._connection() as conn:
-            for doc_id, count in _chunk_counts(chunks).items():
-                await conn.execute(self._drop_tail, {"doc": doc_id, "n": count})
             for chunk in chunks:
                 await conn.execute(
                     self._upsert_chunk,
@@ -619,7 +688,7 @@ class PostgresDocumentIndex:
                         "coord": chunk.coordinate,
                         "emb": _vector_literal(chunk.embedding),
                         "key": key,
-                        "chunking": chunking_key,
+                        "chunking": chunk.chunking_key,
                     },
                 )
             for file in files:
@@ -632,18 +701,24 @@ class PostgresDocumentIndex:
                         "fp": file.fingerprint,
                         "tags": list(file.tags),
                         "mtime": file.modified_at,
-                        "chunking": chunking_key,
+                        "chunking": file.chunking_key,
                     },
                 )
+            touched = sorted({file.doc_id for file in files} | {c.doc_id for c in chunks})
+            await conn.execute(self._drop_unclaimed, {"docs": touched})
             await conn.commit()
 
-    async def stale_chunks(self, key: str, limit: int) -> list[StaleChunk]:
-        """Up to `limit` chunks whose vector was not produced by the current configuration."""
+    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+        """Up to `limit` chunks of a live cutting whose vector is not the current configuration."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(self._stale, {"key": key, "k": limit})
+                await cur.execute(
+                    self._stale, {"key": key, "k": limit, "chunkings": sorted(chunkings)}
+                )
                 rows = await cur.fetchall()
-        return [StaleChunk(doc_id=r[0], ordinal=r[1], content=r[2]) for r in rows]
+        return [
+            StaleChunk(doc_id=r[0], chunking_key=r[1], ordinal=r[2], content=r[3]) for r in rows
+        ]
 
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
         """Replace each chunk's vector and key in one transaction."""
@@ -657,6 +732,7 @@ class PostgresDocumentIndex:
                         "emb": _vector_literal(chunk.embedding),
                         "key": key,
                         "doc": chunk.doc_id,
+                        "chunking": chunk.chunking_key,
                         "ord": chunk.ordinal,
                     },
                 )
@@ -685,7 +761,7 @@ class PostgresDocumentIndex:
         return moment
 
     async def prune_stale(self, source: str, before: datetime) -> int:
-        """Delete this source's rows unseen since `before`, then any chunk no file points at."""
+        """Delete this source's rows unseen since `before`, then any chunk set nothing claims."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -695,11 +771,8 @@ class PostgresDocumentIndex:
                 removed = cur.rowcount
                 # Orphans, not "chunks of the deleted documents": the same content may still be
                 # reachable through a copy elsewhere on the share, and deleting by `doc_id` would
-                # silently un-index a file nobody touched.
-                await cur.execute(
-                    "DELETE FROM document_chunks c WHERE NOT EXISTS "
-                    "(SELECT 1 FROM document_files f WHERE f.doc_id = c.doc_id)"
-                )
+                # silently un-index a file nobody touched. The same `_CLAIMED` the write path uses.
+                await cur.execute(f"DELETE FROM document_chunks c WHERE NOT {_CLAIMED}")
             await conn.commit()
         return removed
 

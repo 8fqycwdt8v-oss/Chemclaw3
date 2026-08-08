@@ -28,12 +28,14 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.embeddings import clear_embedding_cache, embed_texts, embedding_config_key
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.ingest.documents import retriever as retriever_module
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import crawl_share
 from chemclaw.ingest.documents.index import (
     ChunkRecord,
+    DocumentFilter,
     DocumentIndexError,
     FileRecord,
     InMemoryDocumentIndex,
@@ -444,21 +446,22 @@ def test_changing_the_model_re_embeds_the_corpus_without_touching_the_share(
     """
     index = InMemoryDocumentIndex()
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
-    before = asyncio.run(index.stale_chunks(embedding_config_key(), 100))
+    live = {_chunking(share)}
+    before = asyncio.run(index.stale_chunks(embedding_config_key(), 100, live))
     assert before == [], "a freshly indexed corpus carries the current configuration"
 
     _use_model(monkeypatch, "some-better-model")
-    stale = asyncio.run(index.stale_chunks(embedding_config_key(), 100))
+    stale = asyncio.run(index.stale_chunks(embedding_config_key(), 100, live))
     assert stale, "every stored vector is stale once the model changes"
 
     shutil.rmtree(tmp_path / "Projects")
     shutil.rmtree(tmp_path / "SOPs")
 
-    report = asyncio.run(reembed_stale(index, limit=100))
+    report = asyncio.run(reembed_stale(index, live, limit=100))
 
     assert report.embedded == len(stale)
     assert not report.has_more
-    assert asyncio.run(index.stale_chunks(embedding_config_key(), 100)) == []
+    assert asyncio.run(index.stale_chunks(embedding_config_key(), 100, live)) == []
 
 
 def test_a_second_re_embedding_pass_does_nothing(
@@ -469,7 +472,7 @@ def test_a_second_re_embedding_pass_does_nothing(
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
     spent = sum(counted_embeddings)
 
-    report = asyncio.run(reembed_stale(index, limit=100))
+    report = asyncio.run(reembed_stale(index, {_chunking(share)}, limit=100))
 
     assert report.embedded == 0
     assert not report.has_more
@@ -483,17 +486,52 @@ def test_a_bounded_re_embedding_drain_converges(
     index = InMemoryDocumentIndex()
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
     _use_model(monkeypatch, "another-model")
-    total = len(asyncio.run(index.stale_chunks(embedding_config_key(), 1000)))
+    live = {_chunking(share)}
+    total = len(asyncio.run(index.stale_chunks(embedding_config_key(), 1000, live)))
 
     refreshed = 0
     for _ in range(50):
-        report = asyncio.run(reembed_stale(index, limit=1))
+        report = asyncio.run(reembed_stale(index, live, limit=1))
         refreshed += report.embedded
         if not report.has_more:
             break
 
     assert refreshed == total
-    assert asyncio.run(index.stale_chunks(embedding_config_key(), 1000)) == []
+    assert asyncio.run(index.stale_chunks(embedding_config_key(), 1000, live)) == []
+
+
+def test_an_upgrade_that_moves_both_keys_embeds_the_corpus_once(
+    tmp_path: Path, counted_embeddings: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-embed drain runs ahead of the crawl, and paid for text the crawl then re-cut.
+
+    Migrations 038 and 040 land together, so the first run after an upgrade has *both* keys moved:
+    every chunk is stale by embedding key, and every file is stale by chunking. The re-embed pass
+    therefore refreshed the whole old cutting from stored text, and the crawl then re-parsed,
+    re-cut and re-embedded the same text — twice the documented cost. Measured here: 17 embeddings
+    for a document worth 1.
+
+    It cannot be fixed by stamping the chunking during a re-embed: the chunking is *part of the
+    row's identity* (041), and a re-embed does not re-cut anything, so writing the current chunking
+    onto rows cut under the old one would be a lie the search then serves. What is true is that a
+    cutting no enabled share uses any more is about to be replaced, so re-embedding it is work
+    thrown away — and that is what the drain now skips.
+    """
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+
+    _use_model(monkeypatch, "the-upgraded-model")
+    upgraded = load_binding({**share, "chunk_chars": 20000, "chunk_overlap_chars": 200})
+    counted_embeddings.clear()
+
+    asyncio.run(reembed_stale(index, {upgraded.chunking_key}, limit=500))
+    asyncio.run(sync_share(SOURCE, upgraded, index))
+
+    assert sum(counted_embeddings) == 1, counted_embeddings
+    assert (
+        asyncio.run(index.stale_chunks(embedding_config_key(), 100, {upgraded.chunking_key})) == []
+    )
 
 
 def test_a_stale_document_is_re_embedded_even_when_its_content_is_already_known(
@@ -507,7 +545,10 @@ def test_a_stale_document_is_re_embedded_even_when_its_content_is_already_known(
     index = InMemoryDocumentIndex()
     binding = load_binding(share)
     asyncio.run(sync_share(SOURCE, binding, index))
-    doc_ids = {chunk.doc_id for chunk in asyncio.run(index.stale_chunks("never-used", 100))}
+    doc_ids = {
+        chunk.doc_id
+        for chunk in asyncio.run(index.stale_chunks("never-used", 100, {_chunking(share)}))
+    }
 
     _use_model(monkeypatch, "third-model")
     assert (
@@ -583,12 +624,17 @@ def test_changing_the_chunk_size_re_chunks_the_corpus(
     assert _chunk_sizes(index) == after
 
 
-def test_a_coarser_re_chunk_leaves_no_tail_of_the_finer_one(tmp_path: Path) -> None:
-    """The corruption half: fewer chunks must delete the ordinals the previous cutting left.
+def test_a_coarser_re_chunk_leaves_no_trace_of_the_finer_one(tmp_path: Path) -> None:
+    """The corruption half: the superseded cutting must be deleted, not merely superseded.
 
     A stranded chunk belongs to no current cutting of the document, is cited as though it did, and
     `reembed_stale` then stamps it with the current key — after which nothing can tell it apart.
-    Measured before this fix: 400 → 4000 chars left 19 leftovers beside the 2 real chunks.
+    Measured before any of this: 400 → 4000 chars left 19 leftovers beside the 2 real chunks.
+
+    The mechanism changed with the chunk row's identity (041): what is deleted is every cutting of
+    the documents just written that no file row claims any more, not "every ordinal above the new
+    count". The old form could not tell this share's superseded cutting from another share's live
+    one, because both are the same `doc_id`.
     """
     index = InMemoryDocumentIndex()
     fine = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -600,15 +646,62 @@ def test_a_coarser_re_chunk_leaves_no_tail_of_the_finer_one(tmp_path: Path) -> N
     coarse_sizes = _chunk_sizes(index)
 
     assert len(coarse_sizes) < fine_count, "sanity: the coarse cutting really is coarser"
-    # Every surviving chunk is one this cutting produced: no ordinal above a document's new count.
-    counts: dict[str, int] = {}
-    for doc_id, ordinal in index._chunks:
-        counts[doc_id] = max(counts.get(doc_id, 0), ordinal + 1)
-    assert all(
-        ordinal < counts[doc_id] and len(index._chunks[(doc_id, ordinal)].content) <= 20000
-        for doc_id, ordinal in index._chunks
+    assert {row[1] for row in index._chunks} == {load_binding(coarse).chunking_key}, (
+        "only the current cutting survives"
     )
-    assert len(coarse_sizes) == sum(counts.values()), "no gaps, so no tail was left behind"
+    assert max(coarse_sizes) <= 20000
+    assert _served_chunk_sizes(index, SOURCE) == sorted(coarse_sizes, reverse=True)
+
+
+def _served_chunk_sizes(index: InMemoryDocumentIndex, source: str) -> list[int]:
+    """The length of every chunk this source's search can actually cite, longest first.
+
+    Measured through `search_dense` rather than off the index's internals, because what a share
+    serves is the property at stake — and because the internals' key shape is exactly what the
+    defect below is about, so a test reading them could not describe both sides of it.
+    """
+    query = embed_texts(["charge the vessel and hold"])[0]
+    hits = asyncio.run(index.search_dense(source, query, 500, DocumentFilter()))
+    return sorted((len(hit.content) for hit in hits), reverse=True)
+
+
+def test_a_second_share_that_chunks_differently_leaves_the_first_share_intact(
+    tmp_path: Path,
+) -> None:
+    """Two shares, one document, two chunk sizes — and the second share's crawl destroyed the first.
+
+    `doc_id` is the *content* hash and is shared across sources by design, while `chunking_key`
+    comes from the binding and is per-share. Keying chunk rows on `(doc_id, ordinal)` alone
+    therefore made two shares fight over the same rows: the coarse share's write took ordinal 0 and
+    its tail-drop deleted ordinals 1..15, and the fine share never repaired, because its own file
+    fingerprint had not moved and its gate read `unchanged` forever. Measured before the fix: the
+    fine share served one chunk of 6259 characters in place of its own sixteen of at most 400.
+    """
+    index = InMemoryDocumentIndex()
+    fine = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    second_root = tmp_path / "second-share"
+    (second_root / "SOPs").mkdir(parents=True)
+    shutil.copy(
+        Path(fine["mount"]) / "SOPs" / "protocol.txt", second_root / "SOPs" / "protocol.txt"
+    )
+    coarse = {**fine, "mount": str(second_root), "chunk_chars": 20000, "chunk_overlap_chars": 200}
+
+    asyncio.run(sync_share(SOURCE, load_binding(fine), index))
+    served = _served_chunk_sizes(index, SOURCE)
+    assert len(served) > 1 and max(served) <= 400, served
+
+    asyncio.run(sync_share("coarse-share", load_binding(coarse), index))
+
+    assert len(_served_chunk_sizes(index, "coarse-share")) == 1, (
+        "sanity: the second share is coarse"
+    )
+    assert _served_chunk_sizes(index, SOURCE) == served, "the first share kept its own cutting"
+
+    # And it stays that way. This is the half that makes the loss permanent: the fine share's
+    # fingerprint has not moved, so it never even attempts a repair.
+    report = asyncio.run(sync_share(SOURCE, load_binding(fine), index))
+    assert (report.unchanged, report.indexed) == (1, 0), report
+    assert _served_chunk_sizes(index, SOURCE) == served
 
 
 # --- retrieval ----------------------------------------------------------------------------------
@@ -699,6 +792,34 @@ def test_a_backend_failure_yields_no_evidence_instead_of_raising(
     retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=Broken())
     as_user("user-1", {"sharedrive.reader"})
     assert asyncio.run(retriever.retrieve("anything", {})) == []
+
+
+def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
+    share: dict[str, Any], as_user: Callable[[str, set[str]], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The query is embedded *inside* this leg, so the provider's own errors are this leg's too.
+
+    They are not `DocumentIndexError`, `ConnectionError`, `OSError` or `DocumentShareError`, so an
+    `openai.APIError` from a rate-limited endpoint escaped into `gather_evidence`'s `gather` —
+    which has no `return_exceptions` — and failed the whole turn, including the answer the
+    knowledge graph had already produced. The `except Exception` backstop is what makes the
+    "**Never raises**" docstring true; deleting the whole block left all 52 of this file's tests
+    passing, which is why this one exists. Its sibling in `ingest/eln/warehouse/retriever.py` got
+    the identical test in the same change.
+    """
+
+    class _ProviderError(Exception):
+        """Stands in for a vendor client's own error type, which is in none of the lists above."""
+
+    def _refusing(texts: list[str]) -> list[list[float]]:
+        raise _ProviderError("429 rate limited")
+
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    monkeypatch.setattr(retriever_module, "embed_texts", _refusing)
+    as_user("user-1", {"sharedrive.reader"})
+
+    assert asyncio.run(_entitled_retriever(share, index).retrieve("yield", {})) == []
 
 
 def test_a_note_type_filter_returns_nothing_rather_than_ignoring_it(
@@ -987,7 +1108,8 @@ def test_one_unembeddable_chunk_does_not_starve_the_corpus(
     index = InMemoryDocumentIndex()
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
 
-    stale = asyncio.run(index.stale_chunks("some-other-key", 500))
+    live = {_chunking(share)}
+    stale = asyncio.run(index.stale_chunks("some-other-key", 500, live))
     assert len(stale) > 1
     poison = stale[0].content
     real = embed_texts
@@ -1000,7 +1122,7 @@ def test_one_unembeddable_chunk_does_not_starve_the_corpus(
     monkeypatch.setattr(sync_module, "embed_texts", refusing)
     monkeypatch.setattr(sync_module, "embedding_config_key", lambda: "some-other-key", raising=True)
 
-    report = asyncio.run(reembed_stale(index, 500))
+    report = asyncio.run(reembed_stale(index, live, 500))
     assert report.failed == 1
     assert report.embedded == len(stale) - 1  # everything else was refreshed
     # And the drain terminates rather than returning the identical batch forever.
@@ -1166,12 +1288,26 @@ def test_a_top_level_archive_is_excluded_by_the_pattern_that_says_so(tmp_path: P
 # --- the durable backend, against the real database ---------------------------------------------
 
 
-def test_the_postgres_backend_gates_on_the_chunking_and_drops_the_stranded_tail() -> None:
-    """The same two rules as the in-memory reference, in SQL — and migration 040 applied.
+async def _stored_cuttings() -> list[tuple[str, int]]:
+    """Every `(chunking_key, ordinal)` `document_chunks` holds for `doc-1`, in key order."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunking_key, ordinal FROM document_chunks WHERE doc_id = %s "
+                "ORDER BY chunking_key, ordinal",
+                ("doc-1",),
+            )
+            return [(row[0], row[1]) for row in await cur.fetchall()]
+
+
+def test_the_postgres_backend_gates_on_the_chunking_and_sweeps_only_unclaimed_cuttings() -> None:
+    """The same rules as the in-memory reference, in SQL — and migrations 040/041 applied.
 
     The durable backend had no test at all, so its statements were only ever exercised in
-    production. This one round-trips the pair that decides whether a re-chunk happens and whether
-    it leaves anything behind.
+    production. This one round-trips the gates that decide whether a re-chunk happens, and the two
+    halves of what a re-chunk may delete: a cutting no file row claims goes, and a cutting another
+    share still claims stays. Before 041 the second half was false — the delete was `doc_id` plus
+    an ordinal floor, and `doc_id` is content, so one share's re-chunk truncated the other's rows.
     """
 
     async def _run() -> None:
@@ -1183,28 +1319,65 @@ def test_the_postgres_backend_gates_on_the_chunking_and_drops_the_stranded_tail(
         index = PostgresDocumentIndex()
         key = embedding_config_key()
         (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
-        file = FileRecord(
-            path="SOPs/protocol.txt", source=SOURCE, doc_id="doc-1", fingerprint="1:2"
+        fine_file = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
         )
         fine = [
-            ChunkRecord(doc_id="doc-1", ordinal=n, content=f"piece {n}", embedding=vector)
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=n,
+                content=f"piece {n} of a protocol",
+                embedding=vector,
+            )
             for n in range(3)
         ]
-        await index.upsert([file], fine, key, "400:40")
+        await index.upsert([fine_file], fine, key)
 
-        assert await index.fingerprints(SOURCE, [file.path], "400:40") == {file.path: "1:2"}
-        assert await index.fingerprints(SOURCE, [file.path], "2000:200") == {}
+        assert await index.fingerprints(SOURCE, [fine_file.path], "400:40") == {
+            fine_file.path: "1:2"
+        }
+        assert await index.fingerprints(SOURCE, [fine_file.path], "2000:200") == {}
         assert await index.known_documents({"doc-1"}, key, "400:40") == {"doc-1"}
         assert await index.known_documents({"doc-1"}, key, "2000:200") == set()
 
-        coarse = [ChunkRecord(doc_id="doc-1", ordinal=0, content="all of it", embedding=vector)]
-        await index.upsert([file], coarse, key, "2000:200")
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT ordinal FROM document_chunks WHERE doc_id = %s ORDER BY ordinal",
-                    ("doc-1",),
-                )
-                assert [row[0] for row in await cur.fetchall()] == [0], "no tail survived"
+        # A second share holding the same content and cutting it coarsely. Its write must not touch
+        # the first share's rows — this is the destruction 041 closes.
+        coarse_file = fine_file.model_copy(
+            update={"source": "sharedrive-2", "chunking_key": "2000:200"}
+        )
+        coarse = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="2000:200",
+                ordinal=0,
+                content="all of the protocol at once",
+                embedding=vector,
+            )
+        ]
+        await index.upsert([coarse_file], coarse, key)
+        assert await _stored_cuttings() == [
+            ("2000:200", 0),
+            ("400:40", 0),
+            ("400:40", 1),
+            ("400:40", 2),
+        ]
+        assert await index.known_documents({"doc-1"}, key, "400:40") == {"doc-1"}
+
+        # And each share searches its own cutting, never the other's.
+        hits = await index.search_dense(SOURCE, vector, 10, DocumentFilter())
+        assert {hit.ordinal for hit in hits} == {0, 1, 2}
+        assert [
+            hit.content
+            for hit in await index.search_dense("sharedrive-2", vector, 10, DocumentFilter())
+        ] == ["all of the protocol at once"]
+
+        # Now the first share is re-chunked coarsely too. Nothing claims 400:40 any more: it goes.
+        await index.upsert([fine_file.model_copy(update={"chunking_key": "2000:200"})], coarse, key)
+        assert await _stored_cuttings() == [("2000:200", 0)], "the superseded cutting was swept"
 
     asyncio.run(_run())

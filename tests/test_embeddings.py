@@ -133,6 +133,31 @@ def test_config_key_ignores_a_trailing_slash_on_the_endpoint(
     assert provider.embedding_config_key() == plain
 
 
+def test_config_key_carries_no_part_of_the_endpoint_it_identifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key is written into two durable columns, so it may not *be* the endpoint.
+
+    `document_chunks.embedding_key` and `note_index.embedding_key` get one copy of this string per
+    row, in tables nothing prunes and the runtime role can read. `llm_base_url` is a plain `str`
+    with no validator forbidding userinfo, so `https://svc:s3cr3t@llm.internal/v1` is a
+    configuration this deployment accepts — and the verbatim form persisted the password. Even
+    without one, the internal hostname does not belong in every row of the corpus.
+
+    A digest identifies the endpoint without carrying it, which is all the invalidation property
+    needs — and that property is asserted separately, immediately below.
+    """
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="internal-embed",
+        llm_base_url="https://svc:s3cr3t-token@llm.internal/v1",
+    )
+    key = provider.embedding_config_key()
+    for leaked in ("s3cr3t-token", "svc", "llm.internal", "https"):
+        assert leaked not in key, f"the key carries {leaked!r}: {key}"
+
+
 def test_config_key_of_the_hash_provider_names_no_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

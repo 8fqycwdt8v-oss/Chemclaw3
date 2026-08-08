@@ -345,10 +345,34 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       `D-2026-08-08-a-derived-index-must-record-what-derived-it` moved the `note_id` tie-break to an
       outer sort, which restored the HNSW index the inner one had disabled (243 ms → 3.6 ms at
       N=20,000) — and with it, approximate recall, which the accidental Seq Scan had been hiding.
-      Measured against an exact scan: recall@10 **1.0000** on clustered vectors (the shape a real
-      corpus has) and **0.116** on uniformly random ones (the pathological case for any ANN index).
+      The same change was then applied to `document_chunks.search_dense` (228 ms → 2.5 ms at 20,000
+      chunks), so this knob's absence is now felt on both indexes and the document one is the table
+      designed for millions of rows. Measured against an exact scan: recall@10 **1.0000** on
+      clustered vectors (the shape a real corpus has) and **0.116** on uniformly random ones (the
+      pathological case for any ANN index). **And a `within`/eligibility set makes it worse**: the
+      predicate is a post-filter over the ef_search candidate list, not a bound on the scan, so a
+      selective one returns fewer than k — measured, `Index Scan` + `Rows Removed by Filter`, and
+      5 of 8 rows at `within=0.10` with the index forced. `GraphRetriever` always passes one.
       No knob exists to trade latency back for recall. *Trigger:* a corpus where a note a chemist
       knows exists does not come back, or the first recall regression an eval catches.
+
+- [ ] **`chunking_key` names the chunk *settings*, not the chunker** — [S]. `041` made
+      `(doc_id, chunking_key, ordinal)` a chunk row's identity, and `chunking_key` is
+      `chunk_chars:chunk_overlap_chars`. A change to `chunk_document`'s algorithm — a new page-break
+      rule, a different hard-split — moves neither key, so no gate can see it and the corpus keeps
+      the old boundaries silently. This is the same class as the defect `040` closed, one level up.
+      Cheap fix: fold a chunker version constant into `DocumentShareBinding.chunking_key`, bumped by
+      hand in the same commit that changes the algorithm. *Trigger:* the first change to
+      `ingest/documents/chunk.py` that moves a boundary.
+
+- [ ] **A superseded cutting survives until the next write to its document** — [S]. `upsert` sweeps
+      the cuttings that no file row claims for the documents it just wrote, and `prune_stale` sweeps
+      them table-wide — but a share that is *disabled* rather than re-chunked leaves its file rows
+      in place, so its cutting stays claimed and stays stored. It is invisible to search (the
+      eligibility predicate joins on the chunking through the file row) and it is skipped by the
+      re-embed drain (`stale_chunks` is scoped to the enabled shares' chunkings), so it costs disk
+      and nothing else. *Trigger:* a deployment that disables a share permanently, where the storage
+      matters enough to want a `sync_share --forget <name>`.
 
 - [ ] **`038`'s btree cannot serve the query it was added for** — [S].
       `WHERE embedding_key IS DISTINCT FROM %(key)s` is a `DistinctExpr`, not an indexable
@@ -360,10 +384,12 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       *Trigger:* the first corpus large enough for the stale scan to show up.
 
 - [x] **`embedding_config_key` omits the endpoint** — closed by
-      `D-2026-08-08-a-derived-index-must-record-what-derived-it`. The key names the endpoint for
-      `openai_compatible` (trailing slash stripped); the slot stays empty for `hash`, which never
-      reaches one. The half this does **not** close is a vendor rolling a model's weights under an
-      unchanged name at an unchanged URL — no key can see that, and only a re-embed fixes it.
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it`. The key *identifies* the endpoint
+      for `openai_compatible` — a digest of `llm_base_url` with the trailing slash stripped, not the
+      URL itself, because the key is written into two durable columns and `llm_base_url` may carry
+      userinfo; the slot stays empty for `hash`, which never reaches one. The half this does **not**
+      close is a vendor rolling a model's weights under an unchanged name at an unchanged URL — no
+      key can see that, and only a re-embed fixes it.
 
 - [ ] **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
       whether *some* chunk of a document carries the current key, while `index.py`'s docstring

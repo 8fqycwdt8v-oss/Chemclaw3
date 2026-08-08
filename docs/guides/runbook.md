@@ -528,6 +528,27 @@ over the crawl's ordinary bounded passes. Before this the change was silently ig
 cheaper and wrong. The first sync after the upgrade pays it once for the same reason as above:
 nothing recorded what the existing rows were cut with.
 
+**Migration 041 rebuilds `document_chunks`' primary key, and that is the one migration in this set
+with a real duration.** It backfills the added column, sets it `NOT NULL` and replaces
+`(doc_id, ordinal)` with `(doc_id, chunking_key, ordinal)` — building a unique index under an
+`ACCESS EXCLUSIVE` lock. The migrator's `lock_timeout` bounds waiting *for* the lock, not the build,
+so on a share-sized table budget seconds to a minute of the document search being unavailable, once.
+Rows written before 040 get `''`, which no binding can produce: they still read as superseded at
+both gates, and they stay searchable until the crawl replaces them rather than disappearing at
+upgrade.
+
+**Expect one drain, not two — and expect the corpus to be of mixed generation while it runs.** The
+re-embed pass is scoped to the chunkings the enabled shares currently use, so a chunk that the crawl
+is about to re-cut is not refreshed first and then thrown away. What no scoping can remove is the
+window: the re-embed drains `CHEMCLAW_DOCUMENT_REEMBED_BATCH_SIZE` chunks per activity,
+`CHEMCLAW_DOCUMENT_SYNC_MAX_ITERATIONS` times per run, so at the shipped 500 × 100 a million-chunk
+share takes on the order of **days** of six-hourly runs. Throughout it, document search compares
+queries embedded by the new model against vectors not yet refreshed — scores are degraded, results
+are not missing. Watch `re-embedded N chunk(s)` in the background worker's log to see the drain
+converge, and the `%d chunk(s) could not be re-embedded` line at ERROR for the ones it cannot fix.
+To finish faster, raise the batch size or run `python -m chemclaw.cli.sync_share <name>`, which
+drains that share's re-embed to completion before it crawls.
+
 ## (vii) Read eval-drift alerts
 
 The scheduled `EvalDriftWorkflow` re-scores the committed eval case-set and raises one alert per
