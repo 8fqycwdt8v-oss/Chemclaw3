@@ -40,6 +40,36 @@ one was refuted in its remedy. This is the piece deliberately not done.
       **Trigger**: a verifier prompt-size or judge-latency problem, or the next change to what
       `runner_trace.tool_result_text` returns — whichever comes first.
 
+## Open — Left by the gates-and-validators deep fix (2026-08-09)
+
+Six findings on the gates themselves, four of them a validator that could pass vacuously. These are
+what those fixes deliberately did not close.
+
+- [ ] **Rule 9's corpus is now a list, so a selector outside it is unseen** — [S]. `_selector_sources`
+      walked the working directory, which let `make mutants`' gitignored copy of the tree fail
+      `make prose-validate`; it is now the operator documents plus `docs/`. That trades a widening
+      hazard for a narrowing one: a PromQL selector written into a package `README.md`, a `SKILL.md`
+      or `tests/README.md` is no longer checked. Measured at the time of the change: 0 such
+      selectors, all 9 selector-bearing documents still in the corpus. The alternative — deriving
+      the corpus from `git ls-files` — keeps the full reach and cannot see build output either, at
+      the cost of a subprocess and of behaving differently outside a checkout (the tests monkeypatch
+      the root into a `tmp_path`). *Trigger:* the first selector that belongs in a document outside
+      `docs/`, or any second reason to want "the files the repository tracks" as a corpus.
+
+- [ ] **`make template-validate` reports a broken bundle as a traceback** — [S]. A transitive import
+      failure now propagates out of `_resolvable_signatures` instead of being swallowed, which is
+      the point (it used to check less and print "template validation passed"). It exits non-zero
+      and prints a real `ModuleNotFoundError`, where `make connector-validate` — which runs first in
+      `make ci` and names the same bundle — prints a one-line problem. *Trigger:* a second validator
+      needs to survive a broken bundle, i.e. the moment "which bundle" stops being obvious from the
+      gate that already failed.
+
+- [ ] **The old `CHEMCLAW_TEST_TIMEOUT_SCALE` spelling survives in two places** — [XS]. The knob is
+      `PYTEST_TIMEOUT_SCALE` now (it is a pytest knob; the `CHEMCLAW_` prefix is the claim that a key
+      is a `Settings` field, and prose rule 7 enforces exactly that). `tasks/todo.md` still uses the
+      old name in a session log, and so does a merged ADR, which is never edited. Neither is in any
+      gate's corpus. *Trigger:* the next edit to `tasks/todo.md` for any other reason.
+
 ## Open — Left by the pluggable vector store (2026-08-08)
 
 Record: `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The seam ships with a

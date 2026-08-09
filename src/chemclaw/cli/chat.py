@@ -160,12 +160,18 @@ async def _run(args: argparse.Namespace) -> None:
         reset_current_identity(identity_token)
 
 
-async def _repl(
-    agent: Any, connectors: Sequence[Any] = (), session: Any = None, actor: str = ""
-) -> None:
+async def _repl(agent: Any, connectors: Sequence[Any], session: Any, actor: str) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
+
+    Every argument is required, unlike `converse`'s two, whose defaults keep that function additive
+    for a caller building its own agent. This one is private with a single caller that passes all
+    four, so the defaults were unreachable — and one of them was worse than dead: `actor: str = ""`
+    flows into `plan_approval_store().record(...)`, whose entire purpose is that the GxP record
+    names the identity that approved. An unreachable default that would write an anonymous approval
+    is not a safe fallback; it is a fallback that must never be taken, which is what "required"
+    says.
 
     Two lines are commands rather than questions, `/plan` and `/approve`, and they exist because
     the plan gate is now enforced rather than merely recorded (D-167). Under `harness_enabled` with

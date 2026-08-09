@@ -15,8 +15,8 @@ every test; see its docstring for why that has to be autouse rather than a per-f
 that starts a real server instead of being redefined per file (Rule of Three).
 
 `pytest_collection_modifyitems` owns both wall-clock-cap adjustments: the `thread` timeout method
-for Temporal-backed modules, and `CHEMCLAW_TEST_TIMEOUT_SCALE`, which is the one knob that relaxes
-*every* cap — including the per-test markers, which no command-line flag can reach.
+for Temporal-backed modules, and `PYTEST_TIMEOUT_SCALE`, which is the one knob that relaxes *every*
+cap — including the per-test markers, which no command-line flag can reach.
 """
 
 import asyncio
@@ -144,15 +144,23 @@ def timeout_scale() -> float:
     `.env.example`. How loaded the machine running the tests is has nothing to do with a
     deployment.
 
+    **And therefore not spelled `CHEMCLAW_*` either, which it was until this rename.** The prefix
+    is the claim that a key comes from that one config, and prose-contract rule 7 enforces exactly
+    that over the operator corpus — so the old name passed only by being documented where the rule
+    does not look. Measured: one sentence about it added to `README.md`, the natural place to tell
+    a person how to run the suite on a loaded machine, and `make prose-validate` failed with
+    "names CHEMCLAW_TEST_TIMEOUT_SCALE, which is not a Settings field". It is a pytest knob; it now
+    says so, and the runbook may name it.
+
     Read per call rather than at import so a test can set it and see the effect.
     """
-    raw = os.environ.get("CHEMCLAW_TEST_TIMEOUT_SCALE", "1")
+    raw = os.environ.get("PYTEST_TIMEOUT_SCALE", "1")
     try:
         scale = float(raw)
     except ValueError:
-        raise UsageError(f"CHEMCLAW_TEST_TIMEOUT_SCALE must be a number, got {raw!r}") from None
+        raise UsageError(f"PYTEST_TIMEOUT_SCALE must be a number, got {raw!r}") from None
     if scale <= 0:
-        raise UsageError(f"CHEMCLAW_TEST_TIMEOUT_SCALE must be positive, got {scale}")
+        raise UsageError(f"PYTEST_TIMEOUT_SCALE must be positive, got {scale}")
     return scale
 
 
@@ -166,7 +174,7 @@ def _base_timeout(config: pytest.Config) -> float:
 
 
 def _apply_timeout_scale(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Multiply every item's effective wall-clock cap by `CHEMCLAW_TEST_TIMEOUT_SCALE`.
+    """Multiply every item's effective wall-clock cap by `PYTEST_TIMEOUT_SCALE`.
 
     **Why a scale and not larger constants.** A `@pytest.mark.timeout(90)` marker overrides
     `--timeout` and `PYTEST_TIMEOUT`, so the tests with the *tightest* caps are exactly the ones a
@@ -227,8 +235,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     Selected by module rather than by marker so a new Temporal test is covered the day it is
     written: importing `start_env_or_skip` is what makes a module able to hang this way.
 
-    `CHEMCLAW_TEST_TIMEOUT_SCALE` is applied last, after that marker exists, so the scaled
-    replacement can carry `method="thread"` forward.
+    `PYTEST_TIMEOUT_SCALE` is applied last, after that marker exists, so the scaled replacement
+    can carry `method="thread"` forward.
     """
     for item in items:
         module = getattr(item, "module", None)
@@ -260,6 +268,6 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
         terminalreporter.write_line(f"TIMEOUT {nodeid}")
     terminalreporter.write_line(
         "These are wall-clock caps, not assertion failures: nothing above is evidence about the "
-        "code under test. On a loaded machine re-run with CHEMCLAW_TEST_TIMEOUT_SCALE=4 (it "
-        "scales the per-test markers too, which --timeout cannot)."
+        "code under test. On a loaded machine re-run with PYTEST_TIMEOUT_SCALE=4 (it scales the "
+        "per-test markers too, which --timeout cannot)."
     )

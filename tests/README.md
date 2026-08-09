@@ -34,17 +34,17 @@ So: after writing or moving one of these, **break it on purpose and watch it fai
 the green. Each of the modules above now asserts against a non-empty set explicitly, which is the
 cheap version of the same discipline.
 
-## Running on a loaded machine: `CHEMCLAW_TEST_TIMEOUT_SCALE`
+## Running on a loaded machine: `PYTEST_TIMEOUT_SCALE`
 
 Every test is capped at 180 s (`pyproject.toml`), and a few compute-bound ones carry a tighter
 `@pytest.mark.timeout(...)` so a spiking optimizer names itself instead of eating the whole file's
 budget. **A marker overrides `--timeout` and `PYTEST_TIMEOUT`**, so the tightest caps were the ones
 no command line could relax — the wrong way round when the machine is busy.
 
-`CHEMCLAW_TEST_TIMEOUT_SCALE` multiplies every cap, markers included:
+`PYTEST_TIMEOUT_SCALE` multiplies every cap, markers included:
 
 ```
-CHEMCLAW_TEST_TIMEOUT_SCALE=4 make test    # ~4x slack, every cap, same relative tightness
+PYTEST_TIMEOUT_SCALE=4 make test    # ~4x slack, every cap, same relative tightness
 ```
 
 Reach for it when you see the `timeouts — these assertions never ran` section in the output. That

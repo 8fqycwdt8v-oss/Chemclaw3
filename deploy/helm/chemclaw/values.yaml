@@ -509,6 +509,15 @@ monitoring:
     # this is the only signal that covers a slow burn across pods. Deliberately generous —
     # tune it to the deployment's real baseline rather than treating the default as meaningful.
     tokensPerHourWarning: 2000000
+    # The two alerts whose intent is "sustained", not "it happened once". A `for:` cannot express
+    # that over an `increase(...) > 0`: the expression keeps returning a sample for the whole range
+    # window after a single increment, so a `for:` shorter than the window is satisfied by one blip
+    # and only delays the page. The count is the threshold instead, and it is a value because how
+    # many probe misses or lost watermark reads a deployment tolerates is a property of its network
+    # and its database, not of the chart. Both are "more than five in the window"; tune to the
+    # deployment's real baseline rather than treating the default as meaningful.
+    durableUnreachableWarning: 5
+    rollbackWatermarkWarning: 5
 
 # Pod/container security context. The chart asserted none of this, so a namespace labelled
 # `pod-security.kubernetes.io/enforce=restricted` — the default posture for a regulated OpenShift

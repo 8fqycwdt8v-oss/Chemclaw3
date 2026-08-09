@@ -160,7 +160,7 @@ def test_a_served_tool_the_manifest_never_declares_is_reported() -> None:
         return record_id
 
     with mock.patch(
-        "chemclaw.cli.validate_connectors.importlib.import_module",
+        "chemclaw.connectors.registry.importlib.import_module",
         return_value=mock.Mock(server=served),
     ):
         problems = _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST))
@@ -190,7 +190,7 @@ def test_a_bundle_serving_exactly_what_it_declares_is_accepted() -> None:
         return value
 
     with mock.patch(
-        "chemclaw.cli.validate_connectors.importlib.import_module",
+        "chemclaw.connectors.registry.importlib.import_module",
         return_value=mock.Mock(server=served),
     ):
         assert _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST)) == []
@@ -221,7 +221,7 @@ def test_a_job_only_bundle_with_no_server_module_is_not_a_violation() -> None:
 
     absent = ModuleNotFoundError("No module named 'chemclaw.connectors.probe.server'")
     absent.name = "chemclaw.connectors.probe.server.tools"
-    with mock.patch("chemclaw.cli.validate_connectors.importlib.import_module", side_effect=absent):
+    with mock.patch("chemclaw.connectors.registry.importlib.import_module", side_effect=absent):
         assert _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST)) == []
 
 
@@ -240,8 +240,27 @@ def test_a_bundle_whose_server_module_is_broken_is_reported_not_skipped() -> Non
     missing_dep.name = "rdkit"
     for failure in (missing_dep, ImportError("cannot import name 'foo'"), AttributeError("boom")):
         with mock.patch(
-            "chemclaw.cli.validate_connectors.importlib.import_module", side_effect=failure
+            "chemclaw.connectors.registry.importlib.import_module", side_effect=failure
         ):
             problems = _served_tool_problems(manifest)
         assert len(problems) == 1, f"{failure!r} produced {problems}"
         assert "probe" in problems[0]
+
+
+def test_a_server_module_with_no_server_object_is_reported_not_skipped() -> None:
+    """The same vacuous pass one layer down: the module imports and defines no `server`.
+
+    `getattr(module, "server", None) or return []` treated that exactly like `qm`'s "this bundle
+    has no MCP surface", and the two are not the same event. The rule's whole job is to ask the
+    running server what it serves; with no `server` object there is nothing to ask, so it reported
+    no problems while checking nothing. All six bundles with an endpoint define
+    `server = FastMCP(...)`, which means the only way into this state is a rename — the change the
+    rule most needs to survive.
+    """
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    renamed = mock.Mock(spec=["mcp"])  # a module with no `server` attribute at all
+    with mock.patch("chemclaw.connectors.registry.importlib.import_module", return_value=renamed):
+        problems = _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST))
+    assert len(problems) == 1, problems
+    assert "defines no `server`" in problems[0]
