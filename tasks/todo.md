@@ -153,3 +153,29 @@ already raised before `predict_solubility` saw it. The one live instance left is
 `ecfp_bitstring("CCO")` — and it is a `BACKLOG.md` row rather than a silent omission: a wrong search
 result, not a false clearance, and `_parse` also indexes ELN labels where refusing is a different
 trade.
+
+## Defect 2 — a reloaded conversation could not resolve past results
+
+ADR: `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one`.
+
+- [x] `TranscriptToolCall.result_ref` — the same handle the live stream carries, resolved through
+      the same route. Additive; nothing about `ToolResultEvent` or
+      `GET /sessions/{id}/tool-results/{ref}` changes.
+- [x] `tool_results.fetchable_refs` — the session's stored refs, read once per transcript, so an
+      advertised ref means *fetchable* and not merely computable. Skipped when the store is off;
+      an unreachable store degrades to an empty set rather than failing the reload.
+- [x] `_transcript(stored, *, fetchable=…)` — stays a pure projection; the route does the one read.
+
+**The pairing question was the real one, and content addressing dissolves it.** `tool_result_links`
+carries session, tool, correlation id and a timestamp, and those four cannot separate two calls of
+one tool in one turn — a join on them would be right most of the time, which is the worst thing a
+hazard-screen link can be. The transcript instead hashes the result text it is already holding, and
+that is the same string the producer hashed (MAF coerces a function result to `str` once, at the
+content; the durable row is that content's JSON round trip). `tests/test_tool_results.py` drives
+both real paths and asserts the two derivations agree, rather than asserting it in a comment.
+
+**Retention gets a third state rather than a tombstone.** A swept blob leaves the transcript with a
+result and an empty ref, which is distinguishable from `result is None` ("it ran and nobody knows
+how it ended") and instructs a surface identically to "never stored". Separating "swept" from
+"never stored" would mean a durable record per expired blob on the table that grows per tool call —
+a record of a rendering, which is the thing this store deliberately is not.

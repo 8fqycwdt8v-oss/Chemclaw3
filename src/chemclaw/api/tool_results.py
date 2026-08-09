@@ -75,6 +75,13 @@ _SELECT_RESULT = """
     WHERE l.session_id = %s AND l.content_hash = %s
 """
 
+# Which of a session's results are fetchable *right now* — the transcript's question, asked once
+# per reload rather than once per tool call. Only the links are read: `ON DELETE CASCADE` (042)
+# means a link cannot outlive its blob, so the link's existence is the blob's existence, and
+# joining `tool_result_blobs` would re-derive a fact the foreign key already guarantees. Served by
+# `tool_result_links_session_idx`.
+_SELECT_SESSION_REFS = "SELECT content_hash FROM tool_result_links WHERE session_id = %s"
+
 
 class StoredToolResult(BaseModel):
     """One stored tool result, as the fetch route returns it.
@@ -150,6 +157,57 @@ async def load_tool_result(session_id: str, ref: str) -> StoredToolResult | None
         # psycopg may hand BYTEA back as a memoryview.
         text=bytes(data).decode("utf-8"),
     )
+
+
+async def fetchable_refs(session_id: str) -> frozenset[str]:
+    """Every ref `session_id` can currently fetch — what the transcript needs to advertise one.
+
+    **Why the transcript needs this at all, when the ref is derivable from the bytes.** A stored
+    tool call is paired to its blob by *content address*: the transcript holds the result text, and
+    the SHA-256 of that text is the address the store wrote it under. That pairing is exact by
+    construction — no timestamp window, no "the nearest link row with the same tool", nothing that
+    is right most of the time — and it is why `tool_result_links` is not consulted as a *join key*.
+    What the address cannot say is whether those bytes are still there: `result_ref` on the live
+    event means "stored", and a transcript that computed an address for every past result would
+    hand a client refs for results the store never took (the store is off, the result was over the
+    cap, the write failed) and for results retention has since swept. This turns the derivable
+    address into a checked one, so an empty `TranscriptToolCall.result_ref` keeps the one meaning
+    it has on the stream: not fetchable.
+
+    Returned frozen because it is a lookup table the projection only reads, and it crosses from a
+    route into a pure function that must not be able to change it.
+
+    **A failure is an empty set, not an error**, for the reason `session_sink` swallows its write:
+    a fetchable full result is a rendering, and a transcript a chemist is reloading must not fail
+    because the blob store is unreachable — they still get every message, every tool call and the
+    400-character result. The swallow goes through `degraded()` under the same subsystem name as
+    the write side, because from an operator's seat "the tool-result store is not answering" is one
+    condition whether it was noticed writing or reading.
+
+    Skipped entirely when `stream_max_result_bytes` is 0, which is the store's documented off
+    switch: nothing was written, so there is nothing to ask about and no reason to open a
+    connection to ask.
+    """
+    if settings.stream_max_result_bytes <= 0:
+        return frozenset()
+    try:
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_SESSION_REFS, (session_id,))
+                rows = await cur.fetchall()
+    except Exception as exc:  # noqa: BLE001 - a rendering must never cost a chemist their history
+        degraded(
+            logger,
+            "tool_result_store",
+            "could not list the stored results of session %s (%s); its transcript will carry no "
+            "result refs and a client will fall back to the truncated result text",
+            session_id,
+            exc,
+            level=logging.WARNING,
+            exc_info=False,
+        )
+        return frozenset()
+    return frozenset(str(row[0]) for row in rows)
 
 
 def session_sink(session_id: str, correlation_id: str) -> ResultSink:

@@ -1667,3 +1667,26 @@ Rules for myself:
 - Refusing beats narrowing on any path whose empty result reads as reassurance. The screens already
   refuse an over-long component list for exactly this reason and say so in `require_screenable_size`
   — the argument was written, it just had not been applied to the parse.
+
+## A join that is right most of the time is worse than no join (2026-08-09)
+
+Carrying `result_ref` into the transcript, the obvious implementation was to pair a stored tool call
+to its blob through `tool_result_links`, which carries session, tool, correlation id and a
+timestamp. It reads like enough. It is not: two calls of one tool in one turn share all four, so the
+pairing would be a *nearest-timestamp* guess, and its failure mode is a chemist opening a hazard
+screen and being shown a different molecule's flags — with no signal that anything went wrong.
+
+The escape was already in the design and I nearly walked past it. The store is content-addressed, so
+the ref is a function of the result text, and the transcript is holding that text. There is no
+pairing step to get wrong.
+
+Rules for myself:
+
+- When a link's correctness depends on "these rows are usually unique together", write down the case
+  where they are not before writing the query. If that case produces a confidently wrong answer
+  rather than a visible failure, the design is wrong, not the query.
+- Prefer a key derived from the payload over a key assembled from context. Content addressing
+  answers "is this the same thing" without a clock, a sequence or an assumption about concurrency.
+- A derived ref still needs an existence check before it is advertised. Derivable is not fetchable —
+  retention, an over-cap refusal and a failed write all produce an address nothing will serve, and a
+  link that 404s is indistinguishable from a live one until a user clicks it.

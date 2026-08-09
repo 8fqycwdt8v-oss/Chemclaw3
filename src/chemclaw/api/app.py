@@ -78,7 +78,7 @@ from chemclaw.api.state import (
     _default_turn_claims,
     _LiveSessions,
 )
-from chemclaw.api.tool_results import load_tool_result
+from chemclaw.api.tool_results import fetchable_refs, load_tool_result
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -107,6 +107,7 @@ __all__ = [
     "cancel_job",
     "decide_approval",
     "expand_note",
+    "fetchable_refs",
     "job_status",
     "list_pending_approvals",
     "load_tool_result",

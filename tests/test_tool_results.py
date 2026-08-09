@@ -4,8 +4,9 @@ Everything chemical a tool computes used to reach the browser as `ToolResultEven
 characters, cut at whatever byte the budget lands on, explicitly not JSON. So a hazard screen with
 severities and citations arrived as prose the model wrote about it, and the frontend could not fix
 that because the data never crossed the wire. This covers the three pieces that change it — the
-content-addressed store, the producer that names a result on the trace event, and the routes that
-read a stored result and a cited note back.
+content-addressed store, the producer that names a result on the trace event, the routes that read
+a stored result and a cited note back, and the transcript that lets a *reloaded* conversation
+resolve the results of turns it has already had.
 
 The Postgres-backed tests follow `tests/test_postgres_artifacts.py`'s pattern exactly:
 `migrated_db_or_skip()` skips cleanly with no database (this sandbox) and runs for real in CI, each
@@ -18,15 +19,16 @@ import logging
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
+from agent_framework import AgentSession, Message
 from fastapi.testclient import TestClient
 
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.graph_tools import NoteRef, NoteView
-from chemclaw.api.app import create_app
+from chemclaw.api.app import _transcript, create_app
 from chemclaw.api.tool_results import (
     StoredToolResult,
     content_address,
+    fetchable_refs,
     load_tool_result,
     session_sink,
     store_tool_result,
@@ -400,3 +402,217 @@ def test_an_unmerged_note_is_a_404_carrying_its_reason(
 
     assert res.status_code == 404
     assert "note-not-yet-merged" in res.json()["detail"]
+
+
+# --- the transcript ----------------------------------------------------------------------------
+
+
+def _stored_turn(
+    result: str, *, call_id: str = "t1", tool: str = "screen_hazards"
+) -> list[Message]:
+    """One tool call and its result, shaped as the durable history hands them back.
+
+    Built through `Message.from_dict` rather than `Content.from_function_result` because that is
+    literally what `PostgresHistoryProvider.get_messages` does with the JSONB column — so the
+    contents under test have been through the same round trip a reload puts them through, not a
+    shortcut around it.
+    """
+    return [
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "contents": [
+                    {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": tool,
+                        "arguments": {"smiles": ["CCN=[N+]=[N-]"]},
+                    }
+                ],
+            }
+        ),
+        Message.from_dict(
+            {
+                "role": "tool",
+                "contents": [{"type": "function_result", "call_id": call_id, "result": result}],
+            }
+        ),
+    ]
+
+
+def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() -> None:
+    """The whole pairing argument, driven through both real paths rather than asserted about them.
+
+    A reload had no way to resolve a past turn's results: `result_ref` reached a surface on the SSE
+    stream only, so a chemist coming back to a conversation saw *that* `screen_hazards` ran and
+    400 characters of prose about what it found, while the full text sat in `tool_result_blobs`.
+
+    The join is content addressing and nothing else. The producer hashes the result text; the
+    transcript hashes the result text it reads out of the stored message; MAF coerces a function
+    result to `str` once, at the content, so those are the same bytes and therefore the same ref.
+    Nothing pairs on `(session, tool, correlation_id, created_at)` — which could not tell two calls
+    of one tool in one turn apart anyway — so there is no near-miss pairing available to get wrong.
+
+    Both halves run for real here, because a stub cannot disagree with itself: the ref on the left
+    comes from `ToolCallTrace` driving its sink, the one on the right from `_transcript` reading a
+    round-tripped MAF message, and the assertion is that two independent derivations agree.
+    """
+    stored: dict[str, str] = {}
+
+    async def _sink(_tool: str, text: str) -> str:
+        ref = content_address(text)
+        stored[ref] = text
+        return ref
+
+    trace = runner_trace.ToolCallTrace(sink=_sink)
+    _issued(trace, "t1", "screen_hazards")
+    events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="t1", result=_SCREEN)]))
+    (event,) = [e for e in events if e.type == "tool_result"]
+
+    [message] = [m for m in _transcript(_stored_turn(_SCREEN), fetchable=stored) if m.tool_calls]
+    [call] = message.tool_calls
+
+    assert event.result_ref != ""  # the stream stored it
+    assert call.result_ref == event.result_ref  # and the reload names the same bytes
+    assert call.tool == "screen_hazards"
+
+
+def test_a_result_the_store_cannot_serve_is_advertised_as_unfetchable() -> None:
+    """The retention case, and the reason the ref is *checked* rather than merely computed.
+
+    A ref in a transcript outlives the blob it names the moment the TTL sweep runs, and it is also
+    computable for results the store never took (off, over the cap, a failed write). Advertising a
+    derivable address in either case would hand a client a link that 404s and no way to know in
+    advance — so the transcript reports only refs the store can currently serve, and `""` keeps
+    exactly the meaning it has on the live stream: there is nothing to fetch.
+
+    What the client still has is the 400-character `result`, which is why this is a degradation of
+    the rendering and never a loss of the transcript.
+    """
+    [message] = [m for m in _transcript(_stored_turn(_SCREEN), fetchable=()) if m.tool_calls]
+    [call] = message.tool_calls
+
+    assert call.result_ref == ""
+    assert call.result is not None and "azide" in call.result
+
+
+def test_an_unanswered_call_stays_distinguishable_from_an_unfetchable_one() -> None:
+    """Three states, and the pair that must not collapse into each other.
+
+    `result is None` means the call has no result at all — it ran and nobody knows how it ended.
+    `result` set with an empty `result_ref` means it returned and only the preview survives. A
+    surface that conflated them would tell a chemist a tool produced nothing when it produced
+    something the store no longer holds, which is the more reassuring of the two claims and the
+    wrong one.
+    """
+    orphan = [
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "contents": [
+                    {
+                        "type": "function_call",
+                        "call_id": "gone",
+                        "name": "screen_hazards",
+                        "arguments": {},
+                    }
+                ],
+            }
+        )
+    ]
+    [unanswered] = _transcript(orphan)[0].tool_calls
+    [unfetchable] = [
+        call for m in _transcript(_stored_turn(_SCREEN), fetchable=()) for call in m.tool_calls
+    ]
+
+    assert (unanswered.result, unanswered.result_ref) == (None, "")
+    assert unfetchable.result is not None and unfetchable.result_ref == ""
+
+
+def test_the_transcript_route_carries_the_ref_the_store_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the route a client actually reloads through.
+
+    `GET /sessions/{id}/messages` is the rehydration path, and it is where the ref had to arrive: a
+    projection that can produce one is worth nothing if the route never asks for it. The app is
+    built here rather than taken from the `client` fixture because the stored history has to be
+    replaced on `app.state.history`, which is the seam the route reads its transcript through.
+    """
+    app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+    ref = content_address(_SCREEN)
+
+    async def _messages(_session_id: str | None, **_kwargs: Any) -> list[Message]:
+        return _stored_turn(_SCREEN)
+
+    async def _fetchable(session: str) -> frozenset[str]:
+        assert session == session_id
+        return frozenset({ref})
+
+    monkeypatch.setattr(app.state.history, "get_messages", _messages)
+    monkeypatch.setattr("chemclaw.api.app.fetchable_refs", _fetchable)
+
+    [call] = [
+        call
+        for message in client.get(f"/sessions/{session_id}/messages").json()
+        for call in message["tool_calls"]
+    ]
+    assert call["result_ref"] == ref
+
+
+def test_the_refs_a_session_can_fetch_are_its_own() -> None:
+    """`fetchable_refs` is scoped by the link row's session, like every other read of this store.
+
+    Otherwise the transcript would advertise a ref that `load_tool_result` then refuses — the same
+    ownership boundary applied twice, and it must give the same answer both times or a surface
+    renders a link that cannot resolve.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        mine = await store_tool_result(
+            session_id="tr-refs-mine", correlation_id="c", tool="screen_hazards", text=_SCREEN
+        )
+        theirs = await store_tool_result(
+            session_id="tr-refs-theirs", correlation_id="c", tool="find_notes", text="[]"
+        )
+        refs = await fetchable_refs("tr-refs-mine")
+        assert mine in refs
+        assert theirs not in refs
+
+    asyncio.run(_run())
+
+
+def test_a_store_that_cannot_be_read_costs_the_transcript_only_its_refs(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading fails the same way writing does: an empty answer, a count, and no raised error.
+
+    A chemist reloading a conversation must still get every message and every tool call when the
+    blob store is unreachable; what they lose is the link to a full result, which is a rendering.
+    Driven against a DSN pointing at nothing rather than a patched exception, for the reason the
+    write-side test states — that is the real shape of the failure.
+    """
+    monkeypatch.setattr(settings, "postgres_dsn", "postgresql://127.0.0.1:1/nowhere")
+
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(fetchable_refs("tr-unreadable")) == frozenset()
+    assert "tr-unreadable" in caplog.text
+    assert 'chemclaw_degraded_total{subsystem="tool_result_store"}' in METRICS.render()
+
+
+def test_the_off_switch_asks_the_database_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the store disabled there is nothing stored, so there is nothing to look up.
+
+    Asserted by making any connection attempt fail the test: a lookup against a store that is off
+    is a round trip per reload buying an answer that is known in advance.
+    """
+    monkeypatch.setattr(settings, "stream_max_result_bytes", 0)
+
+    def _no_connection(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover - must not be called
+        raise AssertionError("the store is disabled and must not be queried")
+
+    monkeypatch.setattr("chemclaw.api.tool_results.db.connection", _no_connection)
+    assert asyncio.run(fetchable_refs("tr-off")) == frozenset()
