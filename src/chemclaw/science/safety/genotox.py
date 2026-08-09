@@ -70,9 +70,19 @@ class GenotoxAlert(BaseModel):
 
 
 class AlertResult(BaseModel):
-    """The alerts raised for one molecule or route, in table order."""
+    """The alerts raised for one molecule or route, in table order, and what was screened.
+
+    `screened` mirrors `ScreenResult.screened` exactly — the canonical SMILES of every structure
+    this result covers, deduplicated, in the order given — and it is here for the same two reasons
+    and one more. A clean result otherwise names nothing it looked at, which is worst on precisely
+    this result type (`verdict` spends three lines saying an empty list is not a negative
+    mutagenicity prediction, about molecules the payload never identifies); and a surface that must
+    render a genotox alert *distinctly* from a general hazard needs both results to key on the same
+    entity, which they cannot do while each carries only the caller's own spelling.
+    """
 
     alerts: list[GenotoxAlert] = Field(default_factory=list)
+    screened: list[str] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -183,4 +193,7 @@ def screen_genotoxic_alerts(component_smiles: list[str]) -> AlertResult:
             for b in right
             if a != b
         )
-    return AlertResult(alerts=alerts)
+    # Deduplicated after canonicalizing: `molecules` is keyed on the caller's spelling, so a route
+    # listing one substance two ways would otherwise appear as two entities.
+    canonical = list(dict.fromkeys(str(Chem.MolToSmiles(m)) for m in molecules.values()))
+    return AlertResult(alerts=alerts, screened=canonical)

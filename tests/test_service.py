@@ -1596,6 +1596,10 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         # authorize it.
         ("/sessions/{session_id}/plan", "GET"),
         ("/sessions/{session_id}/plan/decision", "POST"),
+        # The stored full text of what one tool returned. Owner-scoped for the reason the route
+        # is hung off a session at all: a ref is the SHA-256 of a result's own text, so it is
+        # unguessable but not secret, and this gate — not the ref — is what says who may read it.
+        ("/sessions/{session_id}/tool-results/{ref}", "GET"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"
@@ -1610,7 +1614,10 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     app.dependency_overrides[require_principal] = lambda: bob
     for route in session_routes:
         for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
-            url = route.path.format(session_id=session_id)
+            # `ref` is supplied for the tool-result route and ignored by every other path;
+            # `str.format` drops the surplus keyword rather than complaining, so one line still
+            # builds a URL for all of them.
+            url = route.path.format(session_id=session_id, ref="0" * 64)
             # The upload route takes multipart, the others JSON; send whichever the route expects so
             # a 404 here proves the *ownership* gate rather than a body-parsing rejection.
             if url.endswith("/attachments"):

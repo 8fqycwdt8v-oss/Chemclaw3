@@ -3,6 +3,29 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
+
+- [ ] **A reloaded conversation cannot resolve the results of its past turns** — [M].
+      `ToolResultEvent.result_ref` reaches a surface on the live SSE stream only.
+      `TranscriptMessage.tool_calls` (`api/schemas.py`) carries `tool`, `arguments` and a
+      400-character `result` per call and no ref, so `GET /sessions/{id}/messages` — the route a
+      client uses to rehydrate a conversation — hands back the same truncated string the preview
+      was, for turns whose full results are sitting in `tool_result_blobs`. The store is keyed on
+      `(session_id, content_hash)` and the transcript is rebuilt from `session_messages`, so the
+      join needs the *ref*, which means the transcript builder computing `content_address` over the
+      result text it already holds. Cheap, and deliberately not in the first change: it touches the
+      transcript contract, which has its own consumers.
+      **Trigger**: the frontend building typed result cards and finding they vanish on reload —
+      which is the first thing a chemist will do.
+
+- [ ] **`tool_result_blobs` has no bound on a deployment that has not stated one** — [S].
+      Its retention window defaults to 0 like every other, for a reason that is written down (see
+      the ADR and `tasks/lessons.md`), and it is the highest-volume table in the schema at up to a
+      row per tool call. Nothing measures it. The honest small piece is a row-count/byte gauge on
+      the metrics surface so an operator meets the growth before the disk does, rather than a
+      default that `retention_enabled=false` makes inert anyway.
+      **Trigger**: the first deployment that turns the store on in anger, or any disk alert.
+
 ## Open — Left by the deep-review fix batch (2026-08-09)
 
 **Migrations 040 and 041 are deliberately not consolidated.** A review argued they should be one

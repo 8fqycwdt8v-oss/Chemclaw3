@@ -41,6 +41,19 @@ class ObservabilitySettings(BaseSettings):
     # `api/runner_trace.py` because it is a threshold on the wire, and an operator whose UI is
     # choking on a chatty connector must be able to lower it without a release (2026-08-05 review).
     stream_max_result_numbers: int = Field(default=512, ge=0)
+    # How large one tool result may be, in UTF-8 bytes, and still be written to the tool-result
+    # store (`api/tool_results.py`) for a surface to fetch through
+    # `GET /sessions/{id}/tool-results/{ref}`. A result over the cap is **not stored** and its
+    # `ToolResultEvent.result_ref` stays empty — the honest "not stored" — and the producer logs
+    # what it refused, for the reason stated one field up: a silent truncation reads as
+    # completeness, which is what `_capped_numbers` exists to avoid.
+    #
+    # 128 KiB against a largest-measured real result of ~20,000 characters (a 40-chunk evidence
+    # sweep), so it is far out of reach of normal traffic and exists only so a pathological result
+    # cannot put megabytes per call into Postgres. 0 disables storing entirely — one knob rather
+    # than a cap plus an on/off flag, because "store nothing" is the cap at its floor and two
+    # settings would be two ways to say one thing.
+    stream_max_result_bytes: int = Field(default=131072, ge=0)
     # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
     # Git SHA the running pod was built from, so a past agent result ties to the exact version that
     # produced it (GxP reproducibility). The image build sets it — `deploy/Containerfile` takes a

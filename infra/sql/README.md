@@ -68,11 +68,15 @@ the pair applies in filename order and neither shadows the other.
 | `turn_costs` | 033 | `agent/turn_cost_store.py` | — |
 | `document_files` | 037 (+040, 041) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
 | `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
+| `tool_result_blobs` | 042 | `api/tool_results.py` | `durable/retention.py`, by `created_at` (`retention_tool_results_days`). 0 by default like every other window, so **an operator who has not stated one lets this grow** — and at up to a row per tool call it grows fastest of the three. It holds no record of anything (the answers are in `calculation_results` and `job_records`), so a plain age cutoff is the whole policy it needs |
+| `tool_result_links` | 042 | `api/tool_results.py` | cascades from `tool_result_blobs` |
 
 ## Two things the shape of this table will not tell you
 
-**There are two foreign keys in the whole schema** (`calculation_artifacts` → `artifact_blobs`,
-`bo_suggestions` → `bo_campaigns`), both where a cascade is load-bearing. Everything else is
+**There are three foreign keys in the whole schema** (`calculation_artifacts` → `artifact_blobs`,
+`bo_suggestions` → `bo_campaigns`, `tool_result_links` → `tool_result_blobs`), each one where a
+cascade is load-bearing — a link row outliving its bytes would hand a caller a reference to
+nothing. Everything else is
 associated by a shared id with no constraint — including the four `session_*` tables, which is why
 pruning one of them does not touch the others and why the **Disposal** column has to be read per
 row rather than per subsystem.

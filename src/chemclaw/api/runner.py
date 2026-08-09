@@ -57,6 +57,7 @@ from chemclaw.api.events import (
 from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace, approval_prompt
 from chemclaw.api.runner_usage import TurnUsage, usage_tokens
+from chemclaw.api.tool_results import session_sink
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -323,7 +324,12 @@ async def run_turn(
             stream = agent.run(
                 user_message, stream=True, session=session, tools=turn_connectors or None
             )
-            tool_trace = ToolCallTrace()
+            # The sink is built here, and only here, because this is where the two things a stored
+            # result has to be filed under exist: the session that owns it (which is what the fetch
+            # route's ownership gate resolves against) and the turn's correlation id (which is what
+            # ties a fetched result back to the audit trail). `ToolCallTrace` deliberately knows
+            # neither — see its module docstring.
+            tool_trace = ToolCallTrace(sink=session_sink(session.session_id, correlation_id))
             async for update in stream:
                 turn_usage.add(usage_tokens(update))
                 # Drain *before* this update's own content: a tool that ran while the model was
@@ -337,7 +343,7 @@ async def run_turn(
                 if text:
                     answer_parts.append(text)
                     yield TokenEvent(text=text)
-                for call in tool_trace.feed(update):
+                for call in await tool_trace.feed(update):
                     yield call
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=approval_prompt(request))
@@ -819,7 +825,7 @@ async def _resume(
         text = getattr(update, "text", "") or ""
         if text:
             yield TokenEvent(text=text)
-        for call in tool_trace.feed(update):
+        for call in await tool_trace.feed(update):
             yield call
     for call in tool_trace.flush():
         yield call

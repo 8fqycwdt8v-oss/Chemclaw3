@@ -42,7 +42,7 @@ from chemclaw.api.events import (
 )
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import record_job_started
-from tests.fakes import FakeUpdate
+from tests.fakes import FakeUpdate, fed
 
 
 class _FakeAgent:
@@ -490,13 +490,13 @@ def test_a_streamed_tool_call_reports_the_arguments_it_was_called_with() -> None
     see the timing test below for why that difference is the whole of D-159.
     """
     trace = runner_trace.ToolCallTrace()
-    assert trace.feed(_update(_CallContent(name="add", call_id="c1", arguments={}))) == []
+    assert fed(trace, _update(_CallContent(name="add", call_id="c1", arguments={}))) == []
     # The provider opens the argument stream with an *empty* fragment before the first characters
     # arrive. Reading that as "nothing more is coming" closed the call early and shipped an empty
     # preview to the UI — the second way this defect survived a fix (D-138).
-    assert trace.feed(_update(_CallContent(call_id="c1", arguments=""))) == []
-    assert trace.feed(_update(_CallContent(call_id="c1", arguments='{"a": 1'))) == []
-    event = _one_call(trace.feed(_update(_CallContent(call_id="c1", arguments='7, "b": 25}'))))
+    assert fed(trace, _update(_CallContent(call_id="c1", arguments=""))) == []
+    assert fed(trace, _update(_CallContent(call_id="c1", arguments='{"a": 1'))) == []
+    event = _one_call(fed(trace, _update(_CallContent(call_id="c1", arguments='7, "b": 25}'))))
     assert event.tool == "add"
     assert event.arguments == '{"a": 17, "b": 25}'
     assert trace.flush() == []
@@ -515,34 +515,34 @@ def test_a_call_is_announced_before_its_result_is_seen() -> None:
     that ends the arguments, with the result update producing a *different* event afterwards.
     """
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="predict_pka", call_id="p1", arguments={})))
+    fed(trace, _update(_CallContent(name="predict_pka", call_id="p1", arguments={})))
 
     issued = _one_call(
-        trace.feed(_update(_CallContent(call_id="p1", arguments='{"smiles": "CCO"}')))
+        fed(trace, _update(_CallContent(call_id="p1", arguments='{"smiles": "CCO"}')))
     )
     assert issued.tool == "predict_pka"
 
     # ...and only now, after the tool has actually run, does its result arrive.
-    returned = _one_result(trace.feed(_update(_CallContent(call_id="p1", result="pKa 15.9"))))
+    returned = _one_result(fed(trace, _update(_CallContent(call_id="p1", result="pKa 15.9"))))
     assert (returned.tool, returned.preview) == ("predict_pka", "pKa 15.9")
 
 
 def test_a_result_is_reported_even_though_its_content_carries_no_name() -> None:
     """The result content has only a `call_id`, so the name has to be remembered from the call."""
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="compute_xtb_energy", call_id="x", arguments={})))
-    trace.feed(_update(_CallContent(call_id="x", arguments='{"smiles": "CCO"}')))
-    result = _one_result(trace.feed(_update(_CallContent(call_id="x", result="-154.5 Hartree"))))
+    fed(trace, _update(_CallContent(name="compute_xtb_energy", call_id="x", arguments={})))
+    fed(trace, _update(_CallContent(call_id="x", arguments='{"smiles": "CCO"}')))
+    result = _one_result(fed(trace, _update(_CallContent(call_id="x", result="-154.5 Hartree"))))
     assert result.tool == "compute_xtb_energy"
 
 
 def test_an_empty_result_reports_nothing_rather_than_an_empty_value() -> None:
     """A trace that shows a value it does not have is worse than one that shows none."""
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="t", call_id="e", arguments={})))
-    trace.feed(_update(_CallContent(call_id="e", arguments="{}")))
-    assert trace.feed(_update(_CallContent(call_id="e", result=""))) == []
-    assert trace.feed(_update(_CallContent(call_id="e"))) == []
+    fed(trace, _update(_CallContent(name="t", call_id="e", arguments={})))
+    fed(trace, _update(_CallContent(call_id="e", arguments="{}")))
+    assert fed(trace, _update(_CallContent(call_id="e", result=""))) == []
+    assert fed(trace, _update(_CallContent(call_id="e"))) == []
 
 
 def test_arguments_that_never_parse_still_fall_back_to_the_update_went_by_rule() -> None:
@@ -553,17 +553,17 @@ def test_arguments_that_never_parse_still_fall_back_to_the_update_went_by_rule()
     it, so such a call is announced at the previous, later moment rather than never.
     """
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="odd_tool", call_id="c9", arguments={})))
-    assert trace.feed(_update(_CallContent(call_id="c9", arguments="smiles=CCO"))) == []
-    event = _one_call(trace.feed(_update(_CallContent(call_id="c9"))))
+    fed(trace, _update(_CallContent(name="odd_tool", call_id="c9", arguments={})))
+    assert fed(trace, _update(_CallContent(call_id="c9", arguments="smiles=CCO"))) == []
+    event = _one_call(fed(trace, _update(_CallContent(call_id="c9"))))
     assert (event.tool, event.arguments) == ("odd_tool", "smiles=CCO")
 
 
 def test_a_call_whose_arguments_end_the_stream_is_still_reported() -> None:
     """Nothing follows the last update, so the flush is what keeps the final call from vanishing."""
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="screen_hazards", call_id="c9", arguments={})))
-    assert trace.feed(_update(_CallContent(call_id="c9", arguments='{"smiles":'))) == []
+    fed(trace, _update(_CallContent(name="screen_hazards", call_id="c9", arguments={})))
+    assert fed(trace, _update(_CallContent(call_id="c9", arguments='{"smiles":'))) == []
     event = _one_call(trace.flush())
     assert (event.tool, event.arguments) == ("screen_hazards", '{"smiles":')
 
@@ -571,17 +571,19 @@ def test_a_call_whose_arguments_end_the_stream_is_still_reported() -> None:
 def test_two_interleaved_calls_keep_their_own_arguments() -> None:
     """Parallel tool calls share the stream; the `call_id` is what keeps them apart."""
     trace = runner_trace.ToolCallTrace()
-    trace.feed(
+    fed(
+        trace,
         _update(
             _CallContent(name="predict_pka", call_id="a", arguments={}),
             _CallContent(name="predict_logd", call_id="b", arguments={}),
-        )
+        ),
     )
-    events = trace.feed(
+    events = fed(
+        trace,
         _update(
             _CallContent(call_id="a", arguments='{"smiles": "CC(=O)O"}'),
             _CallContent(call_id="b", arguments='{"smiles": "c1ccccc1"}'),
-        )
+        ),
     )
     calls = sorted((e for e in events if isinstance(e, ToolCallEvent)), key=lambda e: e.tool)
     assert [(e.tool, e.arguments) for e in calls] == [
@@ -599,8 +601,9 @@ def test_a_call_delivered_whole_is_reported_without_waiting_for_the_next_update(
     """
     trace = runner_trace.ToolCallTrace()
     event = _one_call(
-        trace.feed(
-            _update(_CallContent(name="find_notes", call_id="z", arguments={"query": "amide"}))
+        fed(
+            trace,
+            _update(_CallContent(name="find_notes", call_id="z", arguments={"query": "amide"})),
         )
     )
     assert (event.tool, event.arguments) == ("find_notes", '{"query": "amide"}')
@@ -620,9 +623,9 @@ def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
     assert len(result) > settings.agent_audit_max_arg_chars
 
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="ich_impurity_limit", call_id="i1", arguments={})))
-    trace.feed(_update(_CallContent(call_id="i1", arguments='{"substance": "palladium"}')))
-    event = _one_result(trace.feed(_update(_CallContent(call_id="i1", result=result))))
+    fed(trace, _update(_CallContent(name="ich_impurity_limit", call_id="i1", arguments={})))
+    fed(trace, _update(_CallContent(call_id="i1", arguments='{"substance": "palladium"}')))
+    event = _one_result(fed(trace, _update(_CallContent(call_id="i1", result=result))))
 
     assert event.preview == result[: settings.agent_audit_max_arg_chars]
     assert {100.0, 10.0, 1.0} <= set(event.numbers)
@@ -640,10 +643,10 @@ def test_a_result_with_more_values_than_the_wire_allows_is_capped_and_says_so(
     """
     flood = ", ".join(str(n + 0.5) for n in range(settings.stream_max_result_numbers + 50))
     trace = runner_trace.ToolCallTrace()
-    trace.feed(_update(_CallContent(name="dump_table", call_id="f1", arguments={})))
-    trace.feed(_update(_CallContent(call_id="f1", arguments="{}")))
+    fed(trace, _update(_CallContent(name="dump_table", call_id="f1", arguments={})))
+    fed(trace, _update(_CallContent(call_id="f1", arguments="{}")))
     with caplog.at_level(logging.WARNING, logger=runner_trace.__name__):
-        event = _one_result(trace.feed(_update(_CallContent(call_id="f1", result=flood))))
+        event = _one_result(fed(trace, _update(_CallContent(call_id="f1", result=flood))))
 
     assert len(event.numbers) == settings.stream_max_result_numbers
     assert "dump_table" in caplog.text
@@ -984,7 +987,7 @@ def test_a_named_fragment_stream_reassembles_into_one_call() -> None:
     events: list[Event] = []
     for fragment in ('{"a": 1', "7, ", '"b": 25}'):
         events.extend(
-            trace.feed(_update(_CallContent(name="add", call_id="c1", arguments=fragment)))
+            fed(trace, _update(_CallContent(name="add", call_id="c1", arguments=fragment)))
         )
     events.extend(trace.flush())
 
@@ -1002,7 +1005,7 @@ def test_a_whole_call_delivered_as_a_structured_object_still_announces_immediate
     call would sit unannounced until the next update went by.
     """
     trace = runner_trace.ToolCallTrace()
-    events = trace.feed(_update(_CallContent(name="add", call_id="c9", arguments={"a": 1})))
+    events = fed(trace, _update(_CallContent(name="add", call_id="c9", arguments={"a": 1})))
 
     calls = [e for e in events if isinstance(e, ToolCallEvent)]
     assert len(calls) == 1
@@ -1041,12 +1044,12 @@ def test_a_content_carrying_only_a_call_id_is_still_read() -> None:
     trace = runner_trace.ToolCallTrace()
     update = FakeUpdate()
     update.contents = [_CallContent(name="find_notes", call_id="c1", arguments={"text": "x"})]
-    calls = trace.feed(update)
+    calls = fed(trace, update)
     assert [event.tool for event in calls if isinstance(event, ToolCallEvent)] == ["find_notes"]
 
     result_update = FakeUpdate()
     result_update.contents = [_ResultOnlyContent(call_id="c1", result='[{"id": "note-a"}]')]
-    events = trace.feed(result_update)
+    events = fed(trace, result_update)
     results = [event for event in events if isinstance(event, ToolResultEvent)]
     assert [event.tool for event in results] == ["find_notes"], (
         "a result content carries no name — it is matched back to its call by id, and dropping it "
