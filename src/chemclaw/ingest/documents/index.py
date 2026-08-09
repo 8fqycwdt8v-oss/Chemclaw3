@@ -335,8 +335,8 @@ class InMemoryDocumentIndex:
     def _claimed(self) -> set[tuple[str, str]]:
         """Every `(doc_id, chunking_key)` some file row names — the live chunk sets.
 
-        The in-memory mirror of `_CLAIMED`. A chunk set outside it belongs to no path on any share:
-        a superseded chunk size, or a document whose last file row was swept.
+        The in-memory mirror of `CLAIMED_SQL`. A chunk set outside it belongs to no path on any
+        share: a superseded chunk size, or a document whose last file row was swept.
         """
         return {(f.doc_id, f.chunking_key) for f in self._files.values()}
 
@@ -513,8 +513,10 @@ def _vector_literal(embedding: list[float]) -> str:
 
 # What makes a chunk row live at all: some file row, on any share, names both its document *and*
 # its cutting. One definition, used by the sweep and by the per-write cleanup, because "orphan"
-# has to mean the same thing in both or one of them deletes rows the other keeps.
-_CLAIMED = (
+# has to mean the same thing in both or one of them deletes rows the other keeps. Public because
+# `external_index.py`'s sweep must delete exactly the same rows, and then remove their vectors from
+# the other system — two spellings of "orphan" across two stores is how they come to disagree.
+CLAIMED_SQL = (
     "EXISTS (SELECT 1 FROM document_files f "
     "WHERE f.doc_id = c.doc_id AND f.chunking_key = c.chunking_key)"
 )
@@ -582,12 +584,12 @@ class PostgresDocumentIndex:
             "embedding_key = EXCLUDED.embedding_key"
         )
         # The previous cutting of a document this write re-chunked. Run once at the end of the same
-        # transaction — *after* the file rows, so `_CLAIMED` reads what this write just said — so a
-        # re-chunk cannot leave rows behind that nothing points at and `reembed_stale` would then
-        # adopt as current. Scoped to the documents written, so it is a primary-key range rather
-        # than the table scan the sweep does.
+        # transaction — *after* the file rows, so `CLAIMED_SQL` reads what this write just said —
+        # so a re-chunk cannot leave rows behind that nothing points at and `reembed_stale` would
+        # then adopt as current. Scoped to the documents written, so it is a primary-key range
+        # rather than the table scan the sweep does.
         self._drop_unclaimed = (
-            f"DELETE FROM document_chunks c WHERE c.doc_id = ANY(%(docs)s) AND NOT {_CLAIMED}"
+            f"DELETE FROM document_chunks c WHERE c.doc_id = ANY(%(docs)s) AND NOT {CLAIMED_SQL}"
         )
         # Re-embedding touches the vector and its key and nothing else: the content and coordinate
         # came from the document and did not change, and rewriting the tsvector would be work for
@@ -648,6 +650,16 @@ class PostgresDocumentIndex:
         deployment for a column it does not use.
         """
         require_schema_vector_width()
+
+    async def _forget_vectors(self, keys: list[tuple[str, str, int]]) -> None:
+        """Told which chunk rows a re-chunk just superseded, so a subclass can drop their vectors.
+
+        A no-op here, because this index's vectors are *in* the rows that were deleted. The hook
+        exists for `ExternalVectorDocumentIndex`, whose vectors live in another system and would
+        otherwise accumulate forever: every re-chunk deletes the catalogue rows and left the points
+        behind, unreachable but never reclaimed. Called after the commit, so a subclass never
+        removes vectors for a transaction that then rolled back.
+        """
 
     def _chunk_vector(self, chunk: ChunkRecord) -> str | None:
         """The pgvector literal to store for this chunk, or `None` to leave the column NULL.
@@ -741,8 +753,14 @@ class PostgresDocumentIndex:
                     },
                 )
             touched = sorted({file.doc_id for file in files} | {c.doc_id for c in chunks})
-            await conn.execute(self._drop_unclaimed, {"docs": touched})
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"{self._drop_unclaimed} RETURNING c.doc_id, c.chunking_key, c.ordinal",
+                    {"docs": touched},
+                )
+                superseded = await cur.fetchall()
             await conn.commit()
+        await self._forget_vectors([(r[0], r[1], r[2]) for r in superseded])
 
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
         """Up to `limit` chunks of a live cutting whose vector is not the current configuration."""
@@ -807,8 +825,8 @@ class PostgresDocumentIndex:
                 removed = cur.rowcount
                 # Orphans, not "chunks of the deleted documents": the same content may still be
                 # reachable through a copy elsewhere on the share, and deleting by `doc_id` would
-                # silently un-index a file nobody touched. The same `_CLAIMED` the write path uses.
-                await cur.execute(f"DELETE FROM document_chunks c WHERE NOT {_CLAIMED}")
+                # silently un-index a file nobody touched — the write path's own predicate.
+                await cur.execute(f"DELETE FROM document_chunks c WHERE NOT {CLAIMED_SQL}")
             await conn.commit()
         return removed
 

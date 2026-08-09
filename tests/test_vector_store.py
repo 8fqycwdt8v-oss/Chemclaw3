@@ -176,14 +176,24 @@ async def test_a_zero_query_vector_matches_nothing_rather_than_ordering_over_nan
 # --- point ids round-trip -----------------------------------------------------------------------
 
 
-def test_a_point_id_round_trips_through_the_catalogue_key() -> None:
-    """The write and the read must agree; a doc id containing `#` must not break the parse."""
-    assert parse_point_id(point_id("doc-abc", 3)) == ("doc-abc", 3)
-    # `rpartition`, so only the final `#` separates the ordinal.
-    assert parse_point_id(point_id("doc#weird", 12)) == ("doc#weird", 12)
+def test_a_point_id_round_trips_through_the_whole_catalogue_key() -> None:
+    """The address is `(doc_id, chunking_key, ordinal)` — the chunk's primary key, all of it.
+
+    **The chunking is not optional here.** This index shipped keyed on `(doc_id, ordinal)` the same
+    day `document_chunks` gained `chunking_key`; neither change was wrong alone, and together two
+    cuttings of one document collided on a single point, so re-tuning `chunk_chars` would have had
+    the finer cutting silently overwrite the coarser's vectors.
+    """
+    assert parse_point_id(point_id("doc-abc", "c1800o200", 3)) == ("doc-abc", "c1800o200", 3)
+    # `rpartition` on `#`, so a doc id carrying one still parses.
+    assert parse_point_id(point_id("doc#weird", "c900o100", 12)) == ("doc#weird", "c900o100", 12)
+    # Two cuttings of one document are two distinct points, which is the whole point.
+    assert point_id("doc-a", "c1800o200", 3) != point_id("doc-a", "c900o100", 3)
 
 
-@pytest.mark.parametrize("bad", ["", "no-separator", "#3", "doc-abc#notanumber"])
+@pytest.mark.parametrize(
+    "bad", ["", "no-separator", "#3", "doc-abc@ck#notanumber", "doc-abc#3", "@ck#3"]
+)
 def test_an_unreadable_point_id_is_none_rather_than_an_exception(bad: str) -> None:
     """A store may hold points this catalogue no longer knows about; one must not fail a search."""
     assert parse_point_id(bad) is None
@@ -426,8 +436,13 @@ def test_every_chunk_is_filed_under_its_document_not_under_itself() -> None:
         ),
     ]
     points = _points_for(chunks)
-    assert [point.id for point in points] == ["doc-abc#0", "doc-abc#3"]
-    assert {point.group_key for point in points} == {"doc-abc"}
+    assert [point.id for point in points] == [
+        f"doc-abc@{_CHUNKING}#0",
+        f"doc-abc@{_CHUNKING}#3",
+    ]
+    # Grouped by the *cutting* of the document, because that is what eligibility joins on — a
+    # share must never be served another share's cutting of the same text.
+    assert {point.group_key for point in points} == {f"doc-abc@{_CHUNKING}"}
 
 
 @_sync
@@ -449,7 +464,10 @@ async def test_the_adapter_writes_both_the_reference_and_the_group() -> None:
         ),
     )
     (_, written) = client.upserted[0]
-    assert written[0].payload == {"ref": "doc-a#2", "group": "doc-a"}
+    assert written[0].payload == {
+        "ref": f"doc-a@{_CHUNKING}#2",
+        "group": f"doc-a@{_CHUNKING}",
+    }
 
 
 # --- the scope always carries the source ----------------------------------------------------------
@@ -612,3 +630,34 @@ async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
     assert executed, "an unfiltered query returned a scope without asking the catalogue"
     assert "source = %(src)s" in executed[0]
     assert eligible == {"doc-a", "doc-b"}
+
+
+@_sync
+async def test_a_re_chunk_reclaims_the_superseded_cutting_s_vectors() -> None:
+    """The catalogue deletes the old cutting's rows; the store must lose their points too.
+
+    `PostgresDocumentIndex.upsert` drops the previous cutting at the end of its transaction, and
+    with the vectors in another system those points would otherwise stay forever — unreachable,
+    since every search resolves through the catalogue, but never reclaimed. Re-tuning `chunk_chars`
+    on a large share would leave a second full copy of the corpus in the vector database.
+    """
+
+    class _Deleting(_RecordingStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted: list[str] = []
+
+        async def delete(self, collection: str, ids: list[str]) -> None:
+            self.deleted.extend(ids)
+
+    store = _Deleting()
+    index = ExternalVectorDocumentIndex(store)
+    await index._forget_vectors([("doc-a", "old-cut", 0), ("doc-a", "old-cut", 1)])
+    assert store.deleted == ["doc-a@old-cut#0", "doc-a@old-cut#1"]
+
+
+def test_the_base_index_forgets_nothing_because_its_vectors_were_in_the_rows() -> None:
+    """The hook is a no-op for pgvector, which is why it can live on the base at all."""
+    from chemclaw.ingest.documents.index import PostgresDocumentIndex
+
+    assert PostgresDocumentIndex._forget_vectors is not ExternalVectorDocumentIndex._forget_vectors

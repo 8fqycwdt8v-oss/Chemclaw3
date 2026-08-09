@@ -36,6 +36,7 @@ from datetime import datetime
 from chemclaw.core.config import settings
 from chemclaw.ingest.documents.index import (
     CITATION_SQL,
+    CLAIMED_SQL,
     ChunkRecord,
     DocumentFilter,
     DocumentHit,
@@ -47,27 +48,38 @@ from chemclaw.retrieval.vectors.base import VectorMatch, VectorPoint, VectorStor
 logger = logging.getLogger(__name__)
 
 
-def point_id(doc_id: str, ordinal: int) -> str:
+def point_id(doc_id: str, chunking_key: str, ordinal: int) -> str:
     """The vector store's address for one chunk — the catalogue key, rendered.
 
-    `doc_id#ordinal`, which is the chunk's primary key in `document_chunks`. One function, because
-    the write and the read must agree and a second spelling of a key is how they stop agreeing.
+    `doc_id@chunking_key#ordinal`, which is the chunk's primary key in `document_chunks`
+    (`infra/sql/041`). One function, because the write and the read must agree and a second spelling
+    of a key is how they stop agreeing.
+
+    **The chunking is in the address, and leaving it out was a bug.** It reached `main` as one:
+    this index shipped keyed on `(doc_id, ordinal)` the same day the chunk table gained
+    `chunking_key`, and neither change was wrong alone. Together, two cuttings of one document
+    collide on a single point — the finer cutting's ordinal 3 overwrites the coarser's, so a
+    re-tuned `chunk_chars` silently corrupts the store while the catalogue holds both sets intact.
     """
-    return f"{doc_id}#{ordinal}"
+    return f"{doc_id}@{chunking_key}#{ordinal}"
 
 
-def parse_point_id(reference: str) -> tuple[str, int] | None:
-    """Read a point id back into `(doc_id, ordinal)`, or `None` when it is not one.
+def parse_point_id(reference: str) -> tuple[str, str, int] | None:
+    """Read a point id back into `(doc_id, chunking_key, ordinal)`, or `None` when it is not one.
 
     `None` rather than an exception: the store is a separate system that may hold points this
-    catalogue no longer knows about — a crashed run, a collection shared by mistake — and one
-    unreadable id must degrade to "this hit cannot be resolved" rather than fail the search.
+    catalogue no longer knows about — a crashed run, a collection shared by mistake, an id written
+    before the chunking joined the key — and one unreadable id must degrade to "this hit cannot be
+    resolved" rather than fail the search.
     """
-    doc_id, separator, ordinal = reference.rpartition("#")
-    if not separator or not doc_id:
+    head, separator, ordinal = reference.rpartition("#")
+    if not separator or not head:
+        return None
+    doc_id, marker, chunking_key = head.partition("@")
+    if not marker or not doc_id or not chunking_key:
         return None
     try:
-        return doc_id, int(ordinal)
+        return doc_id, chunking_key, int(ordinal)
     except ValueError:
         return None
 
@@ -85,13 +97,25 @@ def _points_for(chunks: list[ChunkRecord]) -> list[VectorPoint]:
     """
     return [
         VectorPoint(
-            id=point_id(chunk.doc_id, chunk.ordinal),
+            id=point_id(chunk.doc_id, chunk.chunking_key, chunk.ordinal),
             vector=chunk.embedding,
-            # Eligibility is decided per document, so the document is what a scope narrows on.
-            group=chunk.doc_id,
+            # Eligibility is decided per *cutting* of a document, not per document: `_ELIGIBLE`
+            # requires `f.chunking_key = c.chunking_key`, so a share that cuts a document at its own
+            # size must never be served another share's cutting of the same text.
+            group=group_key(chunk.doc_id, chunk.chunking_key),
         )
         for chunk in chunks
     ]
+
+
+def group_key(doc_id: str, chunking_key: str) -> str:
+    """What a scope narrows on: one cutting of one document.
+
+    The pair the catalogue treats as a unit — `document_files` carries both, and eligibility joins
+    them. Keeping the group at `doc_id` alone would let a filtered search match a document through
+    its *superseded* cutting's points.
+    """
+    return f"{doc_id}@{chunking_key}"
 
 
 class ExternalVectorDocumentIndex(PostgresDocumentIndex):
@@ -124,6 +148,21 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         """`None` — the embedding goes to the store, and the column stays NULL."""
         return None
 
+    async def _forget_vectors(self, keys: list[tuple[str, str, int]]) -> None:
+        """Drop the points of chunk rows a re-chunk just superseded.
+
+        Without this the store grows forever: `PostgresDocumentIndex.upsert` deletes the previous
+        cutting's rows at the end of its transaction, and the vectors those rows described would
+        stay behind — unreachable, since every search resolves its hits through the catalogue, but
+        never reclaimed. Re-tuning `chunk_chars` on a large share would leave a second full copy of
+        the corpus in the vector database.
+        """
+        if keys:
+            await self._store.delete(
+                self._collection,
+                [point_id(doc, chunking, ordinal) for doc, chunking, ordinal in keys],
+            )
+
     async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Send the vectors, then commit the catalogue — in that order, always.
 
@@ -150,8 +189,13 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             for chunk in chunks:
                 await conn.execute(
                     "UPDATE document_chunks SET embedding_key = %(key)s "
-                    "WHERE doc_id = %(doc)s AND ordinal = %(ord)s",
-                    {"key": key, "doc": chunk.doc_id, "ord": chunk.ordinal},
+                    "WHERE doc_id = %(doc)s AND chunking_key = %(ck)s AND ordinal = %(ord)s",
+                    {
+                        "key": key,
+                        "doc": chunk.doc_id,
+                        "ck": chunk.chunking_key,
+                        "ord": chunk.ordinal,
+                    },
                 )
             await conn.commit()
 
@@ -171,18 +215,21 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                     (source, before),
                 )
                 removed = cur.rowcount
-                # Orphans across every source, exactly as the base does it: identical content
-                # reachable through a copy on another share must stay indexed.
+                # Orphans across every source, and by the base's own predicate rather than a
+                # second copy of it: identical content reachable through a copy on another share
+                # must stay indexed, and a chunk set is claimed by its *cutting* as well as its
+                # document. Hand-writing this here is how the two stores would come to disagree
+                # about what an orphan is — which they briefly did, when this said only
+                # `f.doc_id = c.doc_id` and the base had already added the chunking.
                 await cur.execute(
-                    "DELETE FROM document_chunks c WHERE NOT EXISTS "
-                    "(SELECT 1 FROM document_files f WHERE f.doc_id = c.doc_id) "
-                    "RETURNING c.doc_id, c.ordinal"
+                    f"DELETE FROM document_chunks c WHERE NOT {CLAIMED_SQL} "
+                    "RETURNING c.doc_id, c.chunking_key, c.ordinal"
                 )
                 orphaned = await cur.fetchall()
             await conn.commit()
         if orphaned:
             await self._store.delete(
-                self._collection, [point_id(row[0], row[1]) for row in orphaned]
+                self._collection, [point_id(row[0], row[1], row[2]) for row in orphaned]
             )
         return removed
 
@@ -273,7 +320,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         citation resolves to no path under these filters, is not evidence a reader could check, and
         the contract is that a hit cites something openable.
         """
-        addressed: dict[tuple[str, int], float] = {}
+        addressed: dict[tuple[str, str, int], float] = {}
         for match in matches:
             parsed = parse_point_id(match.id)
             if parsed is None:
@@ -287,32 +334,35 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
+                    "SELECT c.doc_id, c.chunking_key, c.ordinal, c.content, c.coordinate, "
                     f"{CITATION_SQL}"
                     "FROM document_chunks c "
-                    "JOIN unnest(%(docs)s::text[], %(ords)s::int[]) AS wanted(doc_id, ordinal) "
-                    "ON wanted.doc_id = c.doc_id AND wanted.ordinal = c.ordinal",
+                    "JOIN unnest(%(docs)s::text[], %(cks)s::text[], %(ords)s::int[]) "
+                    "AS wanted(doc_id, chunking_key, ordinal) "
+                    "ON wanted.doc_id = c.doc_id AND wanted.chunking_key = c.chunking_key "
+                    "AND wanted.ordinal = c.ordinal",
                     {
                         "src": source,
                         "tag": filters.tag or None,
                         "since": filters.since,
                         "until": filters.until,
-                        "docs": [doc for doc, _ in addressed],
-                        "ords": [ordinal for _, ordinal in addressed],
+                        "docs": [doc for doc, _, _ in addressed],
+                        "cks": [chunking for _, chunking, _ in addressed],
+                        "ords": [ordinal for _, _, ordinal in addressed],
                     },
                 )
                 rows = await cur.fetchall()
         hits = [
             DocumentHit(
                 doc_id=row[0],
-                ordinal=row[1],
-                content=row[2],
-                coordinate=row[3],
-                path=row[4],
-                score=addressed[(row[0], row[1])],
+                ordinal=row[2],
+                content=row[3],
+                coordinate=row[4],
+                path=row[5],
+                score=addressed[(row[0], row[1], row[2])],
             )
             for row in rows
-            if row[4]
+            if row[5]
         ]
         # The store ranked them; the catalogue only added text. Re-sorted because a SQL result set
         # has no order of its own, and the tie-break matches every other index here.
