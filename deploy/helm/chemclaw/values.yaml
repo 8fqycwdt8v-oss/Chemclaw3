@@ -135,6 +135,23 @@ knowledge:
 # Enabling a connector here is only half the switch: CHEMCLAW_CONNECTORS_ENABLED in `config` below
 # decides which bundles the agent loads at all. Leave it empty (the default) to load every bundle the
 # image ships, which is what matches "enable the pods and it works".
+#
+# **`url:` — a connector this release does not run.** Setting it says the bundle's MCP server is
+# hosted somewhere else (a platform team's model server, a vendor's FastAPI/MCP endpoint) and gives
+# its address. That bundle then gets no app Deployment and no Service, and the front door dials the
+# address given here instead of an in-cluster one — because *hosting is a deployment fact, not a
+# capability fact*: the same bundle can be a local process in dev and somebody else's endpoint in
+# production, and neither belongs in the manifest that says what the capability *is* (D-118/D-120).
+# `server:` still mirrors the manifest's `endpoint:` and is unrelated to who runs it; `worker:` is
+# unaffected, since durable jobs run on our own Temporal queue whoever serves the tools.
+#
+# Two things an operator must do themselves for such a connector, because the chart cannot:
+#   * add its host to `networkPolicy.egressDestinations` below (the egress rule already permits
+#     `egressPorts.https`, but the destination list is empty by default);
+#   * give it a credential. A bundle reached across the network with `auth: mode: none` in its
+#     manifest is refused at load — see `chemclaw/connectors/manifest.py`.
+#
+# No shipped bundle sets it: every one below is ours, served from this release's own image.
 connectors:
   molfp:
     enabled: true

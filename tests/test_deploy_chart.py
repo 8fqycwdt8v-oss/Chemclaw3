@@ -311,6 +311,80 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
         assert "enabled" in entries[name] and "replicas" in entries[name]
 
 
+def test_an_externally_hosted_connector_gets_no_pods_and_no_service() -> None:
+    """`url` on a bundle means somebody else runs its server, so the app half must not render.
+
+    Such a bundle still declares an `endpoint:` and therefore still carries `server: true` — that
+    flag mirrors the manifest and nothing else (the test above). What it must not get is a
+    Deployment running `uvicorn connectors.<name>.server.app:app` from our image against a module
+    that does not exist, plus a Service selecting pods that will never appear.
+
+    Pinned as the *absence of an unguarded conditional* rather than the presence of a guarded one:
+    the failure this prevents is a future edit reverting a block to a bare `if $cfg.server`, and
+    only counting both forms can see that. The rendered proof is `make helm-validate`, which runs
+    `helm` — this suite is the offline half and has no renderer.
+    """
+    template = (CHART / "templates" / "deployment-connectors.yaml").read_text()
+    assert template.count("{{- if and $cfg.server (not $cfg.url) }}") == 2, (
+        "the app Deployment and the Service must both be conditioned on `url` being unset"
+    )
+    assert "{{- if $cfg.server }}" not in template, (
+        "a `server` block is rendered without checking `url`, so a connector this release does "
+        "not run would get a crash-looping pod and a Service selecting nothing"
+    )
+    # The worker is deliberately *not* guarded: a bundle's durable jobs run on our own Temporal
+    # queue whoever hosts its MCP tools, so an external endpoint must not take its worker away.
+    assert "{{- if $cfg.worker }}" in template
+
+
+def test_an_externally_hosted_connector_is_dialled_where_the_operator_says() -> None:
+    """The address map must follow the same `url` the pods do, or it names a Service that is absent.
+
+    This is the half that fails silently. `connectors/registry.py::_endpoint_url` lets the computed
+    override beat the manifest's own URL, so a chart that kept computing an in-cluster address for
+    an externally hosted bundle would point the front door at a name resolving to nothing — and the
+    connector degrades rather than erroring (`connectors/transport.py`), so the symptom is a
+    capability that is quietly missing from every turn.
+    """
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, definition = helpers.partition('define "chemclaw.connectorUrls"')
+    definition, _, _ = definition.partition("{{- end -}}\n\n")
+    assert "$cfg.url" in definition, (
+        "chemclaw.connectorUrls still computes a Service address for every enabled server, "
+        "including bundles this release does not run"
+    )
+
+
+def test_an_externally_hosted_connector_is_not_counted_against_the_connection_ceiling() -> None:
+    """A pod that does not exist may not spend the fleet's Postgres budget.
+
+    `chemclaw.pooledProcesses` multiplies into the ceiling `Settings` refuses to exceed, so an
+    over-count is not cosmetic: it shrinks the pool every real pod is allowed, or trips the refusal
+    outright and CrashLoops the release.
+    """
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, definition = helpers.partition('define "chemclaw.pooledProcesses"')
+    assert "if and $cfg.server (not $cfg.url)" in definition, (
+        "chemclaw.pooledProcesses counts a server pod for an externally hosted bundle"
+    )
+
+
+def test_a_connector_url_is_only_declared_beside_a_server() -> None:
+    """`url` on a bundle with no `server` would silently do nothing.
+
+    `chemclaw.connectorUrls` only visits `enabled && server` entries, so an operator who set `url`
+    on a jobs-only bundle (`qm`) would get no error and no effect — the front door would keep the
+    manifest's own address. Vacuous over the shipped values by design: every bundle here is ours.
+    It exists so the first entry that sets `url` is checked against the one shape it works in.
+    """
+    for name, cfg in _values()["connectors"].items():
+        if cfg.get("url"):
+            assert cfg.get("server"), (
+                f"connector {name!r} sets `url` without `server: true`; the address map ignores "
+                "it, so the front door would keep dialling the manifest's dev default"
+            )
+
+
 def test_knowledge_volume_is_mounted_on_every_reading_component() -> None:
     """Readers resolve the graph as a local directory, so each needs the synced volume (DEP-1)."""
     for template in ("deployment-service.yaml", "deployment-workers.yaml"):
@@ -883,7 +957,8 @@ def _pooled_processes(values: dict[str, Any]) -> int:
     for bundle in values["connectors"].values():
         if not bundle["enabled"]:
             continue
-        if bundle.get("server"):
+        # An externally hosted bundle (`url`) pods no server here, so it pools nothing here.
+        if bundle.get("server") and not bundle.get("url"):
             total += bundle["replicas"]
         if bundle.get("worker"):
             total += bundle["replicas"]

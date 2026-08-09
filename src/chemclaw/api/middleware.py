@@ -17,14 +17,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
+from chemclaw.core.http import LOOPBACK_HOSTS
 from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
-# Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the
-# local host, so it is not a network-exposed footgun. Anything else (notably the "0.0.0.0"
-# default) is.
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # What a client is told when the process cannot take the work right now. One literal because it is
 # said in two shapes — an error *event* on an already-open turn stream (D-166) and a 503 body from
@@ -85,7 +82,7 @@ def _refuse_unauthenticated_exposure() -> None:
     `service_allow_insecure=true` is the explicit, conscious opt-out — it boots with the loud
     warning instead. Loopback dev and Entra-enforced deployments are untouched.
     """
-    if settings.entra_required or settings.service_host in _LOOPBACK_HOSTS:
+    if settings.entra_required or settings.service_host in LOOPBACK_HOSTS:
         return
     if not settings.service_allow_insecure:
         raise RuntimeError(

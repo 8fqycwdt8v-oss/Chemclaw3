@@ -93,6 +93,56 @@ def test_auth_defaults_to_none_and_bearer_names_an_env_var() -> None:
     assert isinstance(auth, BearerAuth) and auth.token_env == "CHEMCLAW_X_TOKEN"
 
 
+def test_a_networked_endpoint_may_not_declare_no_credential() -> None:
+    """`auth: mode: none` is refused for a host that is reachable from the network.
+
+    The rule `NoAuth`'s docstring claimed for a long time and nothing enforced. It only became
+    reachable when a bundle could name somebody else's server (the chart's `connectors.<name>.url`),
+    and the failure it prevents is the quiet one: an unauthenticated MCP call carrying the turn's
+    actor and full role set to a host outside our trust boundary.
+
+    Loopback stays free — every shipped bundle declares a loopback dev default and lets the
+    deployment move it — and a bearer credential makes any host legal.
+    """
+    with pytest.raises(ValidationError, match="is not loopback"):
+        _manifest(endpoint={**_HTTP, "url": "https://model.vendor.example/mcp"})
+    # The same URL with a credential is fine; so is loopback with none, in either spelling.
+    _manifest(
+        endpoint={
+            **_HTTP,
+            "url": "https://model.vendor.example/mcp",
+            "auth": {"mode": "bearer", "token_env": "CHEMCLAW_VENDOR_TOKEN"},
+        }
+    )
+    _manifest(endpoint={**_HTTP, "url": "http://localhost:9/mcp"})
+    _manifest(endpoint={**_HTTP, "url": "http://[::1]:9/mcp"})
+    # An in-cluster Service name is *not* loopback, which is the point: a manifest may not ship
+    # naming one. A deployment still moves any bundle there through CHEMCLAW_CONNECTOR_URLS, which
+    # this rule deliberately does not police (that address is the operator's own infrastructure).
+    with pytest.raises(ValidationError, match="is not loopback"):
+        _manifest(endpoint={**_HTTP, "url": "http://chemclaw-connector-molfp:8080/mcp"})
+
+
+def test_a_stdio_endpoint_needs_no_credential_at_all() -> None:
+    """The rule above is about a *network* hop; a subprocess of our own pod has none.
+
+    Worth pinning separately because the two variants share the `tools` surface and it would be
+    easy to lift the check onto something they share — which would make the zero-infrastructure
+    local path impossible to declare.
+    """
+    stdio = _manifest(
+        endpoint={
+            "transport": "stdio",
+            "command": "python",
+            "args": ["-m", "thing"],
+            "tools": ["search"],
+            "read_only": ["search"],
+        }
+    )
+    assert isinstance(stdio.endpoint, StdioEndpoint)
+    assert not hasattr(stdio.endpoint, "auth"), "a stdio endpoint has no credential to declare"
+
+
 def test_a_bundle_must_contribute_something_reachable() -> None:
     """Neither an endpoint nor a job means nothing could ever reach it (the `SourceSpec` rule)."""
     with pytest.raises(ValidationError, match="must declare an endpoint, a job, or both"):

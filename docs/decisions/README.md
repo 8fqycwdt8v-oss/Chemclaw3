@@ -287,3 +287,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-07-a-manifest-must-say-who-may-read-it](D-2026-08-07-a-manifest-must-say-who-may-read-it.md) | The mount is a boundary, and omission is not a decision |
 | [D-2026-08-07-one-bad-file-must-not-stop-the-corpus](D-2026-08-07-one-bad-file-must-not-stop-the-corpus.md) | The guard belongs at the boundary, not on the constructor |
 | [D-2026-08-07-the-mark-means-observed-not-processed](D-2026-08-07-the-mark-means-observed-not-processed.md) | The sweep reads the drain's own evidence |
+| [D-2026-08-09-a-connector-we-do-not-run](D-2026-08-09-a-connector-we-do-not-run.md) | Hosting is a deployment fact, and the URL is the whole knob |

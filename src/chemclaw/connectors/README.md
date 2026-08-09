@@ -9,15 +9,24 @@ directory; it is not editing core.
 
 | File | What it is | Required |
 | --- | --- | --- |
-| `connector.yaml` | the manifest: tools, jobs, queue, health, `module:callable` pointers | yes |
-| `server/app.py` | the FastAPI transport — `/healthz` + `/mcp`, built by `connector_app()` | if it serves tools |
-| `server/tools.py` | the `FastMCP` instance: the argument names, defaults and docstrings the agent sees | if it serves tools |
+| `connector.yaml` | the manifest: tools, jobs, health, `module:callable` pointers | yes |
+| `server/app.py` | the FastAPI transport — `/healthz` + `/mcp`, built by `connector_app()` | if **we** host the server |
+| `server/tools.py` | the `FastMCP` instance: the argument names, defaults and docstrings the agent sees | if **we** host the server |
 | `worker.py`, `workflows.py`, `activities.py` | the Temporal half, on the bundle's own queue | if it owns durable work |
 | `skills/<name>/SKILL.md` | judgment that belongs to *this* capability and deploys with it | optional |
+
+The queue is deliberately absent from the manifest: it is `connector-<name>`, derived at dispatch,
+because a bundle's worker serves only what the bundle's own modules registered (D-150).
 
 **The variance is information.** `calc` has workflows, activities and a worker; `chem` has only a
 server. That says which capabilities own long-running work, so do not flatten it into a uniform
 template.
+
+**A bundle whose server somebody else runs has neither `server/` file.** It declares an `endpoint:`
+like any other, and the deployment says the address is not ours to render
+(`connectors.<name>.url` in the chart, D-2026-08-09-a-connector-we-do-not-run). Reached across a
+network, it must carry a bearer credential — `HttpEndpoint` refuses `auth: mode: none` for a
+non-loopback URL.
 
 ## The boundary against `science/`
 

@@ -111,8 +111,10 @@ def _rendered_derived_values() -> dict[str, str]:
     actually produces is fed through `Settings`, so a render that emits something `dict[str, str]`
     cannot parse fails here rather than in the cluster.
     """
+    # `cfg["url"]` wins where it is set: that bundle's server is hosted outside this release, so
+    # there is no Service to compute an address from (`chemclaw.connectorUrls`).
     urls = {
-        name: f"http://chemclaw-connector-{name}:{_VALUES['connectorPort']}/mcp"
+        name: cfg.get("url") or f"http://chemclaw-connector-{name}:{_VALUES['connectorPort']}/mcp"
         for name, cfg in _VALUES["connectors"].items()
         if cfg.get("enabled") and cfg.get("server")
     }

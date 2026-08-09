@@ -303,8 +303,10 @@ connectors/<name>/
 1. Create the folder with a `connector.yaml`. For an MCP capability, declare an `endpoint:` and the
    `tools:` the agent may call — read/compute only; `make connector-validate` refuses a mutating
    name, because mutation belongs on the job path or on a core PR-gate tool.
-2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type** and
-   **task queue** its own worker serves. Its workflow returns a `ConnectorJobResult`
+2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type**. The
+   queue is *not* declared — it is `connector-<name>`, derived at dispatch, because a bundle's worker
+   serves only what the bundle's own modules registered (D-150). Its workflow returns a
+   `ConnectorJobResult`
    (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
    id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
    arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
@@ -336,6 +338,26 @@ connectors/<name>/
 `CHEMCLAW_CONNECTOR_URLS` to point the front door at. In a cluster, each bundle is its own
 Deployment + Service (`.Values.connectors.<name>.enabled`), and the chart *computes*
 `CHEMCLAW_CONNECTOR_URLS` from that same block, so addresses cannot drift from the pods that exist.
+
+**A server somebody else runs** — a platform team's model endpoint, a vendor's FastAPI/MCP service.
+Everything above is unchanged (the manifest says what the capability *is*, and that does not depend
+on who hosts it); only the deployment differs, per D-2026-08-09-a-connector-we-do-not-run:
+
+1. In the bundle's `connector.yaml`, declare the `endpoint:` as usual. It must speak MCP
+   streamable-HTTP, and because it is not loopback it must carry a credential —
+   `auth: {mode: bearer, token_env: CHEMCLAW_<NAME>_TOKEN}`, the variable name, never the token.
+   A non-loopback URL with `auth: mode: none` is refused at load. Omit `health_url` if the server
+   exposes none; `/readyz` then reports it `unprobed` rather than guessing a path.
+2. In `values.yaml`, set `connectors.<name>.url` to its address. That bundle gets **no** Deployment
+   and **no** Service, and the front door dials what you gave instead of an in-cluster name.
+   `server: true` still mirrors the manifest's `endpoint:` and says nothing about who runs it.
+3. Add the host to `networkPolicy.egressDestinations` (the rule already permits
+   `egressPorts.https`, but the destination list is empty by default), and put the token in the
+   secret set the pods already mount.
+
+The tools such a server exposes are still read/compute only, still narrowed by `tools:`, and still
+carry the turn's identity headers as *advisory* context — a connector outside our trust boundary
+must never make an access decision on a header's word (`connectors/identity.py`).
 
 **Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — prepend a private bundle dir to
 override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS`,

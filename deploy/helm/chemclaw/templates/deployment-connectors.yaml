@@ -11,10 +11,19 @@
        The front door reaches them through CHEMCLAW_CONNECTOR_URLS, which the chart *computes* from
        this same enabled set (see `chemclaw.connectorUrls` in _helpers.tpl). An operator flips
        `enabled: true` in one place and the address map follows; there is no second list to keep in
-       sync, which is the class of drift the old `mcp.transport` guard existed to catch. */ -}}
+       sync, which is the class of drift the old `mcp.transport` guard existed to catch.
+
+       **`url` means somebody else runs the server, so the app half is not rendered.** A bundle
+       whose MCP endpoint is hosted outside this release — a vendor's model behind its own FastAPI
+       server, a platform team's shared predictor — still declares an `endpoint:` in its manifest
+       and therefore still sets `server: true`, because that flag mirrors the manifest and nothing
+       else. What it must not get is a Deployment running `uvicorn connectors.<name>.server.app:app`
+       from *our* image against a module that does not exist, plus a Service selecting pods that
+       will never appear. The worker block below is deliberately not conditioned on `url`: a
+       bundle's durable jobs run on our own Temporal queue whoever hosts its tools. */ -}}
 {{- range $name, $cfg := .Values.connectors }}
 {{- if $cfg.enabled }}
-{{- if $cfg.server }}
+{{- if and $cfg.server (not $cfg.url) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -146,7 +155,7 @@ spec:
         {{- include "chemclaw.volumes" $ | nindent 8 }}
 ---
 {{- end }}
-{{- if $cfg.server }}
+{{- if and $cfg.server (not $cfg.url) }}
 apiVersion: v1
 kind: Service
 metadata:
