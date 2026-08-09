@@ -206,7 +206,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         if not any(query_embedding):
             return []
         eligible = await self._eligible_documents(source, filters)
-        if eligible is not None and not eligible:
+        if not eligible:
             return []
         # The scope is a set of *documents*, which is exactly what `VectorStore.search` narrows on:
         # a point's group is its `doc_id`. Eligibility is a property of the file rows a document is
@@ -217,21 +217,31 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             return []
         return await self._resolve(source, matches, filters)
 
-    async def _eligible_documents(self, source: str, filters: DocumentFilter) -> set[str] | None:
-        """The doc ids of `source` satisfying `filters`, or `None` when nothing is filtered.
+    async def _eligible_documents(self, source: str, filters: DocumentFilter) -> set[str]:
+        """The doc ids of `source` satisfying `filters`. Always a set — never "no restriction".
 
-        `None` is not "no documents" — it is "no restriction", and the distinction is what keeps an
-        ordinary question from paying for a scope query at all.
+        **The source is always a restriction, and skipping the scope for an unfiltered query was a
+        bug.** Every enabled share writes into one collection
+        (`vector_store_document_collection` is a single setting), so a search that sends no scope
+        takes the top-k across *all* shares. `_resolve` then drops every hit belonging to another
+        source, because `CITATION_SQL` filters on `%(src)s` and yields NULL for it — and the caller
+        silently gets fewer than `top_k` hits, or none, with nothing raised. The pgvector index
+        never had this: `_ELIGIBLE` carries `f.source = %(src)s` *inside* the ranking statement, so
+        its top-k is taken over eligible rows only. Two backends disagreeing about what a search
+        means is worse than either being slow. Measured and recorded in
+        `D-2026-08-08-a-vector-store-is-not-a-catalogue.md`.
 
-        **The stated residual.** A filter this broad over a corpus this large builds a big set, and
-        it is built in memory here and sent to the store. It is bounded by the point of a filter —
-        a tag exists to narrow — but it is not bounded by the code, and a deployment whose commonest
-        query is a filter matching most of a million-document corpus will feel it. Recorded in
-        `docs/planning/BACKLOG.md` rather than pre-optimized, because the fix (a scope the store can
-        express itself) trades away the correctness the two-table design buys.
+        An empty set means nothing is eligible, and the caller must return no hits rather than
+        search unscoped — `VectorStore.search` draws the same distinction between `set()` and
+        `None`, and this method now never produces the latter.
+
+        **The stated residual, and it is a real limit.** This enumerates the source's matching
+        documents and sends them to the store, so an unfiltered query over a million-document share
+        builds a million-id filter. That is not a "documented cost" so much as a ceiling on how far
+        this composition scales as written; `docs/planning/BACKLOG.md` carries the row and names the
+        fix (a source the store can filter on itself, which needs a payload the sync can maintain
+        through content dedup — the hard part, and why it is not done here). Correct first.
         """
-        if not (filters.tag or filters.since or filters.until):
-            return None
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(

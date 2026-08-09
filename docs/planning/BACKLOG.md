@@ -17,13 +17,21 @@ Qdrant adapter proven offline against a fake client; these are the edges it coul
       *Trigger:* a cluster with Qdrant reachable — the same shape as the warehouse ELN connector's
       own "only the tenant is missing" row.
 
-- [ ] **A filtered search builds its eligibility scope in memory** — [S]. `_eligible_documents`
-      selects every matching `doc_id` from `document_files` and sends the set to the store. Bounded
-      in practice by what a filter is *for* — a tag exists to narrow — and unbounded in the code: a
-      deployment whose commonest query is a broad tag over a million-document corpus will feel it.
-      Deliberate, because the alternative is denormalizing tags onto the chunk payload, which is a
-      correctness regression (the ADR's §3), not merely a different trade.
-      *Trigger:* a real corpus where a filtered query's scope query shows up in the latency budget.
+- [ ] **Every search builds an eligibility scope in memory, and that is now the scaling ceiling** —
+      [M], raised from [S] after the source-scoping fix. `_eligible_documents` selects every matching
+      `doc_id` from `document_files` and sends the set to the store — and it runs for *every* search,
+      not only filtered ones, because the `source` is always a restriction and skipping it took the
+      top-k across every share (fixed; see the ADR). So an unfiltered query over a million-document
+      share builds a million-id filter. This is a ceiling on how far the composition scales as
+      written, not a cost to shrug at.
+      The fix is a `source` the store can filter on itself, and the hard part is stated: content
+      dedup means a share that inherits an already-embedded document never writes a point, so a
+      `sources` payload has nothing to write it *on*. Closing it needs either a payload-update
+      operation on the seam (which puts a catalogue concept into a generic interface) or a sync that
+      writes points per referencing source. Neither is a small change, and correctness came first.
+      *Trigger:* the first corpus where the scope query or the filter payload shows up in the
+      latency budget — which for a single-share deployment may be never, since the whole share is
+      the scope.
 
 - [ ] **`note_index` is still pgvector-only** — [M]. The seam was built for the document corpus and
       the note index was deliberately not moved: it has an open item of its own (no embedding-model

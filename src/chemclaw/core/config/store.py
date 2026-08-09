@@ -140,8 +140,10 @@ class StoreSettings(BaseSettings):
     # Where the external store is. Unused by `pgvector`, which reads `postgres_dsn` like every
     # other store here.
     vector_store_url: str = "http://localhost:6333"
-    # Registered with the log-redaction inventory at startup by the package validator, so a client
-    # echoing its own configuration into a traceback cannot put the key in a log.
+    # Registered with the log-redaction inventory by `retrieval.vectors.qdrant.open_qdrant_client`,
+    # where it is read — so a client echoing its own configuration into a traceback cannot put the
+    # key in a log. Registered at the read rather than here, which is the warehouse seam's placement
+    # and the one that cannot drift from the value it protects.
     vector_store_api_key: str = ""
     vector_store_timeout_seconds: float = Field(default=30.0, gt=0)
     # The collection the document corpus's chunks live in. Named rather than derived, because a
