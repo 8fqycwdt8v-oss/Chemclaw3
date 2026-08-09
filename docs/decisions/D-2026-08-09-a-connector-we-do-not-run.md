@@ -89,10 +89,13 @@ explicitly removed, so `core` is where the shared answer lives.
 - A future edit that reverts a `server` block to a bare `if $cfg.server` is caught: the test asserts
   the *absence* of the unguarded form, not merely the presence of the guarded one.
 - The offline suite pins the template text and mirrors both helpers in Python, which is the pattern
-  `tests/test_helm_chart.py` already uses — `make test` has no `helm`. The rendered proof is
-  `make helm-validate`, a separate CI job. **The render was not executed for this change**: this
-  environment's proxy denies `get.helm.sh` and helm publishes no GitHub release asset, so the
-  guards are pinned by test and by review, and CI's helm job is what renders them.
+  `tests/test_helm_chart.py` already uses — `make test` has no `helm`. **Template text is not
+  behaviour**, and it cannot see a `{{- if }}` nesting mistake, so `make helm-validate` now renders
+  the external case too: one `helm template --set connectors.<name>.url=…` asserting the bundle
+  gets no pods, appears in the address map at the given URL, and took no sibling's pods with it.
+  Without it the branch this ADR adds would be rendered nowhere — the default render never takes
+  it, because no shipped bundle sets `url`. That gap was found by reading CI's own log rather than
+  its green tick.
 - `auth: mode: none` on a non-loopback URL now fails at manifest load rather than at `make
   connector-validate`, so it is caught by anything that touches the registry. Every shipped bundle
   declares a loopback default and is unaffected.

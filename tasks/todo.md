@@ -38,8 +38,12 @@ an unauthenticated call carrying the turn's actor and full role set off-premises
 in-cluster Service addresses would flag every shipped bundle the day the override was set, and a
 gate that fires on the normal case is a gate people switch off.
 
-**What is not proven here.** The offline suite pins the template text and mirrors the helpers in
-Python — the established pattern in `tests/test_helm_chart.py`, since `make test` has no `helm`. I
-could not run `helm template` to see the render: this environment's proxy denies `get.helm.sh`, and
-helm publishes no GitHub release asset to fall back to. CI's separate `helm-validate` job renders
-it. The guards are therefore pinned by test and by review, not by a render I watched.
+**The green tick was not the proof.** CI's `chart` job passed in seven seconds, which is too fast
+for an install plus a render, so I read its log instead of trusting it. It had genuinely rendered —
+32 resources, 31 valid, 0 errors — but with *default* values, and no shipped bundle sets `url`. So
+the branch this whole change adds was rendered nowhere: the offline tests can only read template
+text, and text cannot show a `{{- if }}` nesting mistake. `make helm-validate` now renders the
+external case too, asserting no pods, the given URL in the address map, and no collateral damage to
+a sibling bundle. Helm is unavailable in this sandbox (the proxy denies `get.helm.sh`; helm
+publishes no GitHub release asset), so the recipe's shell logic was proven against a stubbed
+`helm` — the happy path and all three failure modes — and CI runs it against the real one.

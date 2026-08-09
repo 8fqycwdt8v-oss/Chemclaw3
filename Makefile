@@ -122,6 +122,21 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	      -schema-location default -schema-location \
 	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+	@# The externally-hosted connector (D-2026-08-09-a-connector-we-do-not-run), rendered because
+	@# no shipped bundle sets `url` and so the default render above never takes that branch. Every
+	@# other check on it reads the template *text*, which cannot see a `{{- if }}` nesting mistake;
+	@# this is the only place the behaviour itself is exercised. `molfp` is an arbitrary choice —
+	@# any bundle with an `endpoint:` proves the same three things.
+	@set -e; \
+	  render=$$(helm template chemclaw deploy/helm/chemclaw \
+	    --set connectors.molfp.url=https://model.invalid/mcp); \
+	  if printf '%s' "$$render" | grep -q 'chemclaw-connector-molfp'; then \
+	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1; fi; \
+	  printf '%s' "$$render" | grep -q 'https://model.invalid/mcp' || \
+	    { echo "FAIL: an externally hosted connector is missing from CHEMCLAW_CONNECTOR_URLS"; exit 1; }; \
+	  printf '%s' "$$render" | grep -q 'chemclaw-connector-rxnfp' || \
+	    { echo "FAIL: overriding one connector removed another's pods"; exit 1; }; \
+	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m chemclaw.cli.verify_audit_chain
