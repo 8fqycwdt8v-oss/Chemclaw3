@@ -13,9 +13,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
-from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note, NoteError, read_note
-from chemclaw.kg.relations import KNOWN_RELATIONS
+from chemclaw.kg.note import Note, NoteError, known_note_types, read_note
+from chemclaw.kg.relations import known_relations
 from chemclaw.science.safety.notes import hazard_problems
 
 
@@ -72,12 +73,17 @@ def validate(notes_dir: Path) -> list[str]:
     # `Note` schema so the agent can *propose* a genuinely new type or relation and a human sees it
     # at the PR-gate — while a typo, which would make the note or the edge unfindable by every
     # filter keyed on it, cannot reach the graph. `kg-validate` runs on that same PR.
+    #
+    # The vocabulary is core's own set **plus what the enabled bundles declare**: `job-result` and
+    # `bo-candidate` are minted by connectors, so a deployment's vocabulary is a property of which
+    # bundles it runs, not of this package alone. Both accessors resolve that union; the message
+    # names both places a reader can add a name.
     problems.extend(
         _registry_problems(
             ((note, path, note.type) for note, path in located),
-            KNOWN_NOTE_TYPES,
+            known_note_types(),
             "type",
-            "chemclaw.kg.note.KNOWN_NOTE_TYPES",
+            "chemclaw.kg.note.KNOWN_NOTE_TYPES or a bundle's `note_types:`",
         )
     )
     problems.extend(
@@ -87,9 +93,9 @@ def validate(notes_dir: Path) -> list[str]:
                 for note, path in located
                 for relation in note.outgoing_relations()
             ),
-            KNOWN_RELATIONS,
+            known_relations(),
             "relation",
-            "chemclaw.kg.relations.KNOWN_RELATIONS",
+            "chemclaw.kg.relations.KNOWN_RELATIONS or a bundle's `relations:`",
         )
     )
     return problems
@@ -116,12 +122,24 @@ def _registry_problems(
 
 
 def main() -> int:
-    """CLI entry point: validate the notes dir; print problems; return exit code."""
+    """CLI entry point: validate the notes dir; print problems; return exit code.
+
+    A `ChemclawError` is reported as a problem rather than raised. `validate` resolves the effective
+    vocabulary through `known_note_types()`, which asks the connector registry what the enabled
+    bundles declare — so a deployment whose `CHEMCLAW_CONNECTORS_ENABLED` names a bundle it does not
+    ship makes *this* gate die, with a traceback, about connectors. That is a real misconfiguration
+    and must still fail; it must not fail looking like a crash in the graph validator. Every sibling
+    validator prints its configuration errors, and this one now does too.
+    """
     notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else settings.knowledge_path
     if not notes_dir.exists():
         print(f"notes directory does not exist: {notes_dir}")
         return 1
-    problems = validate(notes_dir)
+    try:
+        problems = validate(notes_dir)
+    except ChemclawError as exc:
+        print(f"cannot determine this deployment's note vocabulary: {exc}")
+        return 1
     for problem in problems:
         print(problem)
     if problems:

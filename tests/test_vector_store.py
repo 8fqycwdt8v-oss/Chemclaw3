@@ -16,8 +16,14 @@ from typing import Any
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.ingest.documents.external_index import _points_for, parse_point_id, point_id
-from chemclaw.ingest.documents.index import ChunkRecord
+from chemclaw.ingest.documents.external_index import (
+    ExternalVectorDocumentIndex,
+    _points_for,
+    group_key,
+    parse_point_id,
+    point_id,
+)
+from chemclaw.ingest.documents.index import ChunkRecord, DocumentFilter
 from chemclaw.retrieval.vectors import qdrant as qdrant_module
 from chemclaw.retrieval.vectors.base import (
     VectorPoint,
@@ -171,26 +177,23 @@ async def test_a_zero_query_vector_matches_nothing_rather_than_ordering_over_nan
 # --- point ids round-trip -----------------------------------------------------------------------
 
 
-def test_a_point_id_round_trips_through_the_catalogue_key() -> None:
-    """The write and the read must agree; a doc id containing `#` must not break the parse."""
-    assert parse_point_id(point_id("doc-abc", _CHUNKING, 3)) == ("doc-abc", _CHUNKING, 3)
-    # The last two `#` separate the tail, so a `#` inside the doc id stays in the doc id.
-    assert parse_point_id(point_id("doc#weird", _CHUNKING, 12)) == ("doc#weird", _CHUNKING, 12)
-    # A pre-041 row carries the empty chunking, and its point id must still round-trip.
-    assert parse_point_id(point_id("doc-abc", "", 0)) == ("doc-abc", "", 0)
+def test_a_point_id_round_trips_through_the_whole_catalogue_key() -> None:
+    """The address is `(doc_id, chunking_key, ordinal)` — the chunk's primary key, all of it.
 
-
-def test_two_shares_that_cut_one_document_differently_get_different_point_ids() -> None:
-    """The address is the whole primary key, because two thirds of it does not identify a row.
-
-    Under `doc_id#ordinal` both shares wrote `doc-abc#0` and the second overwrote the first — the
-    silent-wrong-vector failure `document_chunks`' own key (041) exists to prevent, one system over.
+    **The chunking is not optional here.** This index shipped keyed on `(doc_id, ordinal)` the same
+    day `document_chunks` gained `chunking_key`; neither change was wrong alone, and together two
+    cuttings of one document collided on a single point, so re-tuning `chunk_chars` would have had
+    the finer cutting silently overwrite the coarser's vectors.
     """
-    assert point_id("doc-abc", "400:40", 0) != point_id("doc-abc", "4000:400", 0)
+    assert parse_point_id(point_id("doc-abc", "c1800o200", 3)) == ("doc-abc", "c1800o200", 3)
+    # `rpartition` on `#`, so a doc id carrying one still parses.
+    assert parse_point_id(point_id("doc#weird", "c900o100", 12)) == ("doc#weird", "c900o100", 12)
+    # Two cuttings of one document are two distinct points, which is the whole point.
+    assert point_id("doc-a", "c1800o200", 3) != point_id("doc-a", "c900o100", 3)
 
 
 @pytest.mark.parametrize(
-    "bad", ["", "no-separator", "doc-abc#3", "#2000:200#3", "doc-abc#2000:200#notanumber"]
+    "bad", ["", "no-separator", "#3", "doc-abc@ck#notanumber", "doc-abc#3", "@ck#3"]
 )
 def test_an_unreadable_point_id_is_none_rather_than_an_exception(bad: str) -> None:
     """A store may hold points this catalogue no longer knows about; one must not fail a search."""
@@ -435,10 +438,12 @@ def test_every_chunk_is_filed_under_its_document_not_under_itself() -> None:
     ]
     points = _points_for(chunks)
     assert [point.id for point in points] == [
-        f"doc-abc#{_CHUNKING}#0",
-        f"doc-abc#{_CHUNKING}#3",
+        f"doc-abc@{_CHUNKING}#0",
+        f"doc-abc@{_CHUNKING}#3",
     ]
-    assert {point.group_key for point in points} == {"doc-abc"}
+    # Grouped by the *cutting* of the document, because that is what eligibility joins on — a
+    # share must never be served another share's cutting of the same text.
+    assert {point.group_key for point in points} == {f"doc-abc@{_CHUNKING}"}
 
 
 @_sync
@@ -460,4 +465,209 @@ async def test_the_adapter_writes_both_the_reference_and_the_group() -> None:
         ),
     )
     (_, written) = client.upserted[0]
-    assert written[0].payload == {"ref": f"doc-a#{_CHUNKING}#2", "group": "doc-a"}
+    assert written[0].payload == {
+        "ref": f"doc-a@{_CHUNKING}#2",
+        "group": f"doc-a@{_CHUNKING}",
+    }
+
+
+# --- the scope always carries the source ----------------------------------------------------------
+
+
+class _RecordingStore:
+    """A `VectorStore` that records the scope it was handed and returns nothing."""
+
+    def __init__(self) -> None:
+        self.scopes: list[set[str] | None] = []
+
+    async def upsert(self, collection: str, points: list[VectorPoint]) -> None: ...
+
+    async def delete(self, collection: str, ids: list[str]) -> None: ...
+
+    async def search(
+        self,
+        collection: str,
+        embedding: list[float],
+        top_k: int,
+        groups: set[str] | None = None,
+    ) -> list[Any]:
+        self.scopes.append(groups)
+        return []  # returning nothing short-circuits before `_resolve` touches a database
+
+
+@_sync
+async def test_an_unfiltered_search_is_still_scoped_to_its_own_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search must never go to the store unscoped, even with no tag and no date window.
+
+    **The bug this exists for.** Every enabled share writes into one collection, so a scope of
+    `None` takes the top-k across *all* of them; `_resolve` then drops the other sources' hits
+    (their citation resolves to NULL) and the caller silently receives fewer than `top_k`, or none.
+    The pgvector index never had it — `_ELIGIBLE` carries `f.source = %(src)s` inside the ranking
+    statement. The fast path that skipped the scope query for an unfiltered search skipped the one
+    restriction that is *always* present.
+    """
+    store = _RecordingStore()
+    index = ExternalVectorDocumentIndex(store)
+
+    # The catalogue lookup is the part that needs a database; stub it, since what is under test is
+    # whether a scope is passed at all.
+    async def _eligible(source: str, filters: DocumentFilter) -> set[str]:
+        return {group_key("doc-a", "400:40"), group_key("doc-b", "400:40")}
+
+    monkeypatch.setattr(index, "_eligible_cuttings", _eligible)
+    await index.search_dense("share-A", [1.0, 0.0], 8, DocumentFilter())
+    assert store.scopes == [{"doc-a@400:40", "doc-b@400:40"}], (
+        "an unfiltered search reached the store unscoped"
+    )
+
+
+@_sync
+async def test_a_source_with_no_eligible_documents_returns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty means empty — it must not degrade into a search of every other share's points."""
+    store = _RecordingStore()
+    index = ExternalVectorDocumentIndex(store)
+
+    async def _none_eligible(source: str, filters: DocumentFilter) -> set[str]:
+        return set()
+
+    monkeypatch.setattr(index, "_eligible_cuttings", _none_eligible)
+    assert await index.search_dense("share-A", [1.0, 0.0], 8, DocumentFilter()) == []
+    assert store.scopes == [], "an empty scope still reached the store"
+
+
+def test_the_api_key_is_registered_for_redaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The claim two docstrings used to make and nothing implemented.
+
+    A client that echoes its own configuration into a traceback must not be able to put the key in
+    a log. Asserted against the inventory rather than trusted as prose.
+    """
+    registered: list[str] = []
+    monkeypatch.setattr(qdrant_module, "register_secret_env", registered.append)
+    monkeypatch.setattr(qdrant_module, "_client_module", lambda: _StubModule())
+    qdrant_module.open_qdrant_client()
+    assert "CHEMCLAW_VECTOR_STORE_API_KEY" in registered
+
+
+def test_no_private_ca_means_no_verify_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default path uses only keywords the client certainly accepts.
+
+    `verify` is forwarded to httpx rather than being part of the constructor's own signature, and
+    nothing here has run against a real client — so passing it unconditionally would risk failing
+    every deployment, including those that never needed a private CA.
+    """
+    stub = _StubModule()
+    monkeypatch.setattr(qdrant_module, "register_secret_env", lambda name: None)
+    monkeypatch.setattr(qdrant_module, "_client_module", lambda: stub)
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", "")
+    qdrant_module.open_qdrant_client()
+    assert "verify" not in stub.kwargs
+
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", "/etc/ssl/internal.pem")
+    qdrant_module.open_qdrant_client()
+    assert stub.kwargs["verify"] == "/etc/ssl/internal.pem"
+
+
+class _StubModule:
+    """Stands in for the `qdrant_client` module, capturing the constructor keywords."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    def AsyncQdrantClient(self, **kwargs: Any) -> Any:  # noqa: N802 - mirrors the vendor name
+        self.kwargs = kwargs
+        return _FakeClient()
+
+
+class _FakeCursor:
+    """Records the SQL a catalogue lookup issues, and returns two rows."""
+
+    def __init__(self, executed: list[str]) -> None:
+        self._executed = executed
+
+    async def execute(self, sql: str, params: Any = None) -> None:
+        self._executed.append(sql)
+
+    async def fetchall(self) -> list[tuple[str, str]]:
+        return [("doc-a", "400:40"), ("doc-b", "4000:400")]
+
+    async def __aenter__(self) -> "_FakeCursor":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None: ...
+
+
+class _FakeConnection:
+    def __init__(self, executed: list[str]) -> None:
+        self._executed = executed
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self._executed)
+
+    async def __aenter__(self) -> "_FakeConnection":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None: ...
+
+
+@_sync
+async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_eligible_cuttings` has no fast path, because the source is always a restriction.
+
+    The stronger half of the source-scoping fix. The sibling test above pins that `search_dense`
+    forwards whatever scope it is given; this one pins that a scope is actually *computed* for an
+    unfiltered query — the exact short-circuit that shipped the bug, and the one a future
+    optimization would be tempted to reintroduce.
+
+    It also pins the *shape* of what is computed, which the sibling cannot: a stubbed
+    `_eligible_cuttings` returns whatever the stub was written to return, so when the points moved
+    to `doc_id@chunking_key` and this query kept selecting bare doc ids, both sibling tests stayed
+    green while every real dense search returned nothing. The scope must be spelled in `group_key`
+    terms and must carry the chunking, because that is what the points are filed under.
+    """
+    executed: list[str] = []
+    index = ExternalVectorDocumentIndex(_RecordingStore())
+    monkeypatch.setattr(index, "_connection", lambda: _FakeConnection(executed))
+
+    eligible = await index._eligible_cuttings("share-A", DocumentFilter())
+
+    assert executed, "an unfiltered query returned a scope without asking the catalogue"
+    assert "source = %(src)s" in executed[0]
+    assert "chunking_key" in executed[0], "a scope that cannot see the cutting cannot match a point"
+    assert eligible == {"doc-a@400:40", "doc-b@4000:400"}
+
+
+@_sync
+async def test_a_re_chunk_reclaims_the_superseded_cutting_s_vectors() -> None:
+    """The catalogue deletes the old cutting's rows; the store must lose their points too.
+
+    `PostgresDocumentIndex.upsert` drops the previous cutting at the end of its transaction, and
+    with the vectors in another system those points would otherwise stay forever — unreachable,
+    since every search resolves through the catalogue, but never reclaimed. Re-tuning `chunk_chars`
+    on a large share would leave a second full copy of the corpus in the vector database.
+    """
+
+    class _Deleting(_RecordingStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted: list[str] = []
+
+        async def delete(self, collection: str, ids: list[str]) -> None:
+            self.deleted.extend(ids)
+
+    store = _Deleting()
+    index = ExternalVectorDocumentIndex(store)
+    await index._forget_vectors([("doc-a", "old-cut", 0), ("doc-a", "old-cut", 1)])
+    assert store.deleted == ["doc-a@old-cut#0", "doc-a@old-cut#1"]
+
+
+def test_the_base_index_forgets_nothing_because_its_vectors_were_in_the_rows() -> None:
+    """The hook is a no-op for pgvector, which is why it can live on the base at all."""
+    from chemclaw.ingest.documents.index import PostgresDocumentIndex
+
+    assert PostgresDocumentIndex._forget_vectors is not ExternalVectorDocumentIndex._forget_vectors

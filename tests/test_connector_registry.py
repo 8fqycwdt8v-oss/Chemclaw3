@@ -19,6 +19,8 @@ from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     ConnectorError,
     connector_tool_names,
+    declared_note_types,
+    declared_relations,
     discovered,
     enabled,
     health_url,
@@ -27,6 +29,8 @@ from chemclaw.connectors.registry import (
     skills_dirs,
 )
 from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
+from chemclaw.kg.note import KNOWN_NOTE_TYPES, known_note_types
+from chemclaw.kg.relations import KNOWN_RELATIONS, known_relations
 
 _JOB_BLOCK = """
 jobs:
@@ -294,3 +298,55 @@ def test_the_first_connectors_dir_wins_a_name_collision(
     (manifest,) = enabled()
     assert isinstance(manifest.endpoint, HttpEndpoint | StdioEndpoint)
     assert "7777" in str(manifest.endpoint)
+
+
+def test_a_bundle_contributes_note_types_without_a_core_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle's `note_types:` join the graph vocabulary, and leave with the bundle.
+
+    **The gap this closes.** `job-result` and `bo-candidate` are minted by the `qm` and `bo`
+    bundles, and both used to be hand-written lines in `chemclaw.kg.note.KNOWN_NOTE_TYPES` — so
+    contributing a note type was the one connector contribution that required editing core, inside
+    the seam whose whole claim is that a capability is a folder (D-118). Everything else a bundle
+    gives (tools, jobs, skills, profiles, its queue, its pods) is declaration-only.
+
+    Scoped to the *enabled* set, not the discovered one: a bundle a deployment does not run
+    contributes no vocabulary either, so a note of its type correctly fails `kg-validate` there.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha") + "note_types:\n  - assay-result\n")
+    _bundle(tmp_path, "beta", _http_manifest("beta") + "note_types:\n  - shelved\n")
+    _use(monkeypatch, tmp_path, enabled_list="alpha")
+
+    assert declared_note_types() == frozenset({"assay-result"})
+    assert "assay-result" in known_note_types()
+    assert "shelved" not in known_note_types(), "a disabled bundle contributes no vocabulary"
+    assert "assay-result" not in KNOWN_NOTE_TYPES, "core's own set is unchanged"
+
+
+def test_a_bundle_contributes_relations_the_same_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The edge-side twin, so `kg-validate` accepts an edge a bundle's notes actually draw."""
+    _bundle(tmp_path, "alpha", _http_manifest("alpha") + "relations:\n  - assayed-by\n")
+    _use(monkeypatch, tmp_path)
+
+    assert declared_relations() == frozenset({"assayed-by"})
+    assert "assayed-by" in known_relations()
+    assert "assayed-by" not in KNOWN_RELATIONS
+
+
+def test_a_malformed_vocabulary_name_is_refused_at_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name that is not a lowercase hyphenated token cannot enter the vocabulary.
+
+    The door opened for extending a closed set must not let through exactly what closing it
+    prevented: a note type becomes a path segment (`knowledge/<type>/<id>.md`), so a name with a
+    slash or a capital would produce a note that validates and is then unfindable by every filter
+    keyed on its type.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha") + "note_types:\n  - Assay Result\n")
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="lowercase hyphenated"):
+        discovered()

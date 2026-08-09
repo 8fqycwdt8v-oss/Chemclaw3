@@ -115,3 +115,23 @@ class DataSourceManifest(BaseModel):
                     "'module:callable' (e.g. 'chemclaw.ingest.eln.json_adapter:JsonExportAdapter')"
                 )
         return self
+
+    @model_validator(mode="after")
+    def _config_does_not_shadow_the_name(self) -> Self:
+        """Reject a `config:` block carrying a `name` key — the folder already decides that.
+
+        `_build_retrieve_half` passes `name=<this manifest's name>` on top of `**config`, so a
+        `name` in `config` is a duplicate keyword and the source cannot be built at all. Refusing
+        it here is what keeps the validator honest: `make datasource-validate` builds the kwargs as
+        a *dict*, where a second `name` silently overwrites the first, so the manifest validated
+        green and then the process died at startup with `got multiple values for keyword argument
+        'name'`. A validator that passes what startup refuses is worse than no validator, because it
+        is the thing an operator trusts before deploying (D-2026-08-08-a-source-is-named-by-...).
+        """
+        if "name" in self.config:
+            raise ValueError(
+                f"data source {self.name!r} sets `name` in its `config:` block; a source's name is "
+                "its folder name (the token `CHEMCLAW_DATA_SOURCES` enables) and is passed to the "
+                "retrieve half automatically — remove the key"
+            )
+        return self

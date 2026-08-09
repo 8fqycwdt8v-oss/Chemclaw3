@@ -385,6 +385,13 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "core.logging - imported by every entrypoint first - must not hard-depend on the connector "
         "registry at import time (see its docstring)"
     ),
+    ("chemclaw.kg", "chemclaw.connectors"): (
+        "known_note_types/known_relations union core's closed vocabulary with what the enabled "
+        "bundles declare, because two shipped note types (job-result, bo-candidate) are minted by "
+        "connectors and used to require a core edit to add. Lazy so layer 4 does not depend on the "
+        "capability layer at import time for a set only the two validators ever ask for - the same "
+        "shape as the core.logging exception above"
+    ),
 }
 
 _ALLOWED_AT_ANY_SCOPE = _ALLOWED_MODULE_EDGES | set(_ALLOWED_LAZY_EDGES)

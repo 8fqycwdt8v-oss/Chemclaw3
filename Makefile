@@ -29,7 +29,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain user-erase reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -141,6 +141,27 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	      -schema-location default -schema-location \
 	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+	@# The externally-hosted connector (D-2026-08-09-a-connector-we-do-not-run), rendered because
+	@# no shipped bundle sets `url` and so the default render above never takes that branch. Every
+	@# other check on it reads the template *text*, which cannot see a `{{- if }}` nesting mistake;
+	@# this is the only place the behaviour itself is exercised. `molfp` is an arbitrary choice —
+	@# any bundle with an `endpoint:` proves the same three things.
+	@# Matched with `case`, never `printf | grep -q` — under this file's `.SHELLFLAGS` (`-o
+	@# pipefail`, line 16) that pipeline reports a *match* as a failure: `grep -q` exits the moment
+	@# it matches, `printf` then dies of EPIPE, and pipefail takes the pipeline's status from it.
+	@# Worse, it is size-dependent, so it passed against a small stub here and failed in CI on the
+	@# real render — the output has to be long enough for grep to leave before printf finishes.
+	@# `case` reads the variable in-process: no subprocess, no pipe, nothing to race.
+	@set -e; \
+	  render=$$(helm template chemclaw deploy/helm/chemclaw \
+	    --set connectors.molfp.url=https://model.invalid/mcp); \
+	  case "$$render" in *chemclaw-connector-molfp*) \
+	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1;; esac; \
+	  case "$$render" in *https://model.invalid/mcp*) ;; *) \
+	    echo "FAIL: an externally hosted connector is missing from CHEMCLAW_CONNECTOR_URLS"; exit 1;; esac; \
+	  case "$$render" in *chemclaw-connector-rxnfp*) ;; *) \
+	    echo "FAIL: overriding one connector removed another's pods"; exit 1;; esac; \
+	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m chemclaw.cli.verify_audit_chain
@@ -199,6 +220,18 @@ deps-audit:  ## Check the locked dependency closure for known vulnerabilities (s
 explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }
 	uv run python -m chemclaw.cli.explain $(SESSION)
+
+user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. Dry run by default.
+	@test -n "$(ACTOR)" || { echo "usage: make user-erase ACTOR=<entra-oid> [APPLY=1]"; exit 64; }
+	@# `APPLY` is compared to the literal `1`, not tested for non-emptiness. `$(if $(APPLY),...)` is
+	@# a *non-empty* test, so `APPLY=0` and `APPLY=false` both read as true — and this is the one
+	@# irreversible target in the file, where "I explicitly said no" must not commit a deletion.
+	@# Anything other than `1` is a dry run, and an unrecognised value says so rather than guessing.
+	@case "$(APPLY)" in \
+	  ""|1) ;; \
+	  *) echo "user-erase: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
+	esac
+	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
 
 reindex:  ## Incrementally rebuild the derived note index — only notes changed since last run.
 	uv run python -m chemclaw.retrieval.vector_index

@@ -188,6 +188,24 @@ def server_tools_module(connector: str) -> ModuleType | None:
         raise
 
 
+def declared_note_types() -> frozenset[str]:
+    """Every knowledge-graph note type the enabled bundles declare.
+
+    Read by `chemclaw.kg.note.known_note_types`, which unions it with core's own set to get the
+    vocabulary `make kg-validate` accepts in this deployment. Scoped to *enabled* bundles rather
+    than discovered ones for the same reason every other registry answer is: a bundle a deployment
+    does not run contributes nothing, including vocabulary — and a note whose type came from a
+    since-disabled bundle should fail validation, because nothing in the running system can produce
+    or interpret one.
+    """
+    return frozenset(name for manifest in enabled() for name in manifest.note_types)
+
+
+def declared_relations() -> frozenset[str]:
+    """Every graph relation the enabled bundles declare — the edge-side twin of the above."""
+    return frozenset(name for manifest in enabled() for name in manifest.relations)
+
+
 def skills_dirs() -> list[str]:
     """The `skills/` directory of every enabled connector that declares skills.
 

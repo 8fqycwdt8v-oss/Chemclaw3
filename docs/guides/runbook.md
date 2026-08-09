@@ -303,8 +303,10 @@ connectors/<name>/
 1. Create the folder with a `connector.yaml`. For an MCP capability, declare an `endpoint:` and the
    `tools:` the agent may call — read/compute only; `make connector-validate` refuses a mutating
    name, because mutation belongs on the job path or on a core PR-gate tool.
-2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type** and
-   **task queue** its own worker serves. Its workflow returns a `ConnectorJobResult`
+2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type**. The
+   queue is *not* declared — it is `connector-<name>`, derived at dispatch, because a bundle's worker
+   serves only what the bundle's own modules registered (D-150). Its workflow returns a
+   `ConnectorJobResult`
    (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
    id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
    arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
@@ -336,6 +338,26 @@ connectors/<name>/
 `CHEMCLAW_CONNECTOR_URLS` to point the front door at. In a cluster, each bundle is its own
 Deployment + Service (`.Values.connectors.<name>.enabled`), and the chart *computes*
 `CHEMCLAW_CONNECTOR_URLS` from that same block, so addresses cannot drift from the pods that exist.
+
+**A server somebody else runs** — a platform team's model endpoint, a vendor's FastAPI/MCP service.
+Everything above is unchanged (the manifest says what the capability *is*, and that does not depend
+on who hosts it); only the deployment differs, per D-2026-08-09-a-connector-we-do-not-run:
+
+1. In the bundle's `connector.yaml`, declare the `endpoint:` as usual. It must speak MCP
+   streamable-HTTP, and because it is not loopback it must carry a credential —
+   `auth: {mode: bearer, token_env: CHEMCLAW_<NAME>_TOKEN}`, the variable name, never the token.
+   A non-loopback URL with `auth: mode: none` is refused at load. Omit `health_url` if the server
+   exposes none; `/readyz` then reports it `unprobed` rather than guessing a path.
+2. In `values.yaml`, set `connectors.<name>.url` to its address. That bundle gets **no** Deployment
+   and **no** Service, and the front door dials what you gave instead of an in-cluster name.
+   `server: true` still mirrors the manifest's `endpoint:` and says nothing about who runs it.
+3. Add the host to `networkPolicy.egressDestinations` (the rule already permits
+   `egressPorts.https`, but the destination list is empty by default), and put the token in the
+   secret set the pods already mount.
+
+The tools such a server exposes are still read/compute only, still narrowed by `tools:`, and still
+carry the turn's identity headers as *advisory* context — a connector outside our trust boundary
+must never make an access decision on a header's word (`connectors/identity.py`).
 
 **Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — prepend a private bundle dir to
 override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS`,
@@ -911,3 +933,115 @@ the diff** — never a downgrade of the whole gate, which is how a control becom
 The SBOM (SPDX) and the built image's digest are retained on the run for 90 days. That is what makes
 "what was in the image that produced this audit record" answerable at all, and it is the reason the
 floating base default is defensible: the bytes cannot be pinned in advance, so they are named after.
+
+## (xv) Onboard, entitle and offboard a person
+
+**Identity is entirely Entra.** This system has no user table, no local accounts and no invite
+flow: it reads the caller's token and nothing else. So "add a user" is a directory operation, and
+everything below is either an Entra change or a config change — **there is no code change in this
+section at all.**
+
+Two ways a tenant can express membership, and the difference matters when you write a role name:
+
+| Tenant wiring | What lands in the turn's role set | How you write it in config |
+| --- | --- | --- |
+| App role assignment | the app role value, verbatim | `chemclaw.sharedrive.reader` |
+| Group claim (`CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`) | each group claim, namespaced | `group:<claim value>` |
+
+The prefix is not decoration. The same flat set gates every write tool, every skill and every
+document share, so an unprefixed group value would be indistinguishable from an app role of that
+name. A bare object id matches nothing.
+
+### The roles this system reads
+
+There is no fixed list to create — the names are yours, and every one of them is referenced from
+config rather than from code. What is fixed is the **set of gates** that read them:
+
+| Setting | What it gates | Shape |
+| --- | --- | --- |
+| `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` | expensive jobs (`expensive: true` in any `connector.yaml`), and who sees the whole PR-gate review queue rather than only their own proposals | comma list of role values |
+| `CHEMCLAW_TOOL_ROLE_GATES` | one named tool → the roles that may call it | JSON `{"tool": ["role"]}` |
+| `CHEMCLAW_SKILL_ROLE_GATES` | one skill's *visibility* — a caller holding none of its roles never sees it | JSON `{"skill": ["role"]}` |
+| `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` | anything expensive that **no** manifest declares; a bundle's own `expensive: true` needs no entry here | comma list of tool names |
+| a share's `required_roles:` | one mounted document share, in its `datasource.yaml` — a caller without it gets nothing from that source, not a filtered list | list of role values |
+
+Two defaults worth knowing before you design the role set:
+
+- **Write tools are closed by default.** `DEFAULT_WRITE_TOOL_GATES` (`agent/authz.py`) gates every
+  job launcher and state-mutating tool to `entra_privileged_roles` unless you have written an
+  explicit `tool_role_gates` entry for it. A deployment that sets **no** privileged role therefore
+  refuses every expensive job — which is the intended failure, not a misconfiguration to route
+  around. Setting `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` is the whole remedy.
+- **None of it is enforced unless `CHEMCLAW_ENTRA_REQUIRED=true`.** In dev the gates are open so
+  the app runs without a tenant. Never run a shared or exposed deployment that way — the front door
+  refuses to start on a non-loopback bind precisely to stop it.
+
+### Onboard someone
+
+1. Assign them the app role (or add them to the group) in Entra. Nothing to restart.
+2. Nothing else. Their first request carries the role; `require_actor` accepts it.
+
+### Grant an existing role a new capability
+
+Edit `CHEMCLAW_TOOL_ROLE_GATES` / `CHEMCLAW_SKILL_ROLE_GATES` in the chart's `config:` block and
+roll the deployment. Adding a *share* to a role is the share's `required_roles:` instead, because
+that entitlement belongs to the corpus rather than to the tool surface.
+
+### Revoke access
+
+Remove the app role or group membership in Entra. **There is no in-app kill switch, and this is a
+decision rather than an omission**: a token already issued stays valid until it expires, so
+revocation takes effect within your tenant's access-token lifetime (an hour by default). If you
+need it faster than that, the lever is the tenant's — continuous access evaluation or a shortened
+lifetime — not a deny-list here, which would be a second source of truth about who may act and
+would drift from the directory the moment anyone edited it by hand.
+
+For an immediate, deployment-wide stop, scale the front door to zero. There is deliberately no
+per-user equivalent.
+
+### Offboard: erase their data
+
+Removing the role stops new access and deletes nothing. Per-actor rows live in nine tables, split
+into two tiers by one rule — **the conversation is erasable, the record is not**:
+
+```bash
+make user-erase ACTOR=<entra-oid>            # dry run: real counts, writes nothing
+make user-erase ACTOR=<entra-oid> APPLY=1    # commits
+```
+
+It removes their sessions, messages, events, turn lease, preferences and watch subscriptions. It
+**keeps and counts** the rows that attribute scientific work to them — `audit_events`,
+`plan_approvals`, `note_proposals`, `bo_suggestions`, `job_records`, `turn_costs` — and prints the
+reason beside each. That is not a limitation to work around: an attributable record that can be
+deleted on request is not an attributable record, and `audit_events` carries a tamper-evident hash
+chain whose proof spans the rows either side of any deletion (see (xvi)). If a data-protection
+obligation reaches the retained tier, that is a decision to take with the record's owner.
+
+The dry run executes the deletes and rolls back, so the number you sign off on is the number that
+will be deleted rather than a second query's guess at it.
+
+## (xvi) Verify the audit trail, and the other commands with no section of their own
+
+Four operations exist as `make` targets and had no entry here. Three of them are yours to run;
+the fourth is automated and listed so nobody runs it by hand wondering why.
+
+**`make audit-verify` — the GxP tamper-evidence check.** `audit_events` is a hash chain: each row
+carries a hash over itself and its predecessor, so any edit or deletion breaks the chain from that
+point on. Verifying it is what makes the trail *evidence* rather than a log. Nothing schedules it,
+so decide a cadence and hold to it — monthly, plus after any restore (see (xiii), which describes
+what a restore does to the chain without naming the command that checks it) and before any audit.
+A reported gap with no restore behind it is an incident, not a maintenance task.
+
+**`make share-sync SHARE=<source>` — crawl a mounted document share now.** The scheduled job is the
+production path (every six hours by default); this is for the first crawl after attaching a share,
+and for re-crawling after a bulk change nobody wants to wait six hours for. Run
+`make share-estimate SHARE=<source>` first — it walks the share, reads nothing, and tells you what
+the crawl would cost.
+
+**`make safety-validate` — force-compile the hazard and genotoxicity tables.** Run it after editing
+a rule table. CI runs it too; the point is that a bad SMARTS fails at deploy rather than on the
+first live hazard question.
+
+**`make schedules-apply` — do not run this by hand.** The chart runs it as a post-rollout Job, so
+the Schedules follow the deployment automatically. It is here only so that finding it in
+`make help` does not read as a missing step.

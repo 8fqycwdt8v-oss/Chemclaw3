@@ -445,12 +445,19 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 
 {{- /* CHEMCLAW_CONNECTOR_URLS, computed from the SAME enabled set the connector Deployments come
        from, so the front door's address map cannot drift from the pods that exist. A bundle's
-       manifest ships a loopback dev default; this is the deployment override that replaces it. */ -}}
+       manifest ships a loopback dev default; this is the deployment override that replaces it.
+
+       A bundle with an explicit `url` is dialled there instead of at a Service this release
+       renders, because for that bundle no such Service exists — `deployment-connectors.yaml` skips
+       the app half precisely when this key is set. The two must stay conditioned on the same value:
+       a computed Service address for a connector we do not run is the failure this exists to
+       prevent, and it is silent — the front door dials a name that resolves to nothing and reports
+       the capability as merely unreachable. */ -}}
 {{- define "chemclaw.connectorUrls" -}}
 {{- $urls := dict -}}
 {{- range $name, $cfg := .Values.connectors -}}
 {{- if and $cfg.enabled $cfg.server -}}
-{{- $_ := set $urls $name (printf "http://%s-connector-%s:%v/mcp" (include "chemclaw.name" $) $name $.Values.connectorPort) -}}
+{{- $_ := set $urls $name (default (printf "http://%s-connector-%s:%v/mcp" (include "chemclaw.name" $) $name $.Values.connectorPort) $cfg.url) -}}
 {{- end -}}
 {{- end -}}
 {{- toJson $urls -}}
@@ -484,7 +491,11 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
 {{- range $name, $cfg := .Values.connectors -}}
 {{- if $cfg.enabled -}}
-{{- if $cfg.server -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
+{{- /* `not $cfg.url` for the same reason the Deployment is guarded on it: an externally hosted
+       connector pods nothing in this release and so opens no pool here. Counting it would spend
+       the fleet's connection budget on processes that do not exist, which is the ceiling being
+       wrong in the direction that silently throttles the pods that do. */ -}}
+{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
 {{- if $cfg.worker -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
 {{- end -}}
 {{- end -}}

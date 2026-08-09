@@ -32,6 +32,7 @@ import logging
 from typing import Any, Protocol, runtime_checkable
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import register_secret_env
 from chemclaw.retrieval.vectors.base import (
     VectorMatch,
     VectorPoint,
@@ -100,19 +101,31 @@ def open_qdrant_client() -> QdrantClient:
 
     Reads the URL and the API key from settings rather than taking them as arguments, because this
     is the one production entry point and the alternative is a second place that decides what
-    "the vector store" means. The key is registered with the log-redaction inventory by the config
-    section that declares it, so a client echoing its own configuration cannot leak it.
+    "the vector store" means.
+
+    **The key is registered with the log-redaction inventory here, at build time.** It used to say
+    the config section did that, which was simply false — `register_secret_env` had exactly one
+    caller in the tree (the warehouse's `connect_options`) and this variable was registered nowhere,
+    so a client echoing its own configuration into a traceback would have put the key in a log. The
+    registration is done where the secret is *read*, which is the warehouse's placement and the one
+    that cannot drift from the read.
     """
     module = _client_module()
-    client: QdrantClient = module.AsyncQdrantClient(
-        url=settings.vector_store_url,
-        api_key=settings.vector_store_api_key or None,
-        timeout=int(settings.vector_store_timeout_seconds),
-        # The private-CA bundle the rest of this system's transports honour. Qdrant in a cluster is
-        # reached over the platform's own TLS, and defaulting to the system store would fail there
-        # for exactly the reason `core.http` pins the bundle everywhere else.
-        verify=settings.llm_tls_ca_bundle or True,
-    )
+    register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")
+    options: dict[str, Any] = {
+        "url": settings.vector_store_url,
+        "api_key": settings.vector_store_api_key or None,
+        "timeout": int(settings.vector_store_timeout_seconds),
+    }
+    # The private-CA bundle the rest of this system's transports honour, passed **only** when one is
+    # configured. Not unconditionally: `verify` is forwarded to the underlying httpx client rather
+    # than being part of the constructor's own documented signature, and nothing here has run
+    # against a real client, so an unrecognised keyword would fail every deployment — including the
+    # ones that never needed a private CA. Narrowing it means the default path uses only the three
+    # keywords the client certainly accepts, and the risk is carried by the deployments that opt in.
+    if settings.llm_tls_ca_bundle:
+        options["verify"] = settings.llm_tls_ca_bundle
+    client: QdrantClient = module.AsyncQdrantClient(**options)
     return client
 
 

@@ -77,14 +77,26 @@ row, so it cannot go stale against anything.
 
 ### 4. Eligibility is a scope applied before the top-k, never a filter applied after it
 
-When a query carries a filter, the catalogue names the eligible documents and that set is handed
-*into* the search. This is the shape `NoteIndex.search_dense(within=...)` already has, and it exists
-for a measured reason: filter after the cut and a narrow tag over a wide corpus returns nothing at
-all, because the k nearest vectors all belonged to something else. `docs/planning/BACKLOG.md` already
-records that defect against pgvector's post-filtering, and Qdrant's filterable HNSW is a large part
-of why an external store is worth attaching.
+The catalogue names the eligible documents and that set is handed *into* the search. This is the
+shape `NoteIndex.search_dense(within=...)` already has, and it exists for a measured reason: filter
+after the cut and a narrow tag over a wide corpus returns nothing at all, because the k nearest
+vectors all belonged to something else. `docs/planning/BACKLOG.md` already records that defect
+against pgvector's post-filtering, and Qdrant's filterable HNSW is a large part of why an external
+store is worth attaching.
 
-An unfiltered query — the common case — passes no scope and pays nothing extra.
+**A scope is computed for every search, including an unfiltered one.** The first cut skipped it when
+a query carried no tag and no date window, on the reasoning that an unfiltered query has no
+restriction to express. That was wrong, and the review of this ADR's own branch measured it: the
+`source` is a restriction and it is *always* present. Every enabled share writes into one collection
+— `vector_store_document_collection` is a single setting — so a search that sent no scope took the
+top-k across all shares, and `_resolve` then dropped every hit belonging to another source, because
+`CITATION_SQL` filters on `%(src)s` and returns NULL for it. The caller silently received fewer than
+`top_k` hits, or none. `PostgresDocumentIndex` never had this: `_ELIGIBLE` carries
+`f.source = %(src)s` inside the ranking statement. Worse, the inherited `search_lexical` *is*
+correctly scoped, so RRF would have fused a correct lexical list with a source-polluted dense one.
+
+Two backends disagreeing about what a search means is a worse failure than either being slow, so the
+fast path is gone and the cost moves into the residual below.
 
 ### 5. The vendor client is late-bound and is not a dependency
 
@@ -118,6 +130,41 @@ proven against a fake driver.
 - `note_index` is deliberately left on pgvector. It has an open item of its own (no embedding-model
   identity, no chunking), any move is a full re-embed anyway, and generalizing the seam to a second
   consumer before the first has run against a live server would be designing against a guess.
+
+## The chunking joined the key, concurrently, and the composition did not notice
+
+Recorded because it is the failure mode this design is most exposed to, and it happened within a day
+of the seam landing.
+
+`D-2026-08-08` (the chunking-key work) made a chunk's identity `(doc_id, chunking_key, ordinal)` —
+`infra/sql/041` — on a branch running beside this one. Neither change was wrong alone, and both
+merged cleanly, because they touched different lines. Together they were wrong in four places at
+once, all of them in the external index:
+
+- the vector point was addressed `doc_id#ordinal`, so **two cuttings of one document collided on a
+  single point** — a re-tuned `chunk_chars` would have had the finer cutting silently overwrite the
+  coarser's vectors while the catalogue held both sets intact;
+- `store_embeddings` addressed rows by `(doc_id, ordinal)`, so a re-embed stamped the current
+  embedding key onto the *superseded* cutting's rows as well;
+- the sweep carried its own hand-written `NOT EXISTS`, which the base had already extended with the
+  chunking — two spellings of "orphan" across two stores;
+- and `upsert`'s per-write cleanup deleted the previous cutting's rows in Postgres while their
+  vectors stayed in the store forever.
+
+**No test failed.** The offline suite covers the seam, the adapter and the point-id contract; the
+external index's Postgres statements run only where a database does, which this ADR's own backlog row
+already said. The gap it named is exactly the gap that let this through.
+
+Two things changed as a result. The point id is now the *whole* primary key, and a scope groups by
+`(doc_id, chunking_key)` rather than by document — because `_ELIGIBLE` joins on the cutting, so a
+share must never be served another share's cutting of the same text. And `CLAIMED_SQL` and
+`_forget_vectors` exist so the subclass cannot hold a second, drifting copy of "what is an orphan"
+or silently skip reclaiming what the base deleted.
+
+The general lesson is about subclassing across a concurrent change: five inherited methods are five
+places a base can move underneath you, and the compiler sees none of it when the change is to a
+*key* rather than to a signature. mypy caught exactly one of the four (a tuple width); the rest were
+found by reading.
 
 ## Alternatives rejected
 

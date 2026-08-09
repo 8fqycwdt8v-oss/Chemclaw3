@@ -71,3 +71,8 @@ jobs:
 
 skills:
   - experiment-design
+
+# The note type this bundle's campaign mints (`connectors/bo/knowledge.py`) — see the same
+# declaration in `connectors/qm/connector.yaml` for why it moved out of core's frozenset.
+note_types:
+  - bo-candidate

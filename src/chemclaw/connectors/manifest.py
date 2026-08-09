@@ -41,9 +41,12 @@ Adding a transport or an auth mode is one variant plus one branch at the single 
 never a widening of one model with optional fields that only apply sometimes.
 """
 
+import re
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from chemclaw.core.http import is_loopback_url
 
 # A job parameter's declared type, mapped to a Python annotation by `connectors.jobs`.
 # Deliberately a *closed* set: the generated pydantic model becomes the JSON schema the model
@@ -57,9 +60,16 @@ class NoAuth(BaseModel):
     """No credential — the connector is inside our own trust boundary.
 
     Correct for a stdio connector (a subprocess of our own pod, under our own identity) and for
-    a loopback HTTP connector in dev. `ConnectorManifest` refuses it for a non-loopback URL
-    unless the deployment has explicitly opted into insecure binding, reusing the front door's
-    loopback rule rather than inventing a second notion of "safe address".
+    a loopback HTTP connector in dev. `HttpEndpoint` refuses it for a non-loopback declared URL,
+    reusing the front door's loopback rule (`chemclaw.core.http.LOOPBACK_HOSTS`) rather than
+    inventing a second notion of "safe address".
+
+    **This paragraph used to describe a validator that did not exist** — the rule lived in this
+    docstring and nowhere else in the tree, so a manifest could ship pointing at a network host with
+    no credential and nothing would say so. It cost nothing while every bundle was ours and shipped
+    a loopback default, and stopped being free the moment a bundle could name somebody else's server
+    (D-2026-08-09-a-connector-we-do-not-run). The rule is now on `HttpEndpoint`, which is where the
+    URL and the auth mode are both in scope.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -116,6 +126,32 @@ class HttpEndpoint(BaseModel):
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
+        return self
+
+    @model_validator(mode="after")
+    def _a_networked_endpoint_carries_a_credential(self) -> Self:
+        """Reject `auth: mode: none` on a URL that is reachable from the network.
+
+        The rule is about the *declared* URL — what a bundle ships in the repo — and not about the
+        effective one after `connector_urls`, which is a deliberate line rather than an oversight.
+        A deployment override points at the operator's own infrastructure (in the shipped chart, an
+        in-cluster Service bounded by the `connector-ingress` NetworkPolicy), and a validator that
+        failed on those would flag the entire shipped fleet the moment the chart set the override —
+        an alarm that fires on the normal case teaches people to disable it. What it does catch is
+        the case that has no compensating control and is now expressible: a manifest naming somebody
+        else's host, reached across a network we do not own, with no credential on the call.
+
+        `NoAuth` stays the default because the transports it is right for — stdio, and the loopback
+        dev endpoint every shipped bundle declares — are the common ones; this makes the default
+        unavailable exactly where it stops being true.
+        """
+        if isinstance(self.auth, NoAuth) and not is_loopback_url(self.url):
+            raise ValueError(
+                f"endpoint url {self.url!r} is not loopback, so `auth: mode: none` would send "
+                "every call across the network with no credential; declare "
+                "`auth: {mode: bearer, token_env: ...}`, or use a loopback URL and let the "
+                "deployment move it with CHEMCLAW_CONNECTOR_URLS"
+            )
         return self
 
 
@@ -339,6 +375,43 @@ class ConnectorManifest(BaseModel):
     # instead of a silently-shipped skill (`scripts.validate_connectors`).
     skills: list[str] = Field(default_factory=list)
     profiles: list[str] = Field(default_factory=list)
+    # The knowledge-graph vocabulary this bundle's `publish_to_graph` jobs mint, unioned into
+    # `KNOWN_NOTE_TYPES`/`KNOWN_RELATIONS` by `chemclaw.kg.note.known_note_types` and its sibling.
+    #
+    # **Why a bundle may extend a closed vocabulary.** Those two frozensets are closed on purpose:
+    # a typo makes a note or an edge unfindable by every filter keyed on it, so the vocabulary is
+    # checked at the PR-gate rather than left open. But the vocabulary is not core's alone —
+    # `job-result` and `bo-candidate` are both minted by bundles (`connectors/qm/knowledge.py`,
+    # `connectors/bo/knowledge.py`) and were written into core's frozenset by hand. That made a
+    # bundle contributing a note type the one connector contribution needing a core edit, in the
+    # seam whose whole claim is that a capability is a folder (D-118).
+    #
+    # Declaring it here keeps both properties: the set is still closed (an undeclared name still
+    # fails `make kg-validate`), a human still sees a genuinely new type at the gate that reviews
+    # the bundle, and the deployment's effective vocabulary is exactly what its enabled bundles say
+    # it is. Names are validated for shape here and for *existence* nowhere — a type nothing has
+    # minted yet is a declaration, not an error.
+    note_types: list[str] = Field(default_factory=list)
+    relations: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _vocabulary_is_well_formed(self) -> Self:
+        """Reject a note type or relation that is not a lowercase hyphenated token.
+
+        The same shape the shipped vocabulary uses (`bo-candidate`, `computed-from`). Enforced
+        because these names become path segments (`knowledge/<type>/<id>.md`) and frontmatter keys:
+        a name with a slash, a space or an uppercase letter would produce a note that validates and
+        then cannot be found by the filters keyed on it — the exact failure the closed vocabulary
+        exists to prevent, arriving through the door opened for extending it.
+        """
+        for field, values in (("note_types", self.note_types), ("relations", self.relations)):
+            bad = sorted(v for v in values if not re.fullmatch(r"[a-z][a-z0-9-]*", v))
+            if bad:
+                raise ValueError(
+                    f"connector {self.name!r}: {field} entries must be lowercase hyphenated "
+                    f"tokens (e.g. 'job-result'); got {bad}"
+                )
+        return self
 
     @model_validator(mode="after")
     def _contributes_capability(self) -> Self:

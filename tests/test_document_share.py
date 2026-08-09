@@ -1642,7 +1642,7 @@ def test_the_external_store_backend_carries_the_chunking_through_every_write() -
         assert await _stored_cuttings() == [("4000:400", 0)]
         # Asked of the store through its own interface: the fine cutting's point is gone and the
         # coarse one is still there, which is what "the vectors went with the rows" means.
-        assert {m.id for m in await store.search("chunks", fine_vector, 10)} == {"doc-1#4000:400#0"}
+        assert {m.id for m in await store.search("chunks", fine_vector, 10)} == {"doc-1@4000:400#0"}
 
         # (3) And the sweep agrees with `CLAIMED_SQL` rather than a local spelling of it: a cutting
         # no file row claims is an orphan even while the *document* still has one.
