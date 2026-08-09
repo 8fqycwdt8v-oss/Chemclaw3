@@ -114,6 +114,26 @@ async def post_message(
             else:
                 await semaphore.acquire()
             permit = True
+            # The budget, again — and this is the check that binds. The one before the response
+            # was handed off runs at *request entry*, so every turn in a concurrent burst passes
+            # it before any of them has recorded a thing: measured with production-shaped values
+            # (8 permits, 40 concurrent POSTs, a 1-turn cap) as 40 answers and 40,000 tokens
+            # booked, against a documented overshoot bound of 8. Re-checking here is what makes
+            # that bound true, because a turn holding a permit is one of at most
+            # `service_max_concurrent_turns`, and every turn that finished ahead of it has
+            # already been booked by `record`.
+            #
+            # An event rather than a status code (D-166): the response is open by now, and the
+            # shed branch above answers the same way for the same reason. Not retryable — the
+            # budget is spent, so the next attempt fails identically until an operator raises the
+            # cap or the counters reset.
+            try:
+                front.budget.check(session_id, principal.oid)
+            except BudgetExceeded as exc:
+                METRICS.increment("chemclaw_turns_refused_budget_total")
+                refused = ErrorEvent(message=str(exc), code="budget_exhausted", retryable=False)
+                yield {"event": refused.type, "data": refused.model_dump_json()}
+                return
             METRICS.increment("chemclaw_turns_started_total")
             try:
                 # The deadline covers the whole streamed run *including* client consumption:
@@ -181,9 +201,10 @@ async def post_message(
     claimed = False
     handed_off = False
     try:
-        # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
-        # has exhausted its turn or token budget — a clean 429, not a started-then-killed
-        # turn.
+        # Runaway-cost guard (budget #3), first pass: refuse before taking a permit if this
+        # session/user has *already* exhausted its budget — a clean 429, not a queued turn that
+        # was never going to run. It is a fast path, not the guard: the binding check is the one
+        # inside the stream, after the permit (see there for the measurement).
         try:
             front.budget.check(session_id, principal.oid)
         except BudgetExceeded as exc:

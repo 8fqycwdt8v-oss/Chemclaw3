@@ -69,9 +69,7 @@ _SEARCH = """
 
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
     """The configured connection, with the shared statement timeout (one place, DRY)."""
-    return db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    )
+    return db.connection(settings.postgres_dsn)
 
 
 class PostgresJobRecordSink:

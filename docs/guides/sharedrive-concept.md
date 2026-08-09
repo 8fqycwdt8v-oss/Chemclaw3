@@ -139,6 +139,41 @@ Watch `reembedded` in the run's output; `CHEMCLAW_DOCUMENT_REEMBED_BATCH_SIZE` p
 The one thing to plan for is *cost*: a model change re-embeds the whole corpus, so it costs what
 the first index cost. Change it before the first full crawl if you can.
 
+### Keeping the vectors somewhere other than Postgres
+
+By default the embeddings live in `document_chunks.embedding` and a search is one statement that
+ranks, filters and resolves the citation together. That is the fastest arrangement and needs no
+extra infrastructure.
+
+For a dedicated vector database:
+
+```
+CHEMCLAW_VECTOR_STORE_PROVIDER=qdrant
+CHEMCLAW_VECTOR_STORE_URL=https://qdrant.internal:6333
+CHEMCLAW_VECTOR_STORE_API_KEY=…            # optional
+CHEMCLAW_VECTOR_STORE_DOCUMENT_COLLECTION=chemclaw_document_chunks
+```
+
+Four things to know before you do:
+
+- **Only the vectors move.** The file table, the fingerprint diff, the mark-and-sweep, the
+  `embedding_key` that makes a model swap self-healing, and the lexical leg all stay in Postgres —
+  they are relational work a vector database has no joins for and no clock to measure against.
+  Postgres is still required. `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md` is
+  the reasoning.
+- **Create the collection with cosine distance**, and index the `group` payload field. The adapter
+  documents this and cannot enforce it: a collection created with dot-product or Euclidean distance
+  returns scores in another range, and every rank fusion above it would mis-rank silently.
+- **`qdrant-client` is not installed by default.** It is deliberately not a runtime dependency —
+  a store nobody configured should not weigh on every pod — so add it to the image that reaches
+  Qdrant. Starting without it fails with a message naming the package.
+- **`CHEMCLAW_EMBEDDING_DIM` is no longer tied to the migration.** The pgvector column is unused
+  under an external store, so a 768-wide model is fine; the collection's own width is what matters.
+
+Adding a *different* vector database is an adapter module implementing three methods plus a name in
+`src/chemclaw/retrieval/vectors/registry.py` — see that package's `README.md`. Nothing else in the
+tree learns the name.
+
 ## 5. Cost it before you buy it
 
 **Do this before enabling the source.** It walks the real mount exactly as the crawl does, reads no

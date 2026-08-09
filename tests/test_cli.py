@@ -19,16 +19,54 @@ from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
 
 
-def test_admin_identity_advertises_all_skills_as_the_configured_actor(
+def test_admin_identity_is_the_configured_actor_holding_the_configured_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admin mode returns the configured actor and holds every role any skill gate requires."""
+    """Admin mode returns the configured actor and exactly `cli_admin_roles` — nothing derived."""
+    monkeypatch.setattr(settings, "cli_admin_roles", ["operator"])
+    actor, roles = cli.resolve_identity(admin=True, actor=None)
+    assert actor == settings.cli_admin_actor
+    assert roles == frozenset({"operator"})
+
+
+def test_admin_holds_no_roles_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--admin` bypasses authentication only. The default confers no entitlement at all."""
+    monkeypatch.setattr(settings, "cli_admin_roles", [])
+    _actor, roles = cli.resolve_identity(admin=True, actor=None)
+    assert roles == frozenset()
+
+
+def test_a_skill_visibility_gate_cannot_confer_tool_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coupling that made an unauthenticated terminal fully privileged.
+
+    `resolve_identity` used to hold the union of every role named in `skill_role_gates` — a map that
+    decides which *skills a chemist is shown*. `authorize_tool` and `authorize_trigger` read
+    `tool_role_gates` and `entra_privileged_role_set`. Unrelated maps, coupled by nothing but the
+    role *name*.
+
+    On the shipped chart the derivation was harmless. But `core/config/agent.py`'s own docstring
+    gives `{"deep-research": ["process-chemist"]}` as the skill-gate example, and the runbook's
+    remedy for a refused expensive job is to put a role in `entra_privileged_roles` — so an operator
+    following both, in two edits neither of which mentions the CLI, handed every tool and every
+    expensive action to anyone who could run the console script. `uv sync` installs it into the
+    image, so that is anyone who can `oc exec` into a pod.
+
+    This asserts the two maps are now independent: the exact configuration that opened everything
+    now confers nothing.
+    """
     monkeypatch.setattr(
         settings, "skill_role_gates", {"deep-research": ["process-chemist"], "bo": ["ops"]}
     )
-    actor, roles = cli.resolve_identity(admin=True, actor=None)
-    assert actor == settings.cli_admin_actor
-    assert roles == frozenset({"process-chemist", "ops"})
+    monkeypatch.setattr(settings, "entra_privileged_roles", "process-chemist")
+    monkeypatch.setattr(settings, "cli_admin_roles", [])
+
+    _actor, roles = cli.resolve_identity(admin=True, actor=None)
+    assert roles == frozenset(), "a skill-visibility gate must not confer any authz role"
+    assert not (roles & settings.entra_privileged_role_set), (
+        "the CLI must not hold a privileged role it was never explicitly given"
+    )
 
 
 def test_actor_override_is_honored() -> None:
@@ -142,7 +180,7 @@ def test_approve_refuses_a_session_whose_todos_are_only_bookkeeping(
         session = AgentSession(session_id="cli-bookkeeping")
         await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
         assert await todo_titles(session), "the precondition is that the display is non-empty"
-        reply = await cli._plan_command("/approve", session)
+        reply = await cli._plan_command("/approve", session, settings.cli_admin_actor)
         return reply, await cli_approvals.decision(session.session_id, EMPTY_PLAN_HASH)
 
     reply, recorded = asyncio.run(_run())
@@ -161,14 +199,18 @@ def test_approve_records_and_arms_a_real_plan(cli_approvals: InMemoryPlanApprova
     async def _run() -> tuple[str, str, tuple[bool, str] | None]:
         session = AgentSession(session_id="cli-real-plan")
         await _set_plan(session, ["screen the species", "compute the barrier"])
-        reply = await cli._plan_command("/approve", session)
+        reply = await cli._plan_command("/approve", session, "alice@lab")
         plan_hash = await current_plan_hash(session)
         return reply, plan_hash, await cli_approvals.decision(session.session_id, plan_hash)
 
     reply, plan_hash, recorded = asyncio.run(_run())
     assert plan_hash != EMPTY_PLAN_HASH, "the precondition is a plan with real work items"
     assert plan_hash in reply, f"the terminal did not name the plan it approved: {reply}"
-    assert recorded == (True, settings.cli_admin_actor)
+    # The *session's* actor, not `settings.cli_admin_actor`. `--actor alice@lab` stamps the ambient
+    # identity every audit row and `requested_by` reads, and the approval used to hardcode the
+    # default instead — so the durable record of a GxP sign-off named someone who took no action and
+    # disagreed with the audit rows for its own session.
+    assert recorded == (True, "alice@lab")
 
 
 def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
@@ -185,7 +227,7 @@ def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
     async def _run() -> str:
         session = AgentSession(session_id="cli-display")
         await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
-        return await cli._plan_command("/plan", session)
+        return await cli._plan_command("/plan", session, settings.cli_admin_actor)
 
     reply = asyncio.run(_run())
     assert "waiting on the DFT run" in reply, f"the display lost the session's todos: {reply}"

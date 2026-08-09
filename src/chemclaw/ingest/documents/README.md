@@ -50,6 +50,13 @@ error anywhere. `sync.reembed_stale` refreshes them from the `content` stored be
 so the fix is a database-to-database pass that never touches the share and runs even when the mount
 is down.
 
+**And a chunk is only good for the chunking that cut it.** The same argument one step out
+(`chunking_key`, migration 040): `chunk_chars` and `chunk_overlap_chars` decide what text each
+vector describes, and until D-2026-08-08 neither of the crawl's two gates could see them change —
+so re-tuning them re-chunked *nothing*, and when a re-chunk did happen for another reason it left
+the finer cutting's higher ordinals stranded, which `reembed_stale` then adopted as current. Both
+gates now compare it, and a document's chunks are replaced rather than merged.
+
 **Identity is the content, not the path.** `doc_id` is the hash of the parsed text, so the same
 report in four project folders is one set of chunks and one embedding call, and a rename is free.
 It is `backfill_corpus.note_for_document`'s rule and D-011's, applied to embeddings.
@@ -71,8 +78,9 @@ enforcement that matches reality is not per-file ACLs but: *a caller not in the 
 nothing from this source at all.* `ShareDocumentRetriever._entitled` checks the binding's
 `required_roles` against the turn's roles — the one entitlement vocabulary `authz.py`,
 `skill_access.py` and every manifest gate already share. An AD group reaches it either by being
-assigned to an Entra app role, or as a group object-id under
-`CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES`.
+assigned to an Entra app role, or — under `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES` — as its group
+claim namespaced with `core.identity_context.GROUP_ROLE_PREFIX`. So a group-gated binding names
+`group:<claim value>`, never the bare object-id, which lands in no role set and matches nothing.
 
 A **gated** share refuses when there is no identity to check (`require_actor`'s reject-if-absent
 rule, applied to a corpus). An **ungated** one has nothing to verify and needs no actor — the

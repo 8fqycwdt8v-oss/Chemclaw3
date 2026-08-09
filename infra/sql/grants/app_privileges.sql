@@ -63,10 +63,16 @@ BEGIN
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
         'plan_approvals, note_index, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints TO %I', app_role);
-    -- Insert only: these three are written once and never revised. `session_owners` upserts with
-    -- `DO NOTHING` (first writer wins), which needs no UPDATE — unlike every table above, whose
-    -- `DO UPDATE` does.
-    EXECUTE format('GRANT INSERT ON bo_suggestions, session_owners TO %I', app_role);
+    -- Insert only: written once and never revised. `bo_suggestions` is a campaign's history, and
+    -- the sequence *is* the history (031), so an UPDATE would rewrite it.
+    EXECUTE format('GRANT INSERT ON bo_suggestions TO %I', app_role);
+
+    -- Insert and delete, no update: `session_owners` upserts with `DO NOTHING` (first writer wins),
+    -- so it needs no UPDATE — but offboarding removes a departed person's ownership rows along with
+    -- the sessions they key (`chemclaw.agent.leaver`), so it does need DELETE. Kept on its own line
+    -- because that combination is unlike every other group here, and folding it into the full-DML
+    -- list below would silently hand it the UPDATE its writer deliberately does not use.
+    EXECUTE format('GRANT INSERT, DELETE ON session_owners TO %I', app_role);
 
     -- Full DML, because the application genuinely deletes from these: the retention sweep prunes
     -- conversation history and spent mailbox rows, artifact eviction reclaims cold blobs, a turn

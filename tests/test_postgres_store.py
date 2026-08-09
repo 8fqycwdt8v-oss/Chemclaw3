@@ -10,11 +10,12 @@ import asyncio
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.migrate import migrate
-from chemclaw.science.calc.postgres_store import PostgresStore
+from chemclaw.science.calc.postgres_store import PostgresStore, default_store
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
     InMemoryStore,
+    ResultStore,
     StoredResult,
 )
 from tests.pg import migrated_db_or_skip
@@ -57,6 +58,51 @@ def test_round_trip_and_upsert() -> None:
         assert got2.provenance == "measured"
 
     asyncio.run(_run())
+
+
+def test_default_store_is_postgres_backed() -> None:
+    """The production seam names the durable backend, not the in-memory one.
+
+    `default_store()` is what every calculator resolves its store from, and its in-memory sibling
+    satisfies the same `ResultStore` Protocol — so a seam accidentally left pointing at
+    `InMemoryStore` type-checks, passes every store test, and silently discards the cache on
+    process exit, which is D-011 turned off. `tests/test_audit.py` pins the audit sink the same
+    way, and `test_default_artifact_store_is_postgres_backed` its artifact twin; this is the third
+    of the trio and the only one that was missing.
+    """
+    store: ResultStore = default_store()
+    assert isinstance(store, PostgresStore)
+
+
+def test_a_rewrite_without_a_cost_keeps_what_the_original_miss_measured() -> None:
+    """`compute_seconds` is written once by the miss that paid it and never erased.
+
+    `StoredResult.compute_seconds` defaults to `None` and only `cached_compute` sets it, so every
+    other writer — `record_best_geometry`, a backfill, an admin correction of a payload — re-`put`s
+    the key with no cost attached. Without the `COALESCE` those writes `SET compute_seconds =
+    NULL`, and `find_calculations` then reports an expensive DFT run as costless: the one number
+    that says what the cache has saved, wrong in the direction that argues the cache is worthless.
+
+    Replacing that line with `compute_seconds = EXCLUDED.compute_seconds,` leaves the calculation
+    store, browse, artifact and in-memory suites green (measured: 47 passed).
+    """
+
+    async def _run() -> tuple[float | None, float | None]:
+        store = await _store_or_skip()
+        key = CalculationKey.build("pgcost", "v1", inputs={"smiles": "pg-cost-CCO"})
+        await store.put(
+            StoredResult(key=key, result={"energy": -1.0}, compute_seconds=310.5),
+        )
+        first = await store.get(key)
+        # A second write of the same answer from a path that does not time itself.
+        await store.put(StoredResult(key=key, result={"energy": -1.0}, provenance="backfill"))
+        second = await store.get(key)
+        assert first is not None and second is not None
+        return first.compute_seconds, second.compute_seconds
+
+    measured, after_rewrite = asyncio.run(_run())
+    assert measured == 310.5
+    assert after_rewrite == 310.5, "a costless rewrite erased what the original miss cost"
 
 
 def test_version_bump_is_a_distinct_row() -> None:

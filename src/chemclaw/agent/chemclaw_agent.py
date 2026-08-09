@@ -30,11 +30,12 @@ from agent_framework import (
     TokenBudgetComposedStrategy,
     ToolResultCompactionStrategy,
     create_harness_agent,
+    # The completion-loop predicate. This used to be imported from `agent_framework._harness._loop`
+    # under a comment saying it "is not re-exported at the package top level" — measured against
+    # 1.11.0, it is, and `agent_framework.todos_remaining is _harness._loop.todos_remaining`. The
+    # private import bought a hard dependency on an experimental module path for nothing.
+    todos_remaining,
 )
-
-# The completion-loop predicate ships in MAF's harness module; it is not re-exported at the
-# package top level, so it is imported from its (experimental) home here.
-from agent_framework._harness._loop import todos_remaining
 
 # Importing each tool module runs its `@tool` decorators, populating the capability-tool
 # registry (a registration side effect, exactly as `evals/__init__.py` seeds the metric

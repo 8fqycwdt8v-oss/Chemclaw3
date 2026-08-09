@@ -18,7 +18,6 @@ into the late-file overlap window, so a drain never replays it once per chunk. F
 module-level so tests swap them for in-memory stores and a fake submitter.
 """
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 from temporalio import activity, workflow
@@ -38,6 +37,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.kg.git_submitter import default_submitter
     from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
 
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
 
 # Module-level indirection so tests swap the production stores for in-memory ones.
@@ -125,20 +125,17 @@ class _BoundedIngest:
         return self._inner.map_to_ord(raw)
 
 
-async def _heartbeat_forever() -> None:
-    """Beat until cancelled, several times per heartbeat-timeout window (the usual margin).
-
-    The sync activity's real work happens inside `sync_entries`, which this layer must not modify
-    (the loop is backend-agnostic core, G6) — so liveness is time-based: a sibling task beats while
-    the sync runs, letting Temporal detect a dead worker within `eln_sync_heartbeat_timeout_seconds`
-    instead of waiting out the whole start-to-close.
-    """
-    # A third of the timeout is the conventional margin: two beats may be lost to scheduling or
-    # network delay before Temporal wrongly declares the worker dead.
-    interval = settings.eln_sync_heartbeat_timeout_seconds / 3
-    while True:
-        activity.heartbeat()
-        await asyncio.sleep(interval)
+# The sync activity's real work happens inside `sync_entries`, which this layer must not modify
+# (the loop is backend-agnostic core, G6) — so liveness is time-based: something beats while the
+# sync runs, letting Temporal detect a dead worker within `eln_sync_heartbeat_timeout_seconds`
+# rather than waiting out the whole start-to-close.
+#
+# That something is `durable.heartbeat.beating`, the helper extracted for exactly this shape. The
+# copy this file used to carry derived its interval as `timeout / 3` with **no floor**, so an
+# ENV-set timeout of a second — permitted, the field is only `gt=0` — beat three times a second
+# against the Temporal server for the whole chunk. `beating()` uses `max(1.0, timeout / 4)`, and
+# that floor is the difference. The eager pre-beat at the call site stays: `beating()` waits one
+# interval before its first beat and a fast sync may finish before it.
 
 
 @durable_activity("background")
@@ -157,21 +154,21 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
     if ingest is None:  # names come from the ingest-filtered set, so this is a wiring bug
         raise ChemclawError(f"data source {source!r} has no ingest half")
     bounded = _BoundedIngest(ingest, since, settings.eln_sync_batch_size)
-    # First beat immediately (a fast sync may finish before the sibling task is ever scheduled),
-    # then the task keeps beating for as long as the chunk actually takes.
+    # First beat immediately (a fast sync may finish before `beating()`'s first interval elapses),
+    # then it keeps beating for as long as the chunk actually takes.
     activity.heartbeat()
-    heartbeater = asyncio.create_task(_heartbeat_forever())
-    try:
-        summary = await sync_entries(
+    summary = await beating(
+        sync_entries(
             bounded,
             _reaction_store(),
             _molecule_store(),
             default_submitter(),
             since,
             apply_overlap=apply_overlap,
-        )
-    finally:
-        heartbeater.cancel()
+        ),
+        f"eln sync {source}",
+        settings.eln_sync_heartbeat_timeout_seconds,
+    )
     return SyncChunk(summary=summary, has_more=bounded.truncated)
 
 

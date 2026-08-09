@@ -1,7 +1,8 @@
 # The reaction-fingerprint capability: DRFP similarity search over past reactions.
 #
-# `index_reaction` is deliberately absent from `tools` — it mutates the index, and the agent's
-# surface is read/compute only (D-029). The server still exposes it for the ingestion path.
+# The index is written in process by the ELN sync, never over MCP (see the `molfp` twin for the
+# full note on the `index_reaction` tool that was served and declared nowhere). The agent's
+# surface is read/compute only (D-029).
 name: rxnfp
 description: >-
   Reaction fingerprints over the indexed corpus: DRFP similarity search, for finding past runs of a

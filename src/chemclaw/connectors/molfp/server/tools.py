@@ -20,7 +20,6 @@ from chemclaw.science.fingerprints.molfp.search import (
     MoleculeHit,
     find_similar_molecules,
     find_substructure_matches,
-    record_for,
 )
 from chemclaw.science.fingerprints.store import (
     FingerprintSearch,
@@ -43,7 +42,9 @@ async def similar_molecules(
     `top_k` and `threshold` (Tanimoto floor) default to the configured values.
 
     **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means the index
-    holds nothing and the question was not answered — it is not a finding of novelty.
+    holds nothing and the question was not answered — it is not a finding of novelty. And
+    `hits_truncated: true` means more molecules cleared the threshold than `top_k` could return,
+    so the count is a lower bound: raise `top_k` before saying how many analogs exist.
     """
     return await find_similar_molecules(_store, smiles, top_k, threshold)
 
@@ -56,15 +57,10 @@ async def substructure_matches(query: str) -> FingerprintSearch[MoleculeHit]:
 
     **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means the index
     holds nothing and the question was not answered — not that no molecule bears the fragment.
+    `scan_truncated: true` means only part of the corpus was examined, so an empty result is
+    inconclusive; `hits_truncated: true` means the hit count is a lower bound, not a total.
     """
     return await find_substructure_matches(_store, query)
-
-
-@server.tool()
-async def index_molecule(record_id: str, smiles: str) -> str:
-    """Add or replace a molecule in the fingerprint index; return its id."""
-    await _store.add(record_for(record_id, smiles))
-    return record_id
 
 
 async def report_index_size() -> None:

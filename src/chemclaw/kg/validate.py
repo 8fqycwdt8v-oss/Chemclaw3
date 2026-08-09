@@ -14,8 +14,8 @@ from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
-from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note, NoteError, read_note
-from chemclaw.kg.relations import KNOWN_RELATIONS
+from chemclaw.kg.note import Note, NoteError, known_note_types, read_note
+from chemclaw.kg.relations import known_relations
 from chemclaw.science.safety.notes import hazard_problems
 
 
@@ -45,6 +45,18 @@ def validate(notes_dir: Path) -> list[str]:
             problems.append(f"duplicate id {note.id!r} in {path} and {id_to_path[note.id]}")
         else:
             id_to_path[note.id] = path
+        # The filename *is* an index key, not decoration. `chemclaw.kg.graph.note_file_fingerprints`
+        # reads a note's id back out of `path.stem` — stat-only, it never parses — and
+        # `reindex_notes` looks that map up by the id in the frontmatter. When the two disagree the
+        # note is missing from both sides of the diff, which used to read as "unchanged" and left it
+        # out of the retrieval index entirely and silently. That half is fixed there; this is the
+        # half that keeps a mismatch from merging at all, because the right name is knowable here.
+        if path.stem != note.id:
+            problems.append(
+                f"note {note.id!r} is in {path}, whose filename says {path.stem!r} — "
+                f"the file must be named {note.id + '.md'!r} "
+                "(the note index keys on the filename and would skip this note)"
+            )
         located.append((note, path))
 
     notes = [note for note, _ in located]
@@ -60,12 +72,17 @@ def validate(notes_dir: Path) -> list[str]:
     # `Note` schema so the agent can *propose* a genuinely new type or relation and a human sees it
     # at the PR-gate — while a typo, which would make the note or the edge unfindable by every
     # filter keyed on it, cannot reach the graph. `kg-validate` runs on that same PR.
+    #
+    # The vocabulary is core's own set **plus what the enabled bundles declare**: `job-result` and
+    # `bo-candidate` are minted by connectors, so a deployment's vocabulary is a property of which
+    # bundles it runs, not of this package alone. Both accessors resolve that union; the message
+    # names both places a reader can add a name.
     problems.extend(
         _registry_problems(
             ((note, path, note.type) for note, path in located),
-            KNOWN_NOTE_TYPES,
+            known_note_types(),
             "type",
-            "chemclaw.kg.note.KNOWN_NOTE_TYPES",
+            "chemclaw.kg.note.KNOWN_NOTE_TYPES or a bundle's `note_types:`",
         )
     )
     problems.extend(
@@ -75,9 +92,9 @@ def validate(notes_dir: Path) -> list[str]:
                 for note, path in located
                 for relation in note.outgoing_relations()
             ),
-            KNOWN_RELATIONS,
+            known_relations(),
             "relation",
-            "chemclaw.kg.relations.KNOWN_RELATIONS",
+            "chemclaw.kg.relations.KNOWN_RELATIONS or a bundle's `relations:`",
         )
     )
     return problems

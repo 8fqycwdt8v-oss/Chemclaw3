@@ -22,6 +22,7 @@ and the rest has no other way in. `suppress_ingested` keeps the original rule in
 exactly the hits that did become notes.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -47,12 +48,20 @@ logger = logging.getLogger(__name__)
 class WarehouseVectorRetriever:
     """A `SourceRetriever` running its similarity search in the warehouse. One per data source."""
 
-    def __init__(self, binding: dict[str, Any], name: str | None = None) -> None:
-        """Validate the binding at startup; `name` is the retriever id chunks are attributed to.
+    def __init__(self, binding: dict[str, Any], name: str) -> None:
+        """Validate the binding at startup; `name` is the source chunks are attributed to.
 
-        The same signature as `WarehouseElnAdapter` because the registry splats one `config:` block
-        into whichever half it builds — a source declaring both halves would fail
-        `make datasource-validate` if they disagreed about their keyword arguments.
+        `binding` comes from the manifest's `config:` block, which the registry splats into
+        whichever half it builds — so a source declaring both halves would fail
+        `make datasource-validate` if they disagreed about their `config` keys. `name` is the extra
+        argument the *retrieve* path adds on top of that block (`_build_retrieve_half`), which the
+        ingest adapter does not take and does not need: the ELN sync already keys its cursors on the
+        manifest name.
+
+        **It is required, and it used to default to `"warehouse"`.** A default is only ever right
+        for the first instance — a second warehouse ELN would have been indistinguishable from the
+        first in every citation and every source weight, which is the same defect that let two
+        mounted shares share one document-index partition.
         """
         self._binding: WarehouseBinding = load_binding(binding)
         if self._binding.vector is None:
@@ -60,7 +69,7 @@ class WarehouseVectorRetriever:
                 "this data source declares a retrieve half, but its binding has no 'vector' section"
             )
         self._vector: VectorBinding = self._binding.vector
-        self.name = name or "warehouse"
+        self.name = name
         self._warehouse: Warehouse | None = None
 
     def _connection(self) -> Warehouse:
@@ -79,15 +88,19 @@ class WarehouseVectorRetriever:
         the fingerprint index could have given between them. `ingest.sources.vendored_dataset` made
         the same call for the same reason.
 
-        The two cases are logged differently on purpose. A transient failure is a WARNING, because
+        The cases are logged differently on purpose. A transient failure is a WARNING, because
         the next query may well succeed. A `BindingError` — a driver package the image does not
         carry, a credential variable nobody set — is an ERROR: it will recur on every query until
         someone changes the deployment, and it must not read as a quiet day for this source.
+        Anything else is an ERROR with its traceback: it is either the embedding provider's own
+        exception type or a defect here, and both need the stack the enumerated cases do not.
         """
         if not query.strip():
             return []
         try:
-            rows = await self._search(query, filters)
+            # `_chunks` is inside the guard too: it stats the knowledge tree per row
+            # (`suppress_ingested`), which is one more way this leg can fail on a bad day.
+            return self._chunks(await self._search(query, filters))
         except BindingError:
             logger.error(
                 "%s: misconfigured, returning no evidence — every query will do this until it is "
@@ -100,13 +113,30 @@ class WarehouseVectorRetriever:
             logger.warning("%s: warehouse search failed, returning no evidence", self.name)
             logger.debug("%s: search failure detail", self.name, exc_info=True)
             return []
-        return self._chunks(rows)
+        except Exception:
+            # The backstop the enumerated list above cannot be, and the docstring's promise is only
+            # true with it. The embedding provider is reached from inside `_search`, and it raises
+            # its *own* client's exception types — an `openai.APIError` is none of the three above,
+            # so a rate-limited or briefly unreachable embedding endpoint escaped this retriever
+            # and, through a `gather` with no `return_exceptions`, failed the whole turn including
+            # the answer the knowledge graph had already produced. Enumerating a vendor's exception
+            # tree here would import it; the contract is "this leg yields no evidence, whatever
+            # happens", so that is what is written. Loud in the log, invisible to the other legs.
+            logger.exception("%s: unexpected search failure, returning no evidence", self.name)
+            return []
 
     async def _search(self, query: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
         """Run the ranked search, embedding here or in the warehouse as the binding says."""
         warehouse = self._connection()
+        # Offloaded, not called inline: under the `openai_compatible` provider `embed_texts` reaches
+        # the LLM endpoint over a blocking client, and this runs on the one event loop serving every
+        # SSE stream — a stall here freezes conversations that have nothing to do with this source.
+        # Measured before this: a 1 s provider call cost the loop its whole second (0 heartbeats
+        # where a free loop runs ~20). `ingest.documents.retriever` offloads for the same reason.
         embedded: str | list[float] = (
-            query if self._vector.embedding == "server" else embed_texts([query])[0]
+            query
+            if self._vector.embedding == "server"
+            else (await asyncio.to_thread(embed_texts, [query]))[0]
         )
         statement, params = sql.vector_statement(
             self._vector,

@@ -10,8 +10,10 @@ split runs through this package, and `tests/test_datasource_isolation.py` holds 
 an AD-group decision; once on it, everyone sees everything. So the honest enforcement is not
 per-file ACLs — it is: *a caller who is not in the share's group gets nothing from this source at
 all.* The check is against the turn's roles, which carry Entra app roles and, when
-`entra_group_claims_as_roles` is set, group object-ids too — so an AD group reaches this whether
-the tenant assigns it to an app role or emits it as a `groups` claim.
+`entra_group_claims_as_roles` is set, each group claim namespaced with `GROUP_ROLE_PREFIX` — so an
+AD group reaches this whether the tenant assigns it to an app role or emits it as a `groups` claim.
+A group-gated binding names `group:<claim value>`; the bare object-id is not what lands in the role
+set and would match nothing.
 
 A gated share **refuses when there is no identity to check**, which is the `require_actor`
 reject-if-absent rule (`agent/authz.py`) applied to a corpus instead of a tool. An *ungated* share
@@ -66,13 +68,22 @@ class ShareDocumentRetriever:
     """A `SourceRetriever` over one mounted share's indexed documents. One per data source."""
 
     def __init__(
-        self, binding: dict[str, Any], name: str | None = None, index: DocumentIndex | None = None
+        self, binding: dict[str, Any], name: str, index: DocumentIndex | None = None
     ) -> None:
         """Validate the binding at startup; `name` is the id every chunk is cited under.
 
+        **`name` is required, and it used to default to `"sharedrive"`.** That default was the
+        whole of a data-loss bug: the registry builds a half from `**manifest.config`, which
+        carries no name, so *every* share took the literal — two mounted shares both answered
+        `sharedrive`, `share_sources()` collapsed them to one entry, and the survivor's sweep
+        deleted the other's rows. `chemclaw.ingest.sources.registry._build_retrieve_half` now
+        stamps the manifest's name over whatever is passed here, so the production path cannot
+        disagree with the folder; requiring it as well means a *direct* construction cannot
+        silently claim to be a share it is not.
+
         Args:
             binding: The share's declared layout, from the manifest's `config:` block.
-            name: The retriever id; the registry passes the source's name.
+            name: The data-source name this share is indexed and cited under.
             index: The backend, injected by tests; production resolves the Postgres one lazily so
                 importing this module opens no connection.
         """
@@ -82,7 +93,7 @@ class ShareDocumentRetriever:
         # column learns it from a message naming both numbers rather than from pgvector rejecting
         # every chunk inside a worker, hours after a deploy that looked clean.
         require_schema_vector_width()
-        self.name = name or "sharedrive"
+        self.name = name
         self._index = index
 
     def share_binding(self) -> DocumentShareBinding:
@@ -146,6 +157,14 @@ class ShareDocumentRetriever:
                 self.name,
                 exc_info=True,
             )
+            return []
+        except Exception:
+            # What makes "never raises" above true rather than aspirational. `_search` embeds the
+            # query through the provider seam, which raises its own client's exception types — an
+            # `openai.APIError` is in neither list above, so a rate-limited embedding endpoint
+            # escaped this leg and failed the whole turn. Naming that vendor's tree here would
+            # import it; the contract is the promise in the docstring, so it is written as one.
+            logger.exception("%s: unexpected search failure, returning no evidence", self.name)
             return []
         return hits
 

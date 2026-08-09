@@ -11,7 +11,12 @@ import uuid
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 
 from chemclaw.agent.attachments import STORE as ATTACHMENTS
-from chemclaw.agent.attachments import AttachmentError, AttachmentSummary, parse_attachment
+from chemclaw.agent.attachments import (
+    AttachmentError,
+    AttachmentSummary,
+    AttachmentUnavailable,
+    parse_attachment_off_loop,
+)
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
@@ -135,12 +140,25 @@ async def upload_attachment(
     Oversized ones are refused with a 413 by `BodySizeLimit` before the body is read at all;
     by the time this handler runs the upload is already bounded, which is why the read below
     can be a plain one.
+
+    **The parse itself never runs on the event loop.** Size is not cost: a decompression bomb or
+    a hostile font map inside the 2 MB cap can hold a CPU for tens of seconds, and this route is
+    `async def` on a front door pinned to one uvicorn worker — so parsing inline froze every
+    session, stream and health probe on the pod for that whole time. It runs in a bounded worker
+    thread instead (`parse_attachment_off_loop`); past the process's parse cap an upload is shed
+    with a retryable 503 rather than queued.
     """
     raw = await file.read()
     try:
-        attachment = parse_attachment(file.filename or "upload", raw, file.content_type)
+        attachment = await parse_attachment_off_loop(
+            file.filename or "upload", raw, file.content_type
+        )
     except AttachmentError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AttachmentUnavailable as exc:
+        # 503, not 422: nothing is wrong with the file, and the client should try again — the
+        # same distinction the turn route's shed answer makes.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     ATTACHMENTS.add(session_id, attachment)
     return AttachmentSummary(
         name=attachment.name,

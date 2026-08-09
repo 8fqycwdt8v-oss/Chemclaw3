@@ -40,7 +40,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agent_framework import AgentSession, FunctionInvocationContext, function_middleware
-from agent_framework._harness._loop import ShouldContinueCallable, ShouldContinueResult
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.harness_mode import (
@@ -52,9 +51,11 @@ from chemclaw.agent.harness_mode import (
     revoke_execute,
     session_mode,
 )
+from chemclaw.agent.harness_types import ShouldContinueCallable, ShouldContinueResult
 from chemclaw.agent.live_session import get_current_session
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
@@ -253,9 +254,10 @@ async def consume_turn_approval(session: AgentSession) -> None:
             if session_mode(session) == EXECUTE_MODE:
                 revoke_execute(session)
     except Exception:  # noqa: BLE001 - a turn must not fail on its way out
-        logger.warning(
+        degraded(
+            logger,
+            "plan_approval",
             "could not spend the plan approval for session %s; the gate still refuses an "
             "unreadable decision, so this costs an extra approval rather than authorizing one",
             session.session_id,
-            exc_info=True,
         )

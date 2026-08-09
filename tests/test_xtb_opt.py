@@ -10,6 +10,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from chemclaw.core.config import settings
 from chemclaw.science.calc import xtb_cli
 from chemclaw.science.calc.store import InMemoryStore
 from chemclaw.science.calc.structure import Structure, structure_from_smiles
@@ -121,6 +122,30 @@ def test_optimization_key_carries_the_convergence_criterion() -> None:
     tight = OptSpec(gradient_tolerance=1e-5).cache_key(structure)
     assert loose.params_hash != tight.params_hash
     assert loose.calc_type == "xtb.opt"
+
+
+def test_the_optimizer_moves_by_the_spec_s_trust_radius_not_the_settings_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key that names a value the optimizer ignores is worse than no key at all.
+
+    `trust_radius` was made an `OptSpec` field so it reaches the cache key by construction, and
+    `tests/test_pka.py::test_the_optimizer_key_names_its_trust_radius` pins that the key moves
+    with it. That is only half the claim: the key must name what *ran*. Reverting the leg's
+    `spec.trust_radius` to `settings.xtb_opt_trust_radius` leaves the key test green while every
+    explicit `OptSpec(trust_radius=…)` keys distinctly and runs the settings value — "a key that
+    disagrees with what ran", the defect the field was introduced against, from the other side.
+
+    Measured here rather than argued: with the setting pinned at its default, the two radii relax
+    ethanol to genuinely different stationary points (`st_e868cd6fe533107f` at 0.35 vs
+    `st_860015aca7be952c` at 0.05, differing in the ninth decimal of the energy). Under the
+    settings read both runs are the 0.35 run and the ids are equal.
+    """
+    monkeypatch.setattr(settings, "xtb_opt_trust_radius", 0.35)
+    start = structure_from_smiles("CCO", optimize=True)
+    loose = optimize_structure(OptSpec(engine="tblite", trust_radius=0.35), start)
+    tight = optimize_structure(OptSpec(engine="tblite", trust_radius=0.05), start)
+    assert loose.structure.structure_id != tight.structure.structure_id
 
 
 def test_summary_drops_the_coordinates_but_keeps_the_address() -> None:

@@ -627,6 +627,18 @@ async def run_turn(
                 completed=answered,
             )
         )
+        if turn_usage.unreadable:
+            # The provider reported usage and we could not read it, which is not the same as a
+            # provider that reports none: this turn was metered at zero against a budget that is
+            # enabled by default in the chart, so the cost guard is not binding. ERROR because the
+            # remedy is a code change, and counted because a per-turn log line during an outage is
+            # noise that nobody aggregates.
+            logger.error(
+                "usage_unreadable: %d usage content(s) carried no token count; this turn metered "
+                "zero and the budget guard did not bind",
+                turn_usage.unreadable,
+            )
+            METRICS.increment("chemclaw_usage_unreadable_total", float(turn_usage.unreadable))
         if turn_usage.total:
             METRICS.increment("chemclaw_tokens_total", float(turn_usage.total), spend_labels)
         # Published separately from the total because they are priced separately (REV-10). Each is
@@ -681,10 +693,20 @@ async def _durable_subsystem_reachable() -> bool:
             settings.connector_health_timeout_seconds,
         )
     except Exception:
-        # DEBUG, not WARNING: `open_reachable` already logs and counts a degraded turn, and an
-        # outage this probe finds is reported to the chemist on the stream — logging it at
-        # attention level once per turn would bury the connector sweep's own signal under it.
+        # DEBUG stays: an outage this probe finds is reported to the chemist on the stream, and
+        # logging it at attention level once per turn would bury the connector sweep's own signal.
+        #
+        # The counter is new, and the comment that used to stand alone here was checkably false.
+        # It said `open_reachable` "already logs and counts a degraded turn" — that counter is
+        # `chemclaw_connectors_unreachable_total`, which reads `tool.is_connected` over *connector*
+        # tools and never names Temporal. Measured at the shipped `log_level=INFO` with the broker
+        # pointed at a dead port: the probe returned False, zero log lines were emitted, and
+        # `METRICS.render()` was unchanged. So every chemist was being told durable jobs were
+        # unavailable while nothing server-side said so — the dashboard read healthy until someone
+        # opened a ticket. A counter is the right instrument precisely because the log line must
+        # stay quiet: it aggregates per-turn noise into one alertable rate.
         logger.debug("the durable subsystem did not answer its health probe", exc_info=True)
+        METRICS.increment("chemclaw_durable_unreachable_total")
         return False
 
 
@@ -780,8 +802,15 @@ async def _resume(
     """
     summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
     message = (
-        "The durable job(s) you started have completed. Their results follow as data; continue "
-        "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
+        # "finished", not "completed", and the failure instruction is explicit. A row carrying
+        # `status: failed` used to arrive under a sentence asserting the jobs had completed, and a
+        # direct assertion of success outranks an unexplained status word — so the model narrated
+        # the calculation as done, which is the outcome reporting failed jobs at all exists to
+        # prevent.
+        "The durable job(s) you started have finished. Some may have failed: report any result "
+        "whose status is 'failed' to the chemist, with its summary, rather than describing the "
+        "work as done. Their results follow as data; continue your answer using them.\n"
+        + frame_untrusted(summary, note_id="job-results")
     )
     async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
         turn_usage.add(usage_tokens(update))
@@ -805,8 +834,12 @@ def _signal_event(signal: Signal) -> Event:
     if isinstance(signal, ApprovalSignal):
         # Carries the durable hold's handle, so a surface can answer it via
         # POST /approvals/{id}/decision. The `user_input_requests` path in the turn loop emits the
-        # *other* kind of approval — a plan prompt, which has no hold and is answered by the next
-        # turn — and deliberately leaves `approval_id` empty to mark that difference.
+        # *other* kind of approval — MAF's own `function_approval_request` content, raised by a
+        # tool registered with `approval_mode="always_require"` — and leaves `approval_id` empty
+        # because there is no durable hold behind it and nothing in this deployment answers one.
+        # (The comment here used to call that path "a plan prompt … answered by the next turn".
+        # It is not: plan approval is `chemclaw.agent.plan_gate`, and it never reaches this
+        # stream.)
         return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     if isinstance(signal, ToolFailureSignal):
         return ToolFailedEvent(tool=signal.tool, message=signal.message)

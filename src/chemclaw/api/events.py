@@ -169,8 +169,13 @@ class AnswerEvent(BaseModel):
       and leaves `confidence` at `None`: it found something or it did not, and that is not a
       score. So `review_required` can be `True` while `confidence is None`.
 
-    With both knobs off — the default — all three stay `None`/`False`/empty and the event is
-    byte-for-byte today's answer.
+    A third condition sets the flag, and it is not a score: a verdict the LLM judge did not produce
+    (`verified_by == "citation-gate"` while verification was on) means the check that earns
+    confidence did not run, so the turn is routed to review with an explicit reason appended to
+    `unsupported_claims` rather than a bare flag beside a high `confidence`.
+
+    With every knob off — the default — the scored fields stay `None`/`False`/empty, `verified_by`
+    stays `None`, and the event is byte-for-byte today's answer.
     """
 
     type: Literal["answer"] = "answer"
@@ -178,6 +183,13 @@ class AnswerEvent(BaseModel):
     confidence: float | None = None
     unsupported_claims: list[str] = []
     review_required: bool = False
+    # Which check produced `confidence`, when one did. `None` means verification was off.
+    #
+    # The routing flag alone cannot carry this: a degraded turn and a genuinely low-confidence turn
+    # both arrive as `review_required=True`, and a reviewer needs to know whether the judge was
+    # even reachable. It is on the wire because the surface is where "this was scored by the weaker
+    # check" has to be legible; the flag is the safety property and this is the transparency.
+    verified_by: Literal["judge", "citation-gate"] | None = None
 
 
 class ToolFailedEvent(BaseModel):

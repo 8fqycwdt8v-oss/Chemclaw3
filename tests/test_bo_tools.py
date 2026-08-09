@@ -19,9 +19,10 @@ import pytest
 import yaml
 
 from chemclaw.connectors.bo.server import tools as bo_tools
-from chemclaw.connectors.bo.server.tools import suggest_next_experiment
+from chemclaw.connectors.bo.server.tools import ObjectiveScale, suggest_next_experiment
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.science.bo.problem import (
+    Candidate,
     CategoricalParameter,
     ContinuousParameter,
     Objective,
@@ -489,3 +490,70 @@ def test_a_cold_multi_objective_start_does_not_announce_an_empty_front() -> None
     assert "no runs were supplied" in summary
     assert "nothing has been measured, not because nothing survived" in summary
     assert "quote those as the trade-off" not in summary
+
+
+def _nearly_exhausted() -> tuple[OptimizationProblem, list[Observation]]:
+    """A 2x2 all-categorical space with three of its four conditions already run."""
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
+            CategoricalParameter(name="base", categories=["K2CO3", "Cs2CO3"]),
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    runs = [
+        Observation(params={"solvent": "THF", "base": "K2CO3"}, value=10.0),
+        Observation(params={"solvent": "THF", "base": "Cs2CO3"}, value=40.0),
+        Observation(params={"solvent": "toluene", "base": "K2CO3"}, value=55.0),
+    ]
+    return problem, runs
+
+
+def test_a_batch_that_could_not_be_filled_says_so() -> None:
+    """A short batch used to read as a complete answer to the question asked.
+
+    `propose_candidates` returns fewer than `n` by design once a finite space has run low — that
+    is correct, and is not what is fixed here. What was missing is that nothing said so: measured
+    on this fixture, asking for three candidates returned one, and every word of the summary was a
+    reading of that one candidate's posterior sd. The model composing the answer had no signal that
+    the other two were not merely worse but nonexistent.
+    """
+    problem, runs = _nearly_exhausted()
+    suggestion = asyncio.run(suggest_next_experiment(problem, runs, count=3))
+    # The engine's behaviour, pinned so the summary below is about a real shortfall.
+    assert len(suggestion.candidates) == 1
+    assert suggestion.requested == 3
+    summary = suggestion.summary
+    assert "You asked for 3 candidate(s) and only 1 could be proposed" in summary
+    assert "already been run" in summary
+    assert "nearly-complete screen" in summary
+
+
+def test_a_batch_that_was_filled_says_nothing_about_a_shortfall() -> None:
+    """The other half: the clause must not fire on a complete answer.
+
+    Same space, one fewer run, so the two remaining conditions can both be proposed. Without this
+    the clause could be permanently on and no test would notice.
+    """
+    problem, runs = _nearly_exhausted()
+    suggestion = asyncio.run(suggest_next_experiment(problem, runs[:2], count=2))
+    assert len(suggestion.candidates) == 2
+    assert "could be proposed" not in suggestion.summary
+
+
+def test_a_directly_built_suggestion_claims_no_shortfall() -> None:
+    """`requested` defaults to 0, which must read as "not stated" rather than as "asked for none".
+
+    The summary is a pure function of the fields and several tests build one directly to assert a
+    sentence without paying for an acquisition run. A default that made the clause fire would put a
+    false shortfall into every one of them.
+    """
+    suggestion = bo_tools.ExperimentSuggestion(
+        campaign_id="campaign-test",
+        candidates=[Candidate(params={"solvent": "THF"}, predicted_sd=0.5)],
+        scale=ObjectiveScale(
+            name="yield", direction="maximize", n=2, observed_min=1.0, observed_max=9.0
+        ),
+    )
+    assert suggestion.requested == 0
+    assert "could be proposed" not in suggestion.summary

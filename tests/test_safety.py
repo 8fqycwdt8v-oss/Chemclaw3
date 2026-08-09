@@ -603,6 +603,60 @@ def test_a_previously_silent_hazard_now_fires(name: str, smiles: str, rule: str)
     assert rule in {flag.rule_id for flag in screen_structure(smiles).flags}, name
 
 
+def test_a_peroxide_salt_is_an_oxidizer_to_the_pair_rule_as_well() -> None:
+    """The widening that made `peroxide` see Na2O2 must reach the pair rule it also belongs to.
+
+    Measured before the fix: `H2O2 + NaBH4` raised ['oxidizer-with-reductant', 'peroxide'] while
+    `Na2O2 + NaBH4` raised ['peroxide'] alone — the structural rule had been widened to
+    `[OX2,OX1-][OX2,OX1-]` for exactly this molecule and its twin in `incompatible_pairs` kept
+    the two-coordinate-only form. A strong solid oxidiser mixed with a complex hydride is the
+    case the rule is named for, and it was the one that did not fire.
+    """
+    hydride = "[BH4-].[Na+]"
+    for oxidizer in ("OO", "[O-][O-].[Na+].[Na+]"):
+        fired = {f.rule_id for f in screen_reaction([oxidizer, hydride]).flags}
+        assert "oxidizer-with-reductant" in fired, oxidizer
+    # The widening must not turn every anionic oxygen into an oxidizer: a carboxylate salt and
+    # a nitro group both carry `[OX1-]` without a peroxide bond.
+    for innocent in ("CC(=O)[O-].[Na+]", "O=[N+]([O-])c1ccccc1"):
+        assert "oxidizer-with-reductant" not in {
+            f.rule_id for f in screen_reaction([innocent, hydride]).flags
+        }, innocent
+
+
+def test_a_hydrazinium_salt_is_a_hydrazine_to_both_rules() -> None:
+    """The salt is how hydrazine is actually weighed out, and it screened clean on both rules.
+
+    Protonating a hydrazine makes that nitrogen `NX4+`, so `[NX3;H2,H1]` stopped matching:
+    hydrazine monohydrochloride and hydrazine sulfate raised neither the structural `hydrazine`
+    rule nor `oxidizer-with-reductant` beside an oxidiser, while free hydrazine raised both. Same
+    class, same hazard, same waste stream — and the protonated spelling is the ordinary catalogue
+    form.
+
+    Both rules are widened together, which is the standard the peroxide widening set: a rule and
+    its structural twin fixed apart read exactly like a clean screen. Neither prose moved, because
+    neither had to — "free hydrazine motif … a strong reductant that forms energetic mixtures with
+    oxidizers" is about the N–N motif and its chemistry, not about its protonation state.
+    """
+    salts = ("[NH3+]N.[Cl-]", "[NH3+]N.[O-]S([O-])(=O)=O", "[NH3+][NH3+].[Cl-].[Cl-]")
+    for salt in salts:
+        assert "hydrazine" in {f.rule_id for f in screen_structure(salt).flags}, salt
+        assert "oxidizer-with-reductant" in {
+            f.rule_id for f in screen_reaction([salt, "OO"]).flags
+        }, salt
+    # Measured across the 83 distinct structures of the reagent identity table, the widening newly
+    # matches hydrazinium salts and nothing else. These are the near misses that keep it honest:
+    # an ordinary ammonium or amine salt has no N–N bond, and an acylated one is a hydrazide.
+    for innocent in (
+        "[NH4+].[Cl-]",  # ammonium chloride
+        "[NH3+]CC[NH3+].[Cl-].[Cl-]",  # ethylenediamine dihydrochloride
+        "[NH3+]O.[Cl-]",  # hydroxylamine hydrochloride
+        "[NH3+]c1ccccc1.[Cl-]",  # aniline hydrochloride
+        "NC(=O)N[NH3+].[Cl-]",  # semicarbazide hydrochloride — acylated, so a hydrazide
+    ):
+        assert "hydrazine" not in {f.rule_id for f in screen_structure(innocent).flags}, innocent
+
+
 def test_a_complex_hydride_fires_against_a_vicinal_dichloride_too() -> None:
     """1,2-dichloroethane carries the same incompatibility as DCM and was silent.
 

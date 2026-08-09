@@ -54,20 +54,33 @@ def test_privileged_role_authorizes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_missing_role_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A user without a privileged role cannot trigger the expensive action."""
+    """A user without a privileged role cannot trigger the expensive action.
+
+    Matched on the message, not just the type. This test and `test_no_user_is_forbidden` below are
+    the only two refusals `authorize_trigger` has, and both raise `AuthorizationError` — so a bare
+    `pytest.raises(AuthorizationError)` in each is satisfied by *either* refusal firing twice.
+    Deleting the `if actor is None` block entirely left both green, because an unauthenticated turn
+    then fell through to the role check and was refused there anyway (measured).
+    """
     _privileged_env(monkeypatch)
     token = set_current_identity("u-2", frozenset({"reader"}))
     try:
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(AuthorizationError, match="user u-2 lacks a privileged role"):
             authorize_trigger("compute_dft_energy")
     finally:
         reset_current_identity(token)
 
 
 def test_no_user_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under enforcement, an expensive action with no authenticated user is rejected."""
+    """Under enforcement, an expensive action with no authenticated user is rejected.
+
+    Rejected *for being unauthenticated*, which is the distinction the message carries and the
+    reason the check is worth having: "no authenticated user" and "this user lacks a role" are
+    different operator problems, and an audit line that says the second when the first happened
+    sends whoever reads it to the wrong console.
+    """
     _privileged_env(monkeypatch)
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(AuthorizationError, match="requires an authenticated user"):
         authorize_trigger("compute_dft_energy")
 
 

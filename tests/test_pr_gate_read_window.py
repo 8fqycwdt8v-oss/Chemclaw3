@@ -193,6 +193,62 @@ def test_a_leftover_worktree_from_a_crash_is_swept_and_the_note_can_be_repropose
     assert not list((knowledge_clone / ".git" / "chemclaw-worktrees").iterdir())
 
 
+def _push_succeeded(clone: Path, branch: str) -> bool:
+    """Is `branch` actually on the remote with the note on it? The fact a caller must be told."""
+    refs = _git(clone, "ls-remote", "--heads", "origin", branch)
+    return branch in refs
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError("git is gone"), asyncio.CancelledError()], ids=["error", "cancelled"]
+)
+def test_a_failing_worktree_cleanup_does_not_destroy_a_pushed_submission(
+    knowledge_clone: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    """Cleanup runs after the push, so nothing it raises may replace the branch name.
+
+    Measured before the fix: with the cleanup raising, the branch was on origin with the note's
+    bytes on it while `submit` raised — `propose_note` then recorded the proposal `failed`, the
+    reviewer queue showed 0 and `close_merged_notes` moved 0. With `CancelledError`, a
+    `BaseException` that `except Exception` does not catch, there was **no durable row at all**:
+    a pushed, unreviewable, unrecorded note. Both cases are one defect — a `finally` that can raise
+    — so both are pinned here.
+    """
+    submitter = _submitter(knowledge_clone)
+
+    async def _boom(_workdir: Path) -> None:
+        raise failure
+
+    monkeypatch.setattr(submitter, "_remove_worktree", _boom)
+
+    assert asyncio.run(submitter.submit(_submission())) == "note/agent-proposal"
+    assert _push_succeeded(knowledge_clone, "note/agent-proposal")
+
+
+def test_an_unremovable_worktree_is_left_for_the_next_sweep_not_lost(
+    knowledge_clone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cost of swallowing: the scratch tree survives — and the next submission reclaims it.
+
+    The pair to the test above. Swallowing the failure would be a leak if nothing else collected
+    the directory, so this asserts the sweep that does.
+    """
+    submitter = _submitter(knowledge_clone)
+    real = submitter._remove_worktree
+
+    async def _boom(_workdir: Path) -> None:
+        raise OSError("git is gone")
+
+    monkeypatch.setattr(submitter, "_remove_worktree", _boom)
+    asyncio.run(submitter.submit(_submission()))
+    leftovers = knowledge_clone / ".git" / "chemclaw-worktrees"
+    assert [p.name for p in leftovers.iterdir()] == ["note-agent-proposal"]
+
+    monkeypatch.setattr(submitter, "_remove_worktree", real)
+    asyncio.run(submitter.submit(_submission("other-note")))
+    assert not list(leftovers.iterdir())
+
+
 def test_a_checkout_parked_on_a_note_branch_by_an_older_version_is_repaired(
     knowledge_clone: Path,
 ) -> None:

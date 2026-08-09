@@ -42,9 +42,7 @@ async def _insert_with_recorded_at(correlation_id: str, actor: str, recorded_at:
     needs a direct insert — the one place this file reaches past the class under test, and only to
     set up a fixture the public API has no way to construct.
     """
-    async with db.connection(
-        _dsn(), statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(_dsn()) as conn:
         await conn.execute(
             """
             INSERT INTO turn_costs (correlation_id, actor, input_tokens, output_tokens, recorded_at)

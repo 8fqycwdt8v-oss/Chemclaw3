@@ -51,12 +51,28 @@ def _write_source(directory: Path, name: str, body: str) -> None:
 
 
 class _FakeRetriever:
-    """A minimal retrieve half returning one fixed chunk, to prove registry fan-out."""
+    """A minimal retrieve half returning one fixed chunk, to prove registry fan-out.
 
-    name = "fake"
+    Takes `name` because every retrieve half does: the registry passes the manifest's name to
+    `_build_retrieve_half` so a source's identity comes from its folder and not from a default
+    the half chose (see that function). A half that does not accept it fails at build time — which
+    is what this class did until the contract landed.
+    """
+
+    def __init__(self, name: str = "fake") -> None:
+        self.name = name
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         return [EvidenceChunk(content=f"hit:{query}", source_note_id="fake-1", retriever=self.name)]
+
+
+class _NamelessRetriever:
+    """A retrieve half that refuses the source name — the shape the registry must reject."""
+
+    name = "nameless"
+
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        return []  # pragma: no cover - never built
 
 
 class _FakeIngest:
@@ -138,6 +154,89 @@ def test_a_new_source_is_a_folder_and_a_config_token(
 
     chunks = asyncio.run(research_tools.gather_evidence("solubility"))
     assert any("hit:solubility" in c.content for c in chunks)  # framed, but the payload survives
+
+
+def test_a_retrieve_half_is_named_by_its_manifest_not_by_its_own_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The source's name wins over whatever default the half's constructor carries.
+
+    `_FakeRetriever` defaults to `"fake"`; mounted under a folder called `borrowed`, it must answer
+    `borrowed`. This is the property the whole partition rests on — see the sibling test below for
+    what it cost when it did not hold.
+    """
+    _write_source(
+        tmp_path,
+        "borrowed",
+        """\
+        name: borrowed
+        description: The fake retriever, mounted under a name it does not know about.
+        retrieve: tests.test_datasource_seam:_FakeRetriever
+        """,
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "data_sources", "borrowed")
+
+    assert [r.name for r in registry.active_retrieve_sources()] == ["borrowed"]
+
+
+def test_two_instances_of_one_engine_get_distinct_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two sources sharing one retrieve engine are two corpora, not one.
+
+    **The regression this file exists to hold.** Every parameterised half used to default its own
+    name — `ShareDocumentRetriever` to `"sharedrive"`, `WarehouseVectorRetriever` to `"warehouse"` —
+    because the registry passed no name at all. Two mounted shares therefore both answered
+    `sharedrive`: `chemclaw.durable.document_sync.share_sources()` is keyed on that name, so the two
+    collapsed to one entry, only the last-discovered share was ever crawled, and its sweep deleted
+    the other's rows — the `document_files` primary key is `(source, path)`, and both handed it
+    the same `source`. The key was right; the value fed to it was not.
+
+    Asserted on names rather than on the deletion because the name *is* the mechanism: distinct
+    names make the partition partition, and every consumer keyed on it (citations, source weights,
+    the sweep) follows.
+    """
+    for name in ("alpha", "beta"):
+        _write_source(
+            tmp_path,
+            name,
+            f"""\
+            name: {name}
+            description: One of two corpora sharing a single retrieve engine.
+            retrieve: tests.test_datasource_seam:_FakeRetriever
+            """,
+        )
+    monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "data_sources", "alpha,beta")
+
+    names = [r.name for r in registry.active_retrieve_sources()]
+    assert names == ["alpha", "beta"], "two instances of one engine must not share a name"
+
+
+def test_a_retrieve_half_that_refuses_a_name_fails_naming_the_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Taking the source name is the contract, and breaking it fails loudly at build time.
+
+    The alternative — stamping the name on after construction — would accept such a half silently,
+    which is how the defect above survived: nothing anywhere objected to a retriever that named
+    itself.
+    """
+    _write_source(
+        tmp_path,
+        "nameless",
+        """\
+        name: nameless
+        description: A half whose constructor takes no source name.
+        retrieve: tests.test_datasource_seam:_NamelessRetriever
+        """,
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "data_sources", "nameless")
+
+    with pytest.raises(registry.DataSourceError, match="nameless"):
+        registry.active_retrieve_sources()
 
 
 def test_manifest_config_reaches_the_adapter(

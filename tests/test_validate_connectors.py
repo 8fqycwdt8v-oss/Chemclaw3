@@ -127,3 +127,121 @@ def test_empty_connector_urls_is_accepted() -> None:
         mock_settings.connector_urls = {}
         problems = _connector_urls_problems(discovered_names)
     assert problems == []
+
+
+def test_a_served_tool_the_manifest_never_declares_is_reported() -> None:
+    """The one rule that reads the running server rather than the YAML.
+
+    Every other check here reads the manifest, which is exactly why an undeclared tool was
+    invisible to all of them: `_check_classification` validates the `tools` allow-list against
+    `state_changing`/`read_only`, so a tool on none of the three lists violates nothing they can
+    see. `molfp` and `rxnfp` each served an `index_*` write tool in that state, and because a
+    connector authenticates nothing by design, an anonymous MCP handshake against the real app
+    wrote a row into `molecule_fingerprints` — the table the report path cites as lab precedent.
+
+    Built here rather than asserted against a shipped bundle, for this file's stated reason: the
+    shipped tree is now clean, so a test that only checked it would pass forever whether or not the
+    rule still existed.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    served = FastMCP("probe")
+
+    @served.tool()
+    async def probe_tool(value: str) -> str:
+        """The declared read tool."""
+        return value
+
+    @served.tool()
+    async def index_probe(record_id: str) -> str:
+        """A write tool the manifest does not name anywhere."""
+        return record_id
+
+    with mock.patch(
+        "chemclaw.cli.validate_connectors.importlib.import_module",
+        return_value=mock.Mock(server=served),
+    ):
+        problems = _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST))
+    assert len(problems) == 1, problems
+    assert "index_probe" in problems[0]
+    assert "served on /mcp" in problems[0]
+
+
+def test_a_bundle_serving_exactly_what_it_declares_is_accepted() -> None:
+    """The positive half, and the reason the rule compares against `tools` specifically.
+
+    `_check_classification` refuses a manifest that classifies a tool it does not serve, so
+    `state_changing` and `read_only` are constrained to be subsets of `tools`: the schema has no
+    way to say "served but not agent-facing". The comment that justified the old gap — "the server
+    still exposes it, for the ingestion path" — described a state the manifest cannot express,
+    which is why a comment was the only place it was ever written.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    served = FastMCP("probe")
+
+    @served.tool()
+    async def probe_tool(value: str) -> str:
+        """The one declared tool."""
+        return value
+
+    with mock.patch(
+        "chemclaw.cli.validate_connectors.importlib.import_module",
+        return_value=mock.Mock(server=served),
+    ):
+        assert _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST)) == []
+
+
+def test_the_manifest_cannot_classify_a_tool_it_does_not_serve() -> None:
+    """Pins the constraint the rule above rests on, so it cannot be relaxed unnoticed.
+
+    If `state_changing` were ever allowed to name a tool outside `tools`, "declared" would stop
+    meaning "on the agent's allow-list" and `_served_tool_problems` would silently start permitting
+    an undeclared MCP surface again.
+    """
+    with pytest.raises(ValueError, match="does not serve"):
+        ConnectorManifest.model_validate(
+            {
+                **_MANIFEST,
+                "endpoint": {
+                    **_MANIFEST["endpoint"],  # type: ignore[dict-item]
+                    "state_changing": ["index_probe"],
+                },
+            }
+        )
+
+
+def test_a_job_only_bundle_with_no_server_module_is_not_a_violation() -> None:
+    """`qm` serves no MCP surface at all — its capability is a Temporal workflow behind `jobs:`."""
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    absent = ModuleNotFoundError("No module named 'chemclaw.connectors.probe.server'")
+    absent.name = "chemclaw.connectors.probe.server.tools"
+    with mock.patch("chemclaw.cli.validate_connectors.importlib.import_module", side_effect=absent):
+        assert _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST)) == []
+
+
+def test_a_bundle_whose_server_module_is_broken_is_reported_not_skipped() -> None:
+    """A *transitive* import failure must not read as "this bundle serves nothing".
+
+    Catching bare `ModuleNotFoundError` meant a missing rdkit — or any renamed dependency — made the
+    one rule that reads the running server pass vacuously, for exactly the bundle most likely to be
+    misbuilt. And any other import-time exception escaped `validate_connectors()` entirely, so CI
+    printed a traceback instead of a problem.
+    """
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    manifest = ConnectorManifest.model_validate(_MANIFEST)
+    missing_dep = ModuleNotFoundError("No module named 'rdkit'")
+    missing_dep.name = "rdkit"
+    for failure in (missing_dep, ImportError("cannot import name 'foo'"), AttributeError("boom")):
+        with mock.patch(
+            "chemclaw.cli.validate_connectors.importlib.import_module", side_effect=failure
+        ):
+            problems = _served_tool_problems(manifest)
+        assert len(problems) == 1, f"{failure!r} produced {problems}"
+        assert "probe" in problems[0]

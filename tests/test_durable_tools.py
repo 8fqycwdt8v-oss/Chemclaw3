@@ -1,22 +1,29 @@
-"""`get_durable_job_status` is the one place a finished durable job is collected.
+"""`get_durable_job_status` is the one *status tool* for a finished durable job.
 
-It became the *only* one in D-118: the QM/DFT job was the last runner with a status tool of its
-own (`agents/job_status.py`, which knew the `qm-` id prefix and the bespoke `QMJobResult` shape),
-and it is a declared `qm` connector job now. Everything a launcher in this system hands an id for
+It became the only one in D-118: the QM/DFT job was the last runner with a tool of its own
+(`agents/job_status.py`, which knew the `qm-` id prefix and the bespoke `QMJobResult` shape), and
+it is a declared `qm` connector job now. Everything a launcher in this system hands an id for
 therefore returns `ConnectorJobResult`.
 
-That is what makes the envelope check here a *hard* error rather than a degraded answer, and it is
-the behaviour worth a test: reporting `completed` with an empty result would tell a chemist their
+That is what makes the envelope check a *hard* error rather than a degraded answer, and it is the
+behaviour worth a test: reporting `completed` with an empty result would tell a chemist their
 week-long calculation finished and then withhold the number.
+
+This file used to open "the one place a finished durable job is collected", and so did the module
+it tests. That was false — three sites collect one, including the in-turn wait in
+`chemclaw.connectors.jobs`, which is a different subsystem and cannot route through an agent tool.
+What is single is the decode, and the last test here is the one that keeps it that way.
 """
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
 from temporalio.client import WorkflowExecutionStatus
 
 import chemclaw.agent.durable_tools as durable_tools
+import chemclaw.connectors.jobs as jobs_module
 from chemclaw.agent.durable_tools import get_durable_job_status
 
 
@@ -199,3 +206,57 @@ def test_finding_past_jobs_reports_what_ran_and_why(monkeypatch: pytest.MonkeyPa
     assert hits[0].rationale == "the Tuesday batch stalled at 60%"
     # The listing carries no result blob: a campaign's history is one lookup away, not in every hit.
     assert not hasattr(hits[0], "result")
+
+
+def test_every_collector_of_a_finished_job_answers_a_foreign_result_identically() -> None:
+    """The three sites that collect a finished job must not disagree about what a bad one is.
+
+    They did. `completed_job_status` raised a written sentence; `connectors.jobs._await_briefly`
+    called `ConnectorJobResult.model_validate` itself and let pydantic's `ValidationError` out.
+    That is not an internal detail: a `ValidationError` **is** a `ValueError`, and `ValueError` is
+    the family `connectors.server._sanitize_tool_errors` deliberately passes through untouched as
+    "a deliberately-worded, caller-safe message" — so the second path relayed
+    "2 validation errors for ConnectorJobResult" and pydantic's field dump to a chemist, while the
+    first said which id was foreign and why.
+
+    Measured before the fix, on one bad result: path A `ValueError: durable job 'job-1' completed
+    but did not return the connector job envelope...`, path C `ValidationError: 2 validation errors
+    for ConnectorJobResult`. Both go through `envelope_from_result` now.
+    """
+    foreign = {"scheduler_job_id": "slurm-77"}
+
+    class _Finished:
+        async def result(self) -> Any:
+            return foreign
+
+    with pytest.raises(ValueError) as from_the_status_tool:
+        durable_tools.completed_job_status("job-1", foreign)
+    with pytest.raises(ValueError) as from_the_inline_wait:
+        asyncio.run(jobs_module._await_briefly(_Finished(), 5.0, "compare", "job-1"))
+
+    assert type(from_the_status_tool.value) is type(from_the_inline_wait.value)
+    assert str(from_the_status_tool.value) == str(from_the_inline_wait.value)
+    assert "did not return the connector job envelope" in str(from_the_inline_wait.value)
+    # Not pydantic's, which is what used to reach the model from the second path.
+    assert "validation error" not in str(from_the_inline_wait.value)
+
+
+def test_the_envelope_decode_has_exactly_one_definition() -> None:
+    """Structural, because the defect was a second copy rather than a wrong one.
+
+    A behavioural test only covers the collectors it knows about; a fourth one added tomorrow
+    would reintroduce the divergence silently. `model_validate` on the envelope belongs in
+    `envelope_from_result` and nowhere else.
+    """
+    src = Path(durable_tools.__file__).resolve().parents[1]
+    offenders = [
+        path.relative_to(src).as_posix()
+        for path in sorted(src.rglob("*.py"))
+        if path.name != "connector_job.py"
+        and "ConnectorJobResult.model_validate" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        f"{offenders} decode the connector job envelope themselves; call "
+        "`chemclaw.durable.connector_job.envelope_from_result` so every collector answers a "
+        "foreign result with the same sentence"
+    )

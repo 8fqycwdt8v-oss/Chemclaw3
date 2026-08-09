@@ -25,7 +25,11 @@ _HALOGENATION = "c1ccccc1.BrBr>>Brc1ccccc1"
 def test_server_advertises_the_reaction_tools() -> None:
     """The two reaction tools are registered with input schemas."""
     tools_by_name = {t.name: t for t in asyncio.run(server.list_tools())}
-    assert {"similar_reactions", "index_reaction"} <= set(tools_by_name)
+    assert {"similar_reactions"} <= set(tools_by_name)
+    assert "index_reaction" not in tools_by_name, (
+        "the write tool was served on the unauthenticated /mcp port while no manifest named "
+        "it and nothing in the tree called it; the ingestion path uses FingerprintStore.add()"
+    )
     assert "reaction_smiles" in tools_by_name["similar_reactions"].inputSchema["properties"]
 
 

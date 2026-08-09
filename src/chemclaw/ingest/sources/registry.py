@@ -140,19 +140,44 @@ def resolve_half(reference: str) -> Callable[..., Any]:
     return factory
 
 
-def _build_half(manifest: DataSourceManifest, reference: str) -> Any:
-    """Construct one half from its `module:callable` and the manifest's `config` kwargs."""
+def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> Any:
+    """Construct a half from its `module:callable`, the manifest `config`, and `extra` kwargs."""
     factory = resolve_half(reference)
     try:
-        return factory(**manifest.config)
+        return factory(**manifest.config, **extra)
     except TypeError as exc:
         # A config key the callable does not accept. Re-raised as a configuration error naming both
         # sides, because a bare TypeError from inside a constructor gives the operator no way to
         # tell a mistyped manifest key from a broken adapter.
         raise DataSourceError(
             f"data source {manifest.name!r}: {reference} rejected config "
-            f"{sorted(manifest.config)}: {exc}"
+            f"{sorted(manifest.config)}{' + ' + str(sorted(extra)) if extra else ''}: {exc}"
         ) from exc
+
+
+def _build_retrieve_half(manifest: DataSourceManifest) -> Any:
+    """Build the retrieve half, telling it which source it is.
+
+    **A retrieve half's name is the manifest's, never the half's own guess.** `SourceRetriever.name`
+    is how the rest of the system identifies a corpus: the document index partitions on it, its
+    sweep deletes by it, `gather_evidence` cites with it, and `retrieval_source_weights` is keyed on
+    it. Nothing used to supply it, so the three *parameterised* halves — the ones where one engine
+    serves many instances — each answered with a literal default. Two mounted shares therefore both
+    called themselves `sharedrive`: `share_sources()` collapsed them to one entry, only the last was
+    ever crawled, and its sweep deleted the other's rows. That is precisely the failure
+    `infra/sql/037`'s `(source, path)` key exists to prevent, reached by handing that key the same
+    `source` twice — the key was right and the value fed to it was not.
+
+    So the name is passed, not defaulted, and it is passed to *every* retrieve half rather than only
+    to the ones that need it. A conditional pass is a rule the next half added can fall outside of;
+    an unconditional one makes "a retrieve half is told which source it is" part of the contract,
+    enforced the moment a bundle is enabled — a half that does not accept it fails at startup, and
+    at `make datasource-validate`, naming the source.
+
+    The folder name is safe to be that identity because `_source_dirs` dedupes on it, so two enabled
+    sources cannot share one name however many directories are mounted.
+    """
+    return _build_half(manifest, manifest.retrieve or "", name=manifest.name)
 
 
 def make_data_source(name: str) -> DataSource:
@@ -170,7 +195,7 @@ def make_data_source(name: str) -> DataSource:
     return SourceSpec(
         name=manifest.name,
         ingest=_build_half(manifest, manifest.ingest) if manifest.ingest else None,
-        retrieve=_build_half(manifest, manifest.retrieve) if manifest.retrieve else None,
+        retrieve=_build_retrieve_half(manifest) if manifest.retrieve else None,
     )
 
 
@@ -222,7 +247,7 @@ def active_retrieve_sources() -> list[RetrieveHalf]:
     wants exactly one source.
     """
     return [
-        _build_half(manifest, manifest.retrieve)
+        _build_retrieve_half(manifest)
         for manifest in active_manifests()
         if manifest.retrieve is not None
     ]

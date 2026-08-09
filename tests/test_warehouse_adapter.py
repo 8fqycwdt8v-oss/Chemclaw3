@@ -7,15 +7,18 @@ schema change is a change to YAML and to nothing else.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from chemclaw.ingest.eln.adapter import ElnMappingError
 from chemclaw.ingest.eln.ord import Role
+from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests import warehouse_fake
+from tests.conftest import FakeSubmitter
 
 _DRIVER = "tests.warehouse_fake:open_fake"
 
@@ -430,3 +433,74 @@ def test_a_missing_reaction_id_names_the_field_rather_than_a_type_error() -> Non
 
     with pytest.raises(ElnMappingError, match="reaction_id"):
         adapter.map_to_ord(entries[0])
+
+
+# --- the paging contract: a page of amended rows must not stall the cursor -----------------------
+
+
+def _reaction_row(
+    entry_id: str, created: datetime, modified: datetime | None = None
+) -> dict[str, Any]:
+    """One header row, complete enough for the binding above to map it into a real reaction."""
+    return {
+        "REACTION_ID": entry_id,
+        "CREATED_TS": created,
+        "LAST_MODIFIED_TS": modified,
+        "PROJECT_CODE": "PRJ-7",
+        "YIELD_PCT": "82.5",
+        "DURATION_MIN": "90",
+        "OPERATOR": "a.chemist",
+    }
+
+
+def _charge_rows(entry_id: str) -> list[dict[str, Any]]:
+    """The three charges that make `entry_id` a mass-balanced esterification."""
+    return [dict(row, REACTION_ID=entry_id) for row in _rows()["V_CHARGE"]]
+
+
+def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
+    """The wedge: the fetch pages on the amendment watermark, so the cursor must advance on it.
+
+    Three already-created rows are amended today — more than one page (`fetch_limit: 2`) — and one
+    genuinely new reaction is created after them. Every fetch returns the amended page first, so a
+    cursor that advances on `created_at` alone never moves past it: `NEW-1` is never ingested, on
+    this run or any future one, and nothing reports it (the batch is not truncated by the
+    workflow's reckoning either, so the wedge guard in `durable/eln_sync.py` is never reached).
+
+    Driven through `sync_entries` rather than the adapter alone because the defect is the seam
+    between them, and against a warehouse that honours WHERE/ORDER BY/LIMIT because the fake that
+    ignores them cannot tell a wedged sync from a sync with nothing to do.
+    """
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    amended = datetime(2026, 6, 1, tzinfo=UTC)
+    created_later = datetime(2026, 6, 2, tzinfo=UTC)
+    binding = _binding()
+    binding["ingest"]["entry"]["fetch_limit"] = 2
+    reactions = [
+        _reaction_row("OLD-1", old, amended),
+        _reaction_row("OLD-2", old, amended + timedelta(minutes=1)),
+        _reaction_row("OLD-3", old, amended + timedelta(minutes=2)),
+        _reaction_row("NEW-1", created_later, None),
+    ]
+    charges = [row for entry in ("OLD-1", "OLD-2", "OLD-3", "NEW-1") for row in _charge_rows(entry)]
+    warehouse_fake.prime_warehouse(
+        warehouse_fake.WatermarkWarehouse(
+            {"V_REACTION": reactions, "V_CHARGE": charges},
+            entry_relation="V_REACTION",
+            created_at="CREATED_TS",
+            modified_at="LAST_MODIFIED_TS",
+        )
+    )
+    adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
+
+    async def _run() -> set[str]:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        cursor = old
+        seen: set[str] = set()
+        for _ in range(4):  # four chunks is more than enough to drain four rows two at a time
+            summary = await sync_entries(adapter, rxn, mol, sub, cursor, apply_overlap=False)
+            seen.update(summary.ingested)
+            cursor = summary.next_cursor
+        return seen
+
+    assert "NEW-1" in asyncio.run(_run()), "the reaction created after the amendments is reachable"

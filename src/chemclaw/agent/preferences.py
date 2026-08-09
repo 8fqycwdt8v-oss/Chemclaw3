@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from chemclaw.agent.authz import require_actor
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -64,9 +65,7 @@ class PreferenceStore:
         raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
         activity for its whole budget.
         """
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             yield conn
 
     async def remember(self, owner: str, key: str, value: str) -> bool:
@@ -91,7 +90,7 @@ class PreferenceStore:
                     await cur.execute(_UPSERT, (owner, key, value))
                 await conn.commit()
         except Exception:
-            logger.warning("could not persist preference %r for %s", key, owner, exc_info=True)
+            degraded(logger, "preferences", "could not persist preference %r for %s", key, owner)
             return False
         return True
 
@@ -137,7 +136,7 @@ class PreferenceStore:
                     await cur.execute(_DELETE, (owner, key))
                 await conn.commit()
         except Exception:
-            logger.warning("could not delete preference %r for %s", key, owner, exc_info=True)
+            degraded(logger, "preferences", "could not delete preference %r for %s", key, owner)
             return False
         return True
 

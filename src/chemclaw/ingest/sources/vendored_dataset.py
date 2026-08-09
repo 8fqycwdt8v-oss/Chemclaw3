@@ -136,13 +136,15 @@ class VendoredDatasetRetriever:
     the dataset and the reason.
     """
 
-    name = "vendored"
+    def __init__(self, dataset_dir: str | None = None, name: str = "vendored") -> None:
+        """Read from `dataset_dir`, or the configured `vendored_dataset_dir`.
 
-    def __init__(self, dataset_dir: str | None = None, name: str | None = None) -> None:
-        """Read from `dataset_dir`, or the configured `vendored_dataset_dir`."""
+        `name` is the data-source name, passed by the registry from the manifest — see
+        `chemclaw.retrieval.retrievers.GraphRetriever.__init__` for why every retrieve half
+        takes one.
+        """
         self._dir = Path(dataset_dir) if dataset_dir is not None else settings.vendored_dataset_path
-        if name is not None:
-            self.name = name
+        self.name = name
         self._records: list[VendoredRecord] | None = None
         self._manifest: DatasetManifest | None = None
 

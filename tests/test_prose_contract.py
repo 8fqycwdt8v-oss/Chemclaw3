@@ -16,6 +16,7 @@ import chemclaw.cli.validate_prose_contract as prose
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.cli.validate_prose_contract import (
     _ALLOWED_NON_TOOLS,
+    check_metric_citations,
     check_operator_prose,
     check_prose_contract,
 )
@@ -299,3 +300,78 @@ def test_env_example_is_read_whole(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     monkeypatch.setattr(prose, "_ROOT", tmp_path)
     sources = prose._operator_sources()
     assert sources[".env.example"] == text
+
+
+def test_the_shipped_documents_cite_only_declared_metric_names() -> None:
+    """Rules 8-9 over the real tree: the regression guard for the defect that motivated them.
+
+    `docs/decisions/D-2026-08-08-redaction-must-outlive-the-formatter.md` documented the only
+    alert for the one *security* degradation in this codebase and named
+    `chemclaw_degradations_total`, a counter that has never existed. Nothing failed, because a
+    wrong series name renders as an alert that matches nothing and reads as healthy.
+    """
+    assert check_metric_citations() == []
+
+
+def test_a_metric_name_no_registry_declares_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rule 8, over the operator corpus, in the backticked-span form."""
+    monkeypatch.setattr(
+        prose, "_operator_sources", lambda: {"fake.md": "Alert on `chemclaw_no_such_total`."}
+    )
+    monkeypatch.setattr(prose, "_selector_sources", dict)
+    problems = check_metric_citations()
+    assert len(problems) == 1
+    assert "chemclaw_no_such_total" in problems[0]
+
+
+def test_a_declared_metric_with_a_label_matcher_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The label matcher is part of the citation, not part of the name being resolved."""
+    text = 'Alert on `chemclaw_degraded_total{subsystem="log_redaction"}`.'
+    monkeypatch.setattr(prose, "_operator_sources", lambda: {"fake.md": text})
+    monkeypatch.setattr(prose, "_selector_sources", lambda: {"fake.md": text})
+    assert check_metric_citations() == []
+
+
+def test_a_module_path_is_not_read_as_a_metric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`chemclaw_agent.py` shares the prefix and is not a series.
+
+    The span has to end at the name, which is what separates the two without an allow-list entry.
+    """
+    monkeypatch.setattr(
+        prose, "_operator_sources", lambda: {"fake.md": "`chemclaw_agent.py` builds the agent."}
+    )
+    monkeypatch.setattr(prose, "_selector_sources", dict)
+    assert check_metric_citations() == []
+
+
+def test_a_selector_is_caught_in_a_document_rule_8_does_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule 9's whole reason to exist: `docs/decisions/` is outside every other rule's corpus."""
+    monkeypatch.setattr(prose, "_operator_sources", dict)
+    monkeypatch.setattr(
+        prose,
+        "_selector_sources",
+        lambda: {"docs/decisions/D-x.md": 'increments `chemclaw_gone_total{subsystem="x"}`'},
+    )
+    problems = check_metric_citations()
+    assert len(problems) == 1
+    assert "chemclaw_gone_total" in problems[0]
+
+
+def test_rule_9_reads_the_decisions_and_leaves_the_archive_alone() -> None:
+    """The corpus split, pinned: a merged ADR is checked for selectors, an archived document not.
+
+    Measured on the tree this was written against: five backticked `chemclaw_*` spans in
+    `docs/decisions/` are undeclared and four of them are correct prose — a module name, the
+    Postgres role, a log marker, and an ADR quoting the stale metric name it exists to report.
+    Which is why only the selector spelling gets this reach.
+    """
+    origins = prose._selector_sources()
+    assert any(origin.startswith("docs/decisions/") for origin in origins)
+    assert not any(origin.startswith("docs/archive/") for origin in origins)
+
+
+def test_the_non_metric_allowlist_is_small_and_deliberate() -> None:
+    """One entry, and it is a namespace collision rather than a pardoned mistake."""
+    assert prose._NON_METRIC_NAMES == frozenset({"chemclaw_app"})

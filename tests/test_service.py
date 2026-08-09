@@ -1038,6 +1038,77 @@ def test_turn_is_refused_over_budget(monkeypatch) -> None:  # type: ignore[no-un
         assert res.status_code == 429
 
 
+def test_a_concurrent_burst_cannot_overrun_the_budget_by_more_than_the_permits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget's documented overshoot bound is the permit count — it was the request count.
+
+    `BudgetTracker`'s docstring promises "up to `service_max_concurrent_turns` in-flight turns may
+    pass `check` before any of them `record`". That was a statement about a call site rather than
+    about the class, and the call site made it false: `check` ran at request entry, before
+    admission, so *every* turn in a burst passed it while the first was still streaming. Measured
+    with production-shaped values — 8 permits, 40 concurrent POSTs, a one-turn-per-user cap —
+    **40 turns ran and 40,000 tokens were booked, with no 429 at all**.
+
+    Here, scaled down so the assertion is a bound and not a race: one permit, a one-turn cap, ten
+    concurrent posts on ten sessions of one user. With the re-check after the permit, at most one
+    turn can be past both gates at once, so exactly one answers and the rest end with a
+    `budget_exhausted` error event on their own stream (D-166 — the stream is already open by
+    then, so a 429 is no longer available to say it).
+
+    Counterfactual: delete the re-check in `_turn_events` and this reports ten answers.
+    """
+    import httpx
+
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "budget_enabled", True)
+    monkeypatch.setattr(settings, "budget_max_turns_per_user", 1)
+    monkeypatch.setattr(settings, "budget_max_turns_per_session", 0)
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 10.0)
+
+    async def _drive() -> None:
+        app = create_app(
+            agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
+        )
+        app.dependency_overrides[require_principal] = lambda: Principal(oid="u1", upn="u1@corp")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", timeout=30
+        ) as client:
+            sessions = [(await client.post("/sessions")).json()["session_id"] for _ in range(10)]
+
+            async def _turn(session_id: str) -> list[dict[str, Any]]:
+                res = await client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+                if res.status_code == 429:
+                    return [{"type": "429"}]
+                return [
+                    json.loads(line[len("data:") :].strip())
+                    for line in res.text.splitlines()
+                    if line.startswith("data:")
+                ]
+
+            streams = await asyncio.gather(*(_turn(s) for s in sessions))
+
+        kinds = [[event["type"] for event in stream] for stream in streams]
+        answered = [k for k in kinds if "answer" in k]
+        assert len(answered) == 1, f"{len(answered)} turns ran against a one-turn budget: {kinds}"
+        # Every other turn was told why, on its own stream or by status — never silently dropped.
+        for stream in streams:
+            if any(event["type"] == "answer" for event in stream):
+                continue
+            last = stream[-1]
+            assert last["type"] in ("error", "429"), stream
+            if last["type"] == "error":
+                assert last["code"] == "budget_exhausted", last
+        booked = app.state.budget._users.get("u1")
+        assert booked is not None and booked.turns == 1, booked
+
+    asyncio.run(_drive())
+
+
 def test_budget_disabled_allows_many_turns(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """With budgets off (the default), turn count is never capped (unchanged behavior)."""
     from chemclaw.core.config import settings

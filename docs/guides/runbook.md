@@ -534,8 +534,42 @@ reindex-full` once after upgrading past it.** The symptom of skipping it is not 
 and lexical search simply keep answering as if the change had not happened, while the substring
 leg answers as if it had.
 
-The same applies to `CHEMCLAW_EMBEDDING_MODEL`: changing it serves mixed-generation vectors until
-a full reindex, and nothing detects that either (it is a known open item, not a solved one).
+**`CHEMCLAW_EMBEDDING_MODEL` and `CHEMCLAW_LLM_BASE_URL` no longer need this**
+(D-2026-08-08-a-derived-index-must-record-what-derived-it). `note_index` records which embedding
+configuration made each row (migration 039, the column `document_chunks` already had), so the
+ordinary incremental `make reindex` — and the hourly workflow — re-embed exactly the rows a swap
+superseded. Nothing to remember and no flag to pass. What that does mean is that the *first* run
+after upgrading past this re-embeds the whole corpus once: every existing row has no key recorded,
+which reads as unknown, and unknown is never treated as current. Same for `document_chunks`, whose
+keys all change because the key now names the endpoint as well as the model.
+
+**A share's `chunk_chars` / `chunk_overlap_chars` now take effect, and they are not free.** The
+same migration set records which chunking cut each row (040), and both of the crawl's gates compare
+it — so changing either number re-reads and re-cuts every document of that share, off the mount,
+over the crawl's ordinary bounded passes. Before this the change was silently ignored, which was
+cheaper and wrong. The first sync after the upgrade pays it once for the same reason as above:
+nothing recorded what the existing rows were cut with.
+
+**Migration 041 rebuilds `document_chunks`' primary key, and that is the one migration in this set
+with a real duration.** It backfills the added column, sets it `NOT NULL` and replaces
+`(doc_id, ordinal)` with `(doc_id, chunking_key, ordinal)` — building a unique index under an
+`ACCESS EXCLUSIVE` lock. The migrator's `lock_timeout` bounds waiting *for* the lock, not the build,
+so on a share-sized table budget seconds to a minute of the document search being unavailable, once.
+Rows written before 040 get `''`, which no binding can produce: they still read as superseded at
+both gates, and they stay searchable until the crawl replaces them rather than disappearing at
+upgrade.
+
+**Expect one drain, not two — and expect the corpus to be of mixed generation while it runs.** The
+re-embed pass is scoped to the chunkings the enabled shares currently use, so a chunk that the crawl
+is about to re-cut is not refreshed first and then thrown away. What no scoping can remove is the
+window: the re-embed drains `CHEMCLAW_DOCUMENT_REEMBED_BATCH_SIZE` chunks per activity,
+`CHEMCLAW_DOCUMENT_SYNC_MAX_ITERATIONS` times per run, so at the shipped 500 × 100 a million-chunk
+share takes on the order of **days** of six-hourly runs. Throughout it, document search compares
+queries embedded by the new model against vectors not yet refreshed — scores are degraded, results
+are not missing. Watch `re-embedded N chunk(s)` in the background worker's log to see the drain
+converge, and the `%d chunk(s) could not be re-embedded` line at ERROR for the ones it cannot fix.
+To finish faster, raise the batch size or run `python -m chemclaw.cli.sync_share <name>`, which
+drains that share's re-embed to completion before it crawls.
 
 ## (vii) Read eval-drift alerts
 
@@ -899,3 +933,115 @@ the diff** — never a downgrade of the whole gate, which is how a control becom
 The SBOM (SPDX) and the built image's digest are retained on the run for 90 days. That is what makes
 "what was in the image that produced this audit record" answerable at all, and it is the reason the
 floating base default is defensible: the bytes cannot be pinned in advance, so they are named after.
+
+## (xv) Onboard, entitle and offboard a person
+
+**Identity is entirely Entra.** This system has no user table, no local accounts and no invite
+flow: it reads the caller's token and nothing else. So "add a user" is a directory operation, and
+everything below is either an Entra change or a config change — **there is no code change in this
+section at all.**
+
+Two ways a tenant can express membership, and the difference matters when you write a role name:
+
+| Tenant wiring | What lands in the turn's role set | How you write it in config |
+| --- | --- | --- |
+| App role assignment | the app role value, verbatim | `chemclaw.sharedrive.reader` |
+| Group claim (`CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES=true`) | each group claim, namespaced | `group:<claim value>` |
+
+The prefix is not decoration. The same flat set gates every write tool, every skill and every
+document share, so an unprefixed group value would be indistinguishable from an app role of that
+name. A bare object id matches nothing.
+
+### The roles this system reads
+
+There is no fixed list to create — the names are yours, and every one of them is referenced from
+config rather than from code. What is fixed is the **set of gates** that read them:
+
+| Setting | What it gates | Shape |
+| --- | --- | --- |
+| `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` | expensive jobs (`expensive: true` in any `connector.yaml`), and who sees the whole PR-gate review queue rather than only their own proposals | comma list of role values |
+| `CHEMCLAW_TOOL_ROLE_GATES` | one named tool → the roles that may call it | JSON `{"tool": ["role"]}` |
+| `CHEMCLAW_SKILL_ROLE_GATES` | one skill's *visibility* — a caller holding none of its roles never sees it | JSON `{"skill": ["role"]}` |
+| `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` | anything expensive that **no** manifest declares; a bundle's own `expensive: true` needs no entry here | comma list of tool names |
+| a share's `required_roles:` | one mounted document share, in its `datasource.yaml` — a caller without it gets nothing from that source, not a filtered list | list of role values |
+
+Two defaults worth knowing before you design the role set:
+
+- **Write tools are closed by default.** `DEFAULT_WRITE_TOOL_GATES` (`agent/authz.py`) gates every
+  job launcher and state-mutating tool to `entra_privileged_roles` unless you have written an
+  explicit `tool_role_gates` entry for it. A deployment that sets **no** privileged role therefore
+  refuses every expensive job — which is the intended failure, not a misconfiguration to route
+  around. Setting `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` is the whole remedy.
+- **None of it is enforced unless `CHEMCLAW_ENTRA_REQUIRED=true`.** In dev the gates are open so
+  the app runs without a tenant. Never run a shared or exposed deployment that way — the front door
+  refuses to start on a non-loopback bind precisely to stop it.
+
+### Onboard someone
+
+1. Assign them the app role (or add them to the group) in Entra. Nothing to restart.
+2. Nothing else. Their first request carries the role; `require_actor` accepts it.
+
+### Grant an existing role a new capability
+
+Edit `CHEMCLAW_TOOL_ROLE_GATES` / `CHEMCLAW_SKILL_ROLE_GATES` in the chart's `config:` block and
+roll the deployment. Adding a *share* to a role is the share's `required_roles:` instead, because
+that entitlement belongs to the corpus rather than to the tool surface.
+
+### Revoke access
+
+Remove the app role or group membership in Entra. **There is no in-app kill switch, and this is a
+decision rather than an omission**: a token already issued stays valid until it expires, so
+revocation takes effect within your tenant's access-token lifetime (an hour by default). If you
+need it faster than that, the lever is the tenant's — continuous access evaluation or a shortened
+lifetime — not a deny-list here, which would be a second source of truth about who may act and
+would drift from the directory the moment anyone edited it by hand.
+
+For an immediate, deployment-wide stop, scale the front door to zero. There is deliberately no
+per-user equivalent.
+
+### Offboard: erase their data
+
+Removing the role stops new access and deletes nothing. Per-actor rows live in nine tables, split
+into two tiers by one rule — **the conversation is erasable, the record is not**:
+
+```bash
+make user-erase ACTOR=<entra-oid>            # dry run: real counts, writes nothing
+make user-erase ACTOR=<entra-oid> APPLY=1    # commits
+```
+
+It removes their sessions, messages, events, turn lease, preferences and watch subscriptions. It
+**keeps and counts** the rows that attribute scientific work to them — `audit_events`,
+`plan_approvals`, `note_proposals`, `bo_suggestions`, `job_records`, `turn_costs` — and prints the
+reason beside each. That is not a limitation to work around: an attributable record that can be
+deleted on request is not an attributable record, and `audit_events` carries a tamper-evident hash
+chain whose proof spans the rows either side of any deletion (see (xvi)). If a data-protection
+obligation reaches the retained tier, that is a decision to take with the record's owner.
+
+The dry run executes the deletes and rolls back, so the number you sign off on is the number that
+will be deleted rather than a second query's guess at it.
+
+## (xvi) Verify the audit trail, and the other commands with no section of their own
+
+Four operations exist as `make` targets and had no entry here. Three of them are yours to run;
+the fourth is automated and listed so nobody runs it by hand wondering why.
+
+**`make audit-verify` — the GxP tamper-evidence check.** `audit_events` is a hash chain: each row
+carries a hash over itself and its predecessor, so any edit or deletion breaks the chain from that
+point on. Verifying it is what makes the trail *evidence* rather than a log. Nothing schedules it,
+so decide a cadence and hold to it — monthly, plus after any restore (see (xiii), which describes
+what a restore does to the chain without naming the command that checks it) and before any audit.
+A reported gap with no restore behind it is an incident, not a maintenance task.
+
+**`make share-sync SHARE=<source>` — crawl a mounted document share now.** The scheduled job is the
+production path (every six hours by default); this is for the first crawl after attaching a share,
+and for re-crawling after a bulk change nobody wants to wait six hours for. Run
+`make share-estimate SHARE=<source>` first — it walks the share, reads nothing, and tells you what
+the crawl would cost.
+
+**`make safety-validate` — force-compile the hazard and genotoxicity tables.** Run it after editing
+a rule table. CI runs it too; the point is that a bad SMARTS fails at deploy rather than on the
+first live hazard question.
+
+**`make schedules-apply` — do not run this by hand.** The chart runs it as a post-rollout Job, so
+the Schedules follow the deployment automatically. It is here only so that finding it in
+`make help` does not read as a missing step.

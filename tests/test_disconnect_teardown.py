@@ -24,6 +24,7 @@ from typing import Any
 from agent_framework import AgentSession
 
 from chemclaw.api.app import create_app
+from chemclaw.core.config import settings
 
 
 class _Update:
@@ -362,6 +363,100 @@ def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
             )
             assert status != 409, "the leaked in-process turn entry never expired (A3)"
             assert status == 200
+
+    asyncio.run(_drive())
+
+
+# --- the push-back event stream's per-user slot (same window, different resource) --------------
+
+
+async def _open_event_stream_and_vanish_before_first_byte(app: Any, session_id: str) -> None:
+    """Open `GET /sessions/{id}/events` for a client that is gone before the first byte lands.
+
+    The event-stream twin of `_post_turn_and_vanish_before_first_byte`, and the same window:
+    `session_events` hands off the streaming response, so its own pre-handoff `finally` stands
+    down, while the send below never accepts `http.response.start`. sse-starlette's disconnect
+    listener cancels the task group with `_stream_response` still suspended in that send —
+    before the body iterator's first `__anext__` — so the generator that holds the slot's
+    release in its `finally` is never started, and an unstarted async generator runs no
+    `finally` at all.
+    """
+    delivered = False
+
+    async def _receive() -> MutableMapping[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def _send(message: MutableMapping[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            await asyncio.Event().wait()  # the wire never accepts the first byte
+
+    await app(_scope("GET", f"/sessions/{session_id}/events"), _receive, _send)
+
+
+def test_a_client_gone_before_the_event_stream_starts_frees_its_per_user_slot(
+    monkeypatch: Any,
+) -> None:
+    """A stream slot is held for as long as the *response* is served, not the generator (A3).
+
+    Measured before the fix: five clients that vanish in this window leave
+    `event_streams == {"oid-...": 5}` with nothing open, and the sixth honest connect is
+    answered `429 too many concurrent event streams; close one and retry` — permanently, for
+    that user on that pod, with nothing to close. It survived `gc.collect()`: a never-started
+    generator has no `finally` to run and closing it is a no-op.
+
+    Unlike the turn slot next door, this one cannot be a lease: a push-back stream is
+    *deliberately* unbounded in lifetime (`stream_new_events` polls until the client leaves), so
+    there is no deadline that expires a leak without also evicting a healthy long-lived stream's
+    accounting. The release therefore moves to the one scope that ends exactly when the stream
+    does — the response's own `__call__`.
+
+    Counterfactual: release the slot only in the generator's `finally` (the shipped behaviour
+    before this test) and the assertion below sees one leaked slot per vanished client.
+    """
+    from chemclaw.api import app as front_door
+
+    async def _never_yields(_session_id: str, **_kwargs: Any) -> Any:
+        """A tailer with nothing to deliver — what a live stream does almost all the time."""
+        await asyncio.Event().wait()
+        yield None  # pragma: no cover - unreachable, and that is the point
+
+    monkeypatch.setattr(front_door, "stream_new_events", _never_yields)
+    app = create_app(
+        agent_factory=lambda _profile: _StreamingAgent(),
+        connector_factory=lambda _profile: [],
+    )
+
+    async def _drive() -> None:
+        async with app.router.lifespan_context(app):
+            _status, payload = await _request(app, "POST", "/sessions", {})
+            session_id = json.loads(payload)["session_id"]
+
+            for _ in range(settings.service_max_event_streams_per_user):
+                await _open_event_stream_and_vanish_before_first_byte(app, session_id)
+                assert app.state.event_streams == {}, (
+                    f"an abandoned event stream kept its per-user slot: {app.state.event_streams}"
+                )
+
+            # The user-visible half: an honest client must still be admitted afterwards. Driven
+            # to a real 200 rather than inferred from the ledger, because the ledger is exactly
+            # what the defect corrupted.
+            started: list[int] = []
+
+            async def _receive() -> MutableMapping[str, Any]:
+                return {"type": "http.disconnect"}
+
+            async def _send(message: MutableMapping[str, Any]) -> None:
+                if message["type"] == "http.response.start":
+                    started.append(int(message["status"]))
+
+            await app(_scope("GET", f"/sessions/{session_id}/events"), _receive, _send)
+            assert started == [200], (
+                f"an honest reconnect was refused after abandoned streams: {started}"
+            )
 
     asyncio.run(_drive())
 

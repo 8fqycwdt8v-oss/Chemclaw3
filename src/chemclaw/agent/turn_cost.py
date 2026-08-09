@@ -30,6 +30,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +120,12 @@ def record_turn_cost(cost: TurnCost) -> None:
         try:
             await sink.record(cost)
         except Exception:  # noqa: BLE001 - telemetry must never escalate into the turn's teardown
-            logger.warning(
+            degraded(
+                logger,
+                "cost_ledger",
                 "could not record the cost of turn %s; the spend is lost to the ledger "
                 "(the metrics counters still carry it in aggregate)",
                 cost.correlation_id,
-                exc_info=True,
             )
 
     try:

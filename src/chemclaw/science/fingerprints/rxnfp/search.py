@@ -40,9 +40,16 @@ async def find_similar_reactions(
 
     Returns a `FingerprintSearch`, not a bare list: this is the tool a chemist asks "have we ever
     run something like this?", and an unindexed corpus must not answer it with "no" (see that
-    model's docstring for the live run that did exactly that).
+    model's docstring for the live run that did exactly that). `hits_truncated` answers the other
+    half of the same question — a page of `top_k` out of more that qualified is a floor, not the
+    number of precedents on file.
     """
-    matches = await find_matches(store, drfp_bitstring(reaction_smiles), top_k, threshold)
+    matches, truncated = await find_matches(
+        store, drfp_bitstring(reaction_smiles), top_k, threshold
+    )
     return FingerprintSearch[Match](
-        subject="reaction", hits=matches, index_empty=await index_is_empty(store, matches)
+        subject="reaction",
+        hits=matches,
+        index_empty=await index_is_empty(store, matches),
+        hits_truncated=truncated,
     )

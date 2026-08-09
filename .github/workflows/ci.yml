@@ -119,6 +119,16 @@ jobs:
       - name: Validate the safety tables
         run: make safety-validate
 
+      # The supply-chain gate, and the reason it is *here* rather than only in `image.yml`: that
+      # workflow triggers on `push: main` and `pull_request`, so a branch push — the thing a
+      # developer does dozens of times before opening a PR — audited nothing. Neither did `make
+      # ci`, the documented pre-push gate, which is what made CLAUDE.md's "a green `make` locally
+      # means a green CI" false for the dependency closure specifically. Same target as
+      # `image.yml` runs, so the two cannot disagree; the duplicate run costs ~15s against a
+      # 4m38s job and is what makes the branch-push case covered at all.
+      - name: Audit the dependency closure for known vulnerabilities
+        run: make deps-audit
+
   # The deployment gate (DA-10/D-2). The Helm chart is the one artifact no test can exercise
   # offline, and a broken chart is only discovered at `helm install` — in production, on the worst
   # day. Rendering it against the Kubernetes schemas needs no cluster and no credentials. A separate
