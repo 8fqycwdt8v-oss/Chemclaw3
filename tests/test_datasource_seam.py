@@ -369,3 +369,31 @@ def test_rehosted_eln_source_carries_provenance() -> None:
     assert source.name == "eln-json"
     assert isinstance(source.ingest, JsonExportAdapter)  # the existing adapter, unchanged
     assert source.retrieve is None  # ELN is ingest-only; retrieval is the graph source's job
+
+
+def test_a_config_that_shadows_the_source_name_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A `name` in `config:` cannot be built, so the manifest refuses it.
+
+    The registry passes `name=<manifest name>` on top of `**config`, so a second `name` is a
+    duplicate keyword and the source dies at startup. `make datasource-validate` built the kwargs as
+    a *dict*, where the second silently overwrote the first — so the manifest validated green and
+    the process then failed with `got multiple values for keyword argument 'name'`. A validator that
+    passes what startup refuses is worse than no validator, because it is what an operator trusts
+    before deploying.
+    """
+    _write_source(
+        tmp_path,
+        "shadowed",
+        """\
+        name: shadowed
+        description: A source trying to name itself in its own config block.
+        retrieve: tests.test_datasource_seam:_FakeRetriever
+        config:
+          name: something-else
+        """,
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
+    with pytest.raises(registry.DataSourceError, match="`config:` block"):
+        registry.discovered()

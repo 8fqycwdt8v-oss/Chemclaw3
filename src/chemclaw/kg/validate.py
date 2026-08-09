@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
 from chemclaw.kg.note import Note, NoteError, known_note_types, read_note
 from chemclaw.kg.relations import known_relations
@@ -121,12 +122,24 @@ def _registry_problems(
 
 
 def main() -> int:
-    """CLI entry point: validate the notes dir; print problems; return exit code."""
+    """CLI entry point: validate the notes dir; print problems; return exit code.
+
+    A `ChemclawError` is reported as a problem rather than raised. `validate` resolves the effective
+    vocabulary through `known_note_types()`, which asks the connector registry what the enabled
+    bundles declare — so a deployment whose `CHEMCLAW_CONNECTORS_ENABLED` names a bundle it does not
+    ship makes *this* gate die, with a traceback, about connectors. That is a real misconfiguration
+    and must still fail; it must not fail looking like a crash in the graph validator. Every sibling
+    validator prints its configuration errors, and this one now does too.
+    """
     notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else settings.knowledge_path
     if not notes_dir.exists():
         print(f"notes directory does not exist: {notes_dir}")
         return 1
-    problems = validate(notes_dir)
+    try:
+        problems = validate(notes_dir)
+    except ChemclawError as exc:
+        print(f"cannot determine this deployment's note vocabulary: {exc}")
+        return 1
     for problem in problems:
         print(problem)
     if problems:

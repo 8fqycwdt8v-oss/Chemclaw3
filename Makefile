@@ -191,7 +191,15 @@ explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 
 user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. Dry run by default.
 	@test -n "$(ACTOR)" || { echo "usage: make user-erase ACTOR=<entra-oid> [APPLY=1]"; exit 64; }
-	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(APPLY),--apply,)
+	@# `APPLY` is compared to the literal `1`, not tested for non-emptiness. `$(if $(APPLY),...)` is
+	@# a *non-empty* test, so `APPLY=0` and `APPLY=false` both read as true — and this is the one
+	@# irreversible target in the file, where "I explicitly said no" must not commit a deletion.
+	@# Anything other than `1` is a dry run, and an unrecognised value says so rather than guessing.
+	@case "$(APPLY)" in \
+	  ""|1) ;; \
+	  *) echo "user-erase: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
+	esac
+	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
 
 reindex:  ## Incrementally rebuild the derived note index — only notes changed since last run.
 	uv run python -m chemclaw.retrieval.vector_index

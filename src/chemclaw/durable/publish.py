@@ -49,6 +49,14 @@ _BAD_DATA_TYPES = [
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
+    # An offboarding erasure the database refused, or one asked for on a blank actor
+    # (`chemclaw.agent.leaver`). Non-retryable for the same reason every entry here is: a missing
+    # `DELETE ON session_owners` grant and an empty actor id are both facts about the request or the
+    # deployment, and the identical call fails identically until a person changes something. Listed
+    # even though no workflow runs an erasure today — the list is keyed by *class name*, so an entry
+    # that is never matched costs nothing, while a missing one is a silent retry storm the day
+    # somebody schedules this.
+    "ErasureError",
     # A vector store that cannot be *built* as configured: the client package is not installed, or
     # the provider names no adapter. Not `VectorStoreError`, which is the store being unreachable —
     # that one is a `SubsystemUnavailableError` and must stay retryable, since the identical call
