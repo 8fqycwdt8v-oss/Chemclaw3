@@ -77,14 +77,26 @@ row, so it cannot go stale against anything.
 
 ### 4. Eligibility is a scope applied before the top-k, never a filter applied after it
 
-When a query carries a filter, the catalogue names the eligible documents and that set is handed
-*into* the search. This is the shape `NoteIndex.search_dense(within=...)` already has, and it exists
-for a measured reason: filter after the cut and a narrow tag over a wide corpus returns nothing at
-all, because the k nearest vectors all belonged to something else. `docs/planning/BACKLOG.md` already
-records that defect against pgvector's post-filtering, and Qdrant's filterable HNSW is a large part
-of why an external store is worth attaching.
+The catalogue names the eligible documents and that set is handed *into* the search. This is the
+shape `NoteIndex.search_dense(within=...)` already has, and it exists for a measured reason: filter
+after the cut and a narrow tag over a wide corpus returns nothing at all, because the k nearest
+vectors all belonged to something else. `docs/planning/BACKLOG.md` already records that defect
+against pgvector's post-filtering, and Qdrant's filterable HNSW is a large part of why an external
+store is worth attaching.
 
-An unfiltered query — the common case — passes no scope and pays nothing extra.
+**A scope is computed for every search, including an unfiltered one.** The first cut skipped it when
+a query carried no tag and no date window, on the reasoning that an unfiltered query has no
+restriction to express. That was wrong, and the review of this ADR's own branch measured it: the
+`source` is a restriction and it is *always* present. Every enabled share writes into one collection
+— `vector_store_document_collection` is a single setting — so a search that sent no scope took the
+top-k across all shares, and `_resolve` then dropped every hit belonging to another source, because
+`CITATION_SQL` filters on `%(src)s` and returns NULL for it. The caller silently received fewer than
+`top_k` hits, or none. `PostgresDocumentIndex` never had this: `_ELIGIBLE` carries
+`f.source = %(src)s` inside the ranking statement. Worse, the inherited `search_lexical` *is*
+correctly scoped, so RRF would have fused a correct lexical list with a source-polluted dense one.
+
+Two backends disagreeing about what a search means is a worse failure than either being slow, so the
+fast path is gone and the cost moves into the residual below.
 
 ### 5. The vendor client is late-bound and is not a dependency
 

@@ -48,11 +48,17 @@ afterwards and a narrow tag over a wide corpus returns nothing, because the k ne
 belonged to something else — the recall defect `docs/planning/BACKLOG.md` already records against
 pgvector's post-filtering, and a large part of why an external store is worth attaching.
 
-**The residual, stated:** a filtered query builds its scope in Postgres and sends it to the store,
-and that set is unbounded in principle. It is bounded in practice by what a filter is *for* — a tag
-exists to narrow — and an unfiltered query, the common case, sends no scope and pays nothing. The
-row is in `BACKLOG.md`; the fix trades away correctness the two-table design buys, so it waits for a
-corpus that actually feels it.
+**A scope is computed for every search, including an unfiltered one**, because the `source` is a
+restriction and it is always present. Every enabled share shares one collection, so a search that
+sent no scope took the top-k across all of them and then silently dropped the other sources' hits
+while resolving. Skipping the scope query for an unfiltered search was a real bug, and it is the one
+optimization not to reintroduce here — `tests/test_vector_store.py` pins it from both ends.
+
+**The residual, stated:** that scope is built in Postgres and sent to the store, so an unfiltered
+query over a million-document share builds a million-id filter. It is a ceiling on how far this
+composition scales as written, and `BACKLOG.md` names both the fix and why it is not small (content
+dedup means a share inheriting an already-embedded document writes no point, so there is nothing to
+hang a `source` payload on).
 
 ## Adding another store
 
