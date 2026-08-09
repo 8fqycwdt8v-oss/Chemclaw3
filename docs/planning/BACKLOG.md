@@ -26,6 +26,22 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       default that `retention_enabled=false` makes inert anyway.
       **Trigger**: the first deployment that turns the store on in anger, or any disk alert.
 
+- [ ] **A similarity search still narrows a query RDKit only half-parses** — [S].
+      The safety screens now refuse a SMILES they cannot read in full
+      (`core/chem.py::require_molecule`, `D-2026-08-09-a-valid-prefix-is-not-a-molecule`), because
+      RDKit's parser accepts a valid prefix and drops whatever follows a space. `science/fingerprints/molfp/fingerprint.py::_parse` is the last
+      first-party parse of *caller-supplied* structure text that does not: measured, `ecfp_bitstring
+      ("CCO junk")` and `ecfp_bitstring("CCO")` are the same bitstring, so
+      `find_similar_molecules("CCO junk")` answers about ethanol's neighbours under the caller's
+      own label. Not folded into the screen fix on purpose — the failure is a wrong *search result*
+      rather than a clean hazard screen of a molecule nobody asked about, and `_parse` also indexes
+      ELN labels, where refusing is a different trade (an odd label must not abort ingestion) that
+      wants its own look. Everything else in `science/` is already covered: every calculator goes
+      through `require_canonical_smiles` at its cached-compute boundary, and
+      `ingest/eln/validate.py` and `connectors/bo/knowledge.py` parse leniently by design.
+      **Trigger**: a similarity search that returns confident neighbours for a query the chemist
+      knows is malformed, or the next edit to the fingerprint index's definition string.
+
 ## Open — Left by the deep-review fix batch (2026-08-09)
 
 **Migrations 040 and 041 are deliberately not consolidated.** A review argued they should be one

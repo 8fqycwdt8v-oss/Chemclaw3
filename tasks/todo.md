@@ -112,3 +112,44 @@ cascading away with it; and a write against an unreachable DSN answering `""` wi
 line rather than raising. The suite's own Postgres tests still could not be run — the shipped
 `pgvector` in this image is 0.6.0 and migration 012 needs `bit_jaccard_ops` (pgvector ≥ 0.7) — so
 they remain unproven *here* and will run in CI.
+
+---
+
+# Two defects left by the tool-result surface (2026-08-09)
+
+Both against `D-2026-08-09-a-preview-is-not-a-result`, which is now merged: the screens it made
+*visible* were still narrowing their input, and the ref it added never reached the one route a
+chemist uses on every reload. Two decisions, so two ADRs — the merged one is not edited.
+
+## Defect 1 — a screen of `"CCO junk"` silently screened ethanol
+
+ADR: `D-2026-08-09-a-valid-prefix-is-not-a-molecule`.
+
+- [x] `core/chem.py::require_molecule` — the "RDKit read this string, all of it" gate factored out
+      of `require_canonical_smiles`, which is where it already lived and where the screens were not
+      looking. `require_standard_smiles` moves onto it too, so the three strict helpers cannot
+      drift on what "parses" means (`tests/test_ids.py` pins that they agree).
+- [x] `science/safety/screen.py::parse_molecule` — refuses what it cannot parse whole, translating
+      `InvalidSmilesError` to `SafetyRulesError` so the package keeps one exception type and the
+      refusal still reaches the model as a worded `ValueError` rather than an internal-error notice.
+- [x] `parse_components` — shared by both screens, and the reason it exists is the message: a
+      reaction refusal names *which* component ("component 2 of 3"), counted in the list as the
+      caller wrote it rather than in the deduplicated mapping.
+- [x] `science/safety/notes.py::_is_structure` — moved onto the same predicate. The PR-gate promises
+      to ignore a code span that is not a structure; `` `CCO at 80 °C` `` passed a bare parse and
+      would have failed the screen it was then handed, turning an ignored span into a gate failure.
+
+**Measured before and after**, because the defect is invisible from the outside: `screen_structure`
+of `"CCO CN=[N+]=[N-]"` — an organic azide sitting in the tail RDKit discards — returned
+`flags=[]`, `screened=["CCO"]` and the verdict "No rule in the hazard table matched"; the
+genotoxicity screen dropped a nitroarene from `"CCO O=[N+]([O-])c1ccccc1"` the same way. Both now
+refuse. `tests/test_safety.py` pins the refusal *and* the absence of a clean result, since a test
+that only expected the exception would pass against a version still returning `flags=[]`.
+
+**The rest of `science/` was checked rather than assumed.** Every calculator reaches RDKit through
+`require_canonical_smiles` at its cached-compute boundary, so `run_cached_solubility("CCO junk")`
+already raised before `predict_solubility` saw it. The one live instance left is
+`fingerprints/molfp/fingerprint.py::_parse` — measured, `ecfp_bitstring("CCO junk")` equals
+`ecfp_bitstring("CCO")` — and it is a `BACKLOG.md` row rather than a silent omission: a wrong search
+result, not a false clearance, and `_parse` also indexes ELN labels where refusing is a different
+trade.

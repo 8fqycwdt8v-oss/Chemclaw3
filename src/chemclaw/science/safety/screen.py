@@ -18,6 +18,7 @@ dangerous than no screen, because it converts an absence of knowledge into appar
 """
 
 import logging
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -26,6 +27,7 @@ import yaml
 from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
+from chemclaw.core.chem import InvalidSmilesError, require_molecule
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 
@@ -219,16 +221,64 @@ def _load_rules(path: str) -> tuple[_RuleTable, dict[str, Chem.Mol]]:
     return table, patterns
 
 
-def parse_molecule(smiles: str) -> Chem.Mol:
-    """Parse a SMILES, raising the module's error type so a caller handles one exception (G4).
+def parse_molecule(smiles: str, *, subject: str = "the structure given") -> Chem.Mol:
+    """Parse a SMILES **in full**, raising the module's error type so a caller handles one (G4).
 
     Public because the genotoxicity alert screen must fail the same way on the same input; a
     second parser there would be a second place for "unparseable" to mean "clean".
+
+    **In full is the word that was missing, and its absence was the defect.** This called
+    `Chem.MolFromSmiles` directly, and RDKit's SMILES parser accepts a valid *prefix* and drops
+    whatever follows a space — so `screen_hazards("CCO junk")` did not fail, it screened ethanol,
+    reported "No rule in the hazard table matched", and (since
+    `D-2026-08-09-a-preview-is-not-a-result`) echoed `CCO` in
+    `screened` as the structure it had looked at. A concatenated or mistyped string therefore came
+    back as a **clean screen of a different, smaller molecule**, which is the single worst outcome
+    available to a tool whose entire documented discipline is that its empty result must never read
+    as a clearance. Measured on this build: `"CCO CN=[N+]=[N-]"` — an azide sitting in the ignored
+    tail — screened with zero flags.
+
+    The gate is `chemclaw.core.chem.require_molecule`, the same one every calculator in the tree
+    already applies at its boundary, rather than a whitespace check written again here: the screens
+    were the outlier, and the fix is to stop being one
+    (`D-2026-08-09-a-valid-prefix-is-not-a-molecule`). `InvalidSmilesError` is translated to
+    `SafetyRulesError` so this package keeps its promise of raising one exception type; both are
+    `ChemclawError`s, so either way the refusal reaches the model as a worded message through
+    `connectors/server.py`'s `ValueError` passthrough rather than as an internal-error notice.
+
+    `subject` names *what* could not be read, and it exists for the reaction path: a chemist handed
+    "one of the nine components you gave me is unusable" cannot act on it, and `screen_reaction`
+    passes `"component 4 of 9"` (see `parse_components`).
     """
-    molecule = Chem.MolFromSmiles(smiles)
-    if molecule is None:
-        raise SafetyRulesError(f"unparseable SMILES for hazard screening: {smiles!r}")
-    return molecule
+    try:
+        return require_molecule(smiles)
+    except InvalidSmilesError as exc:
+        raise SafetyRulesError(f"cannot screen {subject}: {exc}") from exc
+
+
+def parse_components(component_smiles: Sequence[str]) -> dict[str, Chem.Mol]:
+    """Parse every component of a reaction or route, keyed by the caller's own spelling.
+
+    Shared by both screens for the reason `require_screenable_size` is: they must accept and refuse
+    identical input identically, and a refusal that does not say *which* component failed leaves a
+    chemist re-reading a list of nine SMILES to find the one with a stray space in it.
+
+    The position reported is the component's place in the list as the caller wrote it, counted from
+    1 — not its place in the deduplicated mapping, which is a different number the moment a reagent
+    is listed twice.
+
+    Keyed on the caller's spelling rather than the canonical form because `HazardFlag.matched` and
+    the pair rules both report the strings the caller used; `screened` is where the canonical form
+    is echoed, and it is derived from these molecules.
+    """
+    molecules: dict[str, Chem.Mol] = {}
+    for position, smiles in enumerate(component_smiles, start=1):
+        if smiles in molecules:
+            continue
+        molecules[smiles] = parse_molecule(
+            smiles, subject=f"component {position} of {len(component_smiles)}"
+        )
+    return molecules
 
 
 def require_screenable_size(component_smiles: list[str], *, what: str) -> None:
@@ -267,7 +317,8 @@ def screen_structure(smiles: str) -> ScreenResult:
     """Flag hazardous structural motifs in one molecule (advisory — see the module docstring).
 
     Raises:
-        SafetyRulesError: the SMILES is unparseable, or the rule table is missing/malformed.
+        SafetyRulesError: the SMILES does not parse in full (see `parse_molecule` — a valid prefix
+            with trailing text is refused, not screened), or the rule table is missing/malformed.
     """
     molecule = parse_molecule(smiles)
     table, patterns = _load_rules(settings.safety_rules_path)
@@ -300,12 +351,13 @@ def screen_reaction(component_smiles: list[str]) -> ScreenResult:
         component_smiles: Every species in the reaction (reactants, reagents, solvents, products).
 
     Raises:
-        SafetyRulesError: any component is unparseable, the rule table is missing/malformed, or
-            more than `safety_max_components` components were given.
+        SafetyRulesError: any component does not parse in full — the refusal names the component's
+            position in the list given — the rule table is missing/malformed, or more than
+            `safety_max_components` components were given.
     """
     require_screenable_size(component_smiles, what="a hazard screen")
     table, patterns = _load_rules(settings.safety_rules_path)
-    molecules = {smiles: parse_molecule(smiles) for smiles in dict.fromkeys(component_smiles)}
+    molecules = parse_components(component_smiles)
     flags = [flag for smiles in molecules for flag in screen_structure(smiles).flags]
     for pair in table.incompatible_pairs:
         left = [s for s, m in molecules.items() if m.HasSubstructMatch(patterns[f"{pair.id}:left"])]

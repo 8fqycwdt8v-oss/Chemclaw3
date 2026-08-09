@@ -205,8 +205,56 @@ def test_flags_are_ordered_worst_first() -> None:
 
 def test_unparseable_smiles_is_a_clear_error() -> None:
     """A bad structure is an error, not an empty (reassuring) result (G4)."""
-    with pytest.raises(SafetyRulesError, match="unparseable SMILES"):
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
         screen_structure("not-a-molecule(((")
+
+
+def test_a_structure_with_trailing_text_is_refused_and_not_quietly_narrowed() -> None:
+    """The test that would have caught it: trailing garbage must not screen as a clean result.
+
+    RDKit's SMILES parser accepts a valid *prefix* and ignores whatever follows a space, so
+    `screen_structure` used to answer this call with zero flags, the verdict "No rule in the hazard
+    table matched", and `screened == ["CCO"]` — a clean screen of **ethanol**, for an input whose
+    ignored tail is an azide. That is the worst failure mode available to this module: its own
+    docstring says an empty result must never read as a clearance, and here the empty result was
+    not even about the molecule asked about.
+
+    Asserted as a refusal *and* as an absence of a clean result, because the second is the part
+    that was wrong: a test that only pinned the exception would pass against a version that
+    returned `ScreenResult(flags=[], screened=["CCO"])`.
+    """
+    concatenated = f"CCO {_HAZARDOUS['organic-azide']}"
+    assert screen_structure(_HAZARDOUS["organic-azide"]).flags  # the tail alone is a real flag
+
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
+        screen_structure(concatenated)
+
+
+def test_an_empty_string_is_refused_rather_than_screened_as_a_molecule() -> None:
+    """RDKit parses `""` to a molecule with no atoms, which matches no rule and reads as clean."""
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
+        screen_structure("")
+
+
+def test_a_reaction_refusal_names_which_component_it_could_not_read() -> None:
+    """A chemist told "one of these nine is unusable" cannot act on it; the position is the fix.
+
+    The refusal counts positions in the list *as given*, so it points at the string the caller
+    wrote rather than at an index into the deduplicated set the screen works on.
+    """
+    with pytest.raises(SafetyRulesError, match="component 2 of 3"):
+        screen_reaction(["CCO", f"CCO {_HAZARDOUS['organic-azide']}", "O"])
+
+
+def test_a_screened_reaction_still_echoes_what_it_looked_at() -> None:
+    """The refusal above does not cost a good call its `screened` list.
+
+    `screened` is the evidence that a screen is about the molecules the caller meant: it is the
+    canonical form of every structure parsed, deduplicated, so two spellings of one substance
+    appear once.
+    """
+    result = screen_reaction(["OCC", "CCO", "O"])
+    assert result.screened == ["CCO", "O"]
 
 
 def test_missing_rule_table_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,6 +470,24 @@ def test_structures_are_read_from_smiles_and_code_spans() -> None:
     found = structures_in(note)
     assert "CCO" in found and "CCOC(C)=O" in found  # reaction SMILES split into components
     assert "docs/guides/runbook.md" not in found  # RDKit is the arbiter of what is a structure
+
+
+def test_a_code_span_whose_prefix_parses_is_not_read_as_a_structure() -> None:
+    """`structures_in` and the screen must agree on what a structure *is*, or the gate breaks.
+
+    A span like `` `CCO at 80 °C` `` has a valid SMILES prefix, so RDKit's bare parser called it a
+    structure — and once the screen started refusing input it cannot read in full, that span would
+    have reached `screen_reaction` and turned a note this gate is documented to pass into a
+    "hazard screening failed" problem. The two predicates are now one.
+    """
+    note = Note(
+        id="reaction-v",
+        type="reaction",
+        created_by="agent",
+        body="## Procedure\n\n1. Add `CCO at 80 °C` to the flask.\n",
+    )
+    assert structures_in(note) == []
+    assert hazard_problems(note) == []
 
 
 def test_broken_rule_table_blocks_the_gate_instead_of_crashing_it(
@@ -941,8 +1007,24 @@ def test_the_alert_screen_is_advertised_to_the_agent() -> None:
 
 def test_an_unparseable_component_stops_the_alert_screen() -> None:
     """A component that cannot be parsed must not silently screen as "no alerts"."""
-    with pytest.raises(SafetyRulesError, match="unparseable SMILES"):
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
         screen_genotoxic_alerts(["not-a-molecule"])
+
+
+def test_a_component_with_trailing_text_stops_the_alert_screen_too() -> None:
+    """The same silent narrowing, on the screen where a clean result is hedged hardest.
+
+    `"CCO O=[N+]([O-])c1ccccc1"` used to parse as ethanol, drop the nitroarene after the space, and
+    come back with no alerts — under a verdict spending three lines explaining that an empty list
+    is not a negative mutagenicity prediction, about a molecule the payload never identifies.
+    Refusing is the only answer that does not require the reader to know which of the two things
+    the emptiness meant.
+    """
+    nitroarene = "O=[N+]([O-])c1ccccc1"
+    assert screen_genotoxic_alerts([nitroarene]).alerts  # the ignored tail is a real alert
+
+    with pytest.raises(SafetyRulesError, match="component 1 of 1"):
+        screen_genotoxic_alerts([f"CCO {nitroarene}"])
 
 
 # --- the ICH Q3C / Q3D reference tables -----------------------------------------------

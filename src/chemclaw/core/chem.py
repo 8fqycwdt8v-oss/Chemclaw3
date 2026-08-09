@@ -229,6 +229,39 @@ def canonical_smiles(smiles: str) -> str:
     return Chem.MolToSmiles(mol) if mol is not None else smiles
 
 
+def require_molecule(smiles: str) -> Chem.Mol:
+    """The parsed molecule, raising `InvalidSmilesError` unless RDKit reads `smiles` **whole**.
+
+    This is the one definition of "RDKit accepts this string, all of it", and the two strict
+    helpers below are both written on top of it. It is separate from them because a caller that
+    needs the *molecule* rather than a key — `science/safety/screen.py`, which then matches SMARTS
+    against it — otherwise writes its own, weaker acceptance test, and that is exactly what
+    happened: the hazard screens parsed with a bare `Chem.MolFromSmiles`, so
+    `screen_hazards("CCO junk")` returned a clean screen **of ethanol** and echoed `CCO` as the
+    structure it had looked at.
+
+    Two inputs RDKit accepts and this rejects, each measured against this build:
+
+    - **A string with embedded whitespace.** The parser treats any whitespace as the end of the
+      structure and ignores the rest, so `"CCO junk"`, `"CCO 1"` and the tab-separated form are all
+      ethanol. That is the whole silent-truncation class: a malformed or concatenated string does
+      not fail, it narrows to a *different, smaller molecule* than the caller submitted.
+    - **The empty string**, which parses to a molecule with no atoms — a key for nothing, or a
+      screen that matches nothing.
+
+    Surrounding whitespace is stripped rather than refused: a leading newline is a copy-paste
+    artifact, not a second molecule. The message quotes the caller's own string, not the stripped
+    one, so what is echoed back is what was typed.
+    """
+    stripped = smiles.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
+    mol = Chem.MolFromSmiles(stripped)
+    if mol is None or mol.GetNumAtoms() == 0:
+        raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
+    return mol
+
+
 def require_canonical_smiles(smiles: str) -> str:
     """RDKit canonical SMILES, raising `InvalidSmilesError` if it does not parse.
 
@@ -237,18 +270,10 @@ def require_canonical_smiles(smiles: str) -> str:
     the QM durable boundary (G4). Canonicalizing before the key means `"CCO"` and
     `"OCC"` share one cache entry / one workflow id, honoring D-011.
 
-    Stricter than RDKit's parser, which would silently truncate `"CCO junk"` at the
-    first whitespace (keying a different molecule than the caller submitted) and
-    parse `""` to a zero-atom molecule — both are rejected here, since a key for
-    the wrong or empty structure is worse than a fast failure at the boundary.
+    Stricter than RDKit's parser — see `require_molecule`, which is where that strictness now
+    lives so that a caller wanting the molecule instead of the key gets the identical gate.
     """
-    stripped = smiles.strip()
-    if not stripped or any(ch.isspace() for ch in stripped):
-        raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
-    mol = Chem.MolFromSmiles(stripped)
-    if mol is None or mol.GetNumAtoms() == 0:
-        raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
-    return str(Chem.MolToSmiles(mol))
+    return str(Chem.MolToSmiles(require_molecule(smiles)))
 
 
 def standard_smiles(smiles: str) -> str:
@@ -268,18 +293,18 @@ def standard_smiles(smiles: str) -> str:
 def require_standard_smiles(smiles: str) -> str:
     """The standardized canonical SMILES, raising `InvalidSmilesError` if it does not parse.
 
-    The strict counterpart of `standard_smiles`, sharing `require_canonical_smiles`'s rejection of
-    the two inputs RDKit would otherwise accept quietly — a string with embedded whitespace (which
-    it truncates at the first space, keying a different molecule than the caller submitted) and the
-    empty string (which parses to a zero-atom molecule).
+    The strict counterpart of `standard_smiles`, applying `require_molecule`'s gate — so the two
+    strict helpers cannot drift on what "parses" means, which they could while each spelled the
+    same four lines out.
+
+    The molecule `require_molecule` hands back is deliberately discarded: the pipeline runs through
+    `_standardized`, whose cache is keyed on the string and is what makes the loop callers (every
+    component of every ingested reaction, every product/reactant pair in chain detection)
+    affordable. Standardizing the molecule directly here would parse once instead of twice and
+    lose that, which is the more expensive trade by a wide margin.
     """
-    stripped = smiles.strip()
-    if not stripped or any(ch.isspace() for ch in stripped):
-        raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
-    mol = Chem.MolFromSmiles(stripped)
-    if mol is None or mol.GetNumAtoms() == 0:
-        raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
-    standardized = _standardized(stripped)
+    require_molecule(smiles)
+    standardized = _standardized(smiles.strip())
     if standardized is None:  # pragma: no cover - unreachable once the parse above succeeded
         raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
     return standardized

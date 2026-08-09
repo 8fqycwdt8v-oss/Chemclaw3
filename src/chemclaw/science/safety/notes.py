@@ -26,7 +26,12 @@ import re
 
 from chemclaw.core.config import settings
 from chemclaw.kg.note import Note
-from chemclaw.science.safety.screen import SafetyRulesError, at_least, screen_reaction
+from chemclaw.science.safety.screen import (
+    SafetyRulesError,
+    at_least,
+    parse_molecule,
+    screen_reaction,
+)
 
 # Inline code spans, which is how a note writes a SMILES (`CCO.CC(=O)O>>CCOC(C)=O`).
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
@@ -63,10 +68,23 @@ def structures_in(note: Note) -> list[str]:
 
 
 def _is_structure(candidate: str) -> bool:
-    """Whether RDKit reads `candidate` as a molecule (the only test for "is this a SMILES")."""
-    from rdkit import Chem
+    """Whether the screen would accept `candidate` as a molecule — the "is this a SMILES" test.
 
-    return Chem.MolFromSmiles(candidate) is not None
+    Asks `parse_molecule`, which is the acceptance test `screen_reaction` itself applies, rather
+    than a bare `Chem.MolFromSmiles`. The two must be the same predicate or this function's own
+    contract breaks: it promises that a span which is not a structure "simply yields nothing", and
+    RDKit reads a valid prefix, so a span like `` `CCO at 80 °C` `` used to pass as a structure
+    here and then reach a screen that now refuses it — turning a span this gate is documented to
+    ignore into a `kg-validate` failure on every note containing one.
+
+    Which is also why the answer is a boolean rather than the exception: a broken structure in a
+    note body is `chemclaw.ingest.eln.validate`'s problem and the reviewer's, not the hazard gate's.
+    """
+    try:
+        parse_molecule(candidate)
+    except SafetyRulesError:
+        return False
+    return True
 
 
 def hazard_problems(note: Note) -> list[str]:

@@ -1640,3 +1640,30 @@ Rules for myself:
 - When the honest answer is "uniform rule, and the cost is real", write the cost where an operator
   will meet it — here `infra/sql/README.md`'s Disposal column says this table is unbounded until
   someone sets a window — rather than in the config comment nobody reads twice.
+
+## Making a defect visible is not fixing it (2026-08-09)
+
+`ScreenResult.screened` was added an hour earlier in the same branch, and its own docstring said
+what it was for: a clean screen used to name nothing it had looked at. What I did not do was ask the
+next question — *is what it names the thing the caller asked about?* It was not.
+`screen_hazards("CCO junk")` returned no flags and `screened=["CCO"]`, and the new field was
+faithfully reporting a screen of the wrong molecule.
+
+The mechanism was one line: the screens called `Chem.MolFromSmiles` directly while every calculator
+in the tree went through `core.chem.require_canonical_smiles`, whose docstring already spelled out
+that RDKit truncates `"CCO junk"` at whitespace and keys a different molecule. The knowledge was
+written down, one import away, in a function the screens did not call. The defect was not a missing
+insight, it was a missing *reuse*.
+
+Rules for myself:
+
+- A field that echoes what a function operated on is a **question**, not an answer. The moment I add
+  one, run the tool on malformed input and read what it echoes. If the echo differs from the input
+  in a way nobody asked for, the fix is upstream of the field.
+- When one module reaches a shared dependency directly and every sibling reaches it through a
+  guarded helper, that is not a style difference — it is the guard not applying. Grep for the raw
+  call before assuming the helper is universal (`grep -rn MolFromSmiles src/` was the whole audit,
+  and it also found the one remaining instance, now a `BACKLOG.md` row with its measurement).
+- Refusing beats narrowing on any path whose empty result reads as reassurance. The screens already
+  refuse an over-long component list for exactly this reason and say so in `require_screenable_size`
+  — the argument was written, it just had not been applied to the parse.
