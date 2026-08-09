@@ -141,6 +141,27 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	      -schema-location default -schema-location \
 	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+	@# The externally-hosted connector (D-2026-08-09-a-connector-we-do-not-run), rendered because
+	@# no shipped bundle sets `url` and so the default render above never takes that branch. Every
+	@# other check on it reads the template *text*, which cannot see a `{{- if }}` nesting mistake;
+	@# this is the only place the behaviour itself is exercised. `molfp` is an arbitrary choice —
+	@# any bundle with an `endpoint:` proves the same three things.
+	@# Matched with `case`, never `printf | grep -q` — under this file's `.SHELLFLAGS` (`-o
+	@# pipefail`, line 16) that pipeline reports a *match* as a failure: `grep -q` exits the moment
+	@# it matches, `printf` then dies of EPIPE, and pipefail takes the pipeline's status from it.
+	@# Worse, it is size-dependent, so it passed against a small stub here and failed in CI on the
+	@# real render — the output has to be long enough for grep to leave before printf finishes.
+	@# `case` reads the variable in-process: no subprocess, no pipe, nothing to race.
+	@set -e; \
+	  render=$$(helm template chemclaw deploy/helm/chemclaw \
+	    --set connectors.molfp.url=https://model.invalid/mcp); \
+	  case "$$render" in *chemclaw-connector-molfp*) \
+	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1;; esac; \
+	  case "$$render" in *https://model.invalid/mcp*) ;; *) \
+	    echo "FAIL: an externally hosted connector is missing from CHEMCLAW_CONNECTOR_URLS"; exit 1;; esac; \
+	  case "$$render" in *chemclaw-connector-rxnfp*) ;; *) \
+	    echo "FAIL: overriding one connector removed another's pods"; exit 1;; esac; \
+	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m chemclaw.cli.verify_audit_chain

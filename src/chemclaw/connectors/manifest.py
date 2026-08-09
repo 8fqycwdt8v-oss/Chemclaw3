@@ -46,6 +46,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chemclaw.core.http import is_loopback_url
+
 # A job parameter's declared type, mapped to a Python annotation by `connectors.jobs`.
 # Deliberately a *closed* set: the generated pydantic model becomes the JSON schema the model
 # fills in, and a schema the model can always fill correctly is worth more than an open type
@@ -58,9 +60,16 @@ class NoAuth(BaseModel):
     """No credential — the connector is inside our own trust boundary.
 
     Correct for a stdio connector (a subprocess of our own pod, under our own identity) and for
-    a loopback HTTP connector in dev. `ConnectorManifest` refuses it for a non-loopback URL
-    unless the deployment has explicitly opted into insecure binding, reusing the front door's
-    loopback rule rather than inventing a second notion of "safe address".
+    a loopback HTTP connector in dev. `HttpEndpoint` refuses it for a non-loopback declared URL,
+    reusing the front door's loopback rule (`chemclaw.core.http.LOOPBACK_HOSTS`) rather than
+    inventing a second notion of "safe address".
+
+    **This paragraph used to describe a validator that did not exist** — the rule lived in this
+    docstring and nowhere else in the tree, so a manifest could ship pointing at a network host with
+    no credential and nothing would say so. It cost nothing while every bundle was ours and shipped
+    a loopback default, and stopped being free the moment a bundle could name somebody else's server
+    (D-2026-08-09-a-connector-we-do-not-run). The rule is now on `HttpEndpoint`, which is where the
+    URL and the auth mode are both in scope.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -117,6 +126,32 @@ class HttpEndpoint(BaseModel):
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
+        return self
+
+    @model_validator(mode="after")
+    def _a_networked_endpoint_carries_a_credential(self) -> Self:
+        """Reject `auth: mode: none` on a URL that is reachable from the network.
+
+        The rule is about the *declared* URL — what a bundle ships in the repo — and not about the
+        effective one after `connector_urls`, which is a deliberate line rather than an oversight.
+        A deployment override points at the operator's own infrastructure (in the shipped chart, an
+        in-cluster Service bounded by the `connector-ingress` NetworkPolicy), and a validator that
+        failed on those would flag the entire shipped fleet the moment the chart set the override —
+        an alarm that fires on the normal case teaches people to disable it. What it does catch is
+        the case that has no compensating control and is now expressible: a manifest naming somebody
+        else's host, reached across a network we do not own, with no credential on the call.
+
+        `NoAuth` stays the default because the transports it is right for — stdio, and the loopback
+        dev endpoint every shipped bundle declares — are the common ones; this makes the default
+        unavailable exactly where it stops being true.
+        """
+        if isinstance(self.auth, NoAuth) and not is_loopback_url(self.url):
+            raise ValueError(
+                f"endpoint url {self.url!r} is not loopback, so `auth: mode: none` would send "
+                "every call across the network with no credential; declare "
+                "`auth: {mode: bearer, token_env: ...}`, or use a loopback URL and let the "
+                "deployment move it with CHEMCLAW_CONNECTOR_URLS"
+            )
         return self
 
 
