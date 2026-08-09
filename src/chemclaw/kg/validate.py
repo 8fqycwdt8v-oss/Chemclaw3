@@ -14,8 +14,8 @@ from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
-from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note, NoteError, read_note
-from chemclaw.kg.relations import KNOWN_RELATIONS
+from chemclaw.kg.note import Note, NoteError, known_note_types, read_note
+from chemclaw.kg.relations import known_relations
 from chemclaw.science.safety.notes import hazard_problems
 
 
@@ -72,12 +72,17 @@ def validate(notes_dir: Path) -> list[str]:
     # `Note` schema so the agent can *propose* a genuinely new type or relation and a human sees it
     # at the PR-gate — while a typo, which would make the note or the edge unfindable by every
     # filter keyed on it, cannot reach the graph. `kg-validate` runs on that same PR.
+    #
+    # The vocabulary is core's own set **plus what the enabled bundles declare**: `job-result` and
+    # `bo-candidate` are minted by connectors, so a deployment's vocabulary is a property of which
+    # bundles it runs, not of this package alone. Both accessors resolve that union; the message
+    # names both places a reader can add a name.
     problems.extend(
         _registry_problems(
             ((note, path, note.type) for note, path in located),
-            KNOWN_NOTE_TYPES,
+            known_note_types(),
             "type",
-            "chemclaw.kg.note.KNOWN_NOTE_TYPES",
+            "chemclaw.kg.note.KNOWN_NOTE_TYPES or a bundle's `note_types:`",
         )
     )
     problems.extend(
@@ -87,9 +92,9 @@ def validate(notes_dir: Path) -> list[str]:
                 for note, path in located
                 for relation in note.outgoing_relations()
             ),
-            KNOWN_RELATIONS,
+            known_relations(),
             "relation",
-            "chemclaw.kg.relations.KNOWN_RELATIONS",
+            "chemclaw.kg.relations.KNOWN_RELATIONS or a bundle's `relations:`",
         )
     )
     return problems

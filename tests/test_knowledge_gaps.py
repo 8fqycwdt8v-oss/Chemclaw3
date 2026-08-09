@@ -22,7 +22,7 @@ from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
 from chemclaw.kg import analytics
 from chemclaw.kg.analytics import analyze
 from chemclaw.kg.graph import build_graph, load_notes
-from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note
+from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note, known_note_types
 from chemclaw.kg.render import render_note
 from chemclaw.kg.validate import validate
 from chemclaw.memory.playbook import find_playbook_candidates
@@ -122,7 +122,14 @@ def test_a_typo_in_a_note_type_fails_the_gate(tmp_path: Path) -> None:
 
 
 def test_every_type_the_code_mints_is_registered() -> None:
-    """The registry must cover what the system actually writes, or the gate cries wolf."""
+    """The registry must cover what the system actually writes, or the gate cries wolf.
+
+    Against the *effective* vocabulary, because two of these are minted by bundles rather than by
+    core: `job-result` by the `qm` connector and `bo-candidate` by `bo`, each declared in its own
+    `connector.yaml`. That is the point of the union — what this deployment can write is core's set
+    plus its enabled bundles' — and checking core's frozenset alone would assert that a bundle's
+    note type is registered in a file that deliberately no longer names it.
+    """
     minted = {
         "reaction",
         "campaign",
@@ -133,7 +140,7 @@ def test_every_type_the_code_mints_is_registered() -> None:
         "job-result",
         "bo-candidate",
     }
-    assert minted <= KNOWN_NOTE_TYPES
+    assert minted <= known_note_types()
 
 
 def test_the_registry_is_not_enforced_at_the_schema() -> None:

@@ -18,8 +18,8 @@ from chemclaw.core.config import EvalSettings
 from chemclaw.kg.conflicts import find_conflicts
 from chemclaw.kg.crosslink import cited_calculations
 from chemclaw.kg.graph import build_graph, invalidate_cache, load_notes, related
-from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note
-from chemclaw.kg.relations import KNOWN_RELATIONS
+from chemclaw.kg.note import Note, known_note_types
+from chemclaw.kg.relations import known_relations
 from chemclaw.kg.validate import validate
 
 _KNOWLEDGE = Path(__file__).resolve().parents[1] / "knowledge"
@@ -53,16 +53,22 @@ def test_every_note_type_has_a_real_instance() -> None:
 
     `KNOWN_NOTE_TYPES` was enforced at the gate with no corpus behind it, so a filter keyed on
     `bo-candidate` or `failure-mode` could have been broken indefinitely without a failing test.
+
+    Checked against the *effective* vocabulary — core's set unioned with what the enabled bundles
+    declare — so that moving `job-result` and `bo-candidate` out of core's frozenset and into the
+    `qm` and `bo` manifests does not quietly drop them from this guarantee. They are exactly the
+    two types the docstring above names, so checking core's half alone would have retired the test's
+    own example.
     """
     present = {note.type for note in _notes()}
-    missing = sorted(KNOWN_NOTE_TYPES - present)
+    missing = sorted(known_note_types() - present)
     assert not missing, f"never instantiated: {missing}"
 
 
 def test_every_known_relation_has_a_real_instance() -> None:
     """Same argument for edges: a vocabulary entry with no instance is untested surface."""
     used = {relation.rel for note in _notes() for relation in note.outgoing_relations()}
-    assert not KNOWN_RELATIONS - used, f"never used: {sorted(KNOWN_RELATIONS - used)}"
+    assert not known_relations() - used, f"never used: {sorted(known_relations() - used)}"
 
 
 def test_the_graph_is_connected_enough_to_traverse() -> None:

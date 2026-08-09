@@ -114,7 +114,7 @@ from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.metrics import declared_metric_names
-from chemclaw.kg.note import KNOWN_NOTE_TYPES
+from chemclaw.kg.note import known_note_types
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
 # internals a skill explains conceptually. Kept explicit and short — adding one is a review
@@ -434,7 +434,11 @@ def check_prose_contract() -> list[str]:
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):
             problems.append(f"{origin}: names {name} but no such agent tool is registered")
-        for note_type in sorted(referenced_note_types(text) - KNOWN_NOTE_TYPES):
+        # The *effective* vocabulary — core's set plus what the enabled bundles declare — because
+        # that is what `kg-validate` will accept, and this check exists to predict its verdict.
+        # Against core's half alone, prose naming `job-result` (minted by the `qm` bundle) would be
+        # reported as unknown while the note it produces validates perfectly.
+        for note_type in sorted(referenced_note_types(text) - known_note_types()):
             problems.append(
                 f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "
                 "note type — the PR-gate would open a branch that `kg-validate` then rejects"

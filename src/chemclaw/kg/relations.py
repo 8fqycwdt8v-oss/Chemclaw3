@@ -48,3 +48,15 @@ KNOWN_RELATIONS: frozenset[str] = frozenset(
         "part-of",  # this note belongs to that campaign, report or collection
     }
 )
+
+
+def known_relations() -> frozenset[str]:
+    """The adopted vocabulary plus the relations the enabled connector bundles declare.
+
+    The relation-side twin of `chemclaw.kg.note.known_note_types` — same argument, same closed set,
+    same lazy import of the connector registry, and the same reason the import is lazy. See that
+    function; duplicating the reasoning here would be two copies of one decision.
+    """
+    from chemclaw.connectors.registry import declared_relations
+
+    return KNOWN_RELATIONS | declared_relations()

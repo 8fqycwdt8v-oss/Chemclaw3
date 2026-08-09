@@ -42,6 +42,7 @@ from chemclaw.connectors.jobs import _params_model, build_job_tool, resolve_prec
 from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
 from chemclaw.connectors.registry import ConnectorError, discovered, enabled, job_tools
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 
 # Name prefixes that mark a tool as mutating. A prefix list rather than an exact allowlist because
 # the rule is about *intent*: a connector author naming a tool `index_*`, `write_*`, `delete_*` or
@@ -268,8 +269,24 @@ def validate_connectors() -> list[str]:
         # 4).
         names = [manifest.name for manifest in enabled()]
         job_tools()
-    except ConnectorError as exc:
-        problems.append(str(exc))
+    except ChemclawError as exc:
+        # `ChemclawError`, not `ConnectorError`. `job_tools()` rebuilds every enabled bundle's job
+        # tools, so it re-raises whatever `build_job_tool` raises — and that is `ConnectorJobError`,
+        # which is a *sibling* of `ConnectorError` under `ChemclawError`, not a subclass. A bundle
+        # with an unresolvable `params_model` therefore escaped this arm and killed the CLI with a
+        # traceback, after `_job_problems` above had already worked out the clean sentence and put
+        # it in `problems` — the report was computed and then thrown away on the way out.
+        #
+        # The common base is the right width here for the reason both classes' docstrings give:
+        # every one of them means "this deployment is misconfigured", which is exactly what this
+        # entry point exists to print rather than raise.
+        #
+        # Appended only if nothing above already said it. `_job_problems` builds the same tools per
+        # manifest and reports the same fault with the connector and job named, so re-appending the
+        # bare message would describe one fault twice and lose the more specific line in the noise.
+        message = str(exc)
+        if not any(message in problem for problem in problems):
+            problems.append(message)
     else:
         if not names:
             problems.append("no connectors enabled — the agent would have no out-of-process tools")
