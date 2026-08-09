@@ -79,6 +79,22 @@ class SectionRequest(BaseModel):
     It exists at all because the fan-out addresses each child workflow by its argument, so an
     identity that stops at the parent never reaches the activity that does the retrieving — which is
     exactly where an entitlement is checked.
+
+    **`requested_by` stays optional here while `ReportRequest.requested_by` is `min_length=1`, and
+    that pair is deliberate rather than the drift it looks like.** The two are validated at
+    different places for different failures. `ReportRequest` is the front door: it is constructed
+    once, by `request_development_report`, from `require_actor()`, and rejecting an unattributed
+    request there costs a caller an error message. `SectionRequest` is a *derived* payload that
+    crosses the durable boundary — it is serialized into workflow history and deserialized later,
+    possibly by a differently-versioned worker. A `min_length=1` there turns a payload the workflow
+    already accepted into an activity that fails identically on every retry, and history is
+    immutable, so the run cannot be repaired: a front-door constraint is a rejection, the same
+    constraint on a replayed payload is a wedge.
+
+    What makes the laxness safe is that the absent case fails *closed*. `retrieve_section` stamps no
+    identity when there is no requester, so an entitlement-gated source correctly contributes
+    nothing; the widening direction — a run reading more than its requester may — is unreachable
+    because the only constructor of this type passes a `ReportRequest`'s validated actor through.
     """
 
     section: "ReportSection"

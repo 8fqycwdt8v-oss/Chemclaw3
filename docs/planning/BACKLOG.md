@@ -5,6 +5,22 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 
 ## Open — Left by the deep-review fix batch (2026-08-09)
 
+**Migrations 040 and 041 are deliberately not consolidated.** A review argued they should be one
+file: no deployment has ever applied 040 without 041, so the split records the order the author
+discovered things rather than a sequence any operator walks, and `NOT NULL DEFAULT ''` on the
+`ADD COLUMN` would fold 041's two `UPDATE`s and two `SET NOT NULL`s into it. That argument was
+sound when both files were unmerged. **They are now on `main`**, which changes the answer: this
+repository's rule is that a merged migration's statements never change
+(`test_no_merged_migration_had_its_statements_changed`), and consolidating means rewriting one
+merged file and deleting another. Rewriting history to tidy a seam is not worth suspending a rule
+the same campaign spent a lane strengthening — and the checksum guard would be correct to fail it.
+What *is* still worth doing is the 040 header, which promises a tail-drop that 041 then deletes, so
+a reader of 040 alone is told about a mechanism that does not exist.
+*Trigger:* the header seam — any edit to `infra/sql/040_document_chunking_key.sql`. The
+consolidation itself: never, unless the migration set is ever rebuilt from scratch before a first
+production deployment.
+
+
 Five correctness defects found in the hardening campaign's own output; four were fixed in place and
 one was refuted in its remedy. This is the piece deliberately not done.
 
@@ -571,12 +587,40 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       chunks), so this knob's absence is now felt on both indexes and the document one is the table
       designed for millions of rows. Measured against an exact scan: recall@10 **1.0000** on
       clustered vectors (the shape a real corpus has) and **0.116** on uniformly random ones (the
-      pathological case for any ANN index). **And a `within`/eligibility set makes it worse**: the
-      predicate is a post-filter over the ef_search candidate list, not a bound on the scan, so a
-      selective one returns fewer than k — measured, `Index Scan` + `Rows Removed by Filter`, and
-      5 of 8 rows at `within=0.10` with the index forced. `GraphRetriever` always passes one.
-      No knob exists to trade latency back for recall. *Trigger:* a corpus where a note a chemist
-      knows exists does not come back, or the first recall regression an eval catches.
+      pathological case for any ANN index). **And an eligibility predicate makes it worse**: it is
+      a post-filter over the ef_search candidate list, not a bound on the scan, so a selective one
+      returns fewer than k. **Re-measured, because the number this row used to carry — "5 of 8 at
+      `within=0.10` with the index forced" — does not reproduce.** `enable_seqscan=off` does not
+      force the *vector* index for a `note_id = ANY(...)` scope: `EXPLAIN ANALYZE` at N=20,000,
+      tight clusters, k=8, `ef_search=40` gives `Index Scan using note_index_pkey` + top-N
+      heapsort, which is exact — 8 of 8, and 0 of 20 queries short in every note-index
+      configuration tried, planner or forced. Where the shortfall is real is the *document* index,
+      whose eligibility is an `EXISTS` over `document_files` the planner cannot collapse into a key
+      scan — but it is **small**: same corpus size and k, tables `ANALYZE`d, 2 of 20 queries short
+      at a source holding 90% of the table and 1 of 20 at one holding 0.5%, none at all on
+      uniform-random embeddings. **The large numbers came from stale statistics, not from ANN
+      recall**: before `ANALYZE`, the same statements went short on 13 of 20 and 20 of 20 queries
+      (6 rows of a possible 160 at the narrowest), because the planner was working from default
+      estimates. `hnsw.iterative_scan` is `off` on this server and is the knob that addresses the
+      residual directly; `hnsw.ef_search` is the blunter one. Neither is a setting, and neither is
+      the first thing to reach for — autovacuum's `ANALYZE` on a bulk-loaded corpus is.
+      *Trigger:* a corpus where a note or a document a chemist knows exists does not come back, or
+      the first recall regression an eval catches.
+
+- [ ] **An unfiltered external-store search ranks across every share and can return nothing** —
+      [S]. `ExternalVectorDocumentIndex._eligible_documents` returns `None` when a query carries no
+      tag or date filter, so `VectorStore.search` ranks over the whole collection — which holds
+      every enabled share's points — and `_resolve` then drops the hits belonging to another
+      source. That is exactly the post-filter the scope exists to avoid, moved one level out.
+      Measured against the live catalogue with the reference store: 100 chunks of another share
+      close to the query, 10 of the queried share further away, k=8 → **0 hits of 8**. The fix is to
+      scope unconditionally, and its cost is the residual `_eligible_documents` already states: a
+      `SELECT DISTINCT doc_id` over the source on *every* dense query, which on a single-share
+      million-document deployment (the common shape) is the expensive end of the same trade. A
+      per-source collection is not an escape — a document held by two shares has one chunk set and
+      one embedding call by design, which is what makes a TB share affordable. Unreachable while
+      `vector_store_provider` is `pgvector`. *Trigger:* the first deployment that sets a non-pgvector
+      provider, or the first that enables a second document share.
 
 - [ ] **`chunking_key` names the chunk *settings*, not the chunker** — [S]. `041` made
       `(doc_id, chunking_key, ordinal)` a chunk row's identity, and `chunking_key` is

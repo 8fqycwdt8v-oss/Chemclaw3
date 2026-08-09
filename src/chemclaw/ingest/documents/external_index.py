@@ -4,7 +4,8 @@ The other `DocumentIndex` implementation (`PostgresDocumentIndex` is the default
 whose embeddings live in a dedicated vector database. It is a subclass rather than a rewrite,
 because everything except the dense half is *identical*: the file table, the fingerprint diff, the
 mark, the sweep's clock and the lexical leg are relational work that does not move and must not be
-duplicated. Five of the ten `DocumentIndex` methods are therefore inherited untouched.
+duplicated. Six of the ten `DocumentIndex` methods are therefore inherited untouched — counted:
+`upsert`, `store_embeddings`, `prune_stale` and `search_dense` are the four that move.
 
 **What moves, and what does not.** The record is
 `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The short version: a vector
@@ -36,6 +37,7 @@ from datetime import datetime
 from chemclaw.core.config import settings
 from chemclaw.ingest.documents.index import (
     CITATION_SQL,
+    CLAIMED_SQL,
     ChunkRecord,
     DocumentFilter,
     DocumentHit,
@@ -47,27 +49,40 @@ from chemclaw.retrieval.vectors.base import VectorMatch, VectorPoint, VectorStor
 logger = logging.getLogger(__name__)
 
 
-def point_id(doc_id: str, ordinal: int) -> str:
+def point_id(doc_id: str, chunking_key: str, ordinal: int) -> str:
     """The vector store's address for one chunk — the catalogue key, rendered.
 
-    `doc_id#ordinal`, which is the chunk's primary key in `document_chunks`. One function, because
-    the write and the read must agree and a second spelling of a key is how they stop agreeing.
+    `doc_id#chunking_key#ordinal`, which is the chunk's whole primary key in `document_chunks`
+    (`infra/sql/041`). One function, because the write and the read must agree and a second
+    spelling of a key is how they stop agreeing.
+
+    **All three parts, because two of them do not identify a row.** `doc_id` is the hash of the
+    parsed text and is shared across shares by design, so two shares holding one document at
+    different chunk sizes both address ordinal 0 — measured against the live catalogue, the coarse
+    share's vector overwrote the fine share's under a two-part id, and the fine share then answered
+    every query with the other share's vector. That is the same silent-wrong-vector failure
+    `embedding_key` (038) and the chunking key (040/041) were added to close, one system over.
     """
-    return f"{doc_id}#{ordinal}"
+    return f"{doc_id}#{chunking_key}#{ordinal}"
 
 
-def parse_point_id(reference: str) -> tuple[str, int] | None:
-    """Read a point id back into `(doc_id, ordinal)`, or `None` when it is not one.
+def parse_point_id(reference: str) -> tuple[str, str, int] | None:
+    """Read a point id back into `(doc_id, chunking_key, ordinal)`, or `None` when it is not one.
+
+    Split on the last two `#`, never the first: a chunking key is `digits:digits` and an ordinal is
+    digits, so the tail is unambiguous whatever a `doc_id` contains.
 
     `None` rather than an exception: the store is a separate system that may hold points this
-    catalogue no longer knows about — a crashed run, a collection shared by mistake — and one
-    unreadable id must degrade to "this hit cannot be resolved" rather than fail the search.
+    catalogue no longer knows about — a crashed run, a collection shared by mistake, or an id
+    written under an older shape — and one unreadable id must degrade to "this hit cannot be
+    resolved" rather than fail the search.
     """
-    doc_id, separator, ordinal = reference.rpartition("#")
-    if not separator or not doc_id:
+    head, ordinal_separator, ordinal = reference.rpartition("#")
+    doc_id, chunking_separator, chunking_key = head.rpartition("#")
+    if not ordinal_separator or not chunking_separator or not doc_id:
         return None
     try:
-        return doc_id, int(ordinal)
+        return doc_id, chunking_key, int(ordinal)
     except ValueError:
         return None
 
@@ -78,14 +93,20 @@ def _points_for(chunks: list[ChunkRecord]) -> list[VectorPoint]:
     **One builder, because the group is not optional and defaults to something plausible.** A
     `VectorPoint` with no `group` falls back to grouping by its own id, which is right for anything
     embedded whole and silently wrong here: a re-embedded chunk written that way would be filed
-    under `doc-abc#3` instead of `doc-abc`, and would then be invisible to every *filtered* search
-    while still answering unfiltered ones. Two call sites built these points and only one passed the
-    group, so this existed as a bug for the length of one edit — it is a function now so there is
-    nowhere for the second caller to differ.
+    under `doc-abc#400:40#3` instead of `doc-abc`, and would then be invisible to every *filtered*
+    search while still answering unfiltered ones. Two call sites built these points and only one
+    passed the group, so this existed as a bug for the length of one edit — it is a function now so
+    there is nowhere for the second caller to differ.
+
+    **The group stays the document even though the id no longer is one.** Eligibility is a property
+    of the file rows a document is reachable through, so it is decided per document and can never be
+    finer; narrowing the group to the cutting as well would make the scope a set of pairs that
+    `_eligible_documents` would have to enumerate, buying nothing a `_resolve` on the full key does
+    not already give.
     """
     return [
         VectorPoint(
-            id=point_id(chunk.doc_id, chunk.ordinal),
+            id=point_id(chunk.doc_id, chunk.chunking_key, chunk.ordinal),
             vector=chunk.embedding,
             # Eligibility is decided per document, so the document is what a scope narrows on.
             group=chunk.doc_id,
@@ -148,21 +169,42 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         await self._store.upsert(self._collection, _points_for(chunks))
         async with self._connection() as conn:
             for chunk in chunks:
+                # Addressed by the *whole* primary key, exactly as the base's `_store_embedding` is.
+                # Without the chunking clause a re-embed of one share's cutting stamped the current
+                # key onto another share's row for the same text — measured: re-embedding
+                # `(probe-doc, 400:40, 0)` marked `(probe-doc, 4000:400, 0)` current under a model
+                # that never embedded it, and `reembed_stale` would then skip it forever.
                 await conn.execute(
                     "UPDATE document_chunks SET embedding_key = %(key)s "
-                    "WHERE doc_id = %(doc)s AND ordinal = %(ord)s",
-                    {"key": key, "doc": chunk.doc_id, "ord": chunk.ordinal},
+                    "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s",
+                    {
+                        "key": key,
+                        "doc": chunk.doc_id,
+                        "chunking": chunk.chunking_key,
+                        "ord": chunk.ordinal,
+                    },
                 )
             await conn.commit()
+
+    async def _forget_vectors(self, chunks: list[tuple[str, str, int]]) -> None:
+        """Delete the points that addressed these now-deleted chunk rows.
+
+        The other half of every chunk deletion in this deployment, and the one place it happens:
+        the base class calls this after its per-write cleanup, `prune_stale` below after the sweep.
+        """
+        if not chunks:
+            return
+        await self._store.delete(self._collection, [point_id(*chunk) for chunk in chunks])
 
     async def prune_stale(self, source: str, before: datetime) -> int:
         """Sweep the catalogue, then delete the vectors of whatever chunks that orphaned.
 
         Overridden rather than inherited because the base deletes orphan chunks and discards which
-        ones; here they have to be named, so their points can be removed from the other system. The
-        catalogue is committed first and the store second — the catalogue is the record, and a point
-        whose chunk is gone is unreachable (every search resolves its hits through the catalogue)
-        rather than wrong.
+        ones — deliberately, since naming every row of a corpus-wide sweep costs memory a deployment
+        whose vectors are in the same row has no use for. Here they have to be named, so their
+        points can be removed from the other system. The catalogue is committed first and the store
+        second — the catalogue is the record, and a point whose chunk is gone is unreachable (every
+        search resolves its hits through the catalogue) rather than wrong.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -171,19 +213,18 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                     (source, before),
                 )
                 removed = cur.rowcount
-                # Orphans across every source, exactly as the base does it: identical content
-                # reachable through a copy on another share must stay indexed.
+                # Orphans across every source, and by the *imported* predicate rather than a local
+                # spelling of it: identical content reachable through a copy on another share must
+                # stay indexed, and a cutting no file row claims must go. The spelling this replaced
+                # tested only `f.doc_id = c.doc_id`, so a superseded cutting survived here and was
+                # deleted by the base class's next sweep — two definitions of "orphan", disagreeing.
                 await cur.execute(
-                    "DELETE FROM document_chunks c WHERE NOT EXISTS "
-                    "(SELECT 1 FROM document_files f WHERE f.doc_id = c.doc_id) "
-                    "RETURNING c.doc_id, c.ordinal"
+                    f"DELETE FROM document_chunks c WHERE NOT {CLAIMED_SQL} "
+                    "RETURNING c.doc_id, c.chunking_key, c.ordinal"
                 )
-                orphaned = await cur.fetchall()
+                orphaned = [(row[0], row[1], row[2]) for row in await cur.fetchall()]
             await conn.commit()
-        if orphaned:
-            await self._store.delete(
-                self._collection, [point_id(row[0], row[1]) for row in orphaned]
-            )
+        await self._forget_vectors(orphaned)
         return removed
 
     async def search_dense(
@@ -197,8 +238,17 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
            satisfy it, and that set is handed *into* the search. Filtering the results afterwards
            would return nothing whenever the k nearest vectors all belong to another tag — the
            recall defect `BACKLOG.md` already records against pgvector's post-filtering, which this
-           store is partly attached to avoid. An unfiltered query passes no scope and pays nothing,
-           which is the common case.
+           store is partly attached to avoid. An unfiltered query passes no scope and pays nothing.
+
+           **That last sentence is a statement about cost, and the recall it buys is not free.**
+           One collection holds every share's points, so an unfiltered query ranks across all of
+           them and `_resolve` discards whatever belongs to another source — the same post-filter
+           this step exists to avoid, moved one level out. Measured: 100 chunks of another share
+           near the query and 10 of this one further away, k=8, returned **0 hits of 8**. Scoping
+           unconditionally would fix it and would make every query build a set of the source's
+           whole document list, which on a single-share deployment — the common shape — is the
+           expensive end of the same trade. Neither end is free, so this is a
+           `docs/planning/BACKLOG.md` row with a trigger rather than a choice made here.
         2. **Search**, in the store, over vectors only.
         3. **Resolve**, in the catalogue: the content, the coordinate and the citation path for the
            ids that came back. A small keyed lookup over `top_k` rows, not a scan.
@@ -263,7 +313,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         citation resolves to no path under these filters, is not evidence a reader could check, and
         the contract is that a hit cites something openable.
         """
-        addressed: dict[tuple[str, int], float] = {}
+        addressed: dict[tuple[str, str, int], float] = {}
         for match in matches:
             parsed = parse_point_id(match.id)
             if parsed is None:
@@ -274,35 +324,43 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             addressed[parsed] = match.score
         if not addressed:
             return []
+        # Keyed on the whole chunk identity, not on `(doc_id, ordinal)`: a scope narrows on
+        # documents, so a document two shares cut differently puts both cuttings' points in range,
+        # and a two-column join returned the *other* share's row alongside the addressed one. Only
+        # `CITATION_SQL` dropped it, which made a filter carry a correctness obligation it is not
+        # for.
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
+                    "SELECT c.doc_id, c.chunking_key, c.ordinal, c.content, c.coordinate, "
                     f"{CITATION_SQL}"
                     "FROM document_chunks c "
-                    "JOIN unnest(%(docs)s::text[], %(ords)s::int[]) AS wanted(doc_id, ordinal) "
-                    "ON wanted.doc_id = c.doc_id AND wanted.ordinal = c.ordinal",
+                    "JOIN unnest(%(docs)s::text[], %(chunkings)s::text[], %(ords)s::int[]) "
+                    "AS wanted(doc_id, chunking_key, ordinal) "
+                    "ON wanted.doc_id = c.doc_id AND wanted.chunking_key = c.chunking_key "
+                    "AND wanted.ordinal = c.ordinal",
                     {
                         "src": source,
                         "tag": filters.tag or None,
                         "since": filters.since,
                         "until": filters.until,
-                        "docs": [doc for doc, _ in addressed],
-                        "ords": [ordinal for _, ordinal in addressed],
+                        "docs": [doc for doc, _, _ in addressed],
+                        "chunkings": [chunking for _, chunking, _ in addressed],
+                        "ords": [ordinal for _, _, ordinal in addressed],
                     },
                 )
                 rows = await cur.fetchall()
         hits = [
             DocumentHit(
                 doc_id=row[0],
-                ordinal=row[1],
-                content=row[2],
-                coordinate=row[3],
-                path=row[4],
-                score=addressed[(row[0], row[1])],
+                ordinal=row[2],
+                content=row[3],
+                coordinate=row[4],
+                path=row[5],
+                score=addressed[(row[0], row[1], row[2])],
             )
             for row in rows
-            if row[4]
+            if row[5]
         ]
         # The store ranked them; the catalogue only added text. Re-sorted because a SQL result set
         # has no order of its own, and the tie-break matches every other index here.

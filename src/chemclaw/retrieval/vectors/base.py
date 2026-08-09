@@ -15,11 +15,12 @@ stays in Postgres and only the dense half is pluggable. What a vector database i
 operations below.
 
 **A point carries an id, a vector, and one grouping key — and no other metadata.** The id addresses
-the point (for a document chunk, `doc_id#ordinal`); the `group` names the object it is a piece of
-(the `doc_id`). Everything else a query might filter on — tags, dates, which share a file came from
-— stays in the catalogue. Pushing *those* into the store's payload is the textbook shape and the
-wrong one here: a tag belongs to a *path* and a chunk belongs to *content*, so one report filed in
-two project folders has two tag sets and one set of chunks. Storing their union would let a tag
+the point (for a document chunk, `doc_id#chunking_key#ordinal` — the row's whole primary key); the
+`group` names the object it is a piece of (the `doc_id`). Everything else a query might filter on —
+tags, dates, which share a file came from — stays in the catalogue. Pushing *those* into the
+store's payload is the textbook shape and the wrong one here: a tag belongs to a *path* and a chunk
+belongs to *content*, so one report filed in two project folders has two tag sets and one set of
+chunks. Storing their union would let a tag
 filter match a chunk whose other copy carries the tag — a silent wrong answer bought to save a round
 trip. A group is different in kind: it is the point's own identity, not an attribute of some other
 row, so it cannot go stale against anything.
@@ -74,7 +75,8 @@ class VectorPoint(BaseModel):
     the failure `document_chunks` avoids by keying on content in the first place.
     """
 
-    # `doc_id#ordinal` for a document chunk. Opaque to the store; the catalogue parses it back.
+    # `doc_id#chunking_key#ordinal` for a document chunk — the row's whole primary key, because
+    # two of the three do not identify one. Opaque to the store; the catalogue parses it back.
     id: str = Field(min_length=1)
     vector: list[float]
     # The object this point is a piece of — a `doc_id` for a chunk. What `search`'s scope matches

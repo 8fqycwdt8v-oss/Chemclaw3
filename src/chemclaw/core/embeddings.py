@@ -20,6 +20,7 @@ Two providers:
 """
 
 import hashlib
+import logging
 import math
 import re
 from functools import lru_cache
@@ -27,6 +28,8 @@ from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
+
+log = logging.getLogger(__name__)
 
 # Tokenizer for the hash embedder: lowercase alphanumeric runs. Deliberately trivial — the hash
 # embedder is a deterministic dev stand-in, not a linguistic model.
@@ -64,8 +67,9 @@ def embedding_config_key() -> str:
     reading as current, which is precisely the silent-corruption case the column exists to prevent.
     Only `openai_compatible` is affected: the `hash` embedder never reaches the endpoint, so naming
     it there would churn every dev vector on a setting that provably cannot change one. The slot
-    stays in the key (empty) rather than disappearing, so the key has one shape for every provider.
-    A trailing slash is stripped because `.../v1` and `.../v1/` address the same endpoint, and a
+    stays in the key — filled with `ep-none` rather than left empty — so the key has one shape for
+    every provider *and* that shape says what it means. A trailing slash is stripped because
+    `.../v1` and `.../v1/` address the same endpoint, and a
     corpus-wide re-embed is too expensive to trigger on a spelling.
 
     **The endpoint is *identified*, not reproduced.** The slot holds a digest of the URL rather than
@@ -77,17 +81,55 @@ def embedding_config_key() -> str:
     of a corpus. A digest keeps the only property the key needs — two endpoints differ, one endpoint
     does not — and the readable part (provider, model, dimension) is what an operator reads a key
     for anyway. Twelve hex characters, because the population being distinguished is the handful of
-    endpoints one deployment has ever pointed at, not an adversarially chosen set.
+    endpoints one deployment has ever pointed at, not an adversarially chosen set. `_endpoint_slot`
+    logs the URL→digest mapping once, which is the only place an operator can read one back.
+
+    **Every slot is filled, and the one free-form slot is last.** The shape is
+    `provider:endpoint:dDIM:model` — `hash:ep-none:d1536:model-none` on a default deployment,
+    `openai_compatible:ep-b7be08f1d976:d1536:text-embedding-3-large` on a real one. The previous
+    order rendered the default as `hash:::1536`: two empty slots, not one, since `embedding_model`
+    also defaults to `""`, and a key an operator reads out of two durable columns must not look
+    truncated. The dimension moved ahead of the model and is prefixed `d` for the same reason the
+    model went last — a model name is free-form and the separator is `:`, so
+    `nomic-embed-text:v1.5` (ordinary Ollama/vLLM naming) produced `…:nomic-embed-text:v1.5:1536`,
+    a key with five fields and no way to tell which. With the free-form field last, a colon inside
+    it can never be mistaken for a separator.
+
+    **Changing this format re-embeds every corpus**, which is exactly why it changed now: the key is
+    compared for equality, so a new shape makes every stored row stale and `reembed_stale` /
+    `reindex_notes` rebuild it — the self-healing 038/039 were added for. Today that is a dev
+    database. After the first real deployment it is a bill, so the shape had to be settled before
+    one exists, not improved afterwards.
     """
     endpoint = (
-        f"ep-{stable_hash(settings.llm_base_url.rstrip('/'), chars=12)}"
+        _endpoint_slot(settings.llm_base_url)
         if settings.embedding_provider == "openai_compatible"
-        else ""
+        else "ep-none"
     )
-    return (
-        f"{settings.embedding_provider}:{endpoint}:"
-        f"{settings.embedding_model}:{settings.embedding_dim}"
+    model = settings.embedding_model or "model-none"
+    return f"{settings.embedding_provider}:{endpoint}:d{settings.embedding_dim}:{model}"
+
+
+@lru_cache(maxsize=8)
+def _endpoint_slot(base_url: str) -> str:
+    """This endpoint's slot in the key, logged once per URL so an operator can read one back.
+
+    The digest is deliberately irreversible (see `embedding_config_key`), which leaves an operator
+    holding `ep-b7be08f1d976` out of a database column unable to answer "which endpoint is this?"
+    without recomputing it by hand. One INFO line at first use is the whole fix: the mapping exists
+    somewhere bounded and operator-facing instead of nowhere.
+
+    `lru_cache` is what makes "once" true — the key is computed per text on the embedding path, so
+    an unmemoized log would be one line per embedded chunk. It also stops re-hashing the same URL
+    on every call. The URL itself is safe to log because `SecretRedactingFilter` strips userinfo
+    from every record that reaches a handler; it is *not* safe to persist, which is why the column
+    gets the digest.
+    """
+    digest = f"ep-{stable_hash(base_url.rstrip('/'), chars=12)}"
+    log.info(
+        "embedding endpoint %s is recorded as %s in every stored embedding_key", base_url, digest
     )
+    return digest
 
 
 def _cache_key(text: str) -> _CacheKey:

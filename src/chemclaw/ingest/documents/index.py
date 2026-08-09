@@ -206,6 +206,13 @@ class DocumentIndex(Protocol):
         both the model and the chunk size moved, which is exactly what 038 and 040 do together.
         It is not fixable by stamping the chunking during a re-embed: the chunking is part of the
         row's identity (041) and a re-embed does not re-cut anything.
+
+        **That argument covers a re-chunk and not the other case the filter also excludes.** A
+        share dropped from `CHEMCLAW_DATA_SOURCES` leaves rows no crawl will ever touch again, so
+        "the crawl will redo it" is false for them. Skipping them is still right, and for a
+        different reason: no search reaches a disabled source either, so a vector nothing can
+        return is not worth an embedding call. They go when the share's rows are swept, or the day
+        it is re-enabled and re-crawled.
         """
         ...
 
@@ -245,7 +252,36 @@ class DocumentIndex(Protocol):
     async def search_dense(
         self, source: str, query_embedding: list[float], top_k: int, filters: DocumentFilter
     ) -> list[DocumentHit]:
-        """Return up to `top_k` chunks most cosine-similar to `query_embedding`, best first."""
+        """Return up to `top_k` chunks most cosine-similar to `query_embedding`, best first.
+
+        Restricted to chunks `source` holds under `filters`, and that restriction is in the
+        backend's own query rather than applied to the result, so the k slots are mostly not spent
+        on chunks the caller would discard.
+
+        **"Mostly" is the contract: fewer than `top_k` hits does not mean there were no others.**
+        The same caveat `NoteIndex.search_dense` carries. On the approximate backend the
+        eligibility predicate sits above the inner `LIMIT k`, so it filters the vector index's
+        candidate list instead of bounding what the scan considers, and a chunk that would have
+        been a hit can be cut before the filter ever sees it. Only `InMemoryDocumentIndex` and
+        `search_lexical` are exact.
+
+        **Measured, because the size of this matters and is easy to overstate.** 20,000 chunks,
+        20,000 file rows, k=8, 20 queries, pgvector 0.8.0, `hnsw.ef_search=40`,
+        `hnsw.iterative_scan=off`, tables `ANALYZE`d, planner's own plan:
+
+            corpus          source 90%        source 9.5%   source 0.5%
+            clustered       2/20 short        0/20 short    1/20 short
+                            (144/160 rows)    (160/160)     (152/160)
+            uniform-random  0/20              0/20          0/20
+
+        So it is real and it is small. **On the same corpora with stale statistics — no `ANALYZE`
+        after the load — the same statements went short on 13 of 20 and 20 of 20 queries, returning
+        6 rows of a possible 160 at the narrowest.** That is worth knowing on its own: the worst
+        behaviour measured here was a planner working from default estimates, not the index being
+        approximate, so a corpus loaded in bulk and not analyzed is the case to watch.
+        `hnsw.iterative_scan` is the knob that addresses the residual, and it has a
+        `docs/planning/BACKLOG.md` row rather than a setting.
+        """
         ...
 
     async def search_lexical(
@@ -335,8 +371,8 @@ class InMemoryDocumentIndex:
     def _claimed(self) -> set[tuple[str, str]]:
         """Every `(doc_id, chunking_key)` some file row names — the live chunk sets.
 
-        The in-memory mirror of `_CLAIMED`. A chunk set outside it belongs to no path on any share:
-        a superseded chunk size, or a document whose last file row was swept.
+        The in-memory mirror of `CLAIMED_SQL`. A chunk set outside it belongs to no path on any
+        share: a superseded chunk size, or a document whose last file row was swept.
         """
         return {(f.doc_id, f.chunking_key) for f in self._files.values()}
 
@@ -514,35 +550,42 @@ def _vector_literal(embedding: list[float]) -> str:
 # What makes a chunk row live at all: some file row, on any share, names both its document *and*
 # its cutting. One definition, used by the sweep and by the per-write cleanup, because "orphan"
 # has to mean the same thing in both or one of them deletes rows the other keeps.
-_CLAIMED = (
+#
+# Public for the reason `CITATION_SQL` is: `external_index.py` sweeps the same orphans, and a third
+# spelling in that file is not a hypothetical — it had one (`f.doc_id = c.doc_id`, with no chunking
+# clause), and it kept a superseded cutting the base class then deleted on the next call.
+CLAIMED_SQL = (
     "EXISTS (SELECT 1 FROM document_files f "
     "WHERE f.doc_id = c.doc_id AND f.chunking_key = c.chunking_key)"
+)
+# Which file rows of this source hold this chunk, under this chunking, within these filters.
+#
+# **One body, because the two expressions built from it are a contract, not a coincidence.**
+# `_ELIGIBLE` decides which chunks compete for the k slots; `CITATION_SQL` decides whether a winner
+# is citable. Diverge them and the inner `LIMIT k` fills with rows whose citation resolves to NULL,
+# `_run` drops them, and the search returns fewer than k — indistinguishable from the approximate
+# shortfall `DocumentIndex.search_dense` documents, and therefore invisible. They were 293
+# byte-identical characters written twice.
+_FILE_MATCH = (
+    "FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
+    "AND f.chunking_key = c.chunking_key "
+    "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
+    "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
+    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)"
 )
 # The file-row predicate both searches share: a chunk is eligible when at least one path in this
 # source holds it, was indexed under the same chunking, and satisfies the filters. `EXISTS` rather
 # than a join, so a document copied into four folders contributes one row rather than four
 # competing for the same top-k slots. The chunking clause is what keeps a share citing its own
 # cutting when another share holds the same document at a different chunk size.
-_ELIGIBLE = (
-    "EXISTS (SELECT 1 FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
-    "AND f.chunking_key = c.chunking_key "
-    "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
-    "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
-    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)) "
-)
+_ELIGIBLE = f"EXISTS (SELECT 1 {_FILE_MATCH}) "
 # The citation, resolved in the same statement: the smallest matching path. Deterministic, so a
 # repeated question cites the same file rather than alternating between copies.
 #
 # Public because `external_index.py` resolves its hits with the identical rule after searching an
 # external store. Two spellings of "which path does this content get cited as" would be two
 # citation policies, and they would diverge the first time either was tuned.
-CITATION_SQL = (
-    "(SELECT min(f.path) FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
-    "AND f.chunking_key = c.chunking_key "
-    "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
-    "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
-    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)) AS path "
-)
+CITATION_SQL = f"(SELECT min(f.path) {_FILE_MATCH}) AS path "
 
 
 class PostgresDocumentIndex:
@@ -582,12 +625,21 @@ class PostgresDocumentIndex:
             "embedding_key = EXCLUDED.embedding_key"
         )
         # The previous cutting of a document this write re-chunked. Run once at the end of the same
-        # transaction — *after* the file rows, so `_CLAIMED` reads what this write just said — so a
-        # re-chunk cannot leave rows behind that nothing points at and `reembed_stale` would then
-        # adopt as current. Scoped to the documents written, so it is a primary-key range rather
-        # than the table scan the sweep does.
+        # transaction — *after* the file rows, so `CLAIMED_SQL` reads what this write just said —
+        # so a re-chunk cannot leave rows behind that nothing points at and `reembed_stale` would
+        # then adopt as current. Scoped to the documents written, so it is a primary-key range
+        # rather than the table scan the sweep does.
+        #
+        # **It names what it deleted.** Deleting a chunk row is only half the deletion when the
+        # vectors live in another system, and a subclass cannot delete points a statement never
+        # named — which is exactly how this per-write cleanup handed `ExternalVectorDocumentIndex`
+        # an obligation it had no way to see (measured: 3 points left behind by a re-chunk that
+        # deleted 3 rows). `_forget_vectors` is the other half. Affordable here and deliberately
+        # *not* done by the sweep below: this scope is one crawl chunk's documents, that one is
+        # every orphan in the table.
         self._drop_unclaimed = (
-            f"DELETE FROM document_chunks c WHERE c.doc_id = ANY(%(docs)s) AND NOT {_CLAIMED}"
+            f"DELETE FROM document_chunks c WHERE c.doc_id = ANY(%(docs)s) AND NOT {CLAIMED_SQL} "
+            "RETURNING c.doc_id, c.chunking_key, c.ordinal"
         )
         # Re-embedding touches the vector and its key and nothing else: the content and coordinate
         # came from the document and did not change, and rewriting the tsvector would be work for
@@ -609,6 +661,13 @@ class PostgresDocumentIndex:
         # The `> 0` floor mirrors the in-memory reference: a zero or negatively-correlated chunk is
         # not a hit. Without it pgvector returns the top-k nearest unconditionally, so a narrow
         # corpus would surface unrelated documents as cited evidence.
+        #
+        # **`_ELIGIBLE` sits in the inner `WHERE`, above the `LIMIT k`, which makes it a post filter
+        # over the vector index's candidate list rather than a bound on what the scan considers.**
+        # The query can therefore return fewer than k. It is measured and quantified in
+        # `DocumentIndex.search_dense`'s docstring, which is where a caller reads it — small on an
+        # analyzed database, much larger on one whose statistics are stale. A separate property
+        # from the tie-break below: two corrections to one statement, with different causes.
         # **The tie-break sorts the k rows, not the table** — the same correction `note_index`
         # needed, and it matters more here: this is the table designed to hold millions of chunks
         # from a 500k-file share, where `note_index` holds thousands. `(doc_id, ordinal)` as a
@@ -658,6 +717,21 @@ class PostgresDocumentIndex:
         twenty lines of it.
         """
         return _vector_literal(chunk.embedding)
+
+    async def _forget_vectors(self, chunks: list[tuple[str, str, int]]) -> None:
+        """Delete whatever else addressed these now-deleted chunk rows. Nothing, here.
+
+        The counterpart to `_chunk_vector`: that hook decides where a vector is *written*, this one
+        where it is deleted. In this backend the vector is a column of the chunk row, so removing
+        the row removed it and there is nothing left to do. The external-store variant deletes the
+        points by name — and the reason this is a hook at all is that it could not: every statement
+        that deletes chunk rows lives in this class, and a delete that does not say what it removed
+        leaves the other system holding vectors nothing will ever address again.
+
+        Called *after* the commit, always, because the catalogue is the record: a point deleted for
+        a transaction that then rolled back would leave a chunk row whose vector is gone, which the
+        crawl reads as indexed and never repairs.
+        """
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
@@ -741,8 +815,10 @@ class PostgresDocumentIndex:
                     },
                 )
             touched = sorted({file.doc_id for file in files} | {c.doc_id for c in chunks})
-            await conn.execute(self._drop_unclaimed, {"docs": touched})
+            cur = await conn.execute(self._drop_unclaimed, {"docs": touched})
+            orphaned = [(row[0], row[1], row[2]) for row in await cur.fetchall()]
             await conn.commit()
+        await self._forget_vectors(orphaned)
 
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
         """Up to `limit` chunks of a live cutting whose vector is not the current configuration."""
@@ -807,8 +883,16 @@ class PostgresDocumentIndex:
                 removed = cur.rowcount
                 # Orphans, not "chunks of the deleted documents": the same content may still be
                 # reachable through a copy elsewhere on the share, and deleting by `doc_id` would
-                # silently un-index a file nobody touched. The same `_CLAIMED` the write path uses.
-                await cur.execute(f"DELETE FROM document_chunks c WHERE NOT {_CLAIMED}")
+                # silently un-index a file nobody touched. The same `CLAIMED_SQL` the write
+                # path uses.
+                #
+                # **No `RETURNING` here, unlike `_drop_unclaimed`.** That one is scoped to a crawl
+                # chunk's documents; this one is every orphan in the table, and a share removed
+                # from `CHEMCLAW_DATA_SOURCES` orphans the whole corpus at once — naming millions
+                # of rows to a client that discards them is a memory hazard bought for nothing,
+                # since the vector is a column of each row being deleted. The external-store
+                # variant overrides this method precisely because *it* has to pay that cost.
+                await cur.execute(f"DELETE FROM document_chunks c WHERE NOT {CLAIMED_SQL}")
             await conn.commit()
         return removed
 
@@ -824,6 +908,13 @@ class PostgresDocumentIndex:
 
     async def _run(self, statement: str, params: dict[str, object]) -> list[DocumentHit]:
         """Execute a ranked search and build hits, dropping any whose citation resolved to NULL.
+
+        **The NULL guard cannot fire for either statement in this class**, and that is a property
+        of `_FILE_MATCH` rather than an accident: both are built from the same body, `_ELIGIBLE`
+        asserts a row satisfying it exists, and `min(path)` over a `NOT NULL` column with a
+        non-empty match is never NULL. It stays because `external_index._resolve` composes
+        `CITATION_SQL` *without* `_ELIGIBLE` — it filters in the vector store instead — and there a
+        swept file row genuinely leaves a chunk with no citable path.
 
         Raises:
             DocumentIndexError: The backend could not answer. Wrapped rather than left as

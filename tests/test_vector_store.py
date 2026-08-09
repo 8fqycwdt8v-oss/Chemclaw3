@@ -173,12 +173,25 @@ async def test_a_zero_query_vector_matches_nothing_rather_than_ordering_over_nan
 
 def test_a_point_id_round_trips_through_the_catalogue_key() -> None:
     """The write and the read must agree; a doc id containing `#` must not break the parse."""
-    assert parse_point_id(point_id("doc-abc", 3)) == ("doc-abc", 3)
-    # `rpartition`, so only the final `#` separates the ordinal.
-    assert parse_point_id(point_id("doc#weird", 12)) == ("doc#weird", 12)
+    assert parse_point_id(point_id("doc-abc", _CHUNKING, 3)) == ("doc-abc", _CHUNKING, 3)
+    # The last two `#` separate the tail, so a `#` inside the doc id stays in the doc id.
+    assert parse_point_id(point_id("doc#weird", _CHUNKING, 12)) == ("doc#weird", _CHUNKING, 12)
+    # A pre-041 row carries the empty chunking, and its point id must still round-trip.
+    assert parse_point_id(point_id("doc-abc", "", 0)) == ("doc-abc", "", 0)
 
 
-@pytest.mark.parametrize("bad", ["", "no-separator", "#3", "doc-abc#notanumber"])
+def test_two_shares_that_cut_one_document_differently_get_different_point_ids() -> None:
+    """The address is the whole primary key, because two thirds of it does not identify a row.
+
+    Under `doc_id#ordinal` both shares wrote `doc-abc#0` and the second overwrote the first — the
+    silent-wrong-vector failure `document_chunks`' own key (041) exists to prevent, one system over.
+    """
+    assert point_id("doc-abc", "400:40", 0) != point_id("doc-abc", "4000:400", 0)
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "no-separator", "doc-abc#3", "#2000:200#3", "doc-abc#2000:200#notanumber"]
+)
 def test_an_unreadable_point_id_is_none_rather_than_an_exception(bad: str) -> None:
     """A store may hold points this catalogue no longer knows about; one must not fail a search."""
     assert parse_point_id(bad) is None
@@ -421,7 +434,10 @@ def test_every_chunk_is_filed_under_its_document_not_under_itself() -> None:
         ),
     ]
     points = _points_for(chunks)
-    assert [point.id for point in points] == ["doc-abc#0", "doc-abc#3"]
+    assert [point.id for point in points] == [
+        f"doc-abc#{_CHUNKING}#0",
+        f"doc-abc#{_CHUNKING}#3",
+    ]
     assert {point.group_key for point in points} == {"doc-abc"}
 
 
@@ -444,4 +460,4 @@ async def test_the_adapter_writes_both_the_reference_and_the_group() -> None:
         ),
     )
     (_, written) = client.upserted[0]
-    assert written[0].payload == {"ref": "doc-a#2", "group": "doc-a"}
+    assert written[0].payload == {"ref": f"doc-a#{_CHUNKING}#2", "group": "doc-a"}
