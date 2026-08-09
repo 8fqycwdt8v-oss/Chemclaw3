@@ -19,6 +19,7 @@ exists on top of pydantic's own validation:
 from unittest import mock
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 
 from chemclaw.cli.validate_connectors import _connector_urls_problems, _job_problems
 from chemclaw.connectors.manifest import ConnectorManifest
@@ -143,8 +144,6 @@ def test_a_served_tool_the_manifest_never_declares_is_reported() -> None:
     shipped tree is now clean, so a test that only checked it would pass forever whether or not the
     rule still existed.
     """
-    from mcp.server.fastmcp import FastMCP
-
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
     served = FastMCP("probe")
@@ -178,8 +177,6 @@ def test_a_bundle_serving_exactly_what_it_declares_is_accepted() -> None:
     still exposes it, for the ingestion path" — described a state the manifest cannot express,
     which is why a comment was the only place it was ever written.
     """
-    from mcp.server.fastmcp import FastMCP
-
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
     served = FastMCP("probe")

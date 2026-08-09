@@ -18,6 +18,7 @@ from agent_framework import AgentSession
 from chemclaw.api.runner import run_turn
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS, Metrics
+from tests.fakes import FakeUpdate
 
 
 class _SilentAgent:
@@ -34,7 +35,7 @@ class _SilentAgent:
     ) -> Any:
         async def _gen() -> Any:
             self.seen.append(get_current_correlation_id())
-            yield SimpleNamespace(text="ok", contents=[], user_input_requests=[])
+            yield FakeUpdate(text="ok")
 
         return _gen()
 
@@ -144,10 +145,8 @@ def test_token_spend_is_counted_not_only_budgeted() -> None:
         ) -> Any:
             async def _gen() -> Any:
                 usage = {"input_token_count": 30, "output_token_count": 12}
-                yield SimpleNamespace(
-                    text="ok",
-                    contents=[SimpleNamespace(usage_details=usage, name=None)],
-                    user_input_requests=[],
+                yield FakeUpdate(
+                    text="ok", contents=[SimpleNamespace(usage_details=usage, name=None)]
                 )
 
             return _gen()
@@ -190,7 +189,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
             self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
         ) -> Any:
             async def _gen() -> Any:
-                yield SimpleNamespace(
+                yield FakeUpdate(
                     text="ok",
                     contents=[
                         SimpleNamespace(
@@ -198,7 +197,6 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
                             name=None,
                         )
                     ],
-                    user_input_requests=[],
                 )
 
             return _gen()

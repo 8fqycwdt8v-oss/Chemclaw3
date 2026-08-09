@@ -16,8 +16,13 @@ import pytest
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.logging import (
     _SECRET_SETTINGS,
+    ContextFilter,
+    JsonFormatter,
+    SecretRedactingFilter,
+    _handlers_that_reach_an_output_stream,
     configure_logging,
     configure_telemetry,
+    redact_secrets,
 )
 
 
@@ -156,8 +161,6 @@ def _record(message: str, *args: object) -> logging.LogRecord:
 
 def _rendered(record: logging.LogRecord) -> str:
     """Run the redacting filter over a record and return what a handler would emit."""
-    from chemclaw.core.logging import SecretRedactingFilter
-
     SecretRedactingFilter().filter(record)
     return record.getMessage()
 
@@ -185,8 +188,6 @@ def test_a_secret_passed_as_an_argument_is_caught_too(_secrets: None) -> None:
     render the credential — precisely how one escapes a naive redactor. The filter runs on the
     *rendered* message and clears `args` so nothing can re-render the original.
     """
-    from chemclaw.core.logging import SecretRedactingFilter
-
     record = _record("connecting: %s", _DSN)
     SecretRedactingFilter().filter(record)
     assert record.args is None
@@ -200,8 +201,6 @@ def _emitted(record: logging.LogRecord) -> str:
     tests exists for — a credential can be in the message, in the exception, or in a stack dump,
     and only the first was ever redacted.
     """
-    from chemclaw.core.logging import SecretRedactingFilter
-
     SecretRedactingFilter().filter(record)
     return logging.Formatter("%(message)s").format(record)
 
@@ -343,7 +342,6 @@ def test_every_line_carries_what_joins_it_to_the_audit_trail() -> None:
         reset_current_correlation_id,
         set_current_correlation_id,
     )
-    from chemclaw.core.logging import ContextFilter
 
     token = set_current_correlation_id("cid-9")
     try:
@@ -362,8 +360,6 @@ def test_absent_context_is_a_dash_not_a_crash() -> None:
     A filter that raised there would break every worker log; one that emitted an empty identity
     would let a line claim an anonymous user, which is the rule the connector headers follow.
     """
-    from chemclaw.core.logging import ContextFilter
-
     record = _record("worker starting")
     assert ContextFilter().filter(record) is True
     assert record.correlation_id == "-"  # type: ignore[attr-defined]
@@ -372,8 +368,6 @@ def test_absent_context_is_a_dash_not_a_crash() -> None:
 def test_json_output_is_one_parseable_object_per_line() -> None:
     """A log stack should parse, not regex a `%`-format string."""
     import json
-
-    from chemclaw.core.logging import ContextFilter, JsonFormatter
 
     record = _record("ELN sync found %d entries", 3)
     ContextFilter().filter(record)
@@ -387,8 +381,6 @@ def test_json_output_is_one_parseable_object_per_line() -> None:
 def test_a_traceback_stays_inside_the_json_object() -> None:
     """A multi-line traceback trailing a line-delimited record is forty broken entries."""
     import json
-
-    from chemclaw.core.logging import JsonFormatter
 
     try:
         raise ValueError("boom")
@@ -418,8 +410,6 @@ def test_filtering_a_record_never_imports_anything() -> None:
     """
     import builtins
 
-    from chemclaw.core.logging import ContextFilter, SecretRedactingFilter
-
     filters = [ContextFilter(), SecretRedactingFilter()]  # constructing may import; filtering not
     record = _record("something odd")
     real_import = builtins.__import__
@@ -446,8 +436,6 @@ def test_configure_logging_installs_both_filters_on_the_handler() -> None:
     by propagation, and a filter attached to a logger is not consulted for propagated records.
     Installed on the logger, redaction would silently apply to almost nothing.
     """
-    from chemclaw.core.logging import ContextFilter, SecretRedactingFilter
-
     configure_logging()
     handlers = logging.getLogger().handlers
     assert handlers, "configure_logging left the root logger with no handler"
@@ -481,7 +469,6 @@ def test_a_connector_bearer_token_is_redacted(monkeypatch: pytest.MonkeyPatch) -
     from types import SimpleNamespace
 
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
-    from chemclaw.core.logging import SecretRedactingFilter
 
     token_env = "CHEMCLAW_TEST_CONNECTOR_BEARER_TOKEN"
     token = "sk-connector-live-0123456789abcdef"
@@ -536,8 +523,6 @@ def _json_emitted(record: logging.LogRecord) -> str:
     """Everything the *JSON* handler would write, filter first, exactly as a pod runs it."""
     import json
 
-    from chemclaw.core.logging import JsonFormatter, SecretRedactingFilter
-
     SecretRedactingFilter().filter(record)
     return json.dumps(json.loads(JsonFormatter().format(record)))
 
@@ -577,8 +562,6 @@ def test_the_json_formatter_redacts_even_without_the_filter(_secrets: None) -> N
     """
     import json
 
-    from chemclaw.core.logging import JsonFormatter
-
     try:
         raise RuntimeError(f"auth failed for {_KEY}")
     except RuntimeError as exc:
@@ -590,8 +573,6 @@ def test_the_json_formatter_redacts_even_without_the_filter(_secrets: None) -> N
 def test_a_stack_dump_survives_into_the_json_object(_secrets: None) -> None:
     """`stack_info` was scrubbed by the filter and then dropped by the JSON formatter entirely."""
     import json
-
-    from chemclaw.core.logging import JsonFormatter, SecretRedactingFilter
 
     record = _record("failed")
     record.stack_info = f"Stack (most recent call last):\n  connecting to {_DSN}"
@@ -617,12 +598,6 @@ def test_configure_logging_reaches_a_non_propagating_logger(
     Asserting on the filters rather than on captured output because that is the property that
     generalises: any logger that opts out of propagation must still be swept.
     """
-    from chemclaw.core.logging import (
-        ContextFilter,
-        SecretRedactingFilter,
-        configure_logging,
-    )
-
     private = logging.getLogger("chemclaw.test.uvicorn_like")
     private.propagate = False
     handler = logging.StreamHandler()
@@ -662,15 +637,11 @@ def test_a_credential_this_process_does_not_hold_is_still_redacted(secret: str, 
     verbatim. These rules are anchored on a vendor-assigned prefix and a long opaque tail, so they
     are structural without being a guess.
     """
-    from chemclaw.core.logging import redact_secrets
-
     assert secret not in redact_secrets(f"upstream rejected {secret} at 09:31")
 
 
 def test_a_libpq_password_and_a_query_string_token_are_redacted_with_their_label() -> None:
     """The two spellings `_URL_USERINFO` cannot see; the label survives so the line still reads."""
-    from chemclaw.core.logging import redact_secrets
-
     libpq = redact_secrets("host=wh.internal password=S3cr3tP4ssw0rd dbname=eln")
     assert "S3cr3tP4ssw0rd" not in libpq
     assert "password=" in libpq
@@ -684,8 +655,6 @@ def test_a_libpq_password_and_a_query_string_token_are_redacted_with_their_label
 
 def test_an_opaque_bearer_credential_is_redacted_and_the_scheme_kept() -> None:
     """A bearer token with no internal structure has only its scheme to anchor on."""
-    from chemclaw.core.logging import redact_secrets
-
     emitted = redact_secrets("Authorization: Bearer w7Fq2xLpNv8sTr4Kd1Zy")
     assert "w7Fq2xLpNv8sTr4Kd1Zy" not in emitted
     assert "Bearer" in emitted
@@ -728,8 +697,6 @@ def test_the_structural_rules_never_touch_ordinary_content(innocent: str) -> Non
     That version passed the earlier form of this test, which carried only the six identifiers above.
     The source lines and the prose are here because their absence is what made it pass.
     """
-    from chemclaw.core.logging import redact_secrets
-
     assert redact_secrets(innocent) == innocent
 
 
@@ -741,8 +708,6 @@ def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> N
     including the two spellings the first version missed entirely (`PGPASSWORD=` and a `repr`'d
     config dict), which the narrowing pass folded in.
     """
-    from chemclaw.core.logging import redact_secrets
-
     for secret, sample in [
         (
             "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
@@ -769,15 +734,14 @@ def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> N
 def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
     r"""Every pattern's cost is linear in the line, because this runs holding the logging lock.
 
-    **This test used to name the whole class and exercise one member of it.** Its docstring
-    generalized over "every pattern's tail"; its body passed only `-eyJ`, the input that was already
-    fixed. A security review substituted the others into these same assertions and two of them
-    failed outright — `password=` at 63.9x and `api_key=` at 56.2x for an 8x input — because
+    **Every pattern is passed, because two of them were quadratic while one was not.** Measured,
+    `password=` ran at 63.9x and `api_key=` at 56.2x for an 8x input — while `-eyJ`, the pattern
+    the first fix targeted, was already linear. The cause was shared:
     `_HAS_DIGIT` was written `_OPAQUE*\d` and reintroduced, in a lookahead, exactly the unbounded
     tail `_NOT_MID_TOKEN` had been added to remove. Measured then: 18 KB -> 0.5 s, 36 KB -> 2.0 s,
     72 KB -> 8.1 s.
 
-    That mattered more than the earlier instance, because the reach is worse. `uvicorn.access` is a
+    The reach is what makes it serious. `uvicorn.access` is a
     non-propagating logger, so `_handlers_that_reach_an_output_stream` attaches this filter to it —
     and it is the one logger that writes the raw request URL. A 115 KB request line stalled the pod
     for 21 s, unauthenticated, on a 404, before any ASGI middleware ran.
@@ -787,8 +751,6 @@ def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
     fast, so this stays honest on a loaded box.
     """
     import time
-
-    from chemclaw.core.logging import redact_secrets
 
     small = unit * (10_240 // len(unit))
     large = unit * (81_920 // len(unit))  # 8x
@@ -826,13 +788,9 @@ def test_a_log_call_that_declines_a_traceback_does_not_crash_the_filter() -> Non
     `build_agent` raise instead. `logging`'s own `Formatter.format` tests truthiness here; the fix
     is to match it.
     """
-    import logging as stdlib_logging
-
-    from chemclaw.core.logging import SecretRedactingFilter
-
-    record = stdlib_logging.LogRecord(
+    record = logging.LogRecord(
         name="probe",
-        level=stdlib_logging.ERROR,
+        level=logging.ERROR,
         pathname=__file__,
         lineno=1,
         msg="declined a traceback",
@@ -937,16 +895,11 @@ def test_the_filter_survives_a_second_test_that_built_the_front_door() -> None:
     particular order is one that every lane's own green run is structurally unable to see, which is
     why this asserts the composed state rather than the isolated one.
     """
-    import logging as stdlib_logging
-
-    from chemclaw.core.logging import configure_logging
     from chemclaw.core.metrics_bridge import degraded
 
     configure_logging()
     configure_logging()  # idempotent, and the second call is what a second suite would do
-    degraded(
-        stdlib_logging.getLogger("probe"), "log_redaction", "no traceback here", exc_info=False
-    )
+    degraded(logging.getLogger("probe"), "log_redaction", "no traceback here", exc_info=False)
 
 
 def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -958,8 +911,6 @@ def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.Monk
     then be redacted N times, and `SecretRedactingFilter.__init__` walks the connector registry off
     disk, so the startup-only ERROR and counter fired once per handler per call instead.
     """
-    from chemclaw.core.logging import SecretRedactingFilter, configure_logging
-
     private = logging.getLogger("chemclaw.test.repeat_configure")
     private.propagate = False
     handler = logging.StreamHandler()
@@ -984,8 +935,6 @@ def test_the_logger_sweep_survives_concurrent_getlogger() -> None:
     of the three outcomes.
     """
     import threading
-
-    from chemclaw.core.logging import _handlers_that_reach_an_output_stream
 
     stop = threading.Event()
     failures: list[BaseException] = []

@@ -512,7 +512,7 @@ def test_retrieved_content_cannot_close_the_judges_evidence_block() -> None:
     assert prompt.count(f"</{ENVELOPE_TAG}>") == 1, "content forged the envelope's closing tag"
 
 
-def test_a_degraded_verdict_says_which_check_produced_it() -> None:
+def test_a_degraded_verdict_says_which_check_produced_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """The judge and the citation gate answer different questions; the result must say which ran.
 
     The judge scores *faithfulness*; the gate scores *resolvability*. Measured, substituting the
@@ -529,18 +529,14 @@ def test_a_degraded_verdict_says_which_check_produced_it() -> None:
         async def get_response(self, *_: Any, **__: Any) -> Any:
             raise ConnectionError("verifier route unreachable")
 
-    settings_enabled = settings.verifier_enabled
-    settings.verifier_enabled = True
-    try:
-        degraded = asyncio.run(
-            verify_answer(
-                "An answer [[note-a]].",
-                [EvidenceChunk(source_note_id="note-a", content="data", retriever="graph")],
-                client=_Broken(),
-            )
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    degraded = asyncio.run(
+        verify_answer(
+            "An answer [[note-a]].",
+            [EvidenceChunk(source_note_id="note-a", content="data", retriever="graph")],
+            client=_Broken(),
         )
-    finally:
-        settings.verifier_enabled = settings_enabled
+    )
     assert degraded.verified_by == "citation-gate"
 
 

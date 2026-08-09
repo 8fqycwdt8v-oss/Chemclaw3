@@ -13,6 +13,7 @@ from agent_framework import AgentSession
 
 from chemclaw.api.events import AnswerEvent, ErrorEvent, Event, TokenEvent, ToolCallEvent
 from chemclaw.api.runner import run_turn
+from tests.fakes import FakeUpdate
 
 
 class _ToolContent:
@@ -21,15 +22,6 @@ class _ToolContent:
     def __init__(self, name: str, arguments: str) -> None:
         self.name = name
         self.arguments = arguments
-
-
-class _Update:
-    """A minimal streamed update carrying text and/or contents."""
-
-    def __init__(self, text: str = "", contents: list[object] | None = None) -> None:
-        self.text = text
-        self.contents = contents or []
-        self.user_input_requests: list[object] = []
 
 
 class _FakeAgent:
@@ -49,9 +41,9 @@ class _FakeAgent:
         **_run_options: Any,
     ) -> object:
         async def _gen() -> object:
-            yield _Update(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
-            yield _Update(text="The ")
-            yield _Update(text="answer.")
+            yield FakeUpdate(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
+            yield FakeUpdate(text="The ")
+            yield FakeUpdate(text="answer.")
 
         return _gen()
 

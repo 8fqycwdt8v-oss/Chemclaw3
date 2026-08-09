@@ -14,7 +14,6 @@ come out interleaved in order.
 """
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,6 +28,7 @@ from chemclaw.core.turn_signals import (
     record_job_started,
     record_proposal,
 )
+from tests.fakes import FakeUpdate
 
 
 class _SignallingAgent:
@@ -49,12 +49,12 @@ class _SignallingAgent:
         **_run_options: Any,
     ) -> Any:
         async def _gen() -> Any:
-            yield SimpleNamespace(text="thinking", contents=[], user_input_requests=[])
+            yield FakeUpdate(text="thinking")
             for job_id, kind in self._jobs:
                 record_job_started(job_id, kind)
             for note_id, reference in self._proposals:
                 record_proposal(note_id, reference)
-            yield SimpleNamespace(text=" done", contents=[], user_input_requests=[])
+            yield FakeUpdate(text=" done")
 
         return _gen()
 

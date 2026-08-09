@@ -42,23 +42,7 @@ from chemclaw.api.events import (
 )
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import record_job_started
-
-
-class _Update:
-    def __init__(self, text: str = "") -> None:
-        self.text = text
-        self.contents: list[object] = []
-
-    @property
-    def user_input_requests(self) -> list[object]:
-        """Derived from `contents`, exactly as MAF's `AgentResponseUpdate` derives it.
-
-        It used to be an independent `[]` that nothing ever filled, here and in nineteen other
-        fake updates across the suite — so the runner's approval branch had never been executed by
-        any test at all. A property over `contents` means a fake carrying a real
-        `function_approval_request` reaches that branch without the fake having to know it exists.
-        """
-        return [c for c in self.contents if getattr(c, "user_input_request", False)]
+from tests.fakes import FakeUpdate
 
 
 class _FakeAgent:
@@ -75,8 +59,8 @@ class _FakeAgent:
         **_run_options: Any,
     ) -> Any:
         async def _gen() -> Any:
-            yield _Update(text="Yield was 90% ")
-            yield _Update(text="[[reaction-a]].")
+            yield FakeUpdate(text="Yield was 90% ")
+            yield FakeUpdate(text="[[reaction-a]].")
 
         return _gen()
 
@@ -178,11 +162,11 @@ class _JobLaunchingAgent:
             if not self._on_last:
                 for job_id in self._job_ids:
                     record_job_started(job_id, "report")
-            yield _Update(text="submitting. ")
+            yield FakeUpdate(text="submitting. ")
             if self._on_last:
                 for job_id in self._job_ids:
                     record_job_started(job_id, "report")
-            yield _Update(text="done.")
+            yield FakeUpdate(text="done.")
 
         return _gen()
 
@@ -209,8 +193,8 @@ class _ApprovalRequestingAgent:
         **_run_options: Any,
     ) -> Any:
         async def _gen() -> Any:
-            yield _Update(text="I need to run a DFT job. ")
-            update = _Update()
+            yield FakeUpdate(text="I need to run a DFT job. ")
+            update = FakeUpdate()
             update.contents = [
                 Content.from_function_approval_request(
                     id="appr-1",
@@ -220,7 +204,7 @@ class _ApprovalRequestingAgent:
                 )
             ]
             yield update
-            yield _Update(text="waiting.")
+            yield FakeUpdate(text="waiting.")
 
         return _gen()
 
@@ -302,10 +286,10 @@ def test_plan_is_emitted_and_only_when_it_changes(monkeypatch: pytest.MonkeyPatc
         ) -> Any:
             async def _gen() -> Any:
                 await mark_awaiting_job(session, "qm-1", title="Await QM job qm-1")
-                yield _Update(text="a")
-                yield _Update(text="b")  # same plan: must not re-emit
+                yield FakeUpdate(text="a")
+                yield FakeUpdate(text="b")  # same plan: must not re-emit
                 await complete_awaiting_job(session, "qm-1", reason="finished")
-                yield _Update(text="c")
+                yield FakeUpdate(text="c")
 
             return _gen()
 
@@ -340,10 +324,10 @@ class _PlanClearingAgent:
             if first:
                 await mark_awaiting_job(session, "qm-9", title="Await QM job qm-9")
                 record_job_started("qm-9", "qm")
-                yield _Update(text="running it. ")
+                yield FakeUpdate(text="running it. ")
             else:
                 await TodoSessionStore().save_state(session, [], next_id=1, source_id="todo")
-                yield _Update(text="never mind, here is the answer.")
+                yield FakeUpdate(text="never mind, here is the answer.")
 
         return _gen()
 
@@ -391,7 +375,7 @@ class _CappedLoopAgent:
     ) -> Any:
         async def _gen() -> Any:
             await observe_loop_cap(lambda **_kwargs: True)(session=session, agent=None)
-            yield _Update(text="still working on it")
+            yield FakeUpdate(text="still working on it")
 
         return _gen()
 
@@ -479,8 +463,8 @@ class _CallContent:
             self.result = result
 
 
-def _update(*contents: object) -> _Update:
-    update = _Update()
+def _update(*contents: object) -> FakeUpdate:
+    update = FakeUpdate()
     update.contents = list(contents)
     return update
 
@@ -690,7 +674,7 @@ class _CitingAgent:
             if self._tool_result is not None:
                 yield _update(_CallContent(name="find_notes", call_id="c1", arguments={"q": "x"}))
                 yield _update(_CallContent(call_id="c1", result=self._tool_result))
-            yield _Update(text=self._answer)
+            yield FakeUpdate(text=self._answer)
 
         return _gen()
 
@@ -958,7 +942,7 @@ class _SilentAgent:
         **_run_options: Any,
     ) -> Any:
         async def _gen() -> Any:
-            yield _Update(text="")
+            yield FakeUpdate(text="")
 
         return _gen()
 
@@ -1055,12 +1039,12 @@ def test_a_content_carrying_only_a_call_id_is_still_read() -> None:
     from `call_id` alone.
     """
     trace = runner_trace.ToolCallTrace()
-    update = _Update()
+    update = FakeUpdate()
     update.contents = [_CallContent(name="find_notes", call_id="c1", arguments={"text": "x"})]
     calls = trace.feed(update)
     assert [event.tool for event in calls if isinstance(event, ToolCallEvent)] == ["find_notes"]
 
-    result_update = _Update()
+    result_update = FakeUpdate()
     result_update.contents = [_ResultOnlyContent(call_id="c1", result='[{"id": "note-a"}]')]
     events = trace.feed(result_update)
     results = [event for event in events if isinstance(event, ToolResultEvent)]

@@ -12,7 +12,6 @@ error — a database blip must not cost a chemist an answer the model already pr
 
 import asyncio
 import logging
-from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -24,6 +23,7 @@ from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import record_job_started
+from tests.fakes import FakeUpdate
 from tests.pg import migrated_db_or_skip
 
 
@@ -51,11 +51,9 @@ class _JobLaunchingAgent:
         async def _gen() -> Any:
             if first:
                 record_job_started(job_id, "qm")
-                yield SimpleNamespace(text="starting", contents=[], user_input_requests=[])
+                yield FakeUpdate(text="starting")
             else:
-                yield SimpleNamespace(
-                    text=" the energy is -154.1", contents=[], user_input_requests=[]
-                )
+                yield FakeUpdate(text=" the energy is -154.1")
 
         return _gen()
 
@@ -161,7 +159,7 @@ def test_a_turn_that_starts_no_job_never_waits(
             **_run_options: Any,
         ) -> Any:
             async def _gen() -> Any:
-                yield SimpleNamespace(text="an answer", contents=[], user_input_requests=[])
+                yield FakeUpdate(text="an answer")
 
             return _gen()
 
@@ -202,7 +200,7 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
 
             async def _gen() -> Any:
                 record_job_started(f"qm-{index}", "qm")
-                yield SimpleNamespace(text=f"pass{index}", contents=[], user_input_requests=[])
+                yield FakeUpdate(text=f"pass{index}")
 
             return _gen()
 

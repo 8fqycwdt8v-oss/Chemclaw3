@@ -12,7 +12,6 @@ ERROR, and the turn still succeeds.
 """
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +20,7 @@ from agent_framework import AgentSession
 from chemclaw.api.events import AnswerEvent
 from chemclaw.api.runner import run_turn
 from chemclaw.core.metrics import METRICS
+from tests.fakes import FakeUpdate
 
 
 class _SilentAgent:
@@ -32,7 +32,7 @@ class _SilentAgent:
         self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
     ) -> Any:
         async def _gen() -> Any:
-            yield SimpleNamespace(text="done", contents=[], user_input_requests=[])
+            yield FakeUpdate(text="done")
 
         return _gen()
 

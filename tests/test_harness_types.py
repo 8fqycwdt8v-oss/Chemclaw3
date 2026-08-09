@@ -15,11 +15,15 @@ is: `ShouldContinueResult` is the string `'bool | tuple[bool, str | None]'` in M
 `TypeAlias` here, so the check normalizes both to their string form.
 """
 
+import ast
+from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 from chemclaw.agent import harness_types
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
 
 def _maf_loop() -> ModuleType:
@@ -82,24 +86,26 @@ def test_nothing_imports_the_private_loop_module_any_more() -> None:
     `tests/test_third_party_layering.py` enforces the general rule for *declared* private imports;
     this asserts the specific one this module was written to remove, so deleting `harness_types`
     and reinstating the import fails here with the reason rather than only as an undeclared row.
-    """
-    import ast
-    from pathlib import Path
 
-    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    The scan is floored, because `assert not offenders` over an empty glob is a pass: a renamed
+    `src/` layout would turn this into a test of nothing while still reporting green.
+    """
     offenders = []
-    for path in src.rglob("*.py"):
+    scanned = 0
+    for path in _SRC.rglob("*.py"):
+        scanned += 1
         # Parsed, not grepped: `harness_types`'s own docstring names the module it replaced, and a
         # substring search would count that as the thing it forbids.
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
                 "agent_framework._harness._loop"
             ):
-                offenders.append(str(path.relative_to(src)))
+                offenders.append(str(path.relative_to(_SRC)))
             elif isinstance(node, ast.Import) and any(
                 alias.name.startswith("agent_framework._harness._loop") for alias in node.names
             ):
-                offenders.append(str(path.relative_to(src)))
+                offenders.append(str(path.relative_to(_SRC)))
+    assert scanned > 100, f"only {scanned} files under {_SRC} — this scanned nothing worth scanning"
     assert not offenders, (
         f"{offenders} import MAF's private harness loop module again — that is an ImportError at "
         "process start of the front door and the worker on any release that moves it; "

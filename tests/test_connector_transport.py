@@ -27,6 +27,7 @@ import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
@@ -142,8 +143,6 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
     is what matters — `header_provider` runs per `call_tool`, not at connect — so the app
     exposes a trivial one.
     """
-    from mcp.server.fastmcp import FastMCP
-
     received: list[dict[str, str]] = []
     server = FastMCP("header-probe")
 
@@ -208,8 +207,6 @@ def test_a_tool_body_can_read_the_caller_core_stamped() -> None:
     a turn. Advisory throughout: the tool reads them to attribute a record, never to decide
     anything.
     """
-    from mcp.server.fastmcp import FastMCP
-
     from chemclaw.connectors.caller import caller_provenance
 
     seen: list[tuple[str, str, str]] = []
@@ -330,8 +327,6 @@ def test_oversized_body_is_rejected_before_the_mcp_handler_runs(
     now runs in front of the connector, over its own `connector_max_request_bytes` setting, exactly
     as it runs in front of the front door over `service_max_request_bytes`.
     """
-    from mcp.server.fastmcp import FastMCP
-
     from chemclaw.core.config import settings
 
     # Small enough that a real MCP handshake body would trip it too — the point is that the limit
@@ -382,8 +377,6 @@ def test_concurrent_turns_get_their_own_connections_and_their_own_identity() -> 
     misattributing it in the connector's own log. That is the whole reason connectors are not
     attached to the process-lived agent, and this test is what would fail if they were put back.
     """
-    from mcp.server.fastmcp import FastMCP
-
     seen: list[str] = []
     server = FastMCP("concurrency-probe")
 
@@ -449,8 +442,6 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
     changes how it composes the error text (or removes the interception point this relies on)
     should fail this test loudly rather than silently reopen the leak.
     """
-    from mcp.server.fastmcp import FastMCP
-
     secret = "postgresql://chemclaw:s3cr3t-pw@10.0.0.7:5432/chemclaw_prod?sslmode=require"
     server = FastMCP("leak-probe")
 
@@ -515,8 +506,6 @@ def test_building_a_connector_app_does_not_reconfigure_process_logging() -> None
     anything else import freely. It tore out pytest's own capture handler and broke two
     audit-trail tests that have nothing to do with logging.
     """
-    from mcp.server.fastmcp import FastMCP
-
     root = logging.getLogger()
     sentinel = logging.NullHandler()
     root.addHandler(sentinel)
@@ -534,8 +523,6 @@ def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
     `ChemclawError`/`ConnectorError`, both subclasses) precisely so the model reads a sentence it
     can act on. Sanitizing indiscriminately would silently break every one of those.
     """
-    from mcp.server.fastmcp import FastMCP
-
     from chemclaw.core.errors import ChemclawError
 
     server = FastMCP("domain-error-probe")
@@ -572,8 +559,6 @@ def test_a_bundles_startup_report_cannot_delay_it_becoming_ready() -> None:
     ready exactly when the operator most needs it up to read the log line. Proven with a hook that
     never returns at all — if the lifespan awaited it, this test would time out instead of pass.
     """
-    from mcp.server.fastmcp import FastMCP
-
     running = asyncio.Event()
 
     async def _never_finishes() -> None:

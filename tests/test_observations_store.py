@@ -73,12 +73,12 @@ def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
     Support must follow the corpus: a finding seen again with another reaction behind it ends up
     backed by both notes and both projects.
 
-    **This used to assert something subtly different** — that two runs reporting *disjoint*
-    evidence are unioned by the SQL. That union is what let evidence outlive the corpus, so it is
-    gone: a run is authoritative for the rows it names, and both miners emit an observation's
-    complete membership because they mine the whole corpus every pass (`all_reactions()` reads
-    from `datetime.min`). Accumulation now comes from the miner seeing more, which is the only
-    place it can come from and still mean "what the record currently shows".
+    **Accumulation comes from the miner seeing more, and from nowhere else.** A run is
+    authoritative for the rows it names: the SQL replaces an observation's evidence rather than
+    unioning it, because a union lets evidence outlive the corpus that justified it. That is safe
+    only because both miners emit an observation's *complete* membership every pass — they mine the
+    whole corpus each time (`all_reactions()` reads from `datetime.min`) — which is what makes
+    "supported by N notes" mean "what the record currently shows" rather than "what it ever showed".
     """
 
     async def _run() -> None:
@@ -116,9 +116,9 @@ def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
     that says "failed in 2 runs across 2 projects … no successful run is in this cluster" one
     paragraph before "supported by 3 merged notes across 3 projects".
 
-    **This test used to hand-write two `_finding(...)` payloads** while its docstring claimed the
-    real chain, which proved only that the SQL replaces an array — not that the miner ever emits
-    the shrunken cluster that makes replacement mean anything.
+    Hand-written `_finding(...)` payloads cannot state this. Feeding the store two payloads whose
+    evidence lists differ proves the SQL replaces an array; what has to be shown is that the miner
+    *emits* the shrunken cluster, which is the step that makes replacement mean anything.
     """
     monkeypatch.setattr(settings, "observation_promote_min_evidence", 3)
     monkeypatch.setattr(settings, "observation_promote_min_projects", 2)

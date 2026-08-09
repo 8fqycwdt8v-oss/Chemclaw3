@@ -34,6 +34,7 @@ from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
+from tests.fakes import FakeUpdate
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -65,10 +66,9 @@ class _ResumingAgent:
                 from chemclaw.core.turn_signals import record_job_started
 
                 record_job_started("job-1", "calc")
-            yield SimpleNamespace(
+            yield FakeUpdate(
                 text="ok" if first else " and the answer",
                 contents=[SimpleNamespace(usage_details={"total_token_count": tokens})],
-                user_input_requests=[],
             )
 
         return _gen()
@@ -334,12 +334,10 @@ class _UnparseableArgumentAgent:
         self, message: str, *, stream: bool, session: AgentSession, **_options: Any
     ) -> Any:
         async def _gen() -> Any:
-            yield SimpleNamespace(
-                text="",
+            yield FakeUpdate(
                 contents=[
                     SimpleNamespace(call_id="c9", name="find_notes", arguments="not json at all")
-                ],
-                user_input_requests=[],
+                ]
             )
 
         return _gen()

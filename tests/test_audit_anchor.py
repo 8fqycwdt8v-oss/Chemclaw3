@@ -236,31 +236,29 @@ def test_one_junk_anchor_does_not_disable_the_high_water_mark() -> None:
     justifies the first and never justified the second.
     """
 
+    # The secret comes from the autouse `_with_secret` fixture, like every other test here. This
+    # one used to set its own by assignment inside `_run` and restore it in a `finally`, which was
+    # a second, weaker copy of a patch that was already in place.
     async def _run() -> tuple[Anchor | None, Anchor | None]:
         await migrated_db_or_skip()
-        monkey = settings.audit_anchor_secret
-        settings.audit_anchor_secret = "anchor-secret-for-this-test"
-        try:
-            async with connection(
-                settings.postgres_dsn,
-                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
-            ) as conn:
-                await conn.execute("DELETE FROM audit_anchors")
-            genuine = await take_anchor()
-            before, _ = await latest_anchor()
-            async with connection(
-                settings.postgres_dsn,
-                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
-            ) as conn:
-                await conn.execute(
-                    "INSERT INTO audit_anchors "
-                    "(taken_at, row_count, max_event_id, tip_hash, chain_version, signature) "
-                    "VALUES (now() + interval '1 minute', %s, %s, %s, %s, 'junk')",
-                    (0, 0, "" if genuine is None else genuine.tip_hash, 1),
-                )
-            return before, (await latest_anchor())[0]
-        finally:
-            settings.audit_anchor_secret = monkey
+        async with connection(
+            settings.postgres_dsn,
+            statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+        ) as conn:
+            await conn.execute("DELETE FROM audit_anchors")
+        genuine = await take_anchor()
+        before, _ = await latest_anchor()
+        async with connection(
+            settings.postgres_dsn,
+            statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+        ) as conn:
+            await conn.execute(
+                "INSERT INTO audit_anchors "
+                "(taken_at, row_count, max_event_id, tip_hash, chain_version, signature) "
+                "VALUES (now() + interval '1 minute', %s, %s, %s, %s, 'junk')",
+                (0, 0, "" if genuine is None else genuine.tip_hash, 1),
+            )
+        return before, (await latest_anchor())[0]
 
     before, after = asyncio.run(_run())
     assert before is not None, "the genuine anchor must be readable to begin with"

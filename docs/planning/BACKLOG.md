@@ -471,14 +471,56 @@ three are what that lane could not close.
       *Trigger:* the next time the two implementations of a filter diverge, or a new filter is added
       to `CalculationQuery`.
 
-- [ ] **Twenty test files each define their own fake streamed update** — [S]. Each hard-codes the
-      fields the runner branches on; `user_input_requests=[]` was one, and it kept the approval
-      branch unexecuted by any test until D-2026-08-08 fixed the one fake in `tests/test_runner.py`
-      to derive it from `contents` the way MAF does. The other nineteen still assert a shape MAF
-      does not have, so the next field the runner learns to read will be invisible to all of them in
-      the same way. One shared builder in `tests/conftest.py`, mirroring `AgentResponseUpdate`,
-      would fix the class rather than the instance.
-      *Trigger:* the next runner change that reads a new attribute off a streamed update.
+- [x] **Twenty test files each define their own fake streamed update** — closed. `tests/fakes.py`
+      holds one `FakeUpdate` whose `user_input_requests` is a property derived from `contents`, as
+      MAF's `AgentResponseUpdate` derives it, and all fourteen files use it: six local `_Update`
+      classes deleted, fourteen inline `SimpleNamespace(..., user_input_requests=[])` sites
+      rewritten. Thirteen of the fourteen previously hard-coded the field empty, so no fake but
+      `test_runner.py`'s could reach the runner's approval branch. `grep user_input_requests
+      tests/` now finds the one definition and no copies. It went to `tests/fakes.py` rather than
+      `conftest.py`: pytest loads `conftest` before every session for fixtures and hooks, and these
+      are helpers a test imports by name.
+
+- [ ] **Six test files define a byte-identical fake agent** — [S]. `create_session(self, *,
+      session_id)` plus a `run(stream=True)` generator, in `test_approvals`, `test_auth`,
+      `test_metrics`, `test_profile_discovery`, `test_runner`, `test_service`,
+      `test_service_events`, `test_disconnect_teardown` and `test_session_context` — nine
+      definitions of one shape. It is the identical argument to the streamed-update row above
+      (closed), and it was left out of that change on purpose: the update fakes had a *measured*
+      defect behind them (an unexecuted approval branch) while these have only duplication, and the
+      nine differ in what their generator yields, so a shared class needs a scripted-updates
+      parameter designed rather than a mechanical substitution. `tests/fakes.py` exists and is
+      where it goes.
+      *Trigger:* the next time the runner learns to call a new method on the agent — at which point
+      all nine go stale together, which is exactly what happened to the update fakes.
+
+- [ ] **488 function-local imports in `tests/`** — [S]. Measured across `tests/*.py`: 530 before
+      the two clusters below were hoisted, 488 after. The largest remaining groups are `settings`
+      ×46, `asyncio` ×12, `Principal/require_principal` ×11, `discovered` ×10, `METRICS` ×9,
+      `TestClient` ×8, `connector_app` ×7. Most defer nothing: `settings` is a
+      singleton whose identity never changes, so a module-scope binding is equivalent, and several
+      files already import these at module scope beside functions that re-import them. The
+      genuinely justified ones — the subprocess probes and the post-`monkeypatch` imports — must
+      keep a comment saying what they defer and why, which is the rule this row is really asking
+      for. Two clusters are already done: `tests/test_logging.py` (24 re-imports of a module it
+      imports at module scope, plus two `import logging as stdlib_logging` in a file whose line 8
+      is `import logging` — two names for one module), and `FastMCP` in the four files this session
+      owned. `tests/test_deploy_chart.py:576` keeps its local `FastMCP` only because that file
+      belonged to a parallel session.
+      *Trigger:* do it as one mechanical pass with its own review, or when a local import is found
+      shadowing a differently-bound module-scope name (the `stdlib_logging` shape).
+
+- [ ] **`.github/workflows/ci.yml` checks out with `fetch-depth: 1`, which makes the migration
+      immutability check unrunnable in CI** — [S], and it is a one-line fix outside `tests/`.
+      `actions/checkout@v4` defaults to a depth-1 clone, where every file looks introduced by the
+      graft commit and `git show <graft>:file` is the working tree's own content. Measured on a
+      depth-1 clone whose `HEAD` already carried a smuggled `ALTER TABLE` appended to a merged
+      `006_audit_events.sql`: `test_no_merged_migration_had_its_statements_changed` reported no
+      edit, with all 42 migrations "compared". The test now counts comparisons that *span* a commit
+      and skips with this instruction rather than passing, so CI reports one honest skip instead of
+      a false green — but the check itself does not run there until the workflow sets
+      `fetch-depth: 0`.
+      *Trigger:* take it with the next change to `.github/workflows/ci.yml`.
 
 ## Open — Left by the mutation-testing lane (2026-08-08, D-2026-08-08-a-survivor-is-a-hypothesis)
 

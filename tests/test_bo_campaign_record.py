@@ -492,10 +492,12 @@ def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
     written under the pre-canonicalization ids are orphaned — a one-time cost, recorded in
     `BACKLOG.md`, against a fork that would otherwise recur on every re-declaration.
 
-    **This test used to be unable to fail.** It hashed the sorted spelling with the *new* code,
-    which sorts anyway, so its first assertion restated the pin one function above and its second
-    compared two literals; mutations removing either sort left it green. The claim is about the old
-    algorithm, so the old algorithm has to appear — `_pre_canonicalization_id` is it.
+    **The old algorithm has to appear in the test, and `_pre_canonicalization_id` is it.** The
+    claim is about where an id computed the *old* way landed, so computing both sides with the
+    current code cannot state it: today's hash sorts whatever it is given, which makes the unsorted
+    and sorted spellings identical before hashing and reduces the whole assertion to two literals
+    being equal. Mutations removing either sort survive that. A test of a migration needs the
+    pre-migration function.
     """
     for label, problem in _baseline_problems().items():
         rewritten = [

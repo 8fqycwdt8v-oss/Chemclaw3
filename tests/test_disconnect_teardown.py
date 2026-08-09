@@ -25,15 +25,7 @@ from agent_framework import AgentSession
 
 from chemclaw.api.app import create_app
 from chemclaw.core.config import settings
-
-
-class _Update:
-    """A minimal streamed update, shaped as `chemclaw.api.runner` duck-types it."""
-
-    def __init__(self, text: str = "") -> None:
-        self.text = text
-        self.contents: list[object] = []
-        self.user_input_requests: list[object] = []
+from tests.fakes import FakeUpdate
 
 
 class _StreamingAgent:
@@ -54,7 +46,7 @@ class _StreamingAgent:
         **_run_options: Any,
     ) -> Any:
         async def _gen() -> Any:
-            yield _Update(text="tok")
+            yield FakeUpdate(text="tok")
             while True:
                 await asyncio.sleep(0.05)
 

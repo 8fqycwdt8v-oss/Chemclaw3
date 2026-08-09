@@ -28,11 +28,28 @@ and the rule is kept honest by refusing to pass over a statement shape it does n
 import re
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SQL = _ROOT / "infra" / "sql"
 _README = _SQL / "README.md"
 
-_CREATE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", re.I)
+# How a table may be spelled where a statement names one. Every pattern below used to say `\w+`,
+# which is the bare lower-case spelling every merged migration happens to use and only that one —
+# so `ALTER TABLE ONLY audit_events …`, the form **`pg_dump` emits**, resolved to the "table"
+# `only`, and `public.audit_events` to `public`. Neither is in the inventory, so the migration was
+# credited to no table at all and the column check below passed over the row it had just stopped
+# checking. Written once, substituted everywhere, and normalised by `_bare` so the schema qualifier
+# and the quotes are dropped rather than compared.
+_NAME = r"[\w.\"]+"
+
+
+def _bare(identifier: str) -> str:
+    """`public."audit_events"` -> `audit_events`: the identifier without schema or quotes."""
+    return identifier.replace('"', "").rsplit(".", 1)[-1].lower()
+
+
+_CREATE = re.compile(rf"CREATE TABLE IF NOT EXISTS\s+({_NAME})", re.I)
 # A row's first cell, which is the table name in backticks. Anchored to the line start so the
 # "Two things the shape of this table will not tell you" prose below — which mentions
 # `calculation_artifacts` and `bo_suggestions` in running text — cannot be mistaken for rows.
@@ -48,17 +65,17 @@ _LINE_COMMENT = re.compile(r"--[^\n]*")
 # `bo_suggestions`, so "the name appears in the file" would credit migration 031 with touching a
 # table it only mentions as a column.
 _TOUCHES = (
-    re.compile(r"^CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)", re.I),
-    re.compile(r"^ALTER TABLE(?:\s+IF EXISTS)?\s+(\w+)", re.I),
+    re.compile(rf"^CREATE TABLE(?:\s+IF NOT EXISTS)?\s+({_NAME})", re.I),
+    re.compile(rf"^ALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?({_NAME})", re.I),
     re.compile(
         r"^CREATE(?:\s+UNIQUE)?\s+INDEX(?:\s+CONCURRENTLY)?"
-        r"(?:\s+IF NOT EXISTS)?\s+\w+\s+ON\s+(\w+)",
+        rf"(?:\s+IF NOT EXISTS)?\s+{_NAME}\s+ON\s+(?:ONLY\s+)?({_NAME})",
         re.I,
     ),
-    re.compile(r"^COMMENT ON TABLE\s+(\w+)", re.I),
-    re.compile(r"^COMMENT ON COLUMN\s+(\w+)\.", re.I),
-    re.compile(r"^INSERT INTO\s+(\w+)", re.I),
-    re.compile(r"^UPDATE\s+(\w+)\s", re.I),
+    re.compile(rf"^COMMENT ON TABLE\s+({_NAME})", re.I),
+    re.compile(rf"^COMMENT ON COLUMN\s+({_NAME})\.", re.I),
+    re.compile(rf"^INSERT INTO\s+({_NAME})", re.I),
+    re.compile(rf"^UPDATE\s+({_NAME})\s", re.I),
 )
 # Statements that legitimately name no table.
 _TABLE_FREE = (re.compile(r"^CREATE EXTENSION", re.I),)
@@ -83,7 +100,7 @@ def _statements() -> list[tuple[str, str, str]]:
 def tables_on_disk() -> set[str]:
     """Every table the migration set creates."""
     return {
-        match.lower()
+        _bare(match)
         for path in sorted(_SQL.glob("*.sql"))
         for match in _CREATE.findall(path.read_text(encoding="utf-8"))
     }
@@ -92,6 +109,15 @@ def tables_on_disk() -> set[str]:
 def tables_in_the_inventory() -> set[str]:
     """Every table `infra/sql/README.md` has a row for."""
     return {name.lower() for name in _ROW.findall(_README.read_text(encoding="utf-8"))}
+
+
+def table_named_by(statement: str) -> str | None:
+    """The table a statement acts on, or `None` for a statement no `_TOUCHES` construct matches."""
+    for pattern in _TOUCHES:
+        match = pattern.match(statement)
+        if match is not None:
+            return _bare(match.group(1))
+    return None
 
 
 def migrations_that_touch_each_table() -> dict[str, list[str]]:
@@ -103,13 +129,11 @@ def migrations_that_touch_each_table() -> dict[str, list[str]]:
     tables = tables_on_disk()
     touched: dict[str, list[str]] = {table: [] for table in tables}
     for _, number, statement in _statements():
-        for pattern in _TOUCHES:
-            match = pattern.match(statement)
-            if match is None:
-                continue
-            table = match.group(1).lower()
-            if table in tables and number not in touched[table]:
-                touched[table].append(number)
+        table = table_named_by(statement)
+        if table is None or table not in tables:
+            continue
+        if number not in touched[table]:
+            touched[table].append(number)
     return touched
 
 
@@ -166,6 +190,38 @@ def test_every_migration_statement_is_one_the_rule_understands() -> None:
         f"{unrecognised}. Add the construct to _TOUCHES (it names a table) or to _TABLE_FREE (it "
         "does not), so the Migration column keeps being checked"
     )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE TABLE IF NOT EXISTS audit_events (a TEXT)",
+        "ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS c TEXT",
+        "ALTER TABLE public.audit_events ADD COLUMN IF NOT EXISTS c TEXT",
+        "ALTER TABLE ONLY audit_events ADD COLUMN IF NOT EXISTS c TEXT",
+        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS c TEXT",
+        'ALTER TABLE "audit_events" ADD COLUMN IF NOT EXISTS c TEXT',
+        'ALTER TABLE public."audit_events" ADD COLUMN IF NOT EXISTS c TEXT',
+        "CREATE INDEX IF NOT EXISTS i ON audit_events (a)",
+        "CREATE INDEX IF NOT EXISTS i ON ONLY public.audit_events (a)",
+        "COMMENT ON TABLE public.audit_events IS 'x'",
+        "COMMENT ON COLUMN public.audit_events.a IS 'x'",
+        "INSERT INTO public.audit_events (a) VALUES ('x')",
+        "UPDATE public.audit_events SET a = 'x'",
+    ],
+)
+def test_a_table_is_recognised_however_it_is_spelled(statement: str) -> None:
+    """Every spelling Postgres accepts names the same table — or the column check goes blind.
+
+    The failure this closes is silent, which is why it is asked of synthetic SQL rather than of the
+    tree. `ALTER TABLE ONLY audit_events …` is the form **`pg_dump` emits**; read by a rule that
+    expects a bare identifier it yields the "table" `only`, which is in no inventory, so the
+    migration is credited to nothing and `test_the_migration_column_names_every_migration_that_
+    touches_the_table` below passes over a row it has just stopped checking. A schema qualifier
+    resolves to `public` the same way. Every merged migration happens to use the bare lower-case
+    spelling, so the tree can never raise this — only these rows can.
+    """
+    assert table_named_by(statement) == "audit_events"
 
 
 def test_the_migration_column_names_every_migration_that_touches_the_table() -> None:

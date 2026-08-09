@@ -26,6 +26,7 @@ from chemclaw.agent import attachments
 from chemclaw.agent.attachments import Attachment
 from chemclaw.api.app import create_app
 from chemclaw.api.rate_limit import RateLimited, RequestLimiter, reset_limiter
+from tests.fakes import asgi_client
 
 
 class _SessionOnlyAgent:
@@ -351,8 +352,7 @@ def test_a_slow_upload_does_not_stall_every_other_request(
 
     async def _drive() -> None:
         app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             upload = asyncio.create_task(_upload(client, session_id))
             await asyncio.to_thread(parse.started.wait, 5)
@@ -382,12 +382,13 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
     authentication for everyone. Shed with a retryable 503 instead — the same answer the turn
     admission gives.
 
-    The queue window is set to zero here **because this test used to encode the whole policy and
-    now encodes only half of it**. Shedding at the cap with no wait at all was measured to fail the
+    **The queue window is zero here so this test asks one half of the policy.** The policy has two
+    halves and they pull against each other: shedding at the cap with no wait at all fails the
     ordinary case (four spreadsheets dropped on the UI at once came back as two 200s and two 503s),
-    so a bounded wait was added; what must still hold under sustained load is that the wait ends in
-    a shed rather than an unbounded queue, which is what this asserts with the wait removed. The
-    burst half is `test_a_burst_inside_the_queue_window_is_served_rather_than_shed` below.
+    so the parse gate waits a bounded time before shedding. Removing the wait isolates what must
+    hold under *sustained* load — that the wait ends in a shed rather than in an unbounded queue.
+    The burst half is `test_a_burst_inside_the_queue_window_is_served_rather_than_shed` below, and
+    neither test is meaningful without the other.
     """
     from chemclaw.core.config import settings
 
@@ -398,8 +399,7 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
 
     async def _drive() -> None:
         app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             first = asyncio.create_task(_upload(client, session_id))
             await asyncio.to_thread(parse.started.wait, 5)
@@ -436,8 +436,7 @@ def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
 
     async def _drive() -> None:
         app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             uploads = [asyncio.create_task(_upload(client, session_id)) for _ in range(4)]
             await asyncio.to_thread(parse.started.wait, 5)
@@ -468,8 +467,7 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def _drive() -> float:
         app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             before = METRICS.value("chemclaw_attachment_parses_shed_total")
             first = asyncio.create_task(_upload(client, session_id))
@@ -545,8 +543,7 @@ def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread
 
     async def _drive() -> None:
         app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             refused = await _upload(client, session_id)
             assert refused.status_code == 422
