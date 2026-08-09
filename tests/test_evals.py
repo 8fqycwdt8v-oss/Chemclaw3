@@ -329,9 +329,32 @@ def test_strict_mode_gates_on_a_regression_and_not_on_a_demonstration() -> None:
     assert report.regressions() == []
     assert main(["--strict"]) == 0
 
-    # A demonstration case that starts passing its gate would be a silent loss of coverage, and a
-    # *new* case is gated unless someone deliberately says otherwise.
+    # A *new* case is gated unless someone deliberately says otherwise.
     assert EvalCase(id="x", metrics=["pmi"]).expect_pass is True
+    assert report.inert_demonstrations() == []
+
+
+def test_strict_mode_fails_when_a_declared_demonstration_stops_demonstrating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`expect_pass: false` is an assertion, not a mute — the half `regressions()` could not see.
+
+    `regressions()` only ever detects *failures*, and suppresses them per case, so a gate that
+    quietly stops firing removes a by-design failure and leaves the command green. Measured on the
+    shipped set: raising `eval_efactor_max`/`eval_pmi_max` to 1000 took `pharma-solvent-heavy` out
+    of the failure set — failed 4 → 2, regressions 0, **exit 0** — so the entire green-chemistry
+    gate went inert with no signal, and both pinned assertions in this file still held.
+    """
+    from chemclaw.evals.harness import main
+
+    monkeypatch.setattr(settings, "eval_efactor_max", 1000.0)
+    monkeypatch.setattr(settings, "eval_pmi_max", 1000.0)
+    report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
+
+    assert report.regressions() == []  # nothing *failed* that should not have
+    assert report.inert_demonstrations() == ["pharma-solvent-heavy"]
+    assert main(["--strict"]) == 1
+    assert "no longer fails" in render_report(report)
 
 
 def test_a_real_regression_fails_strict_mode() -> None:

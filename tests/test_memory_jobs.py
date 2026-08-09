@@ -9,11 +9,16 @@ default config points at (`data/eln-exports` + `data/eln-exports/ord`); no serve
 """
 
 import asyncio
+from datetime import datetime
 
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
+from chemclaw.durable import memory_jobs
 from chemclaw.durable.memory_jobs import all_reactions
+from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.sources.base import RawEntry
 
 
 def testall_reactions_honors_data_sources_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,6 +36,52 @@ def testall_reactions_empty_when_no_ingest_source_active(monkeypatch: pytest.Mon
     """With only a retrieve-only source active, memory synthesis reads an empty corpus."""
     monkeypatch.setattr(settings, "data_sources", "graph")
     assert asyncio.run(all_reactions()) == []
+
+
+class _PartialSource:
+    """An ingest half whose second entry cannot be mapped — the degraded read, minimally.
+
+    `map_to_ord` raising `ChemclawError` is the documented bad-data contract, and `read_corpus`
+    skips such an entry and goes on. That skip is precisely what makes a pass non-authoritative.
+    """
+
+    def __init__(self, bad: int) -> None:
+        """Return three entries, of which `bad` (by index) fails to map."""
+        self._bad = bad
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        """Three raw entries, ids `0`..`2` — the timestamp filter is irrelevant here."""
+        return [RawEntry(entry_id=str(i), payload={}, created_at=since) for i in range(3)]
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        """Map every entry but the designated bad one, which raises the bad-data error."""
+        if raw.entry_id == str(self._bad):
+            raise ChemclawError(f"entry {raw.entry_id} is unmappable")
+        return OrdReaction(
+            reaction_id=raw.entry_id,
+            inputs=[Component(smiles="CCO", role=Role.REACTANT)],
+            outcomes=[Component(smiles="CC=O", role=Role.PRODUCT)],
+            provenance=f"test:{raw.entry_id}",
+        )
+
+
+def test_a_corpus_read_that_skipped_an_entry_reports_itself_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The signal `record(complete=…)` rests on, proved at the place it is produced.
+
+    Nothing downstream can tell a shrunken corpus from a shrinking one, so the read has to say
+    which it was. Without this the observation upsert would keep replacing evidence on a pass that
+    saw part of the record — a partial reading written down as the complete one, which is the
+    defect this lane is named for.
+    """
+    monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [_PartialSource(bad=1)])
+    partial = asyncio.run(memory_jobs.read_corpus())
+    assert len(partial.reactions) == 2 and partial.complete is False
+
+    monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [_PartialSource(bad=9)])
+    whole = asyncio.run(memory_jobs.read_corpus())
+    assert len(whole.reactions) == 3 and whole.complete is True
 
 
 def test_background_worker_registers_memory_fan_out() -> None:

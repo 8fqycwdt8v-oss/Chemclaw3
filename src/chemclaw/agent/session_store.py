@@ -60,7 +60,7 @@ from chemclaw.agent.message_pairing import strip_call_ids, unmatched_call_ids
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
-from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.metrics_bridge import degraded, record_metric
 
 log = logging.getLogger(__name__)
 
@@ -158,9 +158,7 @@ async def _session_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection
 
     Extracted once the third store in this module needed the identical four lines.
     """
-    async with db.connection(
-        dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(dsn) as conn:
         yield conn
 
 
@@ -234,11 +232,12 @@ class PostgresHistoryProvider(HistoryProvider):
                         await cur.executemany(_UPDATE_MESSAGE, rewrites)
                 await conn.commit()
         except (psycopg.Error, ConnectionError):
-            log.warning(
+            degraded(
+                log,
+                "history_repair",
                 "could not persist history repair for session %s; "
                 "the unmatched tool call was filtered for this turn but remains stored",
                 session_id,
-                exc_info=True,
             )
         else:
             log.warning(
@@ -383,7 +382,9 @@ class PostgresHistoryProvider(HistoryProvider):
                         await cur.execute(_DELETE_IDS, (session_id, sorted(plan.deletes)))
                 await conn.commit()
         except Exception:
-            log.warning("could not compact stored history for %s", session_id, exc_info=True)
+            degraded(
+                log, "history_compaction", "could not compact stored history for %s", session_id
+            )
             return
         record_metric(
             lambda m: m.increment("chemclaw_history_rows_compacted_total", float(len(plan.deletes)))

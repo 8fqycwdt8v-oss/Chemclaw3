@@ -15,6 +15,7 @@ import hashlib
 import hmac
 
 from fastapi import FastAPI, HTTPException
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -168,7 +169,31 @@ async def knowledge_merged(
     signed = _webhook_signature_ok(raw, request.headers.get(_WEBHOOK_SIGNATURE_HEADER, ""))
     if settings.note_webhook_secret and not signed:
         raise HTTPException(status_code=401, detail="invalid or missing webhook signature")
-    merged = KnowledgeMergedIn.model_validate_json(raw) if raw else KnowledgeMergedIn()
+    try:
+        merged = KnowledgeMergedIn.model_validate_json(raw) if raw else KnowledgeMergedIn()
+    except ValidationError as exc:
+        # The body is read raw (the signature covers bytes, not a parsed model), which puts this
+        # parse *inside* the handler — where FastAPI's request-validation layer, the thing that
+        # turns a bad body into a 422, cannot see it. Left alone, a malformed body was an
+        # unhandled `ValidationError`: a 500 for what is plainly the caller's mistake, repeatable
+        # at will and therefore also a way to move the 5xx rate an operator alerts on.
+        #
+        # A *count*, never the errors themselves. Pydantic materialises one error object per bad
+        # list element, so rendering them is an amplifier keyed on the attacker's body: a 2 MB
+        # `{"note_ids": [1, 1, …]}` produces 683,520 errors, 32 MB of detail and ~4 s of
+        # uninterruptible CPU on the pod's single uvicorn worker — the same whole-pod freeze this
+        # module's sibling fix moved attachment parsing off the loop to prevent, handed to the
+        # caller as a response as well. `error_count()` is answered on pydantic's Rust side
+        # without building any of it (measured: 0.0000 s for those same 683,520 errors), and the
+        # expected shape is a constant, because the model is one field.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"the webhook body does not match the expected shape "
+                f"({exc.error_count()} validation error(s)); expected "
+                f'{{"note_ids": ["<note-id>", ...]}}'
+            ),
+        ) from exc
     closed = 0
     if merged.note_ids:
         if not signed:

@@ -148,6 +148,35 @@ def test_an_undated_result_falls_outside_every_window() -> None:
     asyncio.run(_run())
 
 
+def test_an_undated_result_sorts_ahead_of_every_dated_one() -> None:
+    """Where an undated row lands in the ordering — and that mixing the two kinds does not crash.
+
+    The in-memory store keeps no clock, so `find`'s docstring says insertion order stands in for
+    time; the consistent reading is that a row nobody dated is the newest thing the store knows.
+    Nothing stated it, and writing this test found out why it had never come up: the sentinel that
+    expressed it, `created_at or datetime.max`, is **naive**, while every real `created_at` in this
+    codebase is timezone-aware. One store holding one dated and one undated result raised
+    `TypeError: can't compare offset-naive and offset-aware datetimes` — not a wrong order, no
+    order at all. `test_an_undated_result_falls_outside_every_window` never saw it because a
+    single-element list is never compared.
+
+    This is also the only place the two backends *can* differ by construction — Postgres stamps
+    `created_at` itself and has no undated row to place — so the in-memory choice is pinned here or
+    nowhere. Reversing the partition (`dated + undated`) still fails this.
+    """
+
+    async def _run() -> None:
+        store = await _populated()  # three dated results, newest at `_NOW`
+        await store.put(_stored("CCC"))  # no created_at
+        found = await store.find(CalculationQuery())
+        assert found[0].created_at is None
+        dated = [s.created_at for s in found[1:] if s.created_at is not None]
+        assert len(dated) == len(found) - 1, "an undated row sorted in among the dated ones"
+        assert dated == sorted(dated, reverse=True)
+
+    asyncio.run(_run())
+
+
 def test_limit_caps_the_page() -> None:
     """The store is never evicted (D-011), so an uncapped browse is a full scan of it."""
 

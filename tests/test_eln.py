@@ -729,6 +729,40 @@ def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
     asyncio.run(_run())
 
 
+def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
+    """A typo in an amendment date must not delete a real experiment from the corpus.
+
+    The guard exists to keep an implausible timestamp out of the *stored cursor*, because nothing
+    ever lowers one. It was moved onto `entry_window` — the value the cursor takes — and that
+    silently gave it a second job: an entry created in 2026 and amended with a typo'd 2062 was
+    rejected outright, and, because the fetch filters on the same watermark, re-fetched and
+    re-rejected on every run, forever. Its `created_at` is perfectly sane and its chemistry is
+    real. So the entry ingests and only the cursor refuses the value.
+
+    The other half — a *creation* date beyond the wall clock, which means the record is not about
+    anything that has happened — is still a rejection, and
+    `test_future_dated_entry_is_rejected_and_does_not_poison_cursor` pins it.
+    """
+
+    async def _run() -> None:
+        amended = _good_entry("amended", datetime(2026, 1, 1, tzinfo=UTC)).model_copy(
+            update={"modified_at": datetime(2062, 7, 23, tzinfo=UTC)}
+        )
+        good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([amended, good]), rxn, mol, sub, _EPOCH)
+
+        assert summary.ingested == ["amended", "good"]
+        assert summary.rejected == []
+        # The cursor is what the batch's *plausible* entries reached. The amended one contributes
+        # nothing to it — not even its own sane `created_at`, because the fetch filters on the
+        # watermark and the simplest safe answer is to leave the cursor where the rest of the
+        # batch put it. So the entry is fetched again next run, as the warning says.
+        assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # not 2062
+
+    asyncio.run(_run())
+
+
 def test_sync_fetches_an_overlap_window_behind_the_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -22,7 +22,14 @@ from fastapi.testclient import TestClient
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.proposal import (
@@ -201,6 +208,40 @@ def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
     # Still diagnostic: which remote failed, and why, survive the redaction.
     assert "git.example.invalid" in recorded.reason
     assert "could not read Username" in recorded.reason
+
+
+def test_a_recorded_proposal_carries_the_turn_that_made_it(
+    store: InMemoryProposalStore,
+) -> None:
+    """Who proposed this note — the provenance half of "AI proposes, human signs off".
+
+    `propose_note` reads `(actor, session_id, correlation_id)` ambiently and stamps them on the
+    row. Nothing asserted that it does, and the three fields default to `""`, so dropping any of
+    the three stamps produced an unattributable compliance record with a fully green suite —
+    measured by mutation (each of `actor=actor`, `session_id=session_id`,
+    `correlation_id=correlation_id` deleted in turn, whole suite still passing).
+
+    The actor is load-bearing beyond the record: `chemclaw.api.deps` scopes a non-reviewer to
+    `proposal.actor != principal.oid`, so an unstamped row is one its own author is served a 404
+    for. The route's half of that rule is tested; the stamping it depends on was not.
+    """
+    identity = set_current_identity("u-oid-chemist", frozenset({"chemist"}))
+    session = set_current_session_id("sess-42")
+    correlation = set_current_correlation_id("conv-7")
+    try:
+        _run(propose_note(_note(), FakeSubmitter()))
+    finally:
+        reset_current_correlation_id(correlation)
+        reset_current_session_id(session)
+        reset_current_identity(identity)
+
+    [recorded] = _run(store.listing(None, "", 10, None))
+    assert recorded.actor == "u-oid-chemist"
+    assert recorded.session_id == "sess-42"
+    assert recorded.correlation_id == "conv-7"
+    # And the scoping the actor exists for actually selects on it.
+    assert _run(store.listing(None, "u-oid-chemist", 10, None)) == [recorded]
+    assert _run(store.listing(None, "someone-else", 10, None)) == []
 
 
 def test_a_store_failure_never_fails_the_submission(
@@ -514,6 +555,60 @@ def test_without_a_secret_a_reindex_still_works_but_decides_nothing(
     assert refused.status_code == 401
     stored = _run(store.read(proposal_id))
     assert stored is not None and stored.state is ProposalState.OPEN
+
+
+def test_a_malformed_signed_body_is_a_422_not_a_500(
+    client: TestClient, store: InMemoryProposalStore
+) -> None:
+    """A body the schema rejects is the caller's mistake, and must be answered as one.
+
+    `model_validate_json` was called on the raw bytes inside the handler — the one place FastAPI's
+    request-validation layer cannot see — so a `ValidationError` escaped as an unhandled 500.
+    Repeatable at will by anyone who can sign a body (a misconfigured proxy will do it by
+    accident), which also makes it a way to move the 5xx rate operators alert on.
+
+    The signature gate is untouched and still runs first: the body below is correctly signed, so
+    the 422 is reached only *after* authentication, and an unsigned malformed body is still a 401
+    (pinned by the tests around this one).
+    """
+    for body in (b"{not json at all", b'{"note_ids": "reaction-1"}', b'{"note_ids": [1, 2]}'):
+        response = client.post("/events/knowledge-merged", content=body, headers=_signed(body))
+        assert response.status_code == 422, (body, response.status_code)
+        assert "expected" in response.json()["detail"]
+
+
+def test_the_422_does_not_grow_with_the_body_that_caused_it(
+    client: TestClient, store: InMemoryProposalStore
+) -> None:
+    """The first version of this handler rendered `exc.errors()`, and that was an amplifier.
+
+    Pydantic materialises one error object per bad list element, so a body of malformed `note_ids`
+    turns a linear input into a linear number of error objects and a linear rendered string —
+    measured at ~24x the body, plus seconds of uninterruptible CPU, on the pod's single uvicorn
+    worker. That is the same whole-pod freeze the sibling fix moved attachment parsing off the loop
+    to prevent, except handed to the caller as a response as well, and reachable by any
+    authenticated principal whenever `note_webhook_secret` is unset.
+
+    Two properties, because either alone can be satisfied by the wrong fix: the detail must not
+    grow with the input, and it must not contain the input. `error_count()` is what makes both
+    true, and it costs nothing — pydantic answers it without building the errors at all.
+    """
+    small = b'{"note_ids": [1, 1]}'
+    large = b'{"note_ids": [' + b"1," * 50_000 + b"1]}"
+
+    details = []
+    for body in (small, large):
+        response = client.post("/events/knowledge-merged", content=body, headers=_signed(body))
+        assert response.status_code == 422, (len(body), response.status_code)
+        details.append(response.json()["detail"])
+
+    assert len(details[1]) < 2 * len(details[0]), (
+        f"a {len(large)}-byte body produced a {len(details[1])}-byte detail against "
+        f"{len(details[0])} for {len(small)} bytes — the response scales with the input"
+    )
+    assert "1, 1, 1" not in details[1] and "[1," not in details[1], (
+        "the offending input was echoed back into the response"
+    )
 
 
 def test_a_tampered_signature_is_refused(client: TestClient, store: InMemoryProposalStore) -> None:

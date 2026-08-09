@@ -73,6 +73,39 @@ async def _database_unavailable(request: Request, exc: Exception) -> Response:
     return JSONResponse(status_code=503, content={"detail": _AT_CAPACITY})
 
 
+async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
+    """Turn an unreachable durable subsystem into a retryable 503 instead of an unhandled 500.
+
+    `job_status` and `cancel_job` used to report *every* Temporal `RPCError` as "no such job", so a
+    broker roll during a cancel told an operator their runaway DFT run did not exist. Narrowing that
+    to NOT_FOUND was right and, without this handler, exchanged one wrong answer for another: with
+    no handler registered the raise became a bare HTTP 500, whose contract is "this request is
+    broken, do not retry" — the opposite of the truth, and a page for the on-call as an application
+    bug.
+
+    Unlike `_database_unavailable` this relays the exception's own message rather than the capacity
+    wording, because `SubsystemUnavailableError` is written for a human by contract
+    (`core/errors.py`): it names the subsystem, says the work never began, and carries no hostname,
+    port or driver text — those live on `__cause__`, for the log below.
+
+    **Counts its own requests, not the turn probe's.** This used to increment
+    `chemclaw_durable_unreachable_total`, whose declaration is "turns whose durable-subsystem health
+    probe failed (Temporal did not answer)" and whose alert says so — while the handler fires per
+    *request* for the whole `SubsystemUnavailableError` family, `DocumentIndexError` (a pgvector
+    failure) included. One series, two populations, two denominators, and an alert whose summary was
+    true of only one of them. The sibling above is the pattern: one counter per shedding handler.
+    """
+    METRICS.increment("chemclaw_subsystem_unavailable_total")
+    # `exc_info` because the sentence above is only true if something logs the `__cause__`. The
+    # relayed message is deliberately free of hostname, port and driver text, so without the chain
+    # the operator's copy of this event says no more than the client's — the half of the contract
+    # that had no implementation.
+    logger.warning(
+        "shedding %s %s: %s", request.method, request.url.path, exc, exc_info=exc.__cause__
+    )
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 def _refuse_unauthenticated_exposure() -> None:
     """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
 

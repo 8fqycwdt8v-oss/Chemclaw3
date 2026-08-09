@@ -187,3 +187,35 @@ def test_the_closure_contracts_rather_than_expanding() -> None:
     ]
     assert droppable_rows(rows, {1}) <= {1}
     assert droppable_rows(rows, set()) == set()
+
+
+def test_the_maf_discriminators_still_match_what_maf_emits() -> None:
+    """The two strings that decide which rows a data-destroying sweep may delete.
+
+    `durable/retention.py` prunes chat rows and asks this module which ones are safe to drop, and
+    the answer turns on `content.type == "function_call"` / `"function_result"`. Those are MAF's
+    strings, not ours. A rename upstream does not raise: it changes what a nightly sweep deletes.
+    Measured against a plausible rename, `droppable_rows([(1, call), (2, result)], {1})` went from
+    `set()` — the partner correctly protected — to `{1}`, deleting the call and stranding its
+    result, which this module calls "a bricked session with *no* self-heal path".
+
+    **This is not the guard, and the commit that added it overclaimed.** Mutating the two constants
+    fails eight tests in this file, seven of which predate it — every pairing assertion turns on
+    `content.type == _CALL`, so the coupling was already covered. What this adds is a *named*
+    failure: the other seven report "an unanswered call was not stripped", which sends a reader to
+    the pairing logic, while this one says the discriminator moved. Worth keeping for that reason
+    and not worth claiming as a closed risk.
+    """
+    from chemclaw.agent.message_pairing import _CALL, _RESULT
+
+    # Built through MAF's own public constructors, which is the point: the assertion is about what
+    # MAF *emits*, so constructing the content any other way would only prove this file agrees with
+    # itself. (`FunctionCallContent` is not exported at the top level in 1.11.0 — it lives behind
+    # `agent_framework._types` — so the factory is also the only non-private route.)
+    assert Content.from_function_call(call_id="c1", name="t", arguments={}).type == _CALL, (
+        "MAF renamed the function-call discriminator; retention's droppable-row rule now "
+        "mis-classifies every tool exchange"
+    )
+    assert Content.from_function_result(call_id="c1", result="ok").type == _RESULT, (
+        "MAF renamed the function-result discriminator; retention can now strand a call's partner"
+    )

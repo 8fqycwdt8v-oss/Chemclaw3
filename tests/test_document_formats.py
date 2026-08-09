@@ -12,6 +12,7 @@ Every fixture is **built by the format's own writer**, never a checked-in blob â
 """
 
 import io
+import time
 import zipfile
 
 import pytest
@@ -256,6 +257,75 @@ def test_a_container_that_expands_far_past_its_size_is_refused(
     monkeypatch.setattr(settings, "document_max_expanded_bytes", 1_000_000)
     with pytest.raises(AttachmentError, match="expands to"):
         parse_attachment("bomb.xlsx", raw)
+
+
+def _cmap_bomb_pdf_bytes(destination_hex_chars: int = 200_000, span: int = 20_000) -> bytes:
+    """A small PDF whose font declares one `bfrange` line with an enormous destination string.
+
+    Hand-assembled rather than built by a writer, unlike every other fixture here: no PDF writer
+    will emit this, which is the point â€” it is what an attacker sends, not what a tool produces.
+    The destination starts with `A` and is otherwise zeros so incrementing it never gains a hex
+    digit; an all-`F` string overflows into an odd-length hex value on the second entry and pypdf
+    then skips the line as broken, which looks like a passing test and measures nothing.
+    """
+    destination = b"A" + b"0" * (destination_hex_chars - 1)
+    cmap = (
+        b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+        b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+        b"1 beginbfrange\n<0000> <%04X> <%s>\nendbfrange\nendcmap\nend\nend\n"
+    ) % (span, destination)
+    content = b"BT /F1 12 Tf (\\000\\001) Tj ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H "
+        b"/DescendantFonts [6 0 R] /ToUnicode 7 0 R >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+        b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X /CIDSystemInfo "
+        b"<< /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap),
+    ]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    table = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        table,
+    )
+    return bytes(out)
+
+
+def test_a_font_map_that_expands_far_past_its_size_is_refused() -> None:
+    """The PDF twin of the zip bomb, and the reason `pypdf` is pinned at 6.15.0 or above.
+
+    Measured on the previously locked pypdf 6.14.2, in-process: this 201 KB input took **33.8 s
+    and took peak RSS from 35 MB to 1948 MB**, then returned 50,000 characters as if it were an
+    ordinary document. `MAPPING_DICTIONARY_SIZE_LIMIT` did not stop it because it bounds the
+    number of `/ToUnicode` entries, never the size of each one. On 6.15.0 the same bytes are
+    refused in 0.00 s at 36 MB (CVE-2026-71852, CVE-2026-71870).
+
+    Pinned as a *test* rather than left to the version pin because the pin is a floor: this is the
+    behaviour the floor exists for, and it fails loudly if a future resolution walks back under it.
+    The refusal itself is `parse_document`'s boundary net turning the library's `LimitReachedError`
+    into the same 422-shaped `AttachmentError` every other unreadable file gets.
+    """
+    raw = _cmap_bomb_pdf_bytes()
+    assert len(raw) < 300_000  # the whole point: the input is small and the expansion is not
+    started = time.monotonic()
+    with pytest.raises(AttachmentError, match="could not read bomb.pdf"):
+        parse_attachment("bomb.pdf", raw)
+    elapsed = time.monotonic() - started
+    # Two orders of magnitude below the 33.8 s the unpinned version took, so this discriminates
+    # without encoding a timing guess.
+    assert elapsed < 5.0, f"the refusal itself took {elapsed:.1f}s"
 
 
 def test_an_ordinary_workbook_is_not_mistaken_for_a_bomb() -> None:

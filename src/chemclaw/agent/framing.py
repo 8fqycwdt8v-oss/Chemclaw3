@@ -113,6 +113,27 @@ def _defang(content: str) -> str:
 _ID_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
 
 
+def defang(content: str) -> str:
+    """Neutralise any envelope delimiter in `content` without wrapping it.
+
+    For text that must appear in a prompt *outside* an envelope — the answer under review, an id
+    list — where framing would be wrong but a forged delimiter is still a forged delimiter. The
+    judge prompt names `ENVELOPE_TAG` as authoritative, so any span able to spell it can claim to be
+    evidence, and the answer being scored is exactly the span an attacker most wants that for.
+    """
+    return _defang(content)
+
+
+def safe_id(note_id: str) -> str:
+    """Reduce `note_id` to the characters an attribute or a label can safely carry.
+
+    Public because the verifier writes an id list into its prompt outside any envelope: a note id
+    is retrieved data like any other, and the first version of that line emitted it raw — closing
+    the escape in the content channel and opening it in the id channel.
+    """
+    return _ID_UNSAFE.sub("_", note_id) or "unknown"
+
+
 def frame_untrusted(content: str, *, note_id: str) -> str:
     """Wrap retrieved `content` from source `note_id` in a data envelope for the model.
 
@@ -122,5 +143,4 @@ def frame_untrusted(content: str, *, note_id: str) -> str:
     Content and id are neutralized as the module docstring describes, so neither can close the
     envelope early; the text is otherwise preserved verbatim.
     """
-    safe_id = _ID_UNSAFE.sub("_", note_id) or "unknown"
-    return f'<{ENVELOPE_TAG} id="{safe_id}">\n{_defang(content)}\n</{ENVELOPE_TAG}>'
+    return f'<{ENVELOPE_TAG} id="{safe_id(note_id)}">\n{_defang(content)}\n</{ENVELOPE_TAG}>'

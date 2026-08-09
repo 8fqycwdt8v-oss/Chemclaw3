@@ -7,7 +7,12 @@ the ICH Q3C/Q3D impurity limits), `fingerprints` ECFP4/DRFP and Tanimoto search.
 
 **None of these import Temporal, MCP, FastAPI or `chemclaw.agent`.** That is the whole point: an
 engine is importable and testable on its own, so a chemist can check the numbers without an
-orchestration stack, and `tests/test_layering.py` keeps it that way.
+orchestration stack. Two tests keep it that way, and until 2026-08-08 only one of the four
+prohibitions was covered: `tests/test_layering.py` records an import edge only when the target
+starts with `chemclaw`, so it enforced the `chemclaw.agent` half and nothing else — `import
+temporalio` here would have passed every test in the repository.
+`tests/test_third_party_layering.py` is the other half, and it declares exactly what `science`
+may reach for (rdkit, the BoTorch stack, the calculation cache's Postgres driver) and nothing more.
 
 ## Why `science/calc` and `connectors/calc` both exist
 

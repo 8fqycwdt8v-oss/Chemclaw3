@@ -231,5 +231,11 @@ def test_a_malformed_typed_link_is_reported_as_written(tmp_path: Path) -> None:
     """
     assert split_link("precursor-of:") == (DEFAULT_RELATION, "precursor-of:")
     assert split_link(":compound-x") == (DEFAULT_RELATION, ":compound-x")
+    # The same principle on the third malformed shape: a second colon splits at the *first* one, so
+    # the id keeps the text the author wrote and dangles. Splitting at the last one instead would
+    # resolve `[[precursor-of:compound:x]]` to the note `x` under a relation nobody typed — the
+    # silent repair this test is named for. (Mutating `partition` to `rpartition` here survived the
+    # whole suite.)
+    assert split_link("precursor-of:compound:x") == ("precursor-of", "compound:x")
     problems = validate(_write(tmp_path, Note(id="a", type="report", body="[[precursor-of:]]")))
     assert any("precursor-of:" in problem for problem in problems)

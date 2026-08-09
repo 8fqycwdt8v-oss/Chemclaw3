@@ -16,6 +16,7 @@ scores), noted where it is defined.
 """
 
 import asyncio
+import logging
 import math
 import re
 from collections.abc import AsyncIterator
@@ -29,9 +30,11 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.core.embeddings import embed_texts
+from chemclaw.core.embeddings import embed_texts, embedding_config_key
 from chemclaw.kg.graph import invalidate_cache, load_notes, note_file_fingerprints
 from chemclaw.kg.search import search_text
+
+log = logging.getLogger(__name__)
 
 # Lexical tokenizer for the in-memory backend (lowercase alphanumeric runs) — the offline proxy of
 # Postgres `to_tsvector`; the durable backend uses real FTS, this only needs the same ordering.
@@ -65,16 +68,25 @@ class IndexHit(BaseModel):
 class NoteIndex(Protocol):
     """Persistence + dense/lexical search over the note corpus. Backends implement this."""
 
-    async def upsert(self, records: list[NoteRecord]) -> None:
-        """Insert or replace index rows by note id."""
+    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+        """Insert or replace index rows by note id, recording which configuration embedded them.
+
+        `embedding_key` is `chemclaw.core.embeddings.embedding_config_key()` — a batch-level fact,
+        not a per-record one, exactly as the document index takes it (`ingest/documents/index.py`),
+        so one upsert can never write two generations of vector under one call.
+        """
         ...
 
-    async def fingerprints(self) -> dict[str, str]:
-        """The stored `note_id -> fingerprint` for every indexed note (empty fingerprint omitted).
+    async def fingerprints(self, embedding_key: str) -> dict[str, str]:
+        """The stored `note_id -> fingerprint` for notes embedded under `embedding_key`.
 
         What `reindex_notes` diffs the current on-disk fingerprints against to decide which notes
-        need a fresh embedding call — an unindexed or never-fingerprinted note simply has no entry,
-        which reads as "changed" exactly like a real mismatch would.
+        need a fresh embedding call — an unindexed, never-fingerprinted, or differently-embedded
+        note simply has no entry, which reads as "changed" exactly like a real mismatch would.
+
+        Scoping the read to the current configuration is what makes a model swap self-healing: the
+        file fingerprint answers "did the text change" and cannot answer "did the model change",
+        so a key-mismatched row must not be allowed to match on the fingerprint alone.
         """
         ...
 
@@ -117,15 +129,25 @@ class InMemoryNoteIndex:
     def __init__(self) -> None:
         """Start with an empty index, keyed by note id (re-upserting an id replaces it)."""
         self._records: dict[str, NoteRecord] = {}
+        self._embedding_keys: dict[str, str] = {}
 
-    async def upsert(self, records: list[NoteRecord]) -> None:
-        """Insert or replace each record by note id."""
+    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+        """Insert or replace each record by note id, under the configuration that embedded it."""
         for record in records:
             self._records[record.note_id] = record
+            self._embedding_keys[record.note_id] = embedding_key
 
-    async def fingerprints(self) -> dict[str, str]:
-        """Stored fingerprints, empty ones omitted (a caller who never set one looks new)."""
-        return {r.note_id: r.fingerprint for r in self._records.values() if r.fingerprint}
+    async def fingerprints(self, embedding_key: str) -> dict[str, str]:
+        """Fingerprints of rows embedded under `embedding_key`; empty ones omitted.
+
+        A row from a superseded configuration is left out exactly as a fingerprint-less one is —
+        both mean "no reusable vector on record", which is what the caller asks this question for.
+        """
+        return {
+            r.note_id: r.fingerprint
+            for r in self._records.values()
+            if r.fingerprint and self._embedding_keys.get(r.note_id) == embedding_key
+        }
 
     async def search_dense(
         self, query_embedding: list[float], top_k: int, within: set[str] | None = None
@@ -181,30 +203,57 @@ class PostgresNoteIndex:
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         width = settings.embedding_dim
         self._upsert = (
-            "INSERT INTO note_index (note_id, embedding, lexeme, fingerprint, updated_at) "
+            "INSERT INTO note_index "
+            "(note_id, embedding, lexeme, fingerprint, embedding_key, updated_at) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(text)s), %(fp)s, now()) "
+            "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now()) "
             "ON CONFLICT (note_id) DO UPDATE SET "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
-            "fingerprint = EXCLUDED.fingerprint, updated_at = now()"
+            "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
+            "updated_at = now()"
         )
         # The `> 0` floor mirrors the InMemory reference (`score > 0.0`): a zero/near-zero or
         # negatively-correlated note is not a hit. Without it pgvector returns the top-k nearest
         # unconditionally, so a small corpus would surface unrelated notes as cited evidence — a
         # ranking the tests never see. (A zero query vector is short-circuited in `search_dense`
         # before the query, so `<=>` never produces a NaN distance to order by.)
-        # The `within` scope lives in the SQL itself (NULL = unrestricted), so a caller's
-        # eligibility set bounds the search *before* the LIMIT — the top-k slots are never spent
-        # on notes the caller would drop afterwards (the same semantics the InMemory backend has).
+        # The `within` scope lives in the SQL itself (NULL = unrestricted) rather than being applied
+        # to the result, so the top-k slots are mostly not spent on notes the caller would drop.
+        #
+        # **On the dense path that is a tendency, not the guarantee this comment used to claim.**
+        # With the HNSW index actually in use (see the tie-break below), the predicate is a *post*
+        # filter over the ef_search candidate list, not a bound on what the index scan considers:
+        # measured, `Index Scan using note_index_embedding_idx` with `Rows Removed by Filter: 29`
+        # above it. So a selective `within` can leave fewer than k candidates surviving and the
+        # query returns short. At N=20,000, k=8, clustered embeddings and a random eligible subset,
+        # the planner falls back to a Seq Scan once the filter is selective enough and the search is
+        # exact again — but forcing the index at `within=0.10` returned **5 of 8**. `GraphRetriever`
+        # always passes a `within`, so this is the only path production takes, and a `type=` filter
+        # that *correlates* with the embedding clusters will be worse than the random subset
+        # measured here. No knob trades latency back for recall; the `hnsw.ef_search` row in
+        # `docs/planning/BACKLOG.md` is where one would come from.
+        #
+        # The lexical statement below carries no such caveat: `ts_rank` over the GIN index is exact,
+        # and there `within` really is a bound before the LIMIT. So is the InMemory backend, which
+        # is why a two-row unit test cannot see any of this.
         scope = "AND (%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[])) "
+        # **The tie-break sorts the k rows, not the table.** `note_id` as a secondary key mirrors
+        # the InMemory reference's `(-score, note_id)`, so equal-similarity notes order
+        # deterministically and identically across backends — but written into the *inner* ORDER BY
+        # it made the ordering non-derivable from the vector index and the planner abandoned the
+        # index entirely. EXPLAIN ANALYZE at N=20,000, median of 5: inner tie-break → Seq Scan +
+        # Sort, 243.05 ms; this form → Index Scan + a 10-row quicksort, 3.58 ms, returning the same
+        # ids in the same order as the tie-break-free query. What it does *not* pin is which rows
+        # win a tie *at the k-th place* — and neither did the old form, because HNSW is approximate:
+        # the tie-break exists so two backends agree on the order of the hits they return.
         self._dense = (
+            "SELECT note_id, score FROM ("
             f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
             "FROM note_index WHERE embedding IS NOT NULL "
             f"AND 1 - (embedding <=> %(q)s::vector({width})) > 0 "
             f"{scope}"
-            # `note_id` secondary sort mirrors the InMemory reference's (-score, note_id) tie-break,
-            # so equal-similarity notes order deterministically and identically across backends.
-            f"ORDER BY embedding <=> %(q)s::vector({width}), note_id LIMIT %(k)s"
+            f"ORDER BY embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
+            ") AS hits ORDER BY score DESC, note_id"
         )
         self._lexical = (
             "SELECT note_id, ts_rank(lexeme, query) AS score "
@@ -222,13 +271,11 @@ class PostgresNoteIndex:
         raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
         activity for its whole budget.
         """
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
+        async with db.connection(self._dsn) as conn:
             yield conn
 
-    async def upsert(self, records: list[NoteRecord]) -> None:
-        """Insert or replace each record (embedding + tsvector + fingerprint) by note id."""
+    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+        """Insert or replace each record (embedding + tsvector + fingerprint + key) by note id."""
         if not records:
             return
         async with self._connection() as conn:
@@ -240,20 +287,24 @@ class PostgresNoteIndex:
                         "emb": _vector_literal(record.embedding),
                         "text": record.text,
                         "fp": record.fingerprint or None,
+                        "key": embedding_key,
                     },
                 )
             await conn.commit()
 
-    async def fingerprints(self) -> dict[str, str]:
-        """Stored fingerprints for every row that has one.
+    async def fingerprints(self, embedding_key: str) -> dict[str, str]:
+        """Stored fingerprints for every row that has one *and* was embedded under this key.
 
-        NULL (a row written before this column, or by a `--full` rebuild) is left out — either way
-        it is "unknown", which reads as changed to `reindex_notes`, never as a stale match.
+        NULL in either column (a row written before that column existed, or a vector from a
+        superseded embedding configuration) is left out — all of those are "unknown", which reads
+        as changed to `reindex_notes`, never as a stale match.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT note_id, fingerprint FROM note_index WHERE fingerprint IS NOT NULL"
+                    "SELECT note_id, fingerprint FROM note_index "
+                    "WHERE fingerprint IS NOT NULL AND embedding_key = %(key)s",
+                    {"key": embedding_key},
                 )
                 rows = await cur.fetchall()
         return {r[0]: r[1] for r in rows}
@@ -292,6 +343,32 @@ def default_note_index() -> PostgresNoteIndex:
     return PostgresNoteIndex()
 
 
+def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, str]) -> bool:
+    """Whether `note_id` must be (re-)embedded: its file fingerprint differs from the stored one.
+
+    A note the fingerprint scan does **not** know is always re-embedded rather than compared. The
+    two sides are keyed differently by construction — the scan keys on the file's stem (stat-only,
+    it never parses), the note list keys on the id inside the frontmatter — so a note whose filename
+    disagrees with its id is missing from `current`, was missing from `stored` too, and `None !=
+    None` is False: it read as "unchanged" forever and was never indexed at all, with `full=True`
+    no help because it takes the same branch. Absent means unknown, and unknown means embed it.
+
+    Said at WARNING because the only way to be here is that mismatch (or a file deleted between the
+    two scans, which is transient): the note is indexed, but it costs an embedding on every run
+    until the filename is fixed, and `chemclaw.kg.validate` fails the PR that introduces one.
+    """
+    fingerprint = current.get(note_id)
+    if fingerprint is None:
+        log.warning(
+            "note %r has no file fingerprint (its filename does not match its id); "
+            "re-embedding it on every run until the file is renamed to %r",
+            note_id,
+            f"{note_id}.md",
+        )
+        return True
+    return fingerprint != stored.get(note_id)
+
+
 async def reindex_notes(
     index: NoteIndex, notes_dir: str | None = None, *, full: bool = False
 ) -> int:
@@ -304,9 +381,17 @@ async def reindex_notes(
     the knowledge graph regardless of whether anything had changed, one LLM-endpoint call per note
     per hour forever.
 
+    **A model change is detected too, and needs no flag**
+    (D-2026-08-08-a-derived-index-must-record-what-derived-it).
+    The file fingerprint cannot see one — swapping the embedding model moves no mtime —
+    so the index also stores which configuration embedded each row (`note_index.embedding_key`,
+    migration 039), and `fingerprints()` only reports rows made by the current one. A row from a
+    superseded configuration therefore has no stored fingerprint to match and is re-embedded here,
+    which is what makes the scheduled incremental run self-healing rather than a `--full` somebody
+    has to remember at the moment they change a setting.
+
     `full=True` re-embeds every note unconditionally (the CLI's `--full`), for recovery from a
-    corrupted index or a change to the embedding model/dimension the fingerprint cannot see (that
-    staleness — detecting a model change — is the separately tracked backlog item; this is not it).
+    corrupted index.
 
     Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge. Notes
     deleted from disk leave a harmless stale row — the retrievers drop any hit whose note no longer
@@ -325,11 +410,12 @@ async def reindex_notes(
     if not notes:
         return 0
     current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
-    stored_fingerprints = {} if full else await index.fingerprints()
+    embedding_key = embedding_config_key()
+    stored_fingerprints = {} if full else await index.fingerprints(embedding_key)
     changed = [
         note
         for note in notes
-        if current_fingerprints.get(note.id) != stored_fingerprints.get(note.id)
+        if _needs_embedding(note.id, current_fingerprints, stored_fingerprints)
     ]
     if not changed:
         return 0
@@ -345,7 +431,7 @@ async def reindex_notes(
         )
         for note, text, embedding in zip(changed, texts, embeddings, strict=True)
     ]
-    await index.upsert(records)
+    await index.upsert(records, embedding_key)
     return len(records)
 
 

@@ -36,7 +36,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "pyjwt[crypto]>=2.8",
-    "pypdf>=6.14.2",
+    "pypdf>=6.15.0",
     "python-docx>=1.2.0",
     "python-frontmatter>=1.3.0",
     "python-pptx>=1.0.2",
@@ -247,6 +247,17 @@ timeout_multiplier = 4.0
 # and it is the scope DA-7 asks about: the July pass found 3 of 5 hand-made mutants surviving their
 # own test file while dying under the whole suite, so "does a narrow run mislead?" is the question,
 # and this is the narrow run.
+#
+# **DA-7's answer, measured: yes, and by a lot.** The first real run of `kg/note.py`,
+# `kg/pr_gate.py` and `agent/audit_store.py` reported 39 survivors, of which **29 were killed by
+# two test files this list did not name** — `test_relations.py` (24, every typed-link and
+# `outgoing_*` mutant) and `test_metrics_bridge.py` (5, the whole `chemclaw_notes_proposed_total`
+# increment). Both are now listed. The lesson is that "the tests that can kill these mutants" is a
+# claim about the call graph, not about filenames: `test_relations.py` never says `note.py`, it
+# builds a graph, and the graph is what calls `split_link`. A selection assembled by matching
+# module names to test names will keep understating the suite, so a survivor from this list is a
+# *hypothesis* to re-run against the full suite, never a finding
+# (D-2026-08-08-a-survivor-is-a-hypothesis).
 pytest_add_cli_args_test_selection = [
     "tests/test_authz.py",
     "tests/test_tool_authz.py",
@@ -261,6 +272,12 @@ pytest_add_cli_args_test_selection = [
     "tests/test_disconnect_teardown.py",
     "tests/test_note.py",
     "tests/test_note_proposals.py",
+    # Kills 24 of `note.py`'s mutants on its own — every typed-link (`split_link`) and `outgoing_*`
+    # one, including the 12 the previous list reported as covered by no test at all.
+    "tests/test_relations.py",
+    # Kills the five `record_metric(... "chemclaw_notes_proposed_total")` mutants in `pr_gate.py`:
+    # it is the declared-metrics contract test, not a `pr_gate` test, which is why it was missed.
+    "tests/test_metrics_bridge.py",
     "tests/test_properties_core.py",
     "tests/test_pr_gate.py",
     "tests/test_pr_gate_read_window.py",

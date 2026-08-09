@@ -16,6 +16,7 @@ loop it is already heartbeating from.
 """
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable
 from typing import TypeVar
 
@@ -40,13 +41,42 @@ async def beating(
     rather than a progress callback because there is genuinely nothing to report inside the
     wait: the honest signal is "still running", and pretending to know how far along it is would
     be a worse lie than saying nothing.
+
+    **No exit from this wrapper leaves the wrapped work running.** The awaitable runs as a task so
+    the timer can run beside it, and `asyncio.wait` does *not* cancel what it was waiting on when
+    the waiter is cancelled — so without the `finally` below, an activity that stopped waiting
+    would return while its real work carried on detached, still writing.
+
+    Two things make that a `finally` and not an `except asyncio.CancelledError`, and both were
+    measured rather than reasoned:
+
+    - **Cancellation is not the only way out.** `activity.heartbeat` raises outside an activity
+      context, and can raise inside one if the details payload fails to serialise. A handler keyed
+      on `CancelledError` let that exception past while the task ran on — the same detached-write
+      defect through a different door.
+    - **`task.cancel()` only files the request.** Re-raising immediately after it unwound the
+      caller while the work was still inside its own `except`/`finally`, which is where the DB
+      commit lives: the window shrank from unbounded to "the length of the work's cleanup" rather
+      than closing. Awaiting the cancelled task is what makes `beating(x)` behave-alike to
+      `await x` — the caller does not resume until the work has finished unwinding — and that is
+      the only thing a caller wrapping an existing `await` in it can reasonably assume. It
+      inherits the same limit `await x` has: work that refuses cancellation blocks here exactly as
+      it would there.
     """
     task = asyncio.ensure_future(awaitable)
     interval = max(1.0, heartbeat_timeout_seconds / _HEARTBEATS_PER_TIMEOUT)
     elapsed = 0.0
-    while True:
-        done, _ = await asyncio.wait({task}, timeout=interval)
-        if done:
-            return await task
-        elapsed += interval
-        activity.heartbeat(f"{what}: still running after {elapsed:.0f}s")
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=interval)
+            if done:
+                return await task
+            elapsed += interval
+            activity.heartbeat(f"{what}: still running after {elapsed:.0f}s")
+    finally:
+        if not task.done():
+            task.cancel()
+            # Only `CancelledError` is suppressed: an error raised by the work's *own* cleanup is
+            # what `await x` would surface too, so it is allowed to propagate.
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

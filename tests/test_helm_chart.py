@@ -12,6 +12,21 @@ Two failure modes live in that gap, and both are silent until production:
 2. **A malformed value on a real field** — this one *does* crash, at import, in every pod at once.
 
 These tests close both, offline, against the same `Settings` the pods construct.
+
+**What they read, and therefore what they cannot see.** Everything below asserts against the
+chart's *source*: `values.yaml` parsed as YAML, and the `templates/` files as text. Nothing here
+renders. So a claim of the form "the mount is read-only" is really "the string `readOnly: true`
+appears inside that helper's body" — true of a helper that wraps it in a `{{- if }}` no deployment
+satisfies, and true of one whose surrounding block never renders at all. The same holds for every
+`include "…"` count and every "this key appears only in that file" check.
+
+That is not a gap anyone can close here: `helm` is not a Python dependency and is absent from the
+sandbox this suite runs in. It is closed *in CI*, but only halfway — the `chart` job renders with
+`helm template` and pipes the result to `kubeconform`, which asks whether the YAML is schema-valid
+and never asks whether it says what these tests claim. Asserting on rendered documents needs
+`helm` in the job that runs pytest, which is a CI change rather than a test change; see
+`docs/planning/BACKLOG.md` (LIVE — "assert on rendered chart YAML"). Until then, read a green run
+here as "the template source says so", not "the cluster will see so".
 """
 
 import json
@@ -131,6 +146,7 @@ def _chart_env_keys() -> set[str]:
     return (
         set(_VALUES["config"])
         | set(_VALUES["secrets"]["keys"].values())
+        | set(_VALUES["secrets"]["optionalKeys"].values())
         | _TLS_ENV
         | _helper_env_keys()
         | _derived_config_keys()
@@ -220,6 +236,23 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     webhook secret's polarity — absent is *safe* rather than broken. The chain keeps catching
     modification, reordering, interior deletion and prefix truncation, and a point-in-time restore
     stays what it has always been: a trailing deletion nothing can see.
+
+    The framing envelope key is the seventh, and it is the first to land in `optionalKeys` rather
+    than `keys` — a distinction that exists because putting it in `keys` broke every upgrade.
+    `chemclaw.env` renders `keys` as a **required** `secretKeyRef`, and `secrets.create` defaults to
+    false, so the Secret is operator-managed and predates any chart version naming a new key: a
+    required addition takes every pod of an existing release into `CreateContainerConfigError` on
+    `helm upgrade`. `chemclaw.migrationEnv` had already made that argument, two helpers below.
+
+    Required is right for a credential whose absence silently breaks a capability — the four above.
+    This one is the HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from, it defaults to `""`,
+    and the app starts either way; unset, the tag is merely *predictable*, which is the weakness the
+    slot exists to let an operator close rather than a new one it introduces. So it gets a Secret
+    slot (not a `config` entry, which would render into a ConfigMap the `view` role can read) and an
+    `optional: true` reference.
+
+    Both maps are asserted, because "which secrets does this chart name" is one question and
+    splitting the answer across two values is exactly how a key comes to be in neither.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -228,6 +261,9 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
         "CHEMCLAW_AUDIT_ANCHOR_SECRET",
+    }
+    assert set(_VALUES["secrets"]["optionalKeys"].values()) == {
+        "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
     }
 
 
@@ -569,3 +605,29 @@ def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(
                 authorize_trigger(job)
     finally:
         reset_current_identity(token)
+
+
+def test_no_secret_is_carried_in_the_plaintext_config_map() -> None:
+    """A credential in `.Values.config` is a credential in a ConfigMap.
+
+    `templates/config.yaml` ranges over `.Values.config` into a `kind: ConfigMap`, so anything
+    listed there is readable by every principal holding `get configmaps` — which the OpenShift
+    `view` role grants, and which is a far wider audience than `get secrets`. `secrets.keys` is the
+    other slot and the only correct one for a credential.
+
+    Written as a check against the redaction inventory rather than against a hand-kept list,
+    because those are the same question asked twice: `_SECRET_SETTINGS` is this codebase's own
+    statement of which settings hold a credential, so a value it names has already been declared
+    too sensitive to appear in a log line, and a ConfigMap is more durable than a log line. The
+    framing envelope key was in `config`'s position by omission — it is not a credential to an
+    external system, so it was never given a Secret slot — and that is exactly the case a
+    name-shaped heuristic would miss and this one catches.
+    """
+    from chemclaw.core.logging import _SECRET_SETTINGS
+
+    exposed = sorted(key for key in _VALUES["config"] if _field_for(key) in set(_SECRET_SETTINGS))
+    assert not exposed, (
+        f"these settings hold a credential (they are in _SECRET_SETTINGS) but are declared in "
+        f".Values.config, which renders into a plaintext ConfigMap: {exposed}. Move each to "
+        "secrets.keys and argue it in test_chart_declares_only_the_documented_secrets."
+    )

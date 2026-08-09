@@ -24,6 +24,12 @@ entrypoint) and otherwise falls back to a dedicated connect — so a script, a m
 test keeps today's behavior with no setup. Pools are keyed by `(dsn, libpq options)` because
 the statement timeout rides on the connection's `options`, so two call sites asking for
 different timeouts must not share connections.
+
+**A borrowed connection is bounded by default.** `connection()` applies
+`pg_statement_timeout_seconds` when the caller says nothing, and `connect()` — the dedicated,
+unpooled one the migration runner uses — does not. The asymmetry is the point: a connection you
+own may run an index build for an hour, and one borrowed from a pool the request path shares may
+not (D-2026-08-08-a-borrowed-connection-is-bounded-by-default).
 """
 
 import logging
@@ -40,7 +46,9 @@ from chemclaw.core.config import settings
 logger = logging.getLogger(__name__)
 
 # One pool per (dsn, merged libpq options). The options string carries the statement timeout, so
-# keying on it keeps a migration's untimed connection out of the stores' 30s-bounded pool.
+# keying on it keeps the `/readyz` probe's 2s-bounded connection out of the stores' 30s-bounded
+# pool. (It once said "a migration's untimed connection", which was never a pooled connection at
+# all: `migrate` uses `connect`, not `connection`, and never enters `pooling()`.)
 _PoolKey = tuple[str, str | None]
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[TupleRow]]
 _POOLS: dict[_PoolKey, _Pool] = {}
@@ -101,7 +109,11 @@ async def connect(
     `statement_timeout_seconds` sets a per-statement wall-clock bound (libpq
     `statement_timeout`) so a hung query is cancelled rather than burning the enclosing
     activity's whole budget. Omit (or pass 0/None) for no per-statement bound — the
-    migration runner does this, since an index build may legitimately run long.
+    migration runner and the grant applier do exactly that, since an index build may
+    legitimately run long. **This is the one place where omitting the argument means
+    "unbounded"**; `connection()` defaults it instead, because a connection borrowed from a
+    shared pool must never be held open by a single runaway query
+    (D-2026-08-08-a-borrowed-connection-is-bounded-by-default).
 
     Prefer `connection()`: this opens a connection nobody pools, which is right for a migration
     or a one-shot script and wrong for anything on a request path.
@@ -158,7 +170,18 @@ async def connection(
     `ConnectionError` an unreachable database raises, and for the same reason: from the caller's
     point of view "no connection available" and "no database" are one transient infrastructure
     fault, and Temporal must retry both.
+
+    **The statement timeout defaults.** Omitting `statement_timeout_seconds` (or passing `None`)
+    applies `pg_statement_timeout_seconds`, resolved per call so a monkeypatched or reloaded
+    setting is honoured. It used to mean *no bound*, which made the bound a convention thirty call
+    sites in twenty-two modules happened to keep by writing it out; a thirty-first that forgot
+    would hold a pooled connection for as long as one bad query ran, and nothing would say so.
+    Pass a number to bound a call site differently (`/readyz` bounds its `SELECT 1` at two
+    seconds), or `0` to opt out — but a connection borrowed from a shared pool wanting no bound at
+    all is a dedicated connection, which is what `connect()` is for.
     """
+    if statement_timeout_seconds is None:
+        statement_timeout_seconds = settings.pg_statement_timeout_seconds
     options = _merged_options(dsn, statement_timeout_seconds)
     if not _POOLING:
         conn = await connect(dsn, statement_timeout_seconds=statement_timeout_seconds)

@@ -48,7 +48,9 @@ class _FakeRetriever:
 
 
 def _request(*sections: ReportSection) -> ReportRequest:
-    return ReportRequest(title="Development report", sections=list(sections))
+    return ReportRequest(
+        title="Development report", sections=list(sections), requested_by="chemist@corp"
+    )
 
 
 # --- harness core (5b.1) --------------------------------------------------------------
@@ -118,6 +120,7 @@ def test_report_id_is_ref_safe_and_unique() -> None:
             report = await _gather(
                 ReportRequest(
                     title=title,
+                    requested_by="chemist@corp",
                     sections=[ReportSection(heading="S", query="q", memory_layer="episodic")],
                 ),
                 [],

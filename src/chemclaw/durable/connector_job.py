@@ -43,7 +43,7 @@ change"; the 2026-08-05 review measured `task_queue` at zero occurrences in
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio import workflow
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ActivityError, ChildWorkflowError
@@ -151,6 +151,39 @@ class ConnectorJobResult(BaseModel):
     summary: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
     note: Note | None = None
+
+
+def envelope_from_result(job_id: str, raw: Any) -> ConnectorJobResult:
+    """Decode what a finished durable job returned, or say why it is not a job of ours.
+
+    Every place that collects a finished job's result goes through here — `completed_job_status`
+    for the two waiters in `chemclaw.agent`, and the in-turn wait in `chemclaw.connectors.jobs`.
+    They used to validate the envelope separately and diverged on the same bad input: one raised
+    a written sentence, the other let pydantic's `ValidationError` escape. That is not a cosmetic
+    difference, because a `ValidationError` **is** a `ValueError`, which is the family
+    `_sanitize_tool_errors` deliberately passes through unchanged — so the second path relayed
+    "2 validation errors for ConnectorJobResult" and pydantic's field dump to a chemist verbatim.
+
+    Raising `ValueError` keeps that pass-through, now with a sentence written to be read.
+
+    Args:
+        job_id: The workflow id the result belongs to, for the message.
+        raw: Whatever the workflow returned, undecoded.
+
+    Raises:
+        ValueError: When the result is not the connector envelope.
+    """
+    try:
+        return ConnectorJobResult.model_validate(raw)
+    except ValidationError as exc:
+        # Hard, not a degraded status. Every launcher this system exposes produces the envelope,
+        # so a result that is not one is a foreign workflow id. Reporting "completed" with no
+        # result would announce a finished calculation while withholding the answer, which is the
+        # failure mode the envelope was adopted to end (D-118).
+        raise ValueError(
+            f"durable job {job_id!r} completed but did not return the connector job envelope; "
+            "the id does not belong to a job any launcher in this system started"
+        ) from exc
 
 
 def child_workflow_id(suffix: str) -> str:
@@ -331,9 +364,14 @@ class ConnectorJobWorkflow:
             # note is stamped with the run and its reason on the way through, here rather than in
             # each connector, so no bundle can forget and every merged note answers "why was this
             # done" as well as "what came out".
+            # `job.requested_by` travels with the note so the proposal is recorded against the
+            # chemist who launched the job. Without it `ambient_provenance()` yields `actor=""`,
+            # the row is invisible in that chemist's own review queue, and the PR opened on their
+            # behalf is one they cannot find — while the input carrying their identity sits one
+            # frame above, required and unused.
             await publish_note_best_effort(
                 publish_memory_note_activity,
-                [note_with_run_provenance(result.note, record)],
+                [note_with_run_provenance(result.note, record), job.requested_by],
                 label=f"{job.connector}:{job.job}",
             )
         if job.session_id:

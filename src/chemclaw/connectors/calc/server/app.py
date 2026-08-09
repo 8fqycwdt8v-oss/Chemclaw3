@@ -6,7 +6,7 @@ connectors`.
 
 from fastapi import FastAPI
 
-from chemclaw.connectors.calc.server.tools import server
+from chemclaw.connectors.calc.server.tools import resolve_calculator_versions, server
 from chemclaw.connectors.server import connector_app
 
-app: FastAPI = connector_app(server, name="calc")
+app: FastAPI = connector_app(server, name="calc", on_start=resolve_calculator_versions)

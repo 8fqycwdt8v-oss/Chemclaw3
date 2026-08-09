@@ -6,12 +6,15 @@ a non-retryable `ChemclawError`) whose message names the host and the underlying
 live database is needed — the psycopg connect is monkeypatched to fail.
 """
 
+import ast
 import asyncio
+from pathlib import Path
 
 import psycopg
 import pytest
 
 from chemclaw.core import db
+from chemclaw.core.config import settings
 
 
 def test_redact_strips_the_password_only() -> None:
@@ -132,6 +135,106 @@ def test_connection_without_a_pool_opens_a_dedicated_connection(
 
     asyncio.run(_run())
     assert opened == ["postgresql://h/db"] * 3
+
+
+def test_connection_defaults_the_statement_timeout_onto_the_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that names no timeout still connects with `pg_statement_timeout_seconds`.
+
+    The offline half of the live proof in `test_db_pool.py`: it pins the libpq `options` string the
+    connect receives, so it runs in the sandbox where no Postgres answers. Resolution happens per
+    call rather than as a default argument, which is why monkeypatching the setting reaches it —
+    a value frozen at import time would be wrong in every test that redirects the configuration.
+    """
+    monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 12.0)
+    seen: list[object] = []
+
+    class _Conn:
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    async def _fake_connect(dsn: str, **kwargs: object) -> _Conn:
+        seen.append(kwargs.get("options"))
+        return _Conn()
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
+
+    async def _run() -> None:
+        async with db.connection("postgresql://h/db"):
+            pass
+        # An explicit bound still wins — the readiness probe depends on being tighter than this.
+        async with db.connection("postgresql://h/db", statement_timeout_seconds=2.0):
+            pass
+        # ...and 0 is how a call site says "no bound" without leaving the pooled helper.
+        async with db.connection("postgresql://h/db", statement_timeout_seconds=0):
+            pass
+
+    asyncio.run(_run())
+    assert seen == ["-c statement_timeout=12000", "-c statement_timeout=2000", None]
+
+
+_UNBOUNDED_BY_DESIGN = {"chemclaw/core/migrate.py", "chemclaw/core/grants.py"}
+_DEFINITION_SITE = "chemclaw/core/db.py"
+
+
+def _modules_calling_db_connect() -> set[str]:
+    """Every module under `src/chemclaw` that calls `chemclaw.core.db.connect`, by repo path.
+
+    Resolved through the imports rather than by matching the name, because `connect` is also
+    `chemclaw.core.temporal_client.connect` — which a dozen modules import and which has nothing to
+    do with Postgres. Both binding forms are followed: `from chemclaw.core.db import connect [as x]`
+    and `from chemclaw.core import db` + `db.connect(...)`. `core/db.py` itself is skipped: it
+    *defines* `connect` and calls it from `connection()`, which is the delegation rather than a
+    bypass of it, and it binds the name by `def` rather than by an import this walk could follow.
+    """
+    root = Path(__file__).resolve().parents[1] / "src"
+    found: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        if path.relative_to(root).as_posix() == _DEFINITION_SITE:
+            continue
+        tree = ast.parse(path.read_text())
+        direct: set[str] = set()
+        module_aliases: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "chemclaw.core.db":
+                direct |= {a.asname or a.name for a in node.names if a.name == "connect"}
+            elif isinstance(node, ast.ImportFrom) and node.module == "chemclaw.core":
+                module_aliases |= {a.asname or a.name for a in node.names if a.name == "db"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            hit = (isinstance(func, ast.Name) and func.id in direct) or (
+                isinstance(func, ast.Attribute)
+                and func.attr == "connect"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in module_aliases
+            )
+            if hit:
+                found.add(path.relative_to(root).as_posix())
+    return found
+
+
+def test_only_the_migration_paths_open_an_unbounded_postgres_connection() -> None:
+    """`connect()` is the escape hatch from the default bound, so its callers are enumerable.
+
+    Defaulting the timeout in `connection()` closes the hole a forgotten keyword opened, and leaves
+    exactly one way to reopen it: reach past `connection()` to `connect()`, which still defaults to
+    no bound because a migration's index build legitimately runs long. Two modules want that (the
+    migration runner and the grant applier, both of which also need a connection nobody else can be
+    handed, for the advisory lock). A third would be a store quietly running unbounded again, which
+    is the defect this whole change exists to make impossible rather than merely unlikely — so it
+    is pinned here instead of trusted to review.
+
+    Two call sites moved off `connect()` to get here: `cli/live_jobs` and `cli/live_storm` each read
+    one scalar from the live database through it, which wanted no dedicated connection and no
+    unbounded query — only the shortest way to a connection at the time it was written.
+    """
+    assert _modules_calling_db_connect() == _UNBOUNDED_BY_DESIGN
 
 
 def test_pooling_resets_its_state_even_when_the_block_raises() -> None:

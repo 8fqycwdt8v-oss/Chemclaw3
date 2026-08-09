@@ -80,9 +80,7 @@ async def _connection() -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
     activity for its whole budget.
     """
-    async with db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(settings.postgres_dsn) as conn:
         yield conn
 
 

@@ -3,6 +3,420 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the pluggable vector store (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The seam ships with a
+Qdrant adapter proven offline against a fake client; these are the edges it could not close.
+
+- [ ] **Nothing has run against a real Qdrant** — [M]. The adapter is exercised against a fake
+      client *and* a fake `qdrant_client.models`, which is a claim about the calls it makes and not
+      about a server accepting them. Unverified against a live instance: that `query_points` returns
+      `.points` on the pinned client version, that a `MatchAny` filter over a large `any:` list
+      performs, that the collection's distance is actually cosine (the adapter documents this as a
+      requirement and cannot enforce it), and that UUIDv5 point ids round-trip as expected.
+      *Trigger:* a cluster with Qdrant reachable — the same shape as the warehouse ELN connector's
+      own "only the tenant is missing" row.
+
+- [ ] **A filtered search builds its eligibility scope in memory** — [S]. `_eligible_documents`
+      selects every matching `doc_id` from `document_files` and sends the set to the store. Bounded
+      in practice by what a filter is *for* — a tag exists to narrow — and unbounded in the code: a
+      deployment whose commonest query is a broad tag over a million-document corpus will feel it.
+      Deliberate, because the alternative is denormalizing tags onto the chunk payload, which is a
+      correctness regression (the ADR's §3), not merely a different trade.
+      *Trigger:* a real corpus where a filtered query's scope query shows up in the latency budget.
+
+- [ ] **`note_index` is still pgvector-only** — [M]. The seam was built for the document corpus and
+      the note index was deliberately not moved: it has an open item of its own (no embedding-model
+      identity, no chunking — see below), any migration is a full re-embed anyway, and generalizing
+      to a second consumer before the first has run against a live server would be designing against
+      a guess. *Trigger:* the document corpus is running on an external store, and the note index's
+      own item is being closed anyway.
+
+- [ ] **The external index's SQL is unexercised** — [S]. `ExternalVectorDocumentIndex` overrides four
+      methods, and the three that touch Postgres (`store_embeddings`, `prune_stale` with its
+      `RETURNING`, `_resolve`'s `unnest` join) run only where a database does. The offline suite
+      covers the seam, the adapter and the point-id contract; these statements are covered by the
+      Postgres-marked tests, which skip in the sandbox. *Trigger:* the first run against `make up`.
+
+## Open — Left by the Bayesian-optimization audit (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-category-has-no-outside.md`. Two defects fixed and eight
+hypotheses refuted by measurement; these are the three the audit deliberately left.
+
+- [ ] **`generate_screening_design` forwards a BoFire message that names no fix** — [S]. A factor
+      count with no available generator (measured: 4 factors at `n_generators=2`, which would give
+      4 runs for 4 main effects) reaches the caller as BoFire's own `ValueError: No generator
+      available for the requested combination.` It *is* a `ValueError`, so `connectors.server`
+      forwards it verbatim and the model is not left with "an internal error occurred" — but the
+      sentence names neither the factor count nor the remedy (ask for fewer generators). The
+      adjacent refusals in `factorial_design` all name both. **Trigger**: the next time a live turn
+      is observed retrying `generate_screening_design` after this message, or the next change that
+      touches `_fractional_design`'s guards.
+
+- [ ] **A durable campaign's declared direction is not checked against its registered objective** —
+      [M]. `CampaignSpec` carries both `problem.objectives[0].direction` (which drives
+      `MinimizeObjective`/`MaximizeObjective` and `best_of`) and `objective_name` (which selects the
+      evaluator from `science.bo.objectives`'s registry). Nothing binds them, so a spec naming
+      `solubility_max` with `direction: "minimize"` would run a full campaign toward the *worst*
+      solubility and report it as the best, with every number internally consistent. Both fields are
+      LLM-authored on the `start_optimization_campaign` tool. Not fixed here because the registry
+      does not currently declare a sense for its entries, and inventing one is a modelling decision
+      rather than a bug fix — `reizman_suzuki` returns a yield and `solubility_max` a log S, and
+      whether a registered objective may legitimately be optimized in either direction is a
+      chemist's call. **Trigger**: a third objective joins `_REGISTRY`, or a campaign is observed
+      finishing with a direction the requester did not intend. The fix is one declared `direction`
+      per registry entry plus a check in `require_campaign_startable`.
+
+- [ ] **A campaign's stored history is only as long as the last ask** — [M]. `read_campaign_thread`
+      returns the *latest* suggestion's observations, which is complete only under the documented
+      assumption that each turn passes the campaign's whole run history. Measured: an ask made with
+      a shorter list shrinks what a later `resume_campaign` reports (3 runs → 2), on both the
+      in-memory and the Postgres store. This is the documented design rather than a defect, and the
+      alternative — unioning observations across suggestions — would have to decide what a *revised*
+      measurement of one condition means. **Trigger**: an agent is observed resuming onto a
+      truncated history, or a chemist corrects a previously reported value.
+
+## Open — Left by the connection-timeout default (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-borrowed-connection-is-bounded-by-default.md`. The default
+landed; this is what the change surfaced and did not close.
+
+- [ ] **The front door holds two pools against one database, and the fleet budget counts one** —
+      [S]. Pools are keyed by `(dsn, libpq options)` and the statement timeout rides on the options
+      (D-107), so `/readyz` bounding its probe at `service_readiness_db_timeout_seconds` (2 s, and
+      correctly so) gives it a pool of its own beside the stores' 30 s pool. Measured in one
+      process against the live database: `len(db._POOLS) == 2` for a single DSN and
+      `pool_size == 6` at `pg_pool_min_size = 3` — twice the warm connections
+      `chemclaw_pg_pool_max_size` reports as this process's share of
+      `chemclaw_pg_fleet_max_connections`
+      (`D-2026-08-05-the-connection-budget-is-a-fleet-number`). Pre-existing and not introduced by
+      the default — deleting thirty explicit arguments left the probe as the *only* second pool in
+      the tree, which is what made it visible. The fix is not to merge the pools (the probe's
+      tighter bound is the reason it is safe to probe at all) but to decide whether a
+      `SET LOCAL statement_timeout` for the probe's one statement is preferable to a second pool,
+      or whether the fleet gauge should count pools rather than assume one.
+      *Trigger:* the first cluster where the fleet connection budget is actually tight — or any
+      change to `pg_pool_min_size`, which multiplies by the pool count rather than by one.
+
+## Open — Left by the review-and-hardening campaign (2026-08-08)
+
+- [ ] **The additive gate does not see data-dependent narrowings, and four merged migrations are
+      one** — [S]. `tests/test_migrations_are_additive.py` now asks two questions — does this
+      destroy data, and does it stop the previous image writing
+      (`D-2026-08-08-a-rollback-that-is-not-a-schema-step`) — and the second deliberately flags only
+      *unconditional* breaks: `SET NOT NULL` and a dropped or replaced key fail every write
+      regardless of what is in the table. A `CHECK` constraint or a `CREATE UNIQUE INDEX` on an
+      existing table rejects only *some* rows, and four merged migrations add one: `014`
+      (`session_events` dedupe), `016` (`predictions_identity`), `017` (`subscriptions_identity`)
+      and `037_bo_suggestion_provenance` (`bo_suggestions_job_idx`). Each is a real if
+      data-dependent rollback break — the previous image writes a duplicate, and after rollback the
+      write now fails — and each was added precisely because the duplicate was the bug. Flagging
+      them by pattern would be over-reach dressed as rigour and would need four exemptions saying
+      "this was fine"; not saying so at all is the omission D-2026-08-04 was written against.
+      *Trigger:* the first migration that adds a `CHECK` or a unique index to a table whose
+      previous-image writes are not already known to satisfy it — or the first real rollback
+      rehearsal against a populated cluster, which can measure these instead of reasoning about them.
+
+- [ ] **`WarehouseQueryError` embeds the driver's text in a message the model reads** — [S].
+      `ingest/eln/warehouse/snowflake.py:88` raises `f"warehouse rejected the query: {exc}"` around
+      the driver's exception, and `agent/tool_authz.surface_domain_errors` hands a `ChemclawError`'s
+      message to the model verbatim. The sibling defect in `DocumentIndexError` was fixed with this
+      campaign (the message names the subsystem, the detail is the `__cause__`), but that one is a
+      `SubsystemUnavailableError` with a written contract to keep; `ChemclawError`'s contract is
+      "this input is bad", which says nothing about what the message may carry. Deciding needs the
+      answer to a question the tree does not hold: whether a warehouse driver's error text is
+      account/host-bearing, which depends on the connector nobody has run against a live tenant.
+      *Trigger:* the first live Snowflake tenant (the same one `docs/planning/DEFERRED.md` waits on
+      for the ELN binding), or any decision to state a message contract on `ChemclawError` itself.
+
+- [ ] **A decided approval hold can be reopened, and the obvious fix is worse** — [M].
+      `agent/interaction_tools.py::start_approval` passes no `id_reuse_policy`, so temporalio's
+      ALLOW_DUPLICATE default lets a *closed* run's id be reused: re-surfacing a candidate whose
+      hold was already approved or rejected starts a fresh run under the same id and resets it to
+      pending, and a second click can flip a recorded GxP sign-off. The docstring promises "the hold
+      already exists — idempotent surface", which holds only while the prior run is open.
+      REJECT_DUPLICATE was tried and reverted, because expiry is *not* a decision:
+      `InteractionApprovalWorkflow` returns `status="expired"` after
+      `interaction_approval_timeout_seconds` to drop the candidate rather than pin the workflow, and
+      forbidding id reuse makes that candidate unofferable forever while `_announce` still shows a
+      button whose click fails. ALLOW_DUPLICATE_FAILED_ONLY does not help — an expired hold
+      *completes*. The distinction no policy expresses is "closed with a decision" versus "closed
+      without one", so the fix is to read the prior run's terminal outcome before starting.
+      *Trigger:* a reachable Temporal test server, so the closed-hold and expired-hold paths can be
+      exercised rather than reasoned about — they skip offline today.
+
+- [ ] **Seventeen junk anchors still hide a truncated audit trail** — [M].
+      `agent/audit_anchor.py::latest_anchor` now walks the newest `_LATEST_CANDIDATES` (16) rows and
+      returns the first that verifies, so one appended unsigned anchor no longer disables the
+      control. Past the bound it returns None again, and `durable/audit_chain.py` guards its tail
+      comparison with `if held_to is not None:` and records *nothing* in the else branch — so
+      `make audit-verify` prints "OK: the audit trail hash chain is intact" and exits 0 with the
+      tail check silently off. Measured: 17 junk rows, `verify_chain` returned `[]`, CLI exit 0.
+      The fix is in `verify_chain`, not here: when anchors were read and none verified, that is a
+      problem to report, not a reason to skip. *Trigger:* the next change to the audit-chain
+      verifier, or the first deployment that treats anchors as a compliance control.
+
+- [ ] **Inserting a command into an existing workflow path has no versioning convention** — [S].
+      `grep -rn 'workflow.patched|get_version' src/` returns nothing. D-2026-08-08-an-outage-is-not-a-missing-job
+      added a `resolve_notes_per_run` local activity between the build activity and `fan_out` in the
+      three synthesis workflows — the correct fix for a determinism bug, and itself an unguarded
+      history change: a run in flight across that deploy replays the new marker against a history
+      that lacks it and wedges in a workflow-task retry loop. The runbook needs either a
+      `workflow.patched` convention or an explicit "drain these schedules before deploying" step.
+      *Trigger:* the next change to a workflow's command sequence.
+
+The three rows below are the API-robustness lane's residuals; what it fixed is in
+`docs/decisions/D-2026-08-08-a-slot-lives-as-long-as-its-response.md`.
+
+- [ ] **A timed-out attachment parse still runs to completion** — [M]. `parse_attachment_off_loop`
+      bounds how long a *caller* waits and how many parses run at once, and it cannot bound the
+      thread: Python has no way to stop one. So a document past
+      `attachment_parse_timeout_seconds` keeps burning a CPU and holding one of
+      `attachment_max_concurrent_parses` until it finishes on its own. The cap is what makes that
+      survivable rather than fatal, and the pypdf 6.15.0 bump removes the one known input that
+      reaches it. Closing it properly means parsing in a killable **subprocess**, which buys a hard
+      kill and costs a process pool, pickling the bytes, and a second failure mode (a child OOM
+      inside the pod's cgroup) to reason about.
+      *Trigger:* a measured parse that exceeds the timeout in production, or a second CVE in a
+      parser library whose fix is not a version bump.
+
+- [ ] **The share sync's parse has no timeout** — [S]. `ingest/documents/sync.py:200` already runs
+      `_read_and_parse` under `asyncio.to_thread`, so a hostile document cannot wedge the crawler's
+      event loop (the front-door defect does not exist there — measured, not assumed). What it
+      lacks is a wall clock: one pathological file can hold the sync activity for as long as it
+      likes, and Temporal's heartbeat is what notices. That is a throughput concern in a background
+      activity rather than an availability one, so it is recorded instead of changed — and it needs
+      the same subprocess answer as the row above to be more than cosmetic.
+      *Trigger:* a share sync that misses its schedule with one file named in the log.
+
+## Open — Left by the enforcement lane (2026-08-08)
+
+Record: `docs/decisions/D-2026-08-08-a-rule-with-no-test-is-a-claim.md`. Each row below is something
+the new tests now *record* as debt rather than something they fixed; each is a live row in
+`_KNOWN_LEAKS` / an unconverted site, so none of them is silent any more.
+
+- [ ] **One `durable/launch.py` `start_job()`, and the reuse policy it cannot flatten** — [M].
+      Five copies of the durable-launch idiom exist (`agent/durable_tools.py`,
+      `agent/interaction_tools.py`, `templates/registry.py`, and two in `connectors/`), and they are
+      what makes `chemclaw.agent → temporalio` and `chemclaw.templates → temporalio` real edges in
+      the tree — the clearest textual violation of CLAUDE.md's "durability lives only in Temporal,
+      never in MAF", now recorded in `tests/test_third_party_layering.py::_KNOWN_LEAKS` so it cannot
+      grow. The copies have already diverged once: `start_approval` omits the `id_reuse_policy` the
+      others pass. The blocker is not the extraction, it is the policy —
+      `D-2026-08-08-an-outage-is-not-a-missing-job` reverted an attempt to unify it because "closed
+      with a decision" and "closed without one" need different `WorkflowIDReusePolicy` values, so a
+      helper that forces one on all five callers is worse than five copies. Any helper must take the
+      policy from its caller.
+      *Trigger:* a sixth launch site, or the `interaction_tools` reuse-policy fix landing — whichever
+      comes first; both touch the same three lines in five places.
+
+- [ ] **Twenty-nine warn-and-degrade sites still uncounted, in three groups** — [S].
+      Measured on `391b6ec^`, counting one `ast.ExceptHandler` whose subtree calls
+      `.warning()`/`.warn()` and contains no `raise`: 41 such handlers across 34 modules, of which
+      exactly 4 counted anything (`api/routes/turns.py:173`, `api/state.py:237`,
+      `durable/publish.py:151`, `kg/graph.py:155`). Two of those four are in group (c) below, so
+      that group's "`api/` (5)" is five handlers of which two already count.
+      `core/metrics_bridge.degraded` converted ten — the nine in `agent/` and
+      `core/logging.py`. Left: (a) **workflow code** — `durable/notify.py:108`,
+      `durable/report_workflow.py:92`, `connectors/qm/workflows.py:90,143` — a metric emitted from
+      inside a workflow re-counts on every replay, so each needs the
+      `if not workflow.unsafe.is_replaying():` guard `durable/publish.py` already demonstrates, and
+      a `core` helper may not import `temporalio` to know that; (b) **`cli/backfill_corpus.py:66`**
+      — a CLI process exits long before any scrape reaches its registry, so the counter would never
+      be read; (c) **`api/` (5), `ingest/` (10), `science/` (8), `evals/` (1)** — owned by other
+      lanes of this campaign, deliberately untouched to avoid conflicting edits.
+      *Trigger:* group (a) once someone decides whether the replay guard belongs at each site or in a
+      `durable`-side wrapper; group (c) once the campaign's lanes have merged.
+
+- [ ] **`template-validate` cannot check arguments for a template launcher or a skill tool** — [S].
+      The argument check resolves parameters from the in-process `@tool` registry and each bundle's
+      own server tools module: **50 of the 61 advertised tools**. "Covers every tool the shipped
+      templates call" is true and worth little — one template ships, with two steps. A `run_<name>`
+      template launcher takes a single generated pydantic model (`params`), and how MAF maps a
+      call's argument keys onto that has not been measured here, so those steps are skipped rather
+      than guessed at; skill tools are MAF's and not knowable offline at all. The eleven
+      unresolvable ones include every job-launcher — the most expensive things to fail at run time.
+
+- [ ] **`prose-validate` resolves a *bare* metric name only in the operator corpus, not in
+      `docs/decisions/`** — [S].
+      Rule 9 (a PromQL selector, `chemclaw_<name>{…}`) does run over the ADRs and is what would have
+      caught `chemclaw_degradations_total`; rule 8 (a bare backticked metric name) does not, and
+      the reason is measured rather than cautious. `docs/decisions/` holds five undeclared
+      backticked `chemclaw_*` spans and **four are correct prose**: a module (`chemclaw_agent`),
+      the Postgres role (`chemclaw_app`), a log marker (`chemclaw_plans_consumed`), and
+      `chemclaw_tool_latency_seconds` inside D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose,
+      an ADR whose *subject* is that the runbook named a stale metric. A gate that fails the build
+      for correctly quoting the name an ADR exists to report is not a gate, and its only remedy
+      would be editing a merged decision, which CLAUDE.md forbids. So a bare mention of a renamed
+      metric in an ADR stays unchecked, deliberately.
+      *Trigger:* the first metric *rename*, which is when a bare citation in a merged ADR goes
+      stale and someone has to decide whether a "historical" marker in the ADR body (rather than a
+      corpus exclusion) is the right shape.
+
+- [ ] **The two layering policies do not compose hops, so a stack can be reached in two legal
+      steps** — [M].
+      `from chemclaw.core.temporal_client import Client` inside `science/` passes everything:
+      `tests/test_third_party_layering.py` records only third-party targets so it never sees the
+      import, and `tests/test_layering.py` sees a declared `science → core` edge. `core → temporal`
+      is separately declared. Measured — the import passes all 8 stack tests, where a direct
+      `import temporalio` in `science/` correctly fails. Closing it needs a **re-export policy**
+      ("which first-party symbols carry a stack with them"), which is a design decision rather than
+      a walk, and a wrong version of it would fail on every legitimate `from chemclaw.core.db
+      import …`. `importlib.import_module("temporalio")` is invisible for the same family of
+      reasons and is deliberately not chased: an AST walk cannot resolve a string. Both are stated
+      as limits in that file's docstring rather than left implied.
+      *Trigger:* the first time a `science/`, `kg/` or `ingest/` module needs something from
+      `core` that is a third-party object rather than a first-party one — that is the case the
+      policy would have to name, and until it exists there is nothing to write the rule against.
+
+- [ ] **`_ALLOWED_MODULE_STACKS` rows are package-keyed while `_KNOWN_LEAKS` rows are
+      file-keyed** — [S].
+      Measured: a new `connectors/safety/server/_zz.py` importing `agent_framework`, `temporalio`
+      *and* `fastapi` at module scope passes all 8 stack tests, because `chemclaw.connectors` owns
+      all three. One row covers 54 files; `chemclaw.agent` covers 43. Where a row's stated *reason*
+      names one file — `("chemclaw.connectors", "maf")` says "connectors/transport.py builds the
+      MAF tool objects — the one adapter point" — the row licenses 54 and the sentence is true of
+      one. The distinction is defensible (an allowed edge is a design decision about a *layer*; a
+      leak is debt about a *file*) and is now written into the module docstring, so this row is
+      about whether the two or three rows whose reason names specific files should be narrowed to
+      them. Not done here because narrowing them makes ordinary growth *inside* a layer that owns
+      a stack fail the build, and that trade needs a case rather than an argument.
+      *Trigger:* the first second file in a bundle that reaches for MAF, or the first review that
+      finds a package-keyed row hiding a violation.
+      *Trigger:* the first template whose step calls another template's launcher.
+## Open — Left by the science lane of the 2026-08-08 review campaign
+
+Record: `docs/decisions/D-2026-08-08-a-partial-answer-must-say-so.md`. Seven defects fixed; these
+are what that change deliberately did not do.
+
+- [ ] **`peroxide-with-ketone` still misses an inorganic peroxide salt** — [M]. `rules.yaml`'s
+      `left` arm is `[OX2H][OX2H]`, so `Na2O2 + acetone` raises only `peroxide` where
+      `H2O2 + acetone` raises both (measured). It is the same coordination gap the
+      `oxidizer-with-reductant` fix closed, but the rule's explanation and citation name *hydrogen
+      peroxide* forming acetone peroxide specifically, so widening the pattern alone would make the
+      stated reason false for the molecules newly matched. **Trigger**: a process chemist confirms
+      that an inorganic peroxide plus a ketone carries the same TATP-formation hazard, and supplies
+      the citation; then widen the pattern *and* the prose together.
+- [ ] **`complex-hydride-with-chlorinated-solvent` misses sodium hydride** — [M]. Its `left` arm is
+      `[$([AlH4-]),$([BH4-])]`, so `['[H-].[Na+]', 'ClCCl']` raises **nothing** (measured through
+      `screen_reaction`), while `oxidizer-with-reductant` already lists `[H-]` among its reductants
+      and NaH with halocarbons is a Bretherick's entry. Left on the same rule as
+      `peroxide-with-ketone`: the explanation says "complex hydride reducing agents" and the rule id
+      says the same, so a saline hydride is outside its written justification — widening the pattern
+      would make the stated reason false for the molecule newly matched. **Trigger**: a process
+      chemist supplies the citation for the saline-hydride/halocarbon hazard; then either widen this
+      rule's pattern *and* its prose and id together, or add a `saline-hydride-with-chlorinated-
+      solvent` rule beside it with its own explanation.
+- [ ] **`azide-with-dichloromethane` misses chloroform** — [M]. The `right` arm is `[CH2](Cl)Cl`, so
+      `['[Na+].[N-]=[N+]=[N-]', 'ClC(Cl)Cl']` raises only the structural `non-carbon-azide` flag and
+      not the pair rule (measured). Triazidomethane from chloroform is the documented sibling of the
+      diazidomethane hazard the rule is written about — the rule's own explanation even names
+      triazidomethane — but its first clause and its id name *dichloromethane* as the partner, so
+      widening the pattern alone leaves the explanation false for chloroform. **Trigger**: a citation
+      for the chloroform case (the rule cites Peet & Weber 1988, which is about DCM); then widen the
+      pattern, the prose and the id together — `azide-with-polychloromethane` or similar.
+- [ ] **Three campaign ids moved once; a deployment with `bo_campaigns` rows needs a note** — [L].
+      `campaign_id_for` now canonicalizes the parameter and category order, so a campaign declared
+      in unsorted order answers to the id its sorted spelling already carried. Both ids are pinned
+      in `tests/test_bo_campaign_record.py`. **Trigger**: before the first production deploy that
+      carries an existing `bo_campaigns` table — either re-map the rows by recomputing
+      `campaign_id_for` over the stored `problem` JSONB, or accept the orphans and say so in the
+      release note. No live tenant exists today, which is why this is not a migration.
+- [ ] **`expect_pass` is per case, not per metric** — [L]. `inert_demonstrations()` asserts that at
+      least *one* gated metric of a demonstration fails, which is as strong as the case-level flag
+      allows: a case with two gated metrics whose second one goes inert is still invisible. No
+      shipped case needs the finer grain (`retrieval-cross-coupling-literal-miss` is the only
+      multi-metric demonstration and its passing metric is the point). **Trigger**: the first case
+      that declares two metrics both meant to fail.
+- [ ] **The `pka` calibration ledger resets whenever the pKa key widens** — [M]. `predictions` is
+      keyed `(calc_type, calc_version, input_hash)` and `reconciled_for` reads with an exact
+      `calc_version` predicate (D-139), so this campaign's key widening orphaned every reconciled
+      pKa residual: `calculator_trust("pka")` reports `UNCALIBRATED`, n=0, until each molecule is
+      re-predicted. Nothing needs re-measuring — `record_prediction` re-reconciles from
+      `measurements` on write — but only per molecule re-predicted. Documented in `pka.calc_version`
+      and in the ADR's Consequences; what is *not* decided is whether an operator should be given a
+      re-prediction sweep over the measured set. **Trigger**: the first deployment with a populated
+      `predictions` table, or the next widening of a calibrated calculator's version string.
+- [ ] **A partial corpus read is detected only where the miner can see it** — [S]. `read_corpus()`
+      reports `complete=False` when an entry `map_to_ord` rejects, which is what gates the
+      observation upsert's replace branch. A source that silently returns *fewer entries than it
+      holds* — a truncated warehouse query, a share that failed to mount — is invisible: nothing
+      downstream of `fetch_new_entries` can know what was withheld, so such a pass still counts as
+      complete and may shrink an observation's evidence. **Trigger**: the first live ingest source
+      whose fetch can partially succeed; then the `DataSource` contract needs a completeness signal
+      of its own, and `read_corpus` should propagate it rather than infer it.
+
+## Open — Left by the test-evidence lane (2026-08-08, D-2026-08-08-a-test-that-survives-the-mutation-it-names)
+
+Record: `docs/decisions/D-2026-08-08-a-test-that-survives-the-mutation-it-names.md`. Nine tests that
+survived a mutation of the code they name are closed there, each with the mutation quoted. These
+three are what that lane could not close.
+
+- [ ] **The Helm chart tests assert on template *source*, never on rendered YAML** — [M].
+      Every check in `tests/test_helm_chart.py` reads `values.yaml` as YAML and `templates/*` as
+      text, so "the document share is mounted read-only" means "`readOnly: true` appears inside that
+      helper's body" — which stays true if the helper is wrapped in a `{{- if }}` no deployment
+      satisfies, or if the block around it never renders. The same holds for every `include "…"`
+      count and every "this key appears only in that file" assertion. CI *does* render (the `chart`
+      job runs `make helm-validate`), but pipes the output to `kubeconform`, which asks whether the
+      YAML is schema-valid and never whether it says what these tests claim. The fix is to render
+      once in the job that runs pytest and assert on the parsed documents; the offline suite keeps
+      the source-level checks and skips the rendered ones. Deliberately not faked with a
+      hand-rolled Go-template evaluator — that would be a second renderer to be wrong.
+      *Trigger:* a `helm` binary available in the job that runs pytest (today it is installed only
+      in the separate `chart` job, which has no `uv`).
+
+- [ ] **The in-memory and Postgres `find` backends are compared on fixed fixtures, not generated
+      ones** — [S]. `test_find_matches_the_in_memory_backend` runs five hand-written queries and
+      compares result *sets*; `_matches` (Python) and `_FIND` (SQL) express the same predicate twice
+      and nothing makes them stay equal beyond those five. The generated version belongs with the
+      other property tests, and `tests/test_properties_core.py` refuses a database on purpose ("a
+      property test whose failures need a live stack to reproduce is a flaky test"). It therefore
+      needs either a second, Postgres-backed property module or a decision that the rule bends here.
+      *Trigger:* the next time the two implementations of a filter diverge, or a new filter is added
+      to `CalculationQuery`.
+
+- [ ] **Twenty test files each define their own fake streamed update** — [S]. Each hard-codes the
+      fields the runner branches on; `user_input_requests=[]` was one, and it kept the approval
+      branch unexecuted by any test until D-2026-08-08 fixed the one fake in `tests/test_runner.py`
+      to derive it from `contents` the way MAF does. The other nineteen still assert a shape MAF
+      does not have, so the next field the runner learns to read will be invisible to all of them in
+      the same way. One shared builder in `tests/conftest.py`, mirroring `AgentResponseUpdate`,
+      would fix the class rather than the instance.
+      *Trigger:* the next runner change that reads a new attribute off a streamed update.
+
+## Open — Left by the mutation-testing lane (2026-08-08, D-2026-08-08-a-survivor-is-a-hypothesis)
+
+Record: `docs/decisions/D-2026-08-08-a-survivor-is-a-hypothesis.md`. The first real `make mutants`
+run covered the three modules `[tool.mutmut]` named and nothing had ever mutated —
+`kg/pr_gate.py`, `kg/note.py`, `agent/audit_store.py` — and ended at 206 of 223 killed with every
+survivor triaged. These two are what it did not close.
+
+- [ ] **Four of the seven `[tool.mutmut]` modules have still never been run under a corrected test
+      selection** — [S]. `agent/authz.py`, `api/budget.py`, `api/runner_trace.py` and
+      `science/calc/store.py` have a stored report showing **103 survivors**, produced under the
+      same `pytest_add_cli_args_test_selection` that this lane measured as understating the suite by
+      **29 of 39 survivors** on the three modules it did cover. Two files it omitted
+      (`tests/test_relations.py`, `tests/test_metrics_bridge.py`) accounted for all of them, and
+      neither names the module it protects. So the 103 is an upper bound of unknown tightness, and
+      triaging it as-is would generate tests for behaviour that is already pinned. Re-run each with
+      `make mutants ARGS='chemclaw.<module>.*'`, then re-apply every survivor against the **full**
+      suite before treating any of them as a finding.
+      *Trigger:* the next hardening pass that wants a number for those four modules, or any change
+      to one of them — whichever comes first.
+
+- [ ] **The mutmut test selection is maintained by hand and nothing checks it** — [S]. It is a
+      list of eighteen (now twenty) filenames whose stated job is "the tests that can actually kill
+      these mutants", and it was wrong for two of the seven modules because the killing tests do not
+      mention the module they cover — `tests/test_relations.py` builds a graph, and the graph is
+      what calls `split_link`. mutmut already collects per-mutant coverage in its stats phase
+      (`mutmut tests-for-mutant`), so the list is derivable rather than declarable: generate it from
+      a full-suite coverage run and fail CI when a named module has a covering test file that is not
+      listed. Not done here because it needs one clean full-suite coverage run under the `mutants/`
+      copy, which is the thing the selection exists to avoid, so the cost has to be measured before
+      the design is chosen.
+      *Trigger:* the third time a survivor turns out to be killed by an unlisted test file.
+
 ## Open — Left by the mounted-document-share build (2026-08-06)
 
 Record: `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`. The share is crawled,
@@ -70,23 +484,62 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       says so, and the "reference the tests use" claim in `index.py` is not true for this operator.
       *Trigger:* decide which semantics is wanted, then make both backends state it.
 
+- [ ] **`hnsw.ef_search` is not a setting, and the dense note search is now approximate** — [S].
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it` moved the `note_id` tie-break to an
+      outer sort, which restored the HNSW index the inner one had disabled (243 ms → 3.6 ms at
+      N=20,000) — and with it, approximate recall, which the accidental Seq Scan had been hiding.
+      The same change was then applied to `document_chunks.search_dense` (228 ms → 2.5 ms at 20,000
+      chunks), so this knob's absence is now felt on both indexes and the document one is the table
+      designed for millions of rows. Measured against an exact scan: recall@10 **1.0000** on
+      clustered vectors (the shape a real corpus has) and **0.116** on uniformly random ones (the
+      pathological case for any ANN index). **And a `within`/eligibility set makes it worse**: the
+      predicate is a post-filter over the ef_search candidate list, not a bound on the scan, so a
+      selective one returns fewer than k — measured, `Index Scan` + `Rows Removed by Filter`, and
+      5 of 8 rows at `within=0.10` with the index forced. `GraphRetriever` always passes one.
+      No knob exists to trade latency back for recall. *Trigger:* a corpus where a note a chemist
+      knows exists does not come back, or the first recall regression an eval catches.
+
+- [ ] **`chunking_key` names the chunk *settings*, not the chunker** — [S]. `041` made
+      `(doc_id, chunking_key, ordinal)` a chunk row's identity, and `chunking_key` is
+      `chunk_chars:chunk_overlap_chars`. A change to `chunk_document`'s algorithm — a new page-break
+      rule, a different hard-split — moves neither key, so no gate can see it and the corpus keeps
+      the old boundaries silently. This is the same class as the defect `040` closed, one level up.
+      Cheap fix: fold a chunker version constant into `DocumentShareBinding.chunking_key`, bumped by
+      hand in the same commit that changes the algorithm. *Trigger:* the first change to
+      `ingest/documents/chunk.py` that moves a boundary.
+
+- [ ] **A superseded cutting survives until the next write to its document** — [S]. `upsert` sweeps
+      the cuttings that no file row claims for the documents it just wrote, and `prune_stale` sweeps
+      them table-wide — but a share that is *disabled* rather than re-chunked leaves its file rows
+      in place, so its cutting stays claimed and stays stored. It is invisible to search (the
+      eligibility predicate joins on the chunking through the file row) and it is skipped by the
+      re-embed drain (`stale_chunks` is scoped to the enabled shares' chunkings), so it costs disk
+      and nothing else. *Trigger:* a deployment that disables a share permanently, where the storage
+      matters enough to want a `sync_share --forget <name>`.
+
 - [ ] **`038`'s btree cannot serve the query it was added for** — [S].
       `WHERE embedding_key IS DISTINCT FROM %(key)s` is a `DistinctExpr`, not an indexable
       `OpExpr`, so the planner can only full-scan. The index costs write amplification on every
       upsert and buys nothing. An indexable form is `embedding_key IS NULL OR embedding_key <> %(key)s`
-      with a partial index. *Trigger:* the first corpus large enough for the stale scan to show up.
+      with a partial index. Deliberately not fixed by
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it`, which took the lesson instead:
+      `039` and `040` add **no** index for their own key columns, and say why in the file.
+      *Trigger:* the first corpus large enough for the stale scan to show up.
 
-- [ ] **`embedding_config_key` omits the endpoint** — [S]. It is `provider:model:dim`, so
-      repointing `llm_base_url` at a different vendor exposing the same model name — or the same
-      vendor rolling a model's weights under an unchanged name — leaves every `embedding_key`
-      reading as current. Nothing re-embeds and nothing errors, which is the exact silent
-      corruption `038` exists to prevent, one variable further out.
-      *Trigger:* a deployment that changes `llm_base_url` without changing `embedding_model`.
+- [x] **`embedding_config_key` omits the endpoint** — closed by
+      `D-2026-08-08-a-derived-index-must-record-what-derived-it`. The key *identifies* the endpoint
+      for `openai_compatible` — a digest of `llm_base_url` with the trailing slash stripped, not the
+      URL itself, because the key is written into two durable columns and `llm_base_url` may carry
+      userinfo; the slot stays empty for `hash`, which never reaches one. The half this does **not**
+      close is a vendor rolling a model's weights under an unchanged name at an unchanged URL — no
+      key can see that, and only a re-embed fixes it.
 
 - [ ] **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
-      whether *some* chunk of a document carries the current key, while `index.py`'s docstring
-      states the stronger invariant. Transient in the shipped workflow, because the re-embed drain
-      completes before the crawl — but any caller that reorders the two phases inherits a real bug.
+      whether *some* chunk of a document carries the current key. The docstrings said the stronger
+      thing and now say this one, with the measurement (one of five chunks moved to a new key ->
+      the document reports as known, `stale_chunks` finds the other four). Transient in the shipped
+      workflow, because the re-embed drain completes before the crawl — but any caller that
+      reorders the two phases inherits a real bug.
       *Trigger:* reordering those phases, or making the drain partial.
 
 - [ ] **The citation tie-break is collation-dependent** — [S]. In-memory picks the smallest path
@@ -94,6 +547,31 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       For a document at `Projects/Report.pdf` and `Projects/acme report.pdf` the two disagree, so
       the "deterministic citation" is a property of the deployment's collation rather than of the
       code. *Trigger:* a corpus with duplicate content under mixed-case paths.
+
+## Open — Left by lane T10 of the 2026-08-08 review campaign
+
+Record: `D-2026-08-08-the-inventory-that-vouched-for-itself`.
+
+- [ ] **Migration 041 drops a constraint, and the additive guard refuses it** — [M].
+      `tests/test_migrations_are_additive.py::test_a_migration_destroys_nothing[041_document_chunk_identity.sql]`
+      fails: `041` runs `ALTER TABLE document_chunks DROP CONSTRAINT IF EXISTS document_chunks_pkey`
+      to replace the primary key with `(doc_id, chunking_key, ordinal)`. Inherited red, not caused
+      by T10 — the migration and the guard are both byte-identical to what T10 branched from. The
+      open question is which one is wrong: replacing a primary key loses no data, so either the
+      forward-only rule admits `DROP CONSTRAINT` and the guard's `ALTER TABLE … DROP` substring is
+      too coarse to tell a constraint from a column, or the pkey swap has to be a reviewed
+      operation outside the migration set. It is a decision for the lane that wrote 041.
+      *Trigger:* immediately — this is a failing test on the campaign branch's gate.
+
+- [ ] **`_report_id` canonicalisation is a policy about free text only** — [S]. Title, headings and
+      queries are casefolded and whitespace-collapsed and the section list is sorted;
+      `requested_by`, `requested_roles` and `memory_layer` are deliberately byte-exact, because
+      those three are the access-control half (D-2026-08-08-identity-must-travel-with-the-work) and
+      folding two spellings of a principal together is the cross-actor merge they exist to prevent.
+      The cost accepted: two requests differing only in casing or section order share one run, so
+      the first requester's rendering is what the draft shows.
+      *Trigger:* a report request whose *meaning* depends on section order, or a directory where
+      two distinct principals differ only by case.
 
 ## Open — Left by the whole-codebase security sweep (2026-08-06)
 
@@ -430,7 +908,7 @@ not close:
 - [ ] **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up
       that the "separate documented backfill" the operator was assumed to have skipped does not
       exist. `make reindex` is note-index-only; the fingerprint tables are filled as a side effect
-      of the ELN sync (`ElnSyncWorkflow`) or by `index_molecule`/`index_reaction` one record at a
+      of the ELN sync (`ElnSyncWorkflow`), which calls `FingerprintStore.add()` in process — the only
       time, and `docs/guides/runbook.md` covers only re-indexing after a *definition* change (§vi).
       An operator standing up a corpus has no procedure to follow, which is how a live run reached
       1,025 indexed notes and 0 fingerprints. The connectors now say so loudly at startup, so this
@@ -1141,15 +1619,13 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       no product element is absent from the inputs, so `benzene + methanol >> paracetamol` passes.
       No charge balance, no yield-vs-limiting-reagent check despite `amount_mmol` being parsed. The
       stronger check already exists and is not reused (`science/calc/reaction.py:178`).
-- [ ] **`note_index` has no embedding-model identity, and there is no chunking** — [M], **and it
-      is the one item of this block that was not attempted**, so it is stated rather than
-      half-done. Changing `CHEMCLAW_EMBEDDING_MODEL` serves mixed-generation vectors until someone
-      remembers `make reindex`, and nothing detects it — while the in-process embed cache *is*
-      keyed on the model and its docstring names this hazard. Separately, a note is one vector over
-      its whole body and the returned excerpt is `body[:240]`, so a reaction note's matched
-      procedure step is never what comes back. The two halves are one migration and one reindex,
-      and chunking in particular changes what a retrieval hit *is* — every eval baseline moves with
-      it — so it earns its own change rather than riding along with molecule identity.
+- [ ] **A note is one vector over its whole body** — [M]. The identity half of this row is closed
+      (`D-2026-08-08-a-derived-index-must-record-what-derived-it`: `note_index.embedding_key`,
+      migration 039, and the ordinary incremental `make reindex` now heals a model change). What
+      remains is chunking: a note is embedded as a single vector and the returned excerpt is
+      `body[:240]`, so a reaction note's matched procedure step is never what comes back. It earns
+      its own change because it alters what a retrieval hit *is* — every eval baseline moves with
+      it. *Trigger:* the first corpus where whole-note vectors visibly lose a procedure step.
 - [x] **Hazard screening misses the notes that propose conditions** — the note-type half is
       closed: the gate covers `experiment-proposal` and `bo-candidate` by type, not only by a
       `## Procedure` heading a parameter table does not have.

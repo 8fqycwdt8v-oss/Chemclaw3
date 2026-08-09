@@ -1,0 +1,27 @@
+-- Which embedding configuration produced each stored note vector
+-- (D-2026-08-08-a-derived-index-must-record-what-derived-it).
+--
+-- The same defect `038_document_chunk_embedding_key.sql` closed for `document_chunks`, left open
+-- one table over. `note_index` records only the file's `mtime_ns:size` fingerprint (035), and
+-- changing the embedding *model* moves no file's mtime — so `reindex_notes` computed `changed = []`
+-- and re-embedded nothing. Measured on live pgvector: after a model swap every stored vector was
+-- byte-identical, and a query embedded by the new model scored the note whose text it *exactly*
+-- matched at cosine 0.0000 while an unrelated note scored 0.3333. `search_dense` floors at `> 0`,
+-- so the three superseded notes were dropped outright — the production path returned 1 of 4 notes,
+-- and nothing failed.
+--
+-- With this column the two halves of a vector's identity are both stored: `fingerprint` answers
+-- "did the text change", `embedding_key` answers "did the model change", and `reindex_notes` treats
+-- a row whose key is not the current one as changed. That makes the hourly rebuild self-healing
+-- instead of needing a `--full` flag somebody has to remember at the moment they change a setting.
+--
+-- NULL for every row written before this migration reads as "unknown" and is therefore always
+-- treated as stale — a one-time re-embed of the existing corpus after upgrade, never a wrong skip.
+-- That is the argument 035 and 038 each make for their own added column.
+--
+-- **Deliberately no index.** 038 added one and it cannot serve its own scan (`IS DISTINCT FROM` is
+-- not btree-searchable; measured a Seq Scan at 1M rows). This read is different in both directions:
+-- the predicate is a plain `embedding_key = $1`, and the table holds one row per knowledge-graph
+-- note — thousands, not millions — of which the steady-state read returns nearly all, so no planner
+-- would choose an index anyway. Applied by `make db-migrate`.
+ALTER TABLE note_index ADD COLUMN IF NOT EXISTS embedding_key TEXT;

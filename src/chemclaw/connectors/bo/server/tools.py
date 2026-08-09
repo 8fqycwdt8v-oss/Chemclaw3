@@ -52,6 +52,7 @@ from chemclaw.science.bo.engine import (
 from chemclaw.science.bo.featurize import featurize_problem
 from chemclaw.science.bo.problem import (
     Candidate,
+    ContinuousParameter,
     FitQuality,
     Objective,
     Observation,
@@ -127,6 +128,15 @@ class ExperimentSuggestion(BaseModel):
 
     campaign_id: str = Field(min_length=1)
     candidates: list[Candidate] = Field(default_factory=list)
+    # How many were asked for, so a batch that could not be filled says so instead of reading as a
+    # complete answer. `propose_candidates` returns fewer than `n` by design when a finite space has
+    # run low — "Fewer than `n` is allowed and is not an error", and the durable loop stops on
+    # `space_exhausted` before it can happen, so this only ever shortens an *inline* answer, which
+    # is the chemist-facing one. Measured: three cells of a 2x2 run, a batch of three asked for, one
+    # candidate returned, and every word of the summary was about that one candidate.
+    # Zero means "not stated" and suppresses the clause, so a directly-constructed suggestion (the
+    # summary is a pure function of the fields and several tests build one) claims nothing.
+    requested: int = Field(default=0, ge=0)
     calc_refs: list[str] = Field(default_factory=list)
     # What the objective spans in the runs behind these candidates, so each candidate's
     # `predicted_sd` can be read against something. One per objective, lead first.
@@ -156,6 +166,19 @@ class ExperimentSuggestion(BaseModel):
             return "No candidates were proposed."
         spread = self.scale.spread if self.scale else None
         readings = []
+        if self.requested > len(self.candidates):
+            # First, because it is the one sentence that changes what the rest of this means: the
+            # readings below describe the candidates that exist and say nothing about the ones that
+            # do not, so a short batch presented without this reads as a complete answer to the
+            # question asked. The cause is always the same — a finite, all-categorical space with
+            # fewer fresh conditions left than the batch wanted — because a continuous space never
+            # runs out of points to propose.
+            readings.append(
+                f"You asked for {self.requested} candidate(s) and only {len(self.candidates)} "
+                "could be proposed: every other condition in this decision space has already been "
+                "run. This is a nearly-complete screen, not a shortlist — say so, and do not "
+                "present these as the best of a wider search."
+            )
         if len(self.scales) > 1:
             named = ", ".join(f"{scale.direction} {scale.name}" for scale in self.scales)
             # `is None`, not truthiness: an explicit `assay_noise=0.0` means "compare exactly",
@@ -253,17 +276,57 @@ def _require_observed_params_match(
 def _require_points_match(
     problem: OptimizationProblem, points: list[dict[str, ParamValue]]
 ) -> None:
-    """The same check for the points `predict_outcome` is asked about (W5).
+    """The same check for the points `predict_outcome` is asked about, **and one more** (W5).
 
     A prediction goes through `strategy.predict`, not through the acquisition step, so a missing
     column surfaces as a different library error than the one the observation check was written
-    for — but the caller's mistake and the sentence that repairs it are identical, so the message
-    is shared rather than restated.
+    for — but the caller's mistake and the sentence that repairs it are identical, so the name
+    check is shared rather than restated.
+
+    **The values need checking here and do not need it for observations**, which is the half this
+    function was missing. The asymmetry is BoFire's, and it is measured: `tell` runs
+    `validate_experimental`, so a bad *observation* value already comes back as a plain `ValueError`
+    the connector forwards verbatim — "invalid values for `ligand`, allowed are: `['L1','L2','L3']`"
+    for an undeclared level, "not all values of input feature `T` are numerical" for a string.
+    `predict` runs no validation at all, so the identical mistake in a *point* arrived as a
+    `KeyError` ("None of [Index(['L9'], ...)] are in the [index]") or a `TypeError` ("can't convert
+    np.ndarray of type numpy.object_"). Neither is a `ValueError` nor one of the engine's
+    `_SURROGATE_FAILURES`, so `chemclaw.connectors.server` replaced both with "an internal error
+    occurred" — nothing the model can repair from, and it retries.
+
+    **A value outside a continuous bound is deliberately not caught.** That is the case
+    `predict_outcome` documents as answered rather than refused: the model extrapolates, the sd
+    widens roughly sixfold, and `Prediction.in_domain` labels it. So this is not `point_in_domain`,
+    which returns False for both — it is the narrower question of whether the surrogate has an
+    *encoding* for the value at all. A level nobody declared has no column; a string has no number.
 
     Raises:
         ValueError: Naming the offending point's index and the parameter(s) at fault.
     """
     _require_params_match(problem, points, "points")
+    for index, params in enumerate(points):
+        for parameter in problem.parameters:
+            # `_require_params_match` has already established that every declared name is present.
+            value = params[parameter.name]
+            if isinstance(parameter, ContinuousParameter):
+                # `bool` is an `int` in Python, and `True` would reach the surrogate as 1.0 — a
+                # temperature of 1 °C answered confidently for a caller who meant something else.
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    raise ValueError(
+                        f"points[{index}] gives {value!r} for {parameter.name!r}, which is a "
+                        f"continuous parameter and needs a number. Its declared range is "
+                        f"{parameter.lower:g} to {parameter.upper:g}; a value outside that range "
+                        "is allowed and will be answered as an extrapolation."
+                    )
+            elif value not in parameter.categories:
+                raise ValueError(
+                    f"points[{index}] gives {value!r} for {parameter.name!r}, which is not one of "
+                    f"its options {parameter.categories}. Unlike a continuous range, a category "
+                    "has no outside for the model to extrapolate into: it never saw this level and "
+                    "has no way to represent it. Ask about one of the options listed, or add this "
+                    "one to the problem's categories (with its `structures` entry if the others "
+                    "have one) — which makes it a different decision space."
+                )
 
 
 def _require_params_match(
@@ -452,6 +515,7 @@ async def suggest_next_experiment(
     return ExperimentSuggestion(
         campaign_id=campaign_id,
         candidates=candidates,
+        requested=count,
         calc_refs=featurized.calc_refs,
         scale=scales[0],
         scales=scales,
@@ -690,10 +754,16 @@ async def predict_outcome(
     larger sd is a region the model knows nothing about; a similar one means the search has already
     covered it. Do not answer that from the run list alone.
 
-    **Out-of-range points are answered, not refused** — with `in_domain: false` and a much wider sd,
-    because the model extrapolates rather than clamping. Say that the point is outside the declared
-    range and that the mean there is unconstrained; do not quietly present it as a prediction like
-    any other.
+    **A point outside a continuous range is answered, not refused** — with `in_domain: false` and a
+    much wider sd, because the model extrapolates rather than clamping. Say that the point is
+    outside the declared range and that the mean there is unconstrained; do not quietly present it
+    as a prediction like any other.
+
+    **A categorical option the problem does not list is refused**, and the difference is real rather
+    than a policy: a range has an outside the model can extrapolate into, and a category does not —
+    a ligand that was never declared has no representation in the surrogate at all. Asking about one
+    means adding it to the problem's `categories`, which makes it a different decision space with no
+    history. The same applies to a value of the wrong kind (a word where a number belongs).
 
     Args:
         problem: The decision space and objective(s), in the same shape `suggest_next_experiment`

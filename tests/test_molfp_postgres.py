@@ -80,8 +80,8 @@ def test_tie_break_order_matches_the_in_memory_backend() -> None:
             await mem_store.add(record_for(cid, octanol))
 
         bits = ecfp_bitstring(octanol)
-        pg_hits = await find_matches(pg_store, bits, top_k=None, threshold=0.99)
-        mem_hits = await find_matches(mem_store, bits, top_k=None, threshold=0.99)
+        pg_hits, _ = await find_matches(pg_store, bits, top_k=None, threshold=0.99)
+        mem_hits, _ = await find_matches(mem_store, bits, top_k=None, threshold=0.99)
         pg_ids = [h.id for h in pg_hits if h.id.startswith("pg-collate-")]
         mem_ids = [h.id for h in mem_hits]
         assert pg_ids == mem_ids == ["pg-collate-B1", "pg-collate-a1"]  # code-point order

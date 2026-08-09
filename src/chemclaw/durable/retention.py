@@ -144,10 +144,7 @@ async def prune_expired_rows() -> RetentionOutcome:
     cannot disagree about what "expired" means.
     """
     outcome = RetentionOutcome(deleted={}, skipped=[])
-    async with connection(
-        settings.postgres_dsn,
-        statement_timeout_seconds=settings.pg_statement_timeout_seconds,
-    ) as conn:
+    async with connection(settings.postgres_dsn) as conn:
         for table, (column, disposable) in _PRUNABLE.items():
             days = _window_days(table)
             if days <= 0:

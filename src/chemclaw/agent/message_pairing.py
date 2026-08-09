@@ -22,6 +22,16 @@ from collections.abc import Set as AbstractSet
 
 from agent_framework import Message
 
+# MAF's content-type discriminators. These two strings decide which rows `durable/retention.py`
+# may delete, so an upstream rename does not fail loudly — it changes what a data-destroying
+# nightly sweep does. Measured against a plausible rename: `droppable_rows([(1, call), (2, result)],
+# {1})` went from `set()` (the partner correctly protected) to `{1}` — the sweep deletes the call
+# row and strands its result, which this module's own docstring calls "a bricked session with *no*
+# self-heal path". Silent: no exception, no failed activity, sessions that stop working days later.
+#
+# `test_message_pairing.py` asserts these still match what MAF emits, so a rename fails a test
+# rather than a corpus. Pinning them as constants is not the guard — the test is; the constants are
+# what gives the test one place to look.
 _CALL = "function_call"
 _RESULT = "function_result"
 

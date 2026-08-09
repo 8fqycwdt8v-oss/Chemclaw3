@@ -26,6 +26,7 @@ from functools import lru_cache
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.ids import stable_hash
 
 # Tokenizer for the hash embedder: lowercase alphanumeric runs. Deliberately trivial — the hash
 # embedder is a deterministic dev stand-in, not a linguistic model.
@@ -42,7 +43,7 @@ _CACHE: dict[_CacheKey, list[float]] = {}
 
 
 def embedding_config_key() -> str:
-    """Which configuration produces a vector right now: provider, model and dimension.
+    """Which configuration produces a vector right now: provider, endpoint, model and dimension.
 
     The identity half of an embedding — the same lesson the calculation cache learned the hard way
     (D-011): **a vector is only reusable for the configuration that made it.** Pointing a
@@ -50,12 +51,43 @@ def embedding_config_key() -> str:
     model's vectors corrupts every similarity, silently, and no error is ever raised.
 
     Public because the rule has to hold *durably*, not only in memory. The in-process cache below
-    keys on it, and so does `document_chunks.embedding_key` — a stored vector whose key is not
-    this one is stale and gets re-embedded (`chemclaw.ingest.documents.sync.reembed_stale`). One
+    keys on it, and so do `document_chunks.embedding_key` (038) and `note_index.embedding_key`
+    (039) — a stored vector whose key is not this one is stale and gets re-embedded
+    (`chemclaw.ingest.documents.sync.reembed_stale`, `chemclaw.retrieval.vector_index`). One
     definition, because two spellings of "which model made this" is exactly how the memory cache
-    and the table come to disagree about the same vector.
+    and the tables come to disagree about the same vector.
+
+    **The endpoint is part of the identity, and a model name is not enough on its own.** A model
+    name is not globally unique — `text-embedding-3-large` is what the vendor calls it and what any
+    gateway proxying it calls it too, and those need not be the same weights. Without the endpoint
+    in the key, repointing `llm_base_url` at another vendor serving that name left every stored key
+    reading as current, which is precisely the silent-corruption case the column exists to prevent.
+    Only `openai_compatible` is affected: the `hash` embedder never reaches the endpoint, so naming
+    it there would churn every dev vector on a setting that provably cannot change one. The slot
+    stays in the key (empty) rather than disappearing, so the key has one shape for every provider.
+    A trailing slash is stripped because `.../v1` and `.../v1/` address the same endpoint, and a
+    corpus-wide re-embed is too expensive to trigger on a spelling.
+
+    **The endpoint is *identified*, not reproduced.** The slot holds a digest of the URL rather than
+    the URL, because this key is written into `document_chunks.embedding_key` and
+    `note_index.embedding_key` — one copy per row, in tables nothing prunes and the runtime role can
+    read. `llm_base_url` is a plain `str` with no validator forbidding userinfo, so
+    `https://svc:token@chemclaw-llm/v1` is a configuration this deployment accepts and the verbatim
+    form persisted the password; even without one, an internal hostname does not belong in every row
+    of a corpus. A digest keeps the only property the key needs — two endpoints differ, one endpoint
+    does not — and the readable part (provider, model, dimension) is what an operator reads a key
+    for anyway. Twelve hex characters, because the population being distinguished is the handful of
+    endpoints one deployment has ever pointed at, not an adversarially chosen set.
     """
-    return f"{settings.embedding_provider}:{settings.embedding_model}:{settings.embedding_dim}"
+    endpoint = (
+        f"ep-{stable_hash(settings.llm_base_url.rstrip('/'), chars=12)}"
+        if settings.embedding_provider == "openai_compatible"
+        else ""
+    )
+    return (
+        f"{settings.embedding_provider}:{endpoint}:"
+        f"{settings.embedding_model}:{settings.embedding_dim}"
+    )
 
 
 def _cache_key(text: str) -> _CacheKey:

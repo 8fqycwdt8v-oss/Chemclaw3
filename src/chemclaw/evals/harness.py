@@ -47,6 +47,10 @@ class EvalReport(BaseModel):
         """Gated results that did not pass (a regression, treated like a test failure)."""
         return [r for r in self.results if r.passed is False]
 
+    def _demonstrations(self) -> set[str]:
+        """Case ids declared `expect_pass: false` — the cases that exist to fail."""
+        return {case_id for case_id, expected in self.expect_pass.items() if not expected}
+
     def regressions(self) -> list[ScoredResult]:
         """Failures that were not supposed to happen — `failed()` minus the demonstration cases.
 
@@ -54,8 +58,28 @@ class EvalReport(BaseModel):
         gate: two shipped cases exist to *demonstrate* a gate firing, so a command that treated
         every failure as a regression would have been red from the day they were written.
         """
-        demonstrations = {case_id for case_id, expected in self.expect_pass.items() if not expected}
-        return [r for r in self.failed() if r.case_id not in demonstrations]
+        return [r for r in self.failed() if r.case_id not in self._demonstrations()]
+
+    def inert_demonstrations(self) -> list[str]:
+        """Demonstration cases that no longer fail anything — the other half of `expect_pass`.
+
+        `regressions()` can only ever detect a *failure*, and it suppresses failures per case, so
+        the one thing it structurally cannot see is a gate that stops firing: loosen a threshold or
+        break a metric and the by-design failure simply leaves the set, taking the coverage with it
+        and leaving the command green. Measured on the shipped case-set — raising
+        `eval_efactor_max`/`eval_pmi_max` to 1000 dropped `pharma-solvent-heavy` from the failures
+        (4 → 2), `regressions()` stayed empty, `--strict` still exited 0, and the whole
+        green-chemistry gate was inert with no signal.
+
+        So `expect_pass: false` is read as an **assertion** that at least one of the case's gated
+        metrics fails, not as a mute on its failures. At least one, not all: a demonstration may
+        legitimately carry a passing metric beside the failing one — `retrieval_precision` stays
+        1.0 in the case whose `retrieval_recall` is the point.
+
+        Id-sorted, so the list reads the same on every run.
+        """
+        failing = {r.case_id for r in self.results if r.passed is False}
+        return sorted(self._demonstrations() - failing)
 
 
 class EvalCaseError(ChemclawError):
@@ -161,6 +185,16 @@ def render_report(report: EvalReport) -> str:
         # know which of them are the case-set demonstrating that a gate can fire at all.
         summary += f" — {demonstrated} of them by design, {len(regressions)} regression(s)"
     lines += ["", summary + "."]
+    inert = report.inert_demonstrations()
+    if inert:
+        # In the report, not only in the exit code: a gate that stopped firing is invisible by
+        # construction — nothing appears in the failure table to point at.
+        lines += [
+            "",
+            f"**{len(inert)} demonstration case(s) no longer fails any gate**: "
+            f"{', '.join(inert)}. Each was declared `expect_pass: false` to prove a gate can "
+            "fire; a gate that stopped firing is lost coverage, not a green build.",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -176,6 +210,12 @@ def main(argv: list[str] | None = None) -> int:
     regression — the real gate is a pinned assertion in `tests/test_evals.py` — so a reader trusted
     the wrong step. `--strict` makes the labelled step gate what it claims to: a failed gated
     metric is a non-zero exit.
+
+    **And so is a gate that stopped firing.** `expect_pass: false` is an assertion rather than a
+    mute, so `--strict` also fails when a declared demonstration passes everything — see
+    `EvalReport.inert_demonstrations`. Without that half, loosening a threshold silently removes
+    coverage and the command stays green, which is the failure the strict mode exists to prevent
+    read from the other direction.
 
     Returns non-zero when the case-set cannot be loaded or scored (missing, empty, or broken — G4)
     in either mode, so a vacuous or unscorable run never exits green.
@@ -197,7 +237,9 @@ def main(argv: list[str] | None = None) -> int:
         print(exc)
         return 1
     print(render_report(report), end="")
-    return 1 if args.strict and report.regressions() else 0
+    if args.strict and (report.regressions() or report.inert_demonstrations()):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

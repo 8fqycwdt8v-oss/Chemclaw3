@@ -100,3 +100,69 @@ def test_openai_compatible_half_config_is_rejected_at_build_time() -> None:
     """A missing endpoint/model fails when Settings is built, before any embed call happens."""
     with pytest.raises(ValueError, match="embedding_model"):
         Settings(embedding_provider="openai_compatible", llm_base_url="x")
+
+
+def test_config_key_separates_two_endpoints_serving_the_same_model_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect: `provider:model:dim` read as identical across two different endpoints.
+
+    Model names are not globally unique — `text-embedding-3-large` is served by the vendor and by
+    any gateway that proxies it, and two of them need not be the same weights. Repointing
+    `llm_base_url` therefore has to invalidate the stored vectors, or every key already on record
+    keeps reading as current and nothing is ever re-embedded.
+    """
+    endpoint = {
+        "embedding_provider": "openai_compatible",
+        "embedding_model": "text-embedding-3-large",
+    }
+    _use_settings(monkeypatch, **endpoint, llm_base_url="https://vendor.example/v1")
+    vendor = provider.embedding_config_key()
+    _use_settings(monkeypatch, **endpoint, llm_base_url="https://gateway.internal/v1")
+    assert provider.embedding_config_key() != vendor
+
+
+def test_config_key_ignores_a_trailing_slash_on_the_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`.../v1` and `.../v1/` are the same endpoint, so they must not force a corpus re-embed."""
+    endpoint = {"embedding_provider": "openai_compatible", "embedding_model": "internal-embed"}
+    _use_settings(monkeypatch, **endpoint, llm_base_url="https://llm.internal/v1")
+    plain = provider.embedding_config_key()
+    _use_settings(monkeypatch, **endpoint, llm_base_url="https://llm.internal/v1/")
+    assert provider.embedding_config_key() == plain
+
+
+def test_config_key_carries_no_part_of_the_endpoint_it_identifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key is written into two durable columns, so it may not *be* the endpoint.
+
+    `document_chunks.embedding_key` and `note_index.embedding_key` get one copy of this string per
+    row, in tables nothing prunes and the runtime role can read. `llm_base_url` is a plain `str`
+    with no validator forbidding userinfo, so `https://svc:s3cr3t@llm.internal/v1` is a
+    configuration this deployment accepts — and the verbatim form persisted the password. Even
+    without one, the internal hostname does not belong in every row of the corpus.
+
+    A digest identifies the endpoint without carrying it, which is all the invalidation property
+    needs — and that property is asserted separately, immediately below.
+    """
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="internal-embed",
+        llm_base_url="https://svc:s3cr3t-token@llm.internal/v1",
+    )
+    key = provider.embedding_config_key()
+    for leaked in ("s3cr3t-token", "svc", "llm.internal", "https"):
+        assert leaked not in key, f"the key carries {leaked!r}: {key}"
+
+
+def test_config_key_of_the_hash_provider_names_no_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hash embedder never calls the endpoint, so `llm_base_url` cannot change its vectors."""
+    _use_settings(monkeypatch, embedding_provider="hash", llm_base_url="https://one.example/v1")
+    first = provider.embedding_config_key()
+    _use_settings(monkeypatch, embedding_provider="hash", llm_base_url="https://two.example/v1")
+    assert provider.embedding_config_key() == first

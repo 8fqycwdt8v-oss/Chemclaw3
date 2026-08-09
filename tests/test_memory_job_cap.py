@@ -62,7 +62,7 @@ def test_a_corpus_within_the_cap_is_untouched(
     """The steady state must be byte-identical, and silent: no cap, no warning."""
     monkeypatch.setattr(settings, "memory_max_notes_per_run", 25)
     notes = _corpus(10)
-    assert _slice_for_this_run(notes, "campaign") == notes
+    assert _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign") == notes
     assert clock.warnings == []
 
 
@@ -71,7 +71,9 @@ def test_a_cap_of_zero_means_unbounded(
 ) -> None:
     """A deployment that wants the old behaviour must be able to say so."""
     monkeypatch.setattr(settings, "memory_max_notes_per_run", 0)
-    assert len(_slice_for_this_run(_corpus(500), "campaign")) == 500
+    assert (
+        len(_slice_for_this_run(_corpus(500), settings.memory_max_notes_per_run, "campaign")) == 500
+    )
 
 
 def test_a_large_corpus_is_capped_and_the_drop_is_logged(
@@ -79,7 +81,9 @@ def test_a_large_corpus_is_capped_and_the_drop_is_logged(
 ) -> None:
     """The flood this exists to stop — and it is never silent about stopping it."""
     monkeypatch.setattr(settings, "memory_max_notes_per_run", 20)
-    assert len(_slice_for_this_run(_corpus(500), "playbook")) == 20
+    assert (
+        len(_slice_for_this_run(_corpus(500), settings.memory_max_notes_per_run, "playbook")) == 20
+    )
     assert len(clock.warnings) == 1
     message = clock.warnings[0][0] % clock.warnings[0][1:]
     assert "capped at 20 of 500" in message
@@ -97,7 +101,10 @@ def test_consecutive_runs_cover_different_notes(monkeypatch: pytest.MonkeyPatch)
     def _day(n: int) -> set[str]:
         fake = _FakeWorkflowClock(datetime(2026, 7, n, tzinfo=UTC))
         monkeypatch.setattr("chemclaw.durable.memory_jobs.workflow", fake)
-        return {note.id for note in _slice_for_this_run(notes, "campaign")}
+        return {
+            note.id
+            for note in _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
+        }
 
     first, second, third = _day(1), _day(2), _day(3)
     assert first != second != third
@@ -112,7 +119,10 @@ def test_the_whole_corpus_is_reached_within_one_cycle(monkeypatch: pytest.Monkey
     for day in range(1, 11):  # 200 / 20 = 10 runs
         fake = _FakeWorkflowClock(datetime(2026, 7, day, tzinfo=UTC))
         monkeypatch.setattr("chemclaw.durable.memory_jobs.workflow", fake)
-        seen |= {note.id for note in _slice_for_this_run(notes, "campaign")}
+        seen |= {
+            note.id
+            for note in _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
+        }
     assert seen == {note.id for note in notes}
 
 
@@ -127,7 +137,7 @@ def test_the_window_wraps_rather_than_running_short(monkeypatch: pytest.MonkeyPa
     for day in range(1, 15):
         fake = _FakeWorkflowClock(datetime(2026, 7, day, tzinfo=UTC))
         monkeypatch.setattr("chemclaw.durable.memory_jobs.workflow", fake)
-        window = _slice_for_this_run(notes, "campaign")
+        window = _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
         assert len(window) == 7
         assert len({note.id for note in window}) == 7  # no note twice in one run
 
@@ -138,8 +148,10 @@ def test_the_slice_is_stable_within_a_run(
     """A workflow replays, so the same run must select the same notes every time it does."""
     monkeypatch.setattr(settings, "memory_max_notes_per_run", 20)
     notes = _corpus(500)
-    assert _slice_for_this_run(notes, "campaign") == _slice_for_this_run(notes, "campaign")
+    assert _slice_for_this_run(
+        notes, settings.memory_max_notes_per_run, "campaign"
+    ) == _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
     # And it does not depend on the order the builder happened to emit them in.
-    assert _slice_for_this_run(notes, "campaign") == _slice_for_this_run(
-        list(reversed(notes)), "campaign"
-    )
+    assert _slice_for_this_run(
+        notes, settings.memory_max_notes_per_run, "campaign"
+    ) == _slice_for_this_run(list(reversed(notes)), settings.memory_max_notes_per_run, "campaign")

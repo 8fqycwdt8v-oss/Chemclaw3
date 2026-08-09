@@ -59,6 +59,12 @@ class OptSpec(XtbSpec):
         default_factory=lambda: settings.xtb_opt_gradient_tolerance, gt=0
     )
     max_steps: int = Field(default_factory=lambda: settings.xtb_opt_max_steps, gt=0)
+    # Cap on how far any atom may move in one leg, in Angstrom (see `_preconditioned_leg`).
+    # A spec field rather than a settings read inside the loop, because it moves the answer
+    # and a setting that moves the answer belongs in the key: measured on ethanol, 0.35 and
+    # 0.05 relax to different geometries (st_e868cd6fe533107f vs st_860015aca7be952c) and
+    # different energies — and a structure id is what every downstream key is built from.
+    trust_radius: float = Field(default_factory=lambda: settings.xtb_opt_trust_radius, gt=0)
     # Indices of atoms held at their input positions. Used by the relaxed scan; empty
     # for a free optimization.
     frozen_atoms: tuple[int, ...] = ()
@@ -228,7 +234,7 @@ def _preconditioned_leg(
     # The trust region is a Cartesian distance, so it becomes a per-coordinate bound in
     # the preconditioned basis by dividing by that coordinate's own scale — a soft
     # direction is allowed a large `s` because a large `s` moves the atoms little.
-    limit = settings.xtb_opt_trust_radius / np.maximum(scale, 1e-12)
+    limit = spec.trust_radius / np.maximum(scale, 1e-12)
     # `type: ignore` scoped to one call: scipy-stubs' `minimize` overload for
     # `jac=True` *with* a callback requires the objective to accept `*args, **kwargs`,
     # which this one has no use for. The call is correct; the stub is narrow.

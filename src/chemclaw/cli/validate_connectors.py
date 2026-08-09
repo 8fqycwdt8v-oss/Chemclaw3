@@ -19,10 +19,21 @@ see:
    to its allow-list would hand the model a write path around the PR-gate.
 4. **A job that cannot be built.** A `params_model` reference that does not resolve, or two
    connectors claiming the same job name, fails here rather than when a chemist first calls it.
+5. **A tool the server serves and the manifest never mentions.** Everything above reads the
+   manifest, so none of it could see the gap between what a bundle *declares* and what its MCP
+   server actually *answers*. `molfp` and `rxnfp` each served an `index_*` write tool that no
+   manifest named: not on `tools` (correct, D-029), but not in `state_changing`/`read_only` either,
+   so `_check_classification` never saw it and nothing else looked. A connector authenticates
+   nothing by design — the network policy is the boundary — so an undeclared tool on `/mcp` is
+   reachable by anything that can open a socket to that pod. Proved by completing an anonymous MCP
+   handshake against the real app and writing a row into `molecule_fingerprints`, the table the
+   report path cites as lab precedent.
 
 Read-only; touches nothing.
 """
 
+import asyncio
+import importlib
 import inspect
 from pathlib import Path
 from typing import Any
@@ -85,6 +96,68 @@ def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
         "expose it as a job, or keep it off `tools` for the ingestion path to use"
         for tool in sorted(manifest.endpoint.tools if manifest.endpoint else [])
         if tool.startswith(_MUTATING_PREFIXES)
+    ]
+
+
+def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
+    """Refuse a tool the bundle's MCP server serves that its manifest never declares (rule 5).
+
+    The only check here that reads the *running server* rather than the YAML. Everything the other
+    rules know comes from the manifest, which is precisely why an undeclared tool was invisible to
+    all of them: `_check_classification` validates the `tools` allow-list against
+    `state_changing`/`read_only`, and a tool on none of the three lists is not a violation of
+    anything it can see.
+
+    The comparison is against `tools`, and that is forced rather than chosen.
+    `_check_classification` already refuses a manifest that classifies a tool it does not serve,
+    so `state_changing` and `read_only` are constrained to be subsets of `tools` — **the manifest
+    has no vocabulary for "served but not agent-facing" at all.** The comment that justified the
+    gap ("the server still
+    exposes it, for the ingestion path") described a state the schema cannot express, which is why
+    the only place it was ever written down was a comment.
+
+    So `tools` is the served set, and the two must agree exactly. A capability that genuinely must
+    not be on the agent's surface is a `jobs:` entry — which core authorizes, dry-run-gates and
+    attributes — or a core PR-gate tool. That is D-029's actual shape; an undeclared MCP tool was
+    never the third option it looked like.
+
+    A bundle with no server module is not a violation: `qm` is job-only, and its capability is a
+    Temporal workflow behind `jobs:` rather than an MCP surface.
+
+    Costs one import of every bundle's server package (measured 20.8s for the whole gate, mostly
+    rdkit and the ML stack). That is a real cost for a CI gate and it is the price of asking the
+    server instead of the file — the isolation this would otherwise violate is a *runtime* property
+    of the chat pod
+    (`tests/test_connector_isolation.py`), and this is a separate short-lived process.
+    """
+    if manifest.endpoint is None:
+        return []
+    target = f"chemclaw.connectors.{manifest.name}.server.tools"
+    try:
+        module = importlib.import_module(target)
+    except ModuleNotFoundError as exc:
+        # Only "this bundle has no server module" is not a violation — `qm` is job-only, its
+        # capability a Temporal workflow behind `jobs:`. A *transitive* ModuleNotFoundError (a
+        # missing rdkit, a renamed dependency) means the bundle is broken, and swallowing it made
+        # the rule pass vacuously for exactly the bundle most likely to be misbuilt.
+        if exc.name == target:
+            return []
+        return [f"connector {manifest.name!r}: its server module could not be imported ({exc})"]
+    except Exception as exc:
+        # Anything else — an ImportError from a submodule, a failure at import time — is reported
+        # rather than propagated, so CI prints "connector X: ..." instead of a bare traceback from
+        # a validator that never reached its own `main()`.
+        return [f"connector {manifest.name!r}: its server module raised on import ({exc!r})"]
+    server = getattr(module, "server", None)
+    if server is None:
+        return []
+    served = {tool.name for tool in asyncio.run(server.list_tools())}
+    return [
+        f"connector {manifest.name!r}: tool {tool!r} is served on /mcp but the manifest does not "
+        "declare it — connectors authenticate nothing by design, so an undeclared tool is callable "
+        "by anything that can reach the pod, around every gate core applies. Declare it in `tools` "
+        "(and classify it), or make it a `jobs:` entry, or stop serving it"
+        for tool in sorted(served - set(manifest.endpoint.tools))
     ]
 
 
@@ -186,6 +259,7 @@ def validate_connectors() -> list[str]:
     for bundle, manifest in found.values():
         problems.extend(_bundle_content_problems(bundle, manifest))
         problems.extend(_tool_surface_problems(manifest))
+        problems.extend(_served_tool_problems(manifest))
         problems.extend(_job_problems(manifest))
     # Check that connector_urls configuration is valid (rule 5).
     problems.extend(_connector_urls_problems(discovered_names))
