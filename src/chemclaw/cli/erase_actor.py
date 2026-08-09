@@ -50,8 +50,14 @@ def _render(report: ErasureReport) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
-    """Preview or apply one actor's erasure; exit non-zero if it could not run."""
+def main(argv: list[str] | None = None) -> int:
+    """Preview or apply one actor's erasure; exit non-zero if it could not run.
+
+    `argv` is a parameter so a test can drive the real entry point rather than assert something
+    about it — the shipped test for this path asserted `issubclass(psycopg.OperationalError,
+    Exception)`, which is true of every exception and would have passed with this error handling
+    deleted.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("actor", help="The Entra oid (or dev actor id) to erase.")
     parser.add_argument(
@@ -59,10 +65,13 @@ def main() -> int:
         action="store_true",
         help="Commit the deletion. Without it, the counts are real and nothing is written.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     configure_logging()
     try:
         report = asyncio.run(erase_actor(args.actor, apply=args.apply))
+    # `ValueError` covers `ErasureError` — the seam translates a refused statement into one, so a
+    # missing `DELETE ON session_owners` grant (the likeliest failure the first operator will hit)
+    # prints instead of raising, and this entry point still needs no database driver of its own.
     except (ValueError, ConnectionError) as exc:
         print(f"erasure failed: {exc}", file=sys.stderr)
         return 1
