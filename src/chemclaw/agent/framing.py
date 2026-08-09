@@ -138,9 +138,17 @@ def frame_untrusted(content: str, *, note_id: str) -> str:
     """Wrap retrieved `content` from source `note_id` in a data envelope for the model.
 
     The envelope names the source (so a citation is still obvious) and marks the span as
-    retrieved data. The agent instructions tell the model that anything inside the — nonce'd,
-    hence unforgeable — envelope is evidence to weigh and cite, not an instruction to obey.
-    Content and id are neutralized as the module docstring describes, so neither can close the
-    envelope early; the text is otherwise preserved verbatim.
+    retrieved data. The agent instructions tell the model that anything inside the nonce'd envelope
+    is evidence to weigh and cite, not an instruction to obey. Content and id are neutralized as the
+    module docstring describes, so neither can close the envelope early; the text is otherwise
+    preserved verbatim.
+
+    This used to call the envelope "nonce'd, hence unforgeable", which is the module docstring's
+    position with the load-bearing half removed: forgery is closed by *defanging* the content, and
+    the nonce and the defang each cover the other's gap. The distinction is not pedantry — the
+    verifier grew a guard that skipped re-framing whenever content "carried a matching pair", on
+    the strength of the tag being unguessable, and the nonce is per-*deployment* whenever
+    `framing_envelope_secret` is set. No caller may treat a matching delimiter as proof of
+    provenance.
     """
     return f'<{ENVELOPE_TAG} id="{safe_id(note_id)}">\n{_defang(content)}\n</{ENVELOPE_TAG}>'

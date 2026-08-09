@@ -86,7 +86,11 @@ _INSERT = """
 #
 # Bounded rather than unbounded: an attacker who can insert can insert many, and scanning the whole
 # table to find one valid anchor would trade a silent failure for a slow one. Past this many
-# consecutive invalid anchors the control reports absent, loudly, which is the honest answer.
+# consecutive invalid anchors no anchor is returned — and the count of rejected rows is returned
+# with it, which is the half that was missing. The comment here used to claim the control "reports
+# absent, loudly", and it did not: it logged, returned a bare None, and `durable/audit_chain.py`
+# appended nothing, so 17 junk rows read exactly like an unconfigured secret. Loud is a property of
+# the return value, not of a log line.
 _LATEST_CANDIDATES = 16
 
 _LATEST = """
@@ -246,8 +250,8 @@ async def _now(conn: Any) -> str:
     return str(row[0])
 
 
-async def latest_anchor(dsn: str | None = None) -> Anchor | None:
-    """The newest anchor recorded in the database, or None if there is none or none is valid.
+async def latest_anchor(dsn: str | None = None) -> tuple[Anchor | None, int]:
+    """The newest anchor whose signature verifies, and how many newer ones were rejected.
 
     An anchor whose signature does not verify is skipped and logged, and the search continues to
     the next-newest. Skipping an invalid anchor is not treated as a *failure*, because the ordinary
@@ -260,9 +264,22 @@ async def latest_anchor(dsn: str | None = None) -> Anchor | None:
     made `durable/audit_chain.py` set `held_to = None` and skip its comparison, which made a trail
     truncated to any length verify clean. One junk row disabled the high-water mark the table exists
     to be.
+
+    **The rejected count is returned rather than only logged**, and that is the rest of the same
+    defect. Bounding the scan at `_LATEST_CANDIDATES` moved the bypass from one junk row to
+    seventeen instead of closing it: a bare `None` says the identical thing for "no secret
+    configured", "no anchor taken yet" and "every anchor I am allowed to look at is junk", and only
+    the third is an alarm. The caller cannot tell those apart from the return value alone, so it
+    gets the number — a control that cannot be read must not report what a control that was never
+    configured reports.
+
+    Returns:
+        `(anchor, rejected)`. `anchor` is None when anchoring is unconfigured, when the table is
+        empty, or when every row in the scan window failed; `rejected` is how many rows were
+        skipped to get there, which is what tells those cases apart.
     """
     if not settings.audit_anchor_secret:
-        return None
+        return None, 0
     target = dsn if dsn is not None else settings.postgres_dsn
     async with connection(target) as conn:
         cursor = await conn.execute(_LATEST, {"limit": _LATEST_CANDIDATES})
@@ -285,11 +302,11 @@ async def latest_anchor(dsn: str | None = None) -> Anchor | None:
                     skipped,
                     anchor.taken_at,
                 )
-            return anchor
+            return anchor, skipped
         skipped += 1
         logger.warning(
             "ignoring an audit anchor (taken at %s): its signature does not verify under the "
             "configured CHEMCLAW_AUDIT_ANCHOR_SECRET — most often a rotated key",
             anchor.taken_at,
         )
-    return None
+    return None, skipped

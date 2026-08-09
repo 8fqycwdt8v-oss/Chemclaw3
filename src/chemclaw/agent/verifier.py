@@ -179,24 +179,6 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     )
 
 
-def _framed(content: str, note_id: str) -> str:
-    """Frame `content` unless it already carries this process's envelope.
-
-    `research_tools.gather_evidence` and `graph_tools.expand_note` already frame what they return,
-    and `turn_evidence` reads those tool outputs — so wrapping unconditionally put an envelope
-    around an envelope and `_defang` escaped the inner one, leaving `&lt;retrieved-note-…&gt;` noise
-    interleaved with the prose the judge is scoring. Measured on a 20-note turn: 40 escaped
-    pseudo-tags and 2.4 KB of added prompt, on entirely ordinary traffic.
-
-    The tag is per-process and unguessable, so content that carries a *matching* pair was framed by
-    this process and needs no second wrapping.
-    """
-    body = content.strip()
-    if body.startswith(f"<{ENVELOPE_TAG} ") and body.endswith(f"</{ENVELOPE_TAG}>"):
-        return body
-    return frame_untrusted(content, note_id=note_id)
-
-
 def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     """Build the judge prompt: evidence framed as data, then the answer to check against it.
 
@@ -247,9 +229,30 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     # asked to
     # return "the id of the evidence note it relies on". So the list stays readable and outside the
     # untrusted span, and the envelope carries the first id.
+    # **Framed once, whole, and the delimiters inside it escaped — deliberately, and measured.**
+    # A `_framed` helper used to sit here skipping the wrap when the content "already carried this
+    # process's envelope", tested as `startswith(f"<{ENVELOPE_TAG} ") and endswith(...)`. It could
+    # not fire on any real producer and never did: `turn_evidence` sets `content` to the whole
+    # *serialized* tool result, and every framing tool returns a structure rather than a bare
+    # envelope — `gather_evidence` a list of chunks, `expand_note` a `NoteView` — so the string is
+    # a JSON blob with envelopes embedded inside its string literals, starting with
+    # `[{"content": "<retrieved-note-…`. Measured on that shape: detected `False` every time, and
+    # 80 escaped pseudo-tags reach the judge on a 40-chunk sweep.
+    #
+    # Making the guard fire is not the fix, which is the part that is easy to get wrong. Skipping
+    # the wrap would leave the JSON scaffolding at top level in the one prompt that names
+    # `ENVELOPE_TAG` as the mark of authoritative evidence — the forgery `defang(answer)` below
+    # exists to stop. Splitting the blob and framing each gap keeps every span enclosed but costs
+    # an envelope per gap: measured at 40 chunks, +3565 bytes against +325 for escaping, because
+    # an escape is 4 bytes per delimiter and an envelope is ~44. Escaping is both the safe option
+    # and the cheap one here, so it is what this does.
+    #
+    # The real saving is not to hand the judge the serialization at all — see the BACKLOG row on
+    # carrying structured tool results into `turn_evidence`, which is a plumbing change, not a
+    # guard.
     blocks = "\n".join(
         f"evidence from: {' '.join(safe_id(note) for note in dict.fromkeys(ids))}\n"
-        + _framed(content, ids[0])
+        + frame_untrusted(content, note_id=ids[0])
         for content, ids in by_content.items()
     )
     return (

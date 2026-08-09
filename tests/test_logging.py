@@ -843,6 +843,91 @@ def test_a_log_call_that_declines_a_traceback_does_not_crash_the_filter() -> Non
     assert record.exc_text is None, "a declined traceback must not be rendered"
 
 
+class _HostileMessage:
+    """A `msg` object whose `__str__` raises — what `getMessage()` calls on a non-str message."""
+
+    def __str__(self) -> str:
+        raise ValueError("hostile __str__")
+
+
+def _malformed_percent_args(logger: logging.Logger) -> None:
+    """`%d` handed a string: `record.getMessage()` raises `TypeError` at render time."""
+    logger.info("count=%d", "not-a-number")
+
+
+def _malformed_exc_info(logger: logging.Logger) -> None:
+    """A tuple `Logger._log` passes through verbatim; `formatException` subscripts it."""
+    logger.info("boom", exc_info=(1, 2, 3))  # type: ignore[arg-type]
+
+
+def _hostile_message_object(logger: logging.Logger) -> None:
+    """A `msg` that raises from `__str__`, the shape `logger.info(obj)` allows."""
+    logger.info(_HostileMessage())
+
+
+def _non_string_stack_info(logger: logging.Logger) -> None:
+    """`stack_info` set to a non-string, which `redact_secrets` cannot `.replace()` on."""
+    record = logging.LogRecord("probe", logging.INFO, __file__, 1, "m", None, None)
+    record.stack_info = object()  # type: ignore[assignment]
+    logger.handle(record)
+
+
+def _non_string_exc_text(logger: logging.Logger) -> None:
+    """`exc_text` pre-populated with a non-string, the same hazard one field over."""
+    record = logging.LogRecord("probe", logging.INFO, __file__, 1, "m", None, None)
+    record.exc_text = object()  # type: ignore[assignment]
+    logger.handle(record)
+
+
+@pytest.mark.parametrize(
+    "make_call",
+    [
+        _malformed_percent_args,
+        _malformed_exc_info,
+        _hostile_message_object,
+        _non_string_stack_info,
+        _non_string_exc_text,
+    ],
+    ids=["percent-args", "exc-info-tuple", "hostile-str", "stack-info", "exc-text"],
+)
+def test_a_malformed_log_call_is_reported_by_logging_not_raised_at_the_caller(
+    make_call: Callable[[logging.Logger], None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A record the filter cannot process must behave exactly as it does with no filter installed.
+
+    The sibling of `exc_info=False` one test up, and the same mechanism: `Handler.handle` calls
+    `self.filter(record)` *outside* the try/except that wraps `emit()`, so anything the filter
+    raises lands in whoever called `logger.info(...)`. Without the filter every one of these five
+    malformations is logging's own to report — `handleError` writes `--- Logging error ---` to
+    stderr and the caller returns normally. With the filter installed each one raised instead.
+
+    That matters most where it is least visible: `metrics_bridge.degraded()` builds
+    `"degraded[%s]: " + message` and forwards `*args`, so a mismatched `degraded()` call inside an
+    `except` block replaced the degradation being reported with a `TypeError` — precisely what
+    `metrics_bridge` exists to prevent.
+
+    Asserts the whole `Handler.handle` path, not `filter()` in isolation, because the defect is
+    about *where* the exception surfaces rather than about the filter's return value.
+    """
+    from chemclaw.core.logging import SecretRedactingFilter
+
+    logger = logging.getLogger(f"malformed-probe.{make_call.__name__}")
+    logger.handlers.clear()
+    logger.propagate = False
+    handler = logging.StreamHandler()
+    handler.addFilter(SecretRedactingFilter())
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        make_call(logger)  # must not raise
+    finally:
+        logger.handlers.clear()
+    assert "--- Logging error ---" in capsys.readouterr().err, (
+        "logging must still report the malformation on stderr; swallowing it silently would "
+        "trade a crash for an invisible dropped log line"
+    )
+
+
 def test_the_filter_survives_a_second_test_that_built_the_front_door() -> None:
     """The order dependence that hid the bug above from every per-lane test run.
 

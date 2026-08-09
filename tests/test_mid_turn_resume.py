@@ -11,6 +11,7 @@ error — a database blip must not cost a chemist an answer the model already pr
 """
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -244,6 +245,82 @@ def test_the_wait_leaves_other_jobs_push_back_alone() -> None:
     assert asyncio.run(_run()) == ["job-b"], (
         "the mid-turn wait consumed a push-back for a job it was not waiting on; the front door's "
         "event stream will never deliver it"
+    )
+
+
+class _UnreachableBroker:
+    """A `connect()` that fails the way an outage does, before any handle exists."""
+
+    async def __call__(self) -> object:
+        from chemclaw.core.errors import SubsystemUnavailableError
+
+        # One argument, as `core.temporal_client.connect` raises it: the message is the chemist-
+        # facing sentence, so `%s` in the degradation renders it rather than an args tuple.
+        raise SubsystemUnavailableError(
+            "the durable execution backend (Temporal) is unreachable, so durable jobs cannot be "
+            "started or inspected right now — nothing was queued by this call."
+        )
+
+
+class _UndecodableResult:
+    """A workflow that completes normally but returns something that is not a connector envelope."""
+
+    class _Handle:
+        async def result(self) -> object:
+            return {"not": "an envelope"}
+
+    def get_workflow_handle(self, job_id: str) -> _Handle:
+        return self._Handle()
+
+
+@pytest.mark.parametrize(
+    "connect_patch",
+    [
+        mock.patch("chemclaw.agent.job_results.connect", new=_UnreachableBroker()),
+        mock.patch("chemclaw.agent.job_results.connect", return_value=_UndecodableResult()),
+    ],
+    ids=["broker-unreachable", "undecodable-result"],
+)
+def test_a_job_that_cannot_be_collected_is_counted_not_narrated_as_pending(
+    connect_patch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The degradation this module says it counts must actually be counted, per job.
+
+    `_collect` is gathered with `return_exceptions=True`, so nothing ever raised *out of* the
+    gather; the only exception `wait_for` can produce is `TimeoutError`, which the preceding clause
+    already handled. The `except Exception -> degraded(logger, "job_resume", ...)` block was
+    therefore unreachable, and measurement confirmed it: with the broker down, `collected` was `{}`,
+    no `job_resume` series was created, and the only trace was the INFO line reading "no result
+    yet" — which asserts the job is still pending when it could not be reached at all. That is the
+    exact sentence this module's own comment condemns one clause up, left live for the broker while
+    it was fixed for a failed workflow.
+
+    The second shape is the one the fix also has to cover: a workflow that *completes* and returns
+    something `completed_job_status` cannot decode raises `ValueError`, which is not a
+    `WorkflowFailureError`, so it too vanished into the gather with no count and no log.
+
+    Counted per job rather than once for the batch, because the label answers "how much of this
+    turn was lost", and two unreachable jobs are twice the loss of one.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    before = METRICS.value("chemclaw_degraded_total")
+
+    async def _run() -> dict[str, dict[str, Any]]:
+        with connect_patch:
+            return await await_job_results("s-1", ["job-a", "job-b"], timeout_seconds=5)
+
+    with caplog.at_level(logging.ERROR, logger="chemclaw.agent.job_results"):
+        collected = asyncio.run(_run())
+
+    assert collected == {}, "nothing could be collected in either shape"
+    assert METRICS.value("chemclaw_degraded_total") == before + 2, (
+        "a job that could not be collected must leave a number behind, one per job"
+    )
+    assert 'chemclaw_degraded_total{subsystem="job_resume"}' in METRICS.render()
+    named = [r.getMessage() for r in caplog.records]
+    assert any("job-a" in m for m in named) and any("job-b" in m for m in named), (
+        "the degradation must name the job the operator has to go look at"
     )
 
 

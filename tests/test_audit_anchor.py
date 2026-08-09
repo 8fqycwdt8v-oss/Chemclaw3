@@ -247,7 +247,7 @@ def test_one_junk_anchor_does_not_disable_the_high_water_mark() -> None:
             ) as conn:
                 await conn.execute("DELETE FROM audit_anchors")
             genuine = await take_anchor()
-            before = await latest_anchor()
+            before, _ = await latest_anchor()
             async with connection(
                 settings.postgres_dsn,
                 statement_timeout_seconds=settings.pg_statement_timeout_seconds,
@@ -258,7 +258,7 @@ def test_one_junk_anchor_does_not_disable_the_high_water_mark() -> None:
                     "VALUES (now() + interval '1 minute', %s, %s, %s, %s, 'junk')",
                     (0, 0, "" if genuine is None else genuine.tip_hash, 1),
                 )
-            return before, await latest_anchor()
+            return before, (await latest_anchor())[0]
         finally:
             settings.audit_anchor_secret = monkey
 
@@ -266,3 +266,72 @@ def test_one_junk_anchor_does_not_disable_the_high_water_mark() -> None:
     assert before is not None, "the genuine anchor must be readable to begin with"
     assert after is not None, "one junk row removed the high-water mark entirely"
     assert after.tip_hash == before.tip_hash, "the valid anchor behind the junk row must be found"
+
+
+def test_junk_anchors_past_the_scan_window_are_reported_not_silently_absent() -> None:
+    """The same bypass as the test above, at 17 rows instead of 1 — and nothing pinned it.
+
+    `_LATEST_CANDIDATES = 16` bounds the scan so an attacker who can insert cannot make the read
+    arbitrarily slow, and its comment claims that past that many consecutive invalid anchors "the
+    control reports absent, loudly, which is the honest answer". It did not report absent to
+    anything that could act: `latest_anchor` logged and returned None, and `verify_chain` did
+    `if held_to is not None:` and appended nothing otherwise — so 17 junk rows were
+    indistinguishable from "no secret configured" and "no anchor taken yet", and a trail truncated
+    to any length verified clean. Measured against the live database: `latest_anchor` -> None,
+    `verify_chain` -> `[]`.
+
+    A log line is not the control. `verify_chain`'s return value is what the CLI exits on and what
+    the scheduled verification alerts on, so a control that cannot be read has to say so *there*.
+    That is this module's own argument about the chain, one level up: absence of evidence must not
+    render as evidence of absence.
+    """
+
+    async def _run() -> tuple[list[str], list[str], int]:
+        await migrated_db_or_skip()
+        from chemclaw.agent.audit_anchor import _LATEST_CANDIDATES
+        from chemclaw.durable.audit_chain import verify_chain
+
+        monkey = settings.audit_anchor_secret
+        settings.audit_anchor_secret = "anchor-secret-for-this-test"
+        try:
+            async with connection(
+                settings.postgres_dsn,
+                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+            ) as conn:
+                await conn.execute("DELETE FROM audit_anchors")
+            await take_anchor()
+            clean = await verify_chain()
+            async with connection(
+                settings.postgres_dsn,
+                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+            ) as conn:
+                # One more than the scan window, so the genuine anchor is pushed out of reach.
+                for minute in range(_LATEST_CANDIDATES + 1):
+                    await conn.execute(
+                        "INSERT INTO audit_anchors (taken_at, row_count, max_event_id, tip_hash, "
+                        "chain_version, signature) "
+                        "VALUES (now() + make_interval(mins => %s), 0, 0, '', 1, 'junk')",
+                        (minute + 1,),
+                    )
+            buried = await verify_chain()
+            return clean, buried, _LATEST_CANDIDATES
+        finally:
+            async with connection(
+                settings.postgres_dsn,
+                statement_timeout_seconds=settings.pg_statement_timeout_seconds,
+            ) as conn:
+                await conn.execute("DELETE FROM audit_anchors WHERE signature = 'junk'")
+            settings.audit_anchor_secret = monkey
+
+    clean, buried, window = asyncio.run(_run())
+    assert clean == [], f"the trail must verify clean before the junk rows: {clean}"
+    assert buried, f"{window + 1} junk anchors disabled the high-water mark and reported nothing"
+    reported = " ".join(buried)
+    assert "could not be read" in reported, (
+        f"the problem must say the control is unreadable, not merely absent: {reported}"
+    )
+    # The count is what the bounded scan saw, so it saturates at the window rather than reaching
+    # 17 — a valid anchor may still sit behind it, which is what the remedy in the message is for.
+    assert str(window) in reported, (
+        f"the problem must name how many anchors were rejected: {reported}"
+    )

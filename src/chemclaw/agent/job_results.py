@@ -103,9 +103,9 @@ async def await_job_results(
             }
 
     try:
-        await asyncio.wait_for(
+        outcomes = await asyncio.wait_for(
             # `return_exceptions` so one failed or undecodable job does not cancel the others'
-            # waits — the turn should resume with whatever did land. The exceptions are logged
+            # waits — the turn should resume with whatever did land. The exceptions are counted
             # below rather than raised: this whole path is an optimization over waiting for the
             # next turn, and it must degrade to that rather than fail an answer.
             asyncio.gather(*(_collect(job_id) for job_id in job_ids), return_exceptions=True),
@@ -119,11 +119,38 @@ async def await_job_results(
             len(collected),
             len(job_ids),
         )
-    except Exception:
-        # Temporal being unreachable must degrade the turn to its pre-AGT-2 behavior, not fail an
-        # answer the model already has — and be counted, because from outside a broker outage and
-        # a turn that simply had no jobs to collect produce the identical transcript.
-        degraded(logger, "job_resume", "mid-turn resume could not reach the durable jobs")
+    else:
+        # **The gather's result has to be bound to see any of this.** `return_exceptions=True`
+        # means nothing propagates out of the `gather`, and the only exception `wait_for` itself
+        # raises is the `TimeoutError` handled above — so the `except Exception` that used to stand
+        # here could never run, and the degradation this module promises to count was never counted
+        # once. Measured with the broker down: `collected == {}`, no `job_resume` series, and the
+        # single INFO line "no result yet", which asserts the job is still pending when it could
+        # not be reached at all — the exact sentence the `WorkflowFailureError` comment above
+        # condemns, left live for the broker while it was fixed for a failed workflow.
+        #
+        # Two distinct faults land here, and both were silent: `connect()` raising
+        # `SubsystemUnavailableError` during an outage, and `completed_job_status` raising
+        # `ValueError` on a result that is not a connector envelope. Neither is reported *to the
+        # model* as a status, because neither is a job that failed: an unreachable job may still be
+        # running and push-back delivers it next turn, which is the pre-AGT-2 behavior this path is
+        # required to degrade to. They are reported to the **operator**, per job, because from
+        # outside a broker outage and a turn with nothing to collect produce the identical
+        # transcript.
+        #
+        # `exc_info=False` with the reason folded into the message: this is not inside an `except`,
+        # so there is no active exception for `degraded` to attach, and `sys.exc_info()` would
+        # render a useless "NoneType: None" in place of the thing that actually went wrong.
+        for job_id, outcome in zip(job_ids, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                degraded(
+                    logger,
+                    "job_resume",
+                    "mid-turn resume could not collect job %s from the durable subsystem: %s",
+                    job_id,
+                    outcome,
+                    exc_info=False,
+                )
     missing = [job_id for job_id in job_ids if job_id not in collected]
     if missing:
         logger.info("mid-turn resume has no result yet for %s", ", ".join(missing))

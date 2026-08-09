@@ -482,6 +482,51 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     assert asyncio.run(_drive()) == 1
 
 
+def test_a_worker_thread_that_never_starts_gives_its_slot_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot stands for a running thread, so a thread that never started must not hold one.
+
+    Between claiming the slot and attaching `give_back` to the future there was no guard: if
+    `loop.run_in_executor` itself raised — the default executor shut down during pod drain, a loop
+    closing under a cancelled request — the slot was taken and nothing would ever give it back.
+    `_ParseSlots` is a module singleton with no reset, so the loss is permanent and process-wide.
+
+    Measured on the unguarded code with a cap of 2: two raises took `in_flight` from 0 to 2, and
+    every subsequent upload on that replica was answered with a retryable 503 reading "2 uploads
+    are already being parsed on this replica" — false, and the exact opposite of the observability
+    the shed counter was added to give the operator.
+
+    The assertion is on the counter rather than on the status code because that is the durable
+    damage: the request that triggered it fails either way, and what matters is the replica after.
+    """
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 2)
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 10.0)
+
+    def _executor_is_gone(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    async def _drive() -> None:
+        assert attachments._PARSE_SLOTS.in_flight == 0, "a previous test leaked a slot"
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "run_in_executor", _executor_is_gone)
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                await attachments.parse_attachment_off_loop("a.txt", b"hello")
+            assert attachments._PARSE_SLOTS.in_flight == 0, (
+                "the slot for a worker thread that never started was never returned"
+            )
+
+        # And the replica still parses: the leak's real cost is every upload after it.
+        monkeypatch.undo()
+        parsed = await attachments.parse_attachment_off_loop("b.txt", b"hello")
+        assert parsed.text == "hello"
+
+    asyncio.run(_drive())
+
+
 def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

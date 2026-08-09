@@ -3,6 +3,43 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the deep-review fix batch (2026-08-09)
+
+Five correctness defects found in the hardening campaign's own output; four were fixed in place and
+one was refuted in its remedy. This is the piece deliberately not done.
+
+- [ ] **`logging.handleError` prints a malformed record's raw `msg`/`args` to stderr, unredacted**
+      — [S]. Surfaced by the fix that stopped `SecretRedactingFilter.filter` raising into the
+      caller: a record the filter cannot process now continues to the handler, which fails the same
+      way and routes to `Handler.handleError`, and CPython's `handleError` writes
+      `Message: %r\nArguments: %s` straight from `record.msg`/`record.args`. So a *malformed* call
+      that also carries a credential in its args — `logger.info("connecting to %s %s", dsn)` — puts
+      that DSN on stderr, which in a container is the log stream. This is stock `logging` behavior
+      with no filter installed at all, and the fix restored it rather than creating it; it is listed
+      because this deployment installs a redaction filter precisely to not accept it. Not closed
+      now because every cheap option is wrong: rewriting `record.args` in the except branch would
+      corrupt a record whose malformation was *not* fatal, and `raiseExceptions = False` would
+      silence the malformation report that is the whole point of letting the record through.
+      **Trigger**: a credential found in stderr that the filter should have caught, or any move to
+      a structured/JSON stderr handler (which is the point where owning `handleError` becomes
+      natural).
+
+- [ ] **Carry structured tool results into `turn_evidence`, instead of their serialization** — [M].
+      `api/runner_trace.py` stringifies each tool result and `verifier.turn_evidence` takes
+      `Sequence[str]`, so the judge prompt is handed a JSON blob — envelopes escaped inside string
+      literals, plus `source_note_id`/`retriever`/`score` scaffolding it has no use for. Measured
+      on a 40-chunk `gather_evidence` sweep: 7260 bytes of tool output, of which the framing costs
+      +325 bytes and 80 defanged delimiters. The campaign's `verifier._framed` guard tried to fix
+      this at the wrap and could not — no producer returns a bare envelope, so it never fired once
+      (now deleted, with the reasoning pinned by
+      `test_a_serialized_tool_result_is_framed_once_and_stays_enclosed`). Neither of the two
+      wrap-level alternatives is better: skipping the wrap puts scaffolding at top level in the one
+      prompt that treats `ENVELOPE_TAG` as authoritative, and splitting the blob to frame each gap
+      measured +3565 bytes at 40 chunks. The saving is only available one layer down, by passing
+      the chunks themselves so the judge sees note bodies and their own ids.
+      **Trigger**: a verifier prompt-size or judge-latency problem, or the next change to what
+      `runner_trace.tool_result_text` returns — whichever comes first.
+
 ## Open — Left by the pluggable vector store (2026-08-08)
 
 Record: `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The seam ships with a

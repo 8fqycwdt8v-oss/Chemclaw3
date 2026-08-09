@@ -25,6 +25,7 @@ import asyncio
 import logging
 import re
 from collections import deque
+from collections.abc import Callable
 from functools import partial
 
 from pydantic import BaseModel, Field
@@ -130,22 +131,16 @@ class _ParseSlots:
     forbids — a waiter holds a future, not a thread, so no number of them can crowd the default
     executor where `chemclaw.api.auth` validates every bearer token.
 
-    Every mutation happens on the event loop thread: `take` is called from the request, and
-    `give_back` arrives through `Future.add_done_callback`, which asyncio dispatches with
-    `call_soon`. There is therefore no lock, and no window between the test and the increment.
+    Every mutation happens on the event loop thread: `take_or_wait` and `submit` are called from
+    the request, and `_give_back` arrives through `Future.add_done_callback`, which asyncio
+    dispatches with `call_soon`. There is therefore no lock, and no window between the test and the
+    increment.
     """
 
     def __init__(self) -> None:
         """Start idle; the cap itself is read from config at each `take`, so it stays tunable."""
         self.in_flight = 0
         self._waiters: deque[asyncio.Future[None]] = deque()
-
-    def take(self) -> bool:
-        """Claim a parse slot, or report that the process is already at its cap."""
-        if self.in_flight >= settings.attachment_max_concurrent_parses:
-            return False
-        self.in_flight += 1
-        return True
 
     async def take_or_wait(self, seconds: float) -> bool:
         """Claim a slot, waiting up to `seconds` for a busy one to come free.
@@ -156,7 +151,8 @@ class _ParseSlots:
         is handed straight from the finishing worker to the first waiter rather than released and
         re-taken, so a queue cannot be barged past by a request that arrives later.
         """
-        if self.take():
+        if self.in_flight < settings.attachment_max_concurrent_parses:
+            self.in_flight += 1
             return True
         waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._waiters.append(waiter)
@@ -192,7 +188,33 @@ class _ParseSlots:
                 return
         self.in_flight -= 1
 
-    def give_back(self, future: "asyncio.Future[Attachment]") -> None:
+    def submit(
+        self, loop: asyncio.AbstractEventLoop, work: Callable[[], Attachment]
+    ) -> "asyncio.Future[Attachment]":
+        """Start `work` on a worker thread under an already-taken slot, wiring its release.
+
+        **The take and the give-back live in one method because they are one transaction.** As two
+        statements at the call site there was no guard between them, and `run_in_executor` can
+        raise — a default executor shut down during pod drain, a loop closing under a cancelled
+        request. The slot was then taken with no thread to release it, and `_ParseSlots` is a
+        module singleton with no reset, so a cap of 2 reached permanently-full after two such
+        raises and the replica answered every later upload with a retryable 503 naming two parses
+        in flight that did not exist. Fixed here rather than at the call site so a later edit
+        cannot separate them again.
+
+        The slot stands for a *running thread*, which is the whole reason the release hangs off the
+        future's completion rather than off the awaiting request; a thread that never started is
+        the one case where giving it back immediately is not just safe but required.
+        """
+        try:
+            future = loop.run_in_executor(None, work)
+        except BaseException:
+            self._release()  # the slot stands for a thread that does not exist
+            raise
+        future.add_done_callback(self._give_back)
+        return future
+
+    def _give_back(self, future: "asyncio.Future[Attachment]") -> None:
         """Return the slot once the worker thread has actually finished.
 
         `future.exception()` is read and dropped on purpose: when the awaiting request has already
@@ -250,12 +272,14 @@ async def parse_attachment_off_loop(
             f"{settings.attachment_max_concurrent_parses} uploads are already being parsed on "
             "this replica; retry in a moment"
         )
-    loop = asyncio.get_running_loop()
     # The default executor, kept honest by the cap above rather than by a pool of its own: a
     # dedicated pool would bound the threads and still let an unbounded queue of abandoned work
-    # accumulate behind them.
-    future = loop.run_in_executor(None, partial(parse_attachment, name, raw, declared_type))
-    future.add_done_callback(_PARSE_SLOTS.give_back)
+    # accumulate behind them. `submit` owns starting the thread *and* releasing the slot, because
+    # doing those as two statements here left a window in which a failing `run_in_executor` lost
+    # the slot for the life of the process.
+    future = _PARSE_SLOTS.submit(
+        asyncio.get_running_loop(), partial(parse_attachment, name, raw, declared_type)
+    )
     try:
         # Shielded, and that is what makes the cap true: `wait_for` cancels what it waits on, and
         # cancelling this future would fire the release callback while the thread it stands for is
