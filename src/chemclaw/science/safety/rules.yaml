@@ -127,16 +127,34 @@ structural:
   - id: hydrazine
     # H is required on *one* nitrogen, not both. Demanding it on both excluded every
     # N,N-disubstituted hydrazine — 1,1-dimethylhydrazine (UDMH) among them — which is the
-    # opposite of the intended scope. `!$(N[a])` keeps aryl-diazo/azo systems out, which the
-    # H-on-both requirement had been excluding incidentally.
+    # opposite of the intended scope.
+    #
+    # Azo and diazo systems are excluded by *coordination*, not by an aryl guard: an azo nitrogen
+    # is `NX2`, which `[NX3,NX4+]` cannot match. An earlier `!$(N[a])` here was documented as what
+    # kept them out and measurably did not — azobenzene screened False with the guard and False
+    # without it, for both the aryl and the alkyl case (azoxybenzene, DEAD, azo-tert-butane). Its
+    # only measured effect was on hydrazines: it silenced 1,2-diphenylhydrazine (hydrazobenzene, a
+    # routine nitrobenzene-reduction product and benzidine-rearrangement precursor) and
+    # 1-methyl-1-phenylhydrazine, and it bit only when *both* nitrogens were aryl-bound, since
+    # with one the match is found from the other direction. Removed; the class it named is covered.
     #
     # `NX4+` beside `NX3`: protonating a hydrazine is what a catalogue does to it, and the salt
     # is the ordinary bench form — hydrazine monohydrochloride and hydrazine sulfate carry an
     # `NX4+` nitrogen and so screened clean, the same shape of miss the anionic peroxide and the
-    # anionic N-halamine were. Measured over the 83 distinct structures of the reagent identity
-    # table, this newly matches hydrazinium salts and nothing else: an ammonium or amine salt has
-    # no N-N bond, and an acylated one is still excluded as a hydrazide.
-    smarts: "[NX3,NX4+;!$(NC=O);!$(N[a])][NX3,NX4+;H3,H2,H1;!$(NC=O)]"
+    # anionic N-halamine were. An ammonium or amine salt has no N-N bond, and an acylated one is
+    # still excluded as a hydrazide.
+    #
+    # Measured over 106 structures — the 61 distinct structures of the reagent identity table plus
+    # 45 hand-picked hydrazine-adjacent and nitrogen-bearing bench reagents — exactly five
+    # molecules change verdict across both rules, every one of them a hydrazine: hydrazobenzene
+    # and 1-methyl-1-phenylhydrazine gain the structural rule (the aryl guard), and UDMH,
+    # N-aminopiperidine, N-aminomorpholine and 1-methyl-1-phenylhydrazine gain the pair arm (the H
+    # asymmetry). Nothing moves in the false-positive direction: no amine, ammonium, hydroxylamine,
+    # urea, azo, hydrazone or acyl/carbamoyl hydrazide changes, and tetramethylhydrazine stays out
+    # for want of N-H. The identity table alone cannot check any of this and must not be cited as
+    # if it could — it contains no hydrazine in any form (its only N-N structures are two azides
+    # and the triazole of TBTU/HATU), so *zero* of its structures change verdict under any of them.
+    smarts: "[NX3,NX4+;!$(NC=O)][NX3,NX4+;H3,H2,H1;!$(NC=O)]"
     severity: medium
     explanation: >-
       Free hydrazine motif: toxic, a suspected carcinogen, and a strong reductant that forms
@@ -164,13 +182,21 @@ incompatible_pairs:
     # `peroxide` where `H2O2 + NaBH4` raised this rule as well. A rule and its structural twin
     # must be widened together — half a fix reads exactly like a clean screen.
     #
-    # The hydrazine arm carries `NX4+` for the same reason its structural twin does: hydrazine is
-    # bought and weighed as its hydrochloride or sulfate, whose protonated nitrogen is `NX4+`, so
-    # the neutral-only form let the catalogue form of the reductant pass beside an oxidiser while
-    # free hydrazine fired. Measured over the reagent identity table, the widened arm newly matches
-    # hydrazinium salts only.
+    # The hydrazine arm is the `hydrazine` structural rule's SMARTS *verbatim*, and must stay that
+    # way — `tests/test_safety.py::test_the_hydrazine_pair_arm_is_its_structural_twin_verbatim`
+    # pins the two strings equal. Carrying its own spelling is what produced this rule's last two
+    # defects: it gained `NX4+` (hydrazine is weighed as its hydrochloride or sulfate, whose
+    # protonated nitrogen is `NX4+`, so the neutral-only form let the catalogue form of the
+    # reductant pass beside an oxidiser) while keeping H required on *both* nitrogens, which its
+    # twin had already dropped by name for UDMH. So `CN(C)N + OO` — the archetypal hypergolic
+    # pair, ignition on contact with no ignition source — raised `hydrazine` and `peroxide` and
+    # stayed silent on the one rule named for the combination. Half a fix reads exactly like a
+    # clean screen, twice now; equal strings is the only form of that invariant a test can hold.
+    #
+    # `left` keeps its own spelling deliberately: an oxidiser arm is a union over four structural
+    # rules, not the twin of any one of them.
     left: "[$([Cl;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([Mn;X4](~[OX1,OX2H1])(~[OX1,OX2H1])(~[OX1,OX2H1])~[OX1,OX2H1]),$([OX2,OX1-][OX2,OX1-]),$([#6][OX2][NX3+](=[OX1])[OX1-])]"
-    right: "[$([AlH4-]),$([BH4-]),$([H-]),$([NX3,NX4+;H3,H2,H1;!$(NC=O)][NX3,NX4+;H3,H2,H1;!$(NC=O)])]"
+    right: "[$([AlH4-]),$([BH4-]),$([H-]),$([NX3,NX4+;!$(NC=O)][NX3,NX4+;H3,H2,H1;!$(NC=O)])]"
     severity: high
     explanation: >-
       A strong oxidizer and a strong reducing agent appear in the same reaction. Combined directly

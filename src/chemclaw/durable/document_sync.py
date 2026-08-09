@@ -76,6 +76,17 @@ class DocumentSyncPlan(BaseModel):
     sources: list[str]
     # Read from the index backend's own clock, never this worker's — see the module docstring.
     started_at: datetime
+    # How many activities this run may schedule before continuing as new. Captured in the activity
+    # rather than read in the workflow, for the reason `resolve_notes_per_run` states: this bound
+    # decides how many commands the run emits, so reading it live makes the command count a
+    # function of the replaying worker's config instead of of history. A redeploy that lowers it
+    # mid-drain then replays `continue_as_new` earlier than history records — a non-determinism
+    # error, which is a workflow *task* failure, which retries forever and wedges the run (D-093).
+    #
+    # No new activity was needed: `plan_document_sync` already runs exactly once per drain and
+    # already returns a model, so the value is recorded in history once and rides `continue_as_new`
+    # on the state with the cursor.
+    max_iterations: int
 
 
 class DocumentSyncOutcome(BaseModel):
@@ -89,6 +100,9 @@ class DocumentSyncState(BaseModel):
     """A run's position, carried across `continue_as_new` so a huge share drains over many runs."""
 
     started_at: datetime
+    # The bound this drain started with, carried so every run of the chain uses the value the
+    # first one recorded — see `DocumentSyncPlan.max_iterations`.
+    max_iterations: int
     # Sources still to drain; the first is the one in progress.
     remaining: list[str]
     # The crawl cursor within the source in progress: the last path its previous chunk examined.
@@ -106,9 +120,18 @@ class DocumentSyncState(BaseModel):
 @durable_activity("background")
 @activity.defn
 async def plan_document_sync() -> DocumentSyncPlan:
-    """Name the shares to crawl and read the sweep reference off the index's own clock."""
+    """Name the shares to crawl, read the sweep reference off the index's own clock, fix the bound.
+
+    All three are live reads that belong in an activity: the share list and the clock because they
+    are external state, and `max_iterations` because it decides a command count and so must be
+    recorded in history once rather than re-read by whichever worker replays the run.
+    """
     index: DocumentIndex = _document_index()
-    return DocumentSyncPlan(sources=sorted(share_sources()), started_at=await index.clock())
+    return DocumentSyncPlan(
+        sources=sorted(share_sources()),
+        started_at=await index.clock(),
+        max_iterations=settings.document_sync_max_iterations,
+    )
 
 
 # One chunk is hundreds of files read off a network share and parsed — minutes of work with no
@@ -117,13 +140,19 @@ async def plan_document_sync() -> DocumentSyncPlan:
 # whole start-to-close.
 #
 # `durable.heartbeat.beating` is that something now. The two hand-rolled copies this file carried
-# derived their interval as `timeout / 3` with **no floor**, and the setting they divided is
-# declared as a bare `float` with no `Field(gt=0)` — so an ENV-set fraction of a second beat several
-# times a second against the Temporal server for the whole chunk, and a negative value made
-# `asyncio.sleep` return immediately and turned the sibling task into an unbounded busy loop.
-# `beating()` uses `max(1.0, timeout / 4)`, and that floor is exactly what it was written to
-# prevent. The eager pre-beat below is kept and is not redundant: `beating()` waits one interval
-# before its first beat, and a fast chunk may finish before that.
+# derived their interval as `timeout / 3` with **no floor**, and the setting they divided was
+# declared as a bare `float` — so an ENV-set fraction of a second beat several times a second
+# against the Temporal server for the whole chunk, and a negative value made `asyncio.sleep` return
+# immediately and turned the sibling task into an unbounded busy loop. `beating()` uses
+# `max(1.0, timeout / 4)`, and that floor is exactly what it was written to prevent.
+#
+# The negative half of that is now impossible at the source: this block's settings carry
+# `gt=0`/`ge=1` constraints, so a degenerate value is refused at load rather than survived. The
+# floor stays, because a *positive* sub-second timeout is still legal and still needs bounding — the
+# schema can refuse a nonsensical number, not a legal one that implies too high a beat rate.
+#
+# The eager pre-beat below is kept and is not redundant: `beating()` waits one interval before its
+# first beat, and a fast chunk may finish before that.
 
 
 @durable_activity("background")
@@ -195,7 +224,11 @@ class DocumentShareSyncWorkflow:
             plan: DocumentSyncPlan = await workflow.execute_activity(
                 plan_document_sync, start_to_close_timeout=timeout, retry_policy=BAD_DATA_RETRY
             )
-            state = DocumentSyncState(started_at=plan.started_at, remaining=plan.sources)
+            state = DocumentSyncState(
+                started_at=plan.started_at,
+                remaining=plan.sources,
+                max_iterations=plan.max_iterations,
+            )
         iterations = 0
         # Before the crawl: a vector made by a superseded model is actively wrong, and it is being
         # compared against queries embedded by the current one. Nothing here reads a share, so it
@@ -214,7 +247,7 @@ class DocumentShareSyncWorkflow:
             if not refresh.has_more:
                 state.reembed_done = True
                 break
-            if iterations >= settings.document_sync_max_iterations:
+            if iterations >= state.max_iterations:
                 state.reports = _merge_by_source(state.reports)
                 workflow.continue_as_new(state)
         while state.remaining:
@@ -234,7 +267,7 @@ class DocumentShareSyncWorkflow:
             iterations += 1
             if chunk.has_more and chunk.cursor > state.after:
                 state.after = chunk.cursor
-                if iterations >= settings.document_sync_max_iterations:
+                if iterations >= state.max_iterations:
                     # Compacted first: the carried state is the *input* of the next run, and a
                     # first crawl of a large share is thousands of chunks. Handing every chunk's
                     # report forward would grow the payload without bound over exactly the drains

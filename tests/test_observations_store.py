@@ -335,6 +335,66 @@ def test_a_promoted_observation_leaves_the_open_set() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
+def test_a_retired_observation_comes_back_when_the_corpus_does(
+    complete: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retirement has to be reversible, or the tier empties permanently instead of breathing.
+
+    Neither `_REPLACE` nor `_ACCUMULATE` touched `status`, and every read is `status = 'open'`, so
+    a re-observed finding had its evidence replaced and its `last_seen` bumped while staying
+    invisible to `open_observations`, `promotable` and `recall_observations` forever. Measured
+    before the fix, on both statements: `retire_stale() == 1`, then re-recording left
+    `status='retired'` with a fresh `last_seen`, and the row appeared in neither read.
+
+    Two ordinary paths reach it — a finding that lapses for `observation_retire_after_days` and
+    returns, and an ingest source quiet for that long — so this is a permanently dead row rather
+    than a temporarily hidden one. It also stops being counted by `retire_stale`, which is the
+    tier's own stated instrumentation for whether the miners are producing noise.
+    """
+    monkeypatch.setattr(settings, "observation_retire_after_days", 30)
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        await store.record([_finding()], complete=complete)
+        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+            await conn.execute("UPDATE observations SET last_seen = now() - interval '90 days'")
+            await conn.commit()
+
+        assert await store.retire_stale() == 1
+        assert await store.open_observations() == []
+
+        # The corpus produces the finding again: it must return to the open set.
+        await store.record([_finding()], complete=complete)
+        revived = await store.open_observations()
+        assert len(revived) == 1, "a re-observed finding must leave the retired state"
+        assert revived[0].status == "open"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
+def test_re_observing_a_promoted_observation_does_not_reopen_it(complete: bool) -> None:
+    """Revival must reach `retired` only — `promoted` is the state that stops the nightly PR.
+
+    `test_a_promoted_observation_leaves_the_open_set` pins why: a promoted finding that returned to
+    the open set would be re-promoted on the next pass and open the same PR forever. The miners
+    keep re-observing a promoted finding by construction, so this is the routine case, not an edge.
+    """
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        await store.record([_finding()], complete=complete)
+        promoted = (await store.open_observations())[0]
+        await store.set_status(promoted.id, "promoted")
+
+        await store.record([_finding()], complete=complete)
+        assert await store.open_observations() == []
+        assert await store.promotable() == []
+
+    asyncio.run(_run())
+
+
 def test_retirement_spares_what_was_just_re_observed(monkeypatch: pytest.MonkeyPatch) -> None:
     """`last_seen` is refreshed by every run that still finds the finding.
 

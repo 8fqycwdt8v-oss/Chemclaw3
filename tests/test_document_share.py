@@ -1066,6 +1066,50 @@ def test_compaction_carries_the_sweep_guard_across_continue_as_new() -> None:
     assert asyncio.run(prune_share("b", index, started, compacted["b"])) == 0
 
 
+def test_the_continue_as_new_bound_is_carried_in_state_not_read_live() -> None:
+    """The command count must come from history, never from the replaying worker's config.
+
+    `document_sync_max_iterations` decides when `continue_as_new` is emitted, so it decides how
+    many activity commands the run schedules — exactly what `resolve_notes_per_run` was added to
+    the memory jobs for (`D-2026-08-08-an-outage-is-not-a-missing-job`). Read live, a redeploy that
+    lowers it mid-drain replays `continue_as_new` earlier than history records it: a
+    non-determinism error, which is a workflow *task* failure, which retries forever and wedges the
+    run (the trap D-093 documents).
+
+    Temporal is unavailable in this environment, so this asserts the *structure* that makes the
+    replay safe rather than executing a replay: the value is captured once in the activity, carried
+    on the plan, and carried on the state across `continue_as_new`. The workflow body must contain
+    no live read of it — an AST check, because that is the property that actually broke.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from chemclaw.durable import document_sync
+    from chemclaw.durable.document_sync import DocumentSyncPlan, DocumentSyncState
+
+    assert "max_iterations" in DocumentSyncPlan.model_fields
+    assert "max_iterations" in DocumentSyncState.model_fields
+
+    # The activity is where a live read belongs: it runs once per drain and its result is recorded.
+    plan_src = inspect.getsource(document_sync.plan_document_sync)
+    assert "settings.document_sync_max_iterations" in plan_src
+
+    run_src = textwrap.dedent(inspect.getsource(document_sync.DocumentShareSyncWorkflow.run))
+    tree = ast.parse(run_src)
+    live_reads = [
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "settings"
+    ]
+    assert "document_sync_max_iterations" not in live_reads, (
+        "the continue-as-new bound must come from `state.max_iterations`, captured in the plan "
+        f"activity; the workflow body still reads settings for: {sorted(set(live_reads))}"
+    )
+
+
 def test_a_wedged_drain_leaves_has_more_set_for_the_guard() -> None:
     """A pass that reports more work but no cursor advance must not merge into "finished"."""
     from chemclaw.durable.document_sync import _merge_by_source

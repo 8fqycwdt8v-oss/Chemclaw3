@@ -334,6 +334,18 @@ are what that change deliberately did not do.
       stated reason false for the molecules newly matched. **Trigger**: a process chemist confirms
       that an inorganic peroxide plus a ketone carries the same TATP-formation hazard, and supplies
       the citation; then widen the pattern *and* the prose together.
+- [ ] **The reagent identity table holds no hydrazine, so it cannot check a hydrazine widening** —
+      [M]. `chemclaw.core.reagents._TABLE` is 87 names over **61** distinct structures, and its only
+      N–N structures are two azides and the triazole of TBTU/HATU. Three places cited it as "83
+      distinct structures" showing a hydrazine widening "matches hydrazinium salts and nothing
+      else"; re-measured, **zero** of the 61 change verdict under any of the three widenings, so the
+      set could never have established that claim (D-2026-08-09-a-twin-rule-is-one-string). The
+      prose is corrected and `tests/test_safety.py::_NOT_A_HYDRAZINE` now carries a 106-structure
+      panel instead. Adding hydrazine, its hydrate and its hydrochloride/sulfate salts to the
+      identity table would make the shared table able to check this itself — and they belong there
+      anyway, since the table's job is resolving what a source calls a reagent. **Trigger**: the next
+      change to `core/reagents`, or the next safety rule whose scope is a class the table should
+      already name; add the hydrazines with their CAS/aliases and re-run the panel.
 - [ ] **`complex-hydride-with-chlorinated-solvent` misses sodium hydride** — [M]. Its `left` arm is
       `[$([AlH4-]),$([BH4-])]`, so `['[H-].[Na+]', 'ClCCl']` raises **nothing** (measured through
       `screen_reaction`), while `oxidizer-with-reductant` already lists `[H-]` among its reductants
@@ -1304,14 +1316,6 @@ the `D-2026-08-01-*` ADRs). These are what the fixes uncovered and deliberately 
   because the sole `connect()` caller on that path runs in the front door, not the MCP server — a
   trap for the first connector server that needs Temporal. Not fixed because no `helm` binary and
   no cluster exist here to render the change against.
-- [ ] **REV-4 [Low] — four hazard rules are narrow rather than wrong.** From the rule-by-rule audit
-  (~90 molecules): `peroxide` and `n-halamine` miss the sanitised ionic spellings (Na2O2 parses to
-  `[O-][O-]`, both X1; chloramine-T's `[N-]Cl` is X2); `hydrazine`'s `H2,H1` excludes fully
-  substituted free hydrazines such as UDMH while its prose says "free hydrazine motif";
-  `complex-hydride-with-chlorinated-solvent` matches *gem*-dihalides only, so 1,2-dichloroethane
-  does not fire. Recorded rather than widened — widening a cited hazard rule on taste is how a
-  table stops being citable. The azide table's own precedent for the ionic gap was a *separate*
-  rule (`non-carbon-azide`), which is the shape a fix should take.
 - [ ] **REV-5 [Low] — local development needs pgvector >= 0.7.** The migrations use
   `bit_jaccard_ops`; the common distribution package is 0.6.0, so a database stood up from `apt`
   fails to migrate. Pre-existing. CI is unaffected (it provides a pgvector-enabled Postgres), so

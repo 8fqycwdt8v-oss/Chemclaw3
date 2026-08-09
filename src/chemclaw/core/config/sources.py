@@ -62,16 +62,23 @@ class SourcesSettings(BaseSettings):
     # How many candidate documents one activity attempt may consider. The bound that lets a share
     # of any size make durable forward progress instead of wedging one over-window attempt: the
     # workflow loops with the crawl cursor until the pass reports no more.
-    document_sync_batch_size: int = 500
-    document_sync_timeout_seconds: float = 900.0
-    document_sync_heartbeat_timeout_seconds: float = 120.0
+    #
+    # Every bound in this block is constrained, as its neighbouring blocks constrain theirs. They
+    # were declared bare, and each degenerate value is a live failure rather than a merely odd
+    # setting: a batch size of 0 makes a pass that considers nothing and never advances its cursor,
+    # `document_sync_max_iterations` at 0 continues-as-new after every chunk forever, and a
+    # timeout at or below 0 is what the `max(1.0, timeout / 4)` floor in `durable/heartbeat.py`
+    # was added to survive — a floor is a workaround for a value the schema should have refused.
+    document_sync_batch_size: int = Field(default=500, ge=1)
+    document_sync_timeout_seconds: float = Field(default=900.0, gt=0)
+    document_sync_heartbeat_timeout_seconds: float = Field(default=120.0, gt=0)
     # How many chunks one workflow run drains before continuing as new. Event history is bounded,
     # and a first full crawl of a TB share is thousands of chunks — far past what one run may hold.
-    document_sync_max_iterations: int = 100
+    document_sync_max_iterations: int = Field(default=100, ge=1)
     # How many stale chunks one re-embedding pass refreshes. Its own bound because the work is
     # unlike the crawl's: no filesystem at all, just a read of stored text, one embedding batch and
     # an update — so it is paced by the embedding endpoint rather than by a network share.
-    document_reembed_batch_size: int = 500
+    document_reembed_batch_size: int = Field(default=500, ge=1)
     # Every N minutes. Six hours by default: a file share is not an ELN, its documents change over
     # days, and an unchanged crawl still costs a full `scandir` pass over every path.
     document_sync_schedule_minutes: int = 360

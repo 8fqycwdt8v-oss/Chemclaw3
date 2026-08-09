@@ -91,11 +91,17 @@ def test_a_sub_second_timeout_still_beats_no_faster_than_once_a_second(
     """The floor, asserted as a rate rather than as an expression.
 
     `max(1.0, timeout / 4)` is the whole reason the hand-rolled copies had to go: three modules
-    derived the interval as `timeout / 3` with no floor, `document_sync_heartbeat_timeout_seconds`
-    is declared as a bare `float` with no `Field(gt=0)`, and a deployment that set either to a
+    derived the interval as `timeout / 3` with no floor, so a deployment that set the timeout to a
     fraction of a second turned a sibling task into several `activity.heartbeat()` calls per second
     against the Temporal server for the whole chunk. A 0.4 s timeout would give a 0.13 s interval
     without the floor — about ten beats across the wait below; with it, at most one.
+
+    The floor and the schema constraint are not the same guard, which is why both exist.
+    `document_sync_heartbeat_timeout_seconds` now carries `Field(gt=0)` — it was declared bare —
+    so a zero or negative timeout is refused at load rather than surviving into an unbounded busy
+    loop. A *positive* sub-second timeout is still a legal setting, and this floor is what keeps it
+    from flooding the server; the constraint cannot express that, because the right value depends
+    on the beat rate rather than on the number.
     """
     beats: list[str] = []
     monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a[0])))

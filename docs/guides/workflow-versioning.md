@@ -12,9 +12,18 @@ see the last section for why.
 
 **No live Temporal cluster holds Chemclaw histories yet** (the F4/F5/F6 live edges are still open,
 see `docs/planning/BACKLOG.md`). Every workflow-logic change made so far — `fan_out`'s local activity, the
-`ElnSyncWorkflow` chunk loop, the BO activities' seed argument — was therefore safe **and needs no
+`ElnSyncWorkflow` chunk loop, the BO activities' seed argument, the `resolve_notes_per_run` activity
+added to the three memory synthesis workflows, and the `plan_document_sync` activity now carrying
+`DocumentShareSyncWorkflow`'s continue-as-new bound — was therefore safe **and needs no
 retroactive `workflow.patched()` gate**: there is no history to replay against. Gating them now
 would add permanent branches guarding a case that cannot occur.
+
+Note what the last two have in common, because it is the pattern this policy is really about: both
+moved a *count* out of workflow code and into an activity. A bound read live from `settings` makes
+the command sequence a function of the replaying worker's configuration rather than of history, so
+a redeploy that lowers it is itself a workflow-logic change — without touching a line of workflow
+code. Neither of those is gated for the reason above; from the first production deploy onward, a
+change to either value would be.
 
 From the **first production deploy** onward, that changes: every deploy that touches workflow code
 must go through the checklist below.
