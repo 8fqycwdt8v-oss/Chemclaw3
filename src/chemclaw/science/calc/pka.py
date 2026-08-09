@@ -45,6 +45,7 @@ amines not at all. Explicit-solvent or cluster-continuum treatment is what would
 it, and neither is in this system.
 """
 
+import asyncio
 from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, Field
@@ -287,6 +288,16 @@ def _protonated_forms(mol: Chem.Mol, sites: list[int]) -> list[tuple[Chem.Mol, b
     return forms
 
 
+def relaxation_spec() -> OptSpec:
+    """The optimizer the base branch relaxes both species with — built in exactly one place.
+
+    One function rather than two `OptSpec(...)` literals because the second caller is
+    `pka_cache_key`: the spec has to *be* the one that runs for the key to be honest about
+    what ran, and two constructions of "the same" spec is how they come to differ.
+    """
+    return OptSpec(solvent=settings.pka_solvent)
+
+
 def _relaxed_energy(mol: Chem.Mol, charge: int) -> float:
     """Solvated energy of `mol` at a GFN2-optimized geometry.
 
@@ -306,7 +317,7 @@ def _relaxed_energy(mol: Chem.Mol, charge: int) -> float:
         positions=[[float(value) for value in row] for row in positions],
         charge=charge,
     )
-    relaxed = optimize_structure(OptSpec(solvent=settings.pka_solvent), structure)
+    relaxed = optimize_structure(relaxation_spec(), structure)
     return relaxed.energy_hartree
 
 
@@ -426,12 +437,70 @@ def calc_version() -> str:
     or RDKit upgrade recomputes, exactly as the xTB energy key does. The reported
     `uncertainty` is part of the stored result, so it is keyed too — otherwise
     re-tuning `pka_uncertainty` would serve the old value from cache.
+
+    **The relaxation's own version is folded in**, obeying `XtbSpec.calc_version`'s rule — name
+    every program whose output survives into the stored payload. The base branch relaxes both
+    species through `optimize_structure`, which runs on `OptSpec.engine`; this string named only
+    the tblite/RDKit builds, so a pKa computed in-process and one computed by the `xtb` binary
+    shared a key. Unconditional, not only on the base branch: which branch runs is decided by the
+    molecule *after* the key is built, and a key that has to re-derive the dispatch is a key that
+    can disagree with it. The cost is that an acid result is invalidated by an optimizer change
+    that could not have touched it — recomputing more than necessary, never serving a stale value.
+
+    **Two costs of widening this string are not cache misses, and both are accepted deliberately.**
+
+    A cache miss costs CPU; the *calibration ledger* costs bench work. `predictions` is keyed
+    `(calc_type, calc_version, input_hash)` and `reconciled_for` reads with an exact `calc_version`
+    predicate (D-139, so a v1 that ran high is never averaged with a v2 that ran low), so every
+    reconciled pKa residual recorded under a previous version becomes unreachable the moment this
+    string moves: `calculator_trust("pka")` reports `UNCALIBRATED`, n=0, until each molecule is
+    predicted again. It is recoverable without re-measuring anything — `record_prediction`
+    re-reconciles from `measurements` on write — but only per molecule re-predicted, so the
+    ledger refills at the rate the calculator is used, not at once. Any version widening here pays
+    that, and it is worth pricing before widening: an operator who needs the figures back sooner
+    re-runs the measured set.
+
+    And under the default `xtb_engine=auto`, `relaxation_spec()` resolves a concrete backend, so a
+    pod **with** the `xtb` binary and one **without** now compute different pKa keys — the pKa
+    cache is fleet-partitioned where it used to name only the tblite/RDKit wheels and was
+    machine-independent. That is wanted: the base branch really does relax through whichever
+    backend is present, the two do not agree to the last decimal, and a shared key would serve one
+    program's number as the other's — the defect this string was widened to remove. A heterogeneous
+    fleet therefore computes some molecules twice, which is the honest price; pinning
+    `CHEMCLAW_XTB_ENGINE` to one backend removes the split for a deployment that would rather not
+    pay it.
     """
     return (
         f"{settings.xtb_method}+{engine_version()}/alpb-{settings.pka_solvent}/"
         f"cal-{settings.pka_calibration_slope}:{settings.pka_calibration_intercept}/"
         f"base-{settings.pka_base_calibration_slope}:{settings.pka_base_calibration_intercept}/"
-        f"u-{settings.pka_uncertainty}:{settings.pka_base_uncertainty}"
+        f"u-{settings.pka_uncertainty}:{settings.pka_base_uncertainty}/"
+        f"opt-{relaxation_spec().calc_version()}"
+    )
+
+
+def pka_cache_key(job: PkaInput) -> CalculationKey:
+    """The versioned identity of predicting `job`'s pKa.
+
+    Expects a job whose SMILES is already canonical (`run_cached_pka` canonicalizes before
+    calling): atom order steers the seeded embedding, so a key built from one spelling and a
+    computation run on another would store a value that depends on which arrived first.
+
+    The relaxation's *knobs* land in `params` for the same reason its programs land in
+    `calc_version` — `XtbSpec.cache_key` splits them exactly this way, and the fields it excludes
+    are the ones already named in the version string. Measured, they move the answer: pyridine
+    comes out at 5.400052 / 5.402952 / 5.335181 for gradient tolerances 5e-4 / 5e-3 / 2e-2, and
+    before this all three were one key.
+    """
+    spec = relaxation_spec()
+    return CalculationKey.build(
+        calc_type=CALC_TYPE,
+        calc_version=calc_version(),
+        inputs={"smiles": job.smiles},
+        params={
+            "embed_seed": settings.xtb_embed_seed,
+            "opt": spec.model_dump(exclude=spec.unkeyed_fields()),
+        },
     )
 
 
@@ -446,10 +515,8 @@ async def run_cached_pka(store: ResultStore, job: PkaInput) -> tuple[PkaResult, 
     arrived first (D-011 determinism).
     """
     canonical = job.model_copy(update={"smiles": require_canonical_smiles(job.smiles)})
-    key = CalculationKey.build(
-        calc_type=CALC_TYPE,
-        calc_version=calc_version(),
-        inputs={"smiles": canonical.smiles},
-        params={"embed_seed": settings.xtb_embed_seed},
-    )
+    # Off the event loop for the reason `xtb_opt.run_cached_optimization` documents: the key now
+    # names the relaxation's backend, and resolving that shells out to `xtb --version` on the
+    # first call in a process. This coroutine runs inside the connector's one-loop MCP server.
+    key = await asyncio.to_thread(pka_cache_key, canonical)
     return await run_cached(store, key, lambda: predict_pka(canonical), PkaResult)

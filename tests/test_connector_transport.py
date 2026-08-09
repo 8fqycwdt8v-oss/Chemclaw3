@@ -105,9 +105,15 @@ def test_health_route_answers_for_the_startup_probe(name: str, composite: int) -
 def test_the_agent_sees_exactly_the_manifest_allow_list(name: str, composite: int) -> None:
     """The boundary that keeps write/index tools off the conversation, now over HTTP.
 
-    A server may legitimately expose more than the agent may call — `molfp` still serves
-    `index_molecule` for the ingestion path — so this asserts the *agent's* view equals the
-    manifest, not that the server is minimal.
+    Asserts the *agent's* view equals the manifest's `tools` allow-list. A server may still serve
+    more than the agent may call — a job's tool is not on this list either — so this is not a
+    minimality check.
+
+    It used to say `molfp` "still serves `index_molecule` for the ingestion path", which was the
+    justification for not checking the served set at all. Nothing in the tree ever called it, and
+    an anonymous MCP handshake against the real app wrote a row into `molecule_fingerprints`.
+    Minimality of the *served* set is now `connector-validate`'s job
+    (`_served_tool_problems`): every served tool must be declared in the manifest.
     """
     manifest = dict(_LOCAL_HTTP)[name]
     assert isinstance(manifest.endpoint, HttpEndpoint)

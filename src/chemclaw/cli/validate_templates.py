@@ -2,21 +2,47 @@
 
 `make template-validate`, the CI gate that keeps a template honest — the same job
 `make connector-validate` does for bundles. Pydantic already rejects a malformed file at load and
-`Template`'s own validators already reject duplicate ids and forward references; this adds the two
-checks a per-file schema cannot make, because both are about the rest of the system:
+`Template`'s own validators already reject duplicate ids and forward references; this adds the
+checks a per-file schema cannot make, because each is about the rest of the system:
 
 1. **A step naming a tool, job or profile that does not exist.** A template is a *pinned* procedure,
    so this is worse than the equivalent typo in a skill: the run gets several steps in, spends real
    compute, and then fails on step four. Catching it in CI is the difference between a broken commit
    and a broken run.
-2. **A template that no deployment can start.** An enabled name with no file behind it advertises
+2. **A step passing arguments the tool it names does not take.** This checked only the *name* until
+   the 2026-08-08 review, which is half a reference: renaming `smiles` to `smilez` in the shipped
+   `hazard-briefing` template and adding `nonexistent_arg: 42` beside it passed validation, and
+   would have failed at the first live run of step one, after the launch, inside an activity. The
+   name check exists because a template is pinned; the argument check exists for the same reason,
+   and the gap between them was the whole distance from "this template is validated" to "this
+   template can run".
+3. **A template that no deployment can start.** An enabled name with no file behind it advertises
    nothing at run time and looks exactly like a capability that quietly stopped working.
+
+**Where the argument check can and cannot reach.** A tool's parameters are knowable here only when
+its implementation is a function in this tree: the in-process `@tool` registry, and each connector
+bundle's own server tools module (the declared endpoint tool names are that module's function
+names — the same convention `cli/connectors_dev.py` and `connectors/server_entry.py` resolve by).
+
+That resolves 50 of the 61 tools a template could name. It covers every tool the shipped templates
+call — a claim worth less than it sounds, since exactly one template ships and it has two steps.
+The eleven it cannot resolve are the interesting ones: they include every job-launcher, which are
+the most expensive things to discover broken at run time. It does *not* cover a template launcher's
+generated `params` model or a skill tool, and those are skipped rather than guessed at — an
+unresolvable tool leaves the argument check silent, which is what keeps it from inventing failures
+about surfaces that only exist at run time. `job` steps are left to the launch itself: a connector
+job's payload is validated against its declared params model in `prepare_job_launch`.
 
 Read-only; touches nothing.
 """
 
+import importlib
+import inspect
+
 from chemclaw.agent.profiles import registered_profile_names
+from chemclaw.connectors.registry import discovered as discovered_connectors
 from chemclaw.connectors.registry import enabled as enabled_connectors
+from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 from chemclaw.templates.registry import TemplateError, discovered, enabled
 
@@ -38,18 +64,91 @@ def _available_jobs() -> set[str]:
     return {job.name for manifest in enabled_connectors() for job in manifest.jobs}
 
 
+def _resolvable_signatures() -> dict[str, inspect.Signature]:
+    """Every tool name whose parameters this tree can answer for, mapped to its signature.
+
+    Two sources, both local: the in-process `@tool` registry, and each discovered bundle's own
+    `chemclaw.connectors.<name>.server.tools` module, whose function names *are* the tool names the
+    manifest declares. A bundle with no server module (`qm` is jobs-only) and a declared name the
+    module does not define are both skipped — whether a bundle serves what it declares is
+    `make connector-validate`'s question, and answering it twice, differently, here would be worse
+    than not answering it.
+
+    **The agent import is load-bearing, not incidental.** `registered_tools()` is populated as an
+    import side effect of `chemclaw.agent.chemclaw_agent`, so without it this returns the connector
+    half only: measured, 30 signatures and 31 advertised tools uncovered, against 50 and 11 with it.
+    It used to be supplied by `_step_problems` happening to call `_available_tools()` two lines
+    earlier — so reordering those lines, or calling this function from anywhere else, would have
+    dropped 20 in-process tools from the argument check **with no failure at all**; the validator
+    would simply have checked less and still printed "template validation passed".
+    """
+    importlib.import_module("chemclaw.agent.chemclaw_agent")
+    signatures = {fn.__name__: inspect.signature(fn) for fn in registered_tools()}
+    for name, (_bundle, manifest) in discovered_connectors().items():
+        endpoint = manifest.endpoint
+        if endpoint is None:
+            continue
+        try:
+            module = importlib.import_module(f"chemclaw.connectors.{name}.server.tools")
+        except ImportError:
+            continue
+        for tool_name in endpoint.tools:
+            fn = getattr(module, tool_name, None)
+            if callable(fn):
+                signatures[tool_name] = inspect.signature(fn)
+    return signatures
+
+
+def _argument_problems(
+    template: Template, step: ToolStep, signature: inspect.Signature
+) -> list[str]:
+    """Check one tool step's argument *keys* against the parameters the tool actually takes.
+
+    Keys only, never values: a template's argument may be a `${...}` reference whose type is known
+    only once the run substitutes it, so type-checking here would reject correct templates. A wrong
+    key, by contrast, is wrong at every possible substitution.
+    """
+    named = [
+        p
+        for p in signature.parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ]
+    takes_any_key = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+    )
+    problems: list[str] = []
+    given = set(step.arguments)
+    accepted = {p.name for p in named}
+    unknown = sorted(given - accepted)
+    if unknown and not takes_any_key:
+        problems.append(
+            f"template {template.name!r} step {step.id!r} passes argument(s) {unknown} that "
+            f"{step.tool!r} does not take; it accepts: {sorted(accepted)}"
+        )
+    missing = sorted({p.name for p in named if p.default is inspect.Parameter.empty} - given)
+    if missing:
+        problems.append(
+            f"template {template.name!r} step {step.id!r} omits required argument(s) {missing} "
+            f"of {step.tool!r}"
+        )
+    return problems
+
+
 def _step_problems(template: Template) -> list[str]:
-    """Check every step's outward references — the tool, job or profile it names."""
+    """Check every step's outward references — the tool, job or profile it names, and its args."""
     problems: list[str] = []
     tools = _available_tools()
     jobs = _available_jobs()
     profiles = set(registered_profile_names())
+    signatures = _resolvable_signatures()
     for step in template.steps:
         if isinstance(step, ToolStep) and step.tool not in tools:
             problems.append(
                 f"template {template.name!r} step {step.id!r} calls unknown tool "
                 f"{step.tool!r}; available: {sorted(tools)}"
             )
+        elif isinstance(step, ToolStep) and step.tool in signatures:
+            problems.extend(_argument_problems(template, step, signatures[step.tool]))
         elif isinstance(step, JobStep) and step.job not in jobs:
             problems.append(
                 f"template {template.name!r} step {step.id!r} runs unknown job "

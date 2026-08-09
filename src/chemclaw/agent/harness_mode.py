@@ -43,13 +43,17 @@ state would let the authorized artifact drift from the displayed one.
 import logging
 from typing import Any
 
-from agent_framework import AgentSession
-from agent_framework._harness._mode import AgentModeProvider, get_agent_mode, set_agent_mode
+# `AgentModeProvider`/`get_agent_mode`/`set_agent_mode` were imported from
+# `agent_framework._harness._mode` until 2026-08-08. Measured against 1.11.0: all three are exported
+# at the package top level and are the identical objects, so the private path was a dependency on an
+# experimental module for no reach it did not already have.
+from agent_framework import AgentModeProvider, AgentSession, get_agent_mode, set_agent_mode
 
 from chemclaw.agent.harness_todo import todo_plan_items
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +158,16 @@ class PlanApprovalModeProvider(AgentModeProvider):
         try:
             approved = await plan_is_approved(session)
         except Exception:  # noqa: BLE001 - a display repair must never fail the turn it precedes
-            logger.warning(
+            # WARNING rather than the helper's ERROR default: what is lost here is the accuracy of
+            # a displayed mode badge. The tool-level gate is a separate check that still runs and
+            # still fails closed, so nothing becomes permitted — paging on this would be noise.
+            degraded(
+                logger,
+                "mode_display",
                 "could not check the plan approval for session %s; leaving the displayed mode "
                 "alone (the tool-level gate still decides, and fails closed)",
                 session.session_id,
-                exc_info=True,
+                level=logging.WARNING,
             )
             return
         if not approved:

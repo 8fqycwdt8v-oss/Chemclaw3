@@ -48,7 +48,7 @@ from temporalio.client import WorkflowExecutionStatus
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
-from chemclaw.core.db import connect as db_connect
+from chemclaw.core.db import connection as db_connection
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,28 @@ SMOKE_JOB = "compute_reaction_energy"
 # could have asked for: any temperature in this range is a legitimate question, and the answer
 # changes with it. Constant within the process, so the idempotency check below still derives the
 # same id when it relaunches.
-_RUN_TEMPERATURE_K = 298.15 + (int(time.time()) % 25)
+#
+# **The modulus is the whole guarantee, and this copy had the wrong one.** `% 25` on a one-second
+# grid yields exactly 25 distinct temperatures that ever exist, so after ~25 runs against one
+# database the calculation cache holds all of them and every subsequent `make live-jobs` rejoins a
+# completed run — the lane goes permanently green while computing nothing, which is the precise
+# failure the paragraph above says it exists to remove. `cli/storm_behaviours.py` already carried
+# the reasoned value after a soak measured the smaller period failing (6 of 81 rounds), and the fix
+# landed in one of the three copies. 100,000 values on a 10-µK grid puts the recurrence at ~27.8
+# hours, past any soak this harness runs, and every value is still a temperature a chemist could
+# ask about. `tests/test_run_jitter.py` pins all three periods so a fourth copy cannot regress it.
+#
+# **The base is 301.15 K and not 298.15 K, and that is the second half of the same guarantee.**
+# Copying the reasoned modulus here left this module and `cli/storm_behaviours.py` carrying the
+# identical expression over otherwise byte-identical payloads — measured at `t = 1700000123`, both
+# derived 298.15123 and the two payloads compared equal. Before that they had one value in common;
+# after it they had all of them, so a `make live-jobs` launched during a soak round hashed to the
+# storm's workflow id, rejoined its completed run and wrote no `job_records` row: the same "0
+# job_records row(s) written" false failure, now reachable *between* harnesses. Each grid spans
+# base + [0, 1) K, so the three bases (298.15, 300.0 in `live_storm`, 301.15 here) have to stay at
+# least 1 K apart; `tests/test_run_jitter.py` asserts the union is disjoint rather than trusting
+# that. 301.15 K is 28 °C — still a temperature a chemist could have asked for.
+_RUN_TEMPERATURE_K = 301.15 + (int(time.time()) % 100_000) / 100_000.0
 
 # Ammonia synthesis at the quick level: three species, small, and its symmetry numbers are the
 # textbook ones — so a wrong answer is recognisable as wrong.
@@ -172,7 +193,7 @@ async def _workflow_status(workflow_id: str) -> WorkflowExecutionStatus | None:
 
 async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
     """One value from the live database, using the application's own connection helper."""
-    async with await db_connect(settings.postgres_dsn) as conn:
+    async with db_connection(settings.postgres_dsn) as conn:
         cursor = await conn.execute(sql, params)
         row = await cursor.fetchone()
         return None if row is None else row[0]

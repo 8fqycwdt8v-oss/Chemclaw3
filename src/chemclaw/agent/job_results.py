@@ -33,8 +33,12 @@ import asyncio
 import logging
 from typing import Any
 
+from temporalio.client import WorkflowFailureError
+
 from chemclaw.agent.durable_tools import completed_job_status
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.temporal_client import connect
+from chemclaw.durable.connector_job import failure_reason
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +76,31 @@ async def await_job_results(
 
     async def _collect(job_id: str) -> None:
         handle = (await connect()).get_workflow_handle(job_id)
-        collected[job_id] = completed_job_status(job_id, await handle.result()).model_dump()
+        try:
+            collected[job_id] = completed_job_status(job_id, await handle.result()).model_dump()
+        except WorkflowFailureError as exc:
+            # **A failed job is a result, not an absence.** `gather(return_exceptions=True)` was
+            # collecting these and the return value was never bound, so a job whose workflow failed
+            # was simply missing from `collected` — and the runner's `if results:` then skipped the
+            # resume entirely, leaving the model to finish the turn on its pre-wait text ("I've
+            # launched the calculation, it's running"), narrating a success that did not happen.
+            # The only trace was an INFO line reading "no result yet", which asserts the job is
+            # still pending when it has failed permanently.
+            #
+            # This module's docstring already promised the opposite: "A job that failed is reported
+            # with its status rather than omitted ... dropping it would leave the model narrating a
+            # success that did not happen."
+            logger.info("mid-turn resume: job %s failed; reporting it in this turn", job_id)
+            collected[job_id] = {
+                "job_id": job_id,
+                "status": "failed",
+                # `exc.__cause__ or exc`, not `exc`. The client-side `WorkflowFailureError` wraps
+                # ChildWorkflowError → ActivityError → the product's own sentence; passing the
+                # wrapper stops at the first frame and reports "Workflow execution failed",
+                # discarding the diagnostic written for exactly this moment.
+                # `connectors/jobs.py` documents this in a comment, and I made the mistake anyway.
+                "summary": failure_reason(exc.__cause__ or exc),
+            }
 
     try:
         await asyncio.wait_for(
@@ -93,8 +121,9 @@ async def await_job_results(
         )
     except Exception:
         # Temporal being unreachable must degrade the turn to its pre-AGT-2 behavior, not fail an
-        # answer the model already has.
-        logger.warning("mid-turn resume could not reach the durable jobs", exc_info=True)
+        # answer the model already has — and be counted, because from outside a broker outage and
+        # a turn that simply had no jobs to collect produce the identical transcript.
+        degraded(logger, "job_resume", "mid-turn resume could not reach the durable jobs")
     missing = [job_id for job_id in job_ids if job_id not in collected]
     if missing:
         logger.info("mid-turn resume has no result yet for %s", ", ".join(missing))

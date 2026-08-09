@@ -54,6 +54,27 @@ async def start_approval(candidate: InteractionCandidate) -> str:
             owned,
             id=approval_id,
             task_queue=settings.background_task_queue,
+            # **No `id_reuse_policy`, deliberately — and this is a reverted fix.**
+            #
+            # This is the one of five copies of the launch idiom that passes no policy, and the
+            # default (ALLOW_DUPLICATE) does let a *decided* hold reopen: once the run is closed,
+            # re-surfacing the same candidate starts a fresh one under the same id and resets it to
+            # pending, so a second click can flip a recorded sign-off. That is a real defect.
+            #
+            # REJECT_DUPLICATE is not its fix, and shipping it was worse than the bug. Expiry is not
+            # a decision: `InteractionApprovalWorkflow` times out after
+            # `interaction_approval_timeout_seconds` (7 days by default) and returns
+            # `status="expired"` precisely to drop the candidate rather than pin the workflow. Under
+            # REJECT_DUPLICATE that id can never be reused, so the same interaction could never be
+            # offered again — while `_announce` still puts the button back on the stream with the
+            # dead id, and the click then fails with "no approval hold with id ...". Knowledge that
+            # nobody got round to approving would become unsavable through this surface, forever.
+            # ALLOW_DUPLICATE_FAILED_ONLY does not help either: an expired hold *completes*.
+            #
+            # The distinction the policy cannot express is "closed with a decision" versus "closed
+            # without one", which needs the prior run's terminal outcome read before deciding
+            # whether to start — a change with no offline test here (Temporal is unreachable in this
+            # sandbox). Tracked in `docs/planning/BACKLOG.md` rather than guessed at.
         )
     except WorkflowAlreadyStartedError:
         _announce(owned, approval_id)

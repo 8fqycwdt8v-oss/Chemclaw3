@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import BaseModel
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
@@ -31,13 +32,35 @@ with workflow.unsafe.imports_passed_through():
         build_playbook_notes,
     )
 
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
 
 logger = logging.getLogger(__name__)
 
 
-async def all_reactions() -> list[OrdReaction]:
+class CorpusRead(BaseModel):
+    """The memory corpus as one read: the reactions, **and whether that is all of them**.
+
+    The second field exists because the first one alone is indistinguishable from a shrunken
+    corpus, and one consumer acts on the difference. `memory.observations.record` replaces a
+    stored observation's evidence when a pass is authoritative — which is only true if the pass
+    saw everything — so a read that skipped entries must say so rather than let a partial view be
+    written down as the complete record (the defect
+    `D-2026-08-08-a-partial-answer-must-say-so` §6 fixes).
+
+    `complete` is about *this* read, not about configuration: a source an operator has turned off
+    is not part of the corpus, so a read without it is complete. What makes a read partial is an
+    entry a source returned and this job could not map — the corpus holds a reaction the miner
+    never saw. Honest limit: a source that silently returns fewer entries than it holds is
+    invisible here, because nothing downstream of `fetch_new_entries` can know what it withheld.
+    """
+
+    reactions: list[OrdReaction]
+    complete: bool
+
+
+async def read_corpus() -> CorpusRead:
     """Read and map every reaction from the *configured active* ingest sources (the memory corpus).
 
     Reads the ingest halves of `settings.data_sources` (via `chemclaw.ingest.sources.registry`),
@@ -47,9 +70,13 @@ async def all_reactions() -> list[OrdReaction]:
     ingest half feeds the same canonical schema, so the memory layers reason over the union without
     knowing any source's shape. Adding a future source is one registry entry + one config token,
     not a change here (the "keep integrations dumb, put the reasoning above them" line).
+
+    Returns a `CorpusRead` rather than the bare list so a skipped entry is a fact the caller can
+    act on instead of a silence — see that model.
     """
     since = datetime.min.replace(tzinfo=UTC)
     reactions: list[OrdReaction] = []
+    skipped = 0
     for adapter in active_ingest_sources():
         for raw in await adapter.fetch_new_entries(since):
             try:
@@ -60,8 +87,26 @@ async def all_reactions() -> list[OrdReaction]:
                 # unexpected error surfaces instead of being silently dropped; log the skip
                 # so a corpus that quietly loses reactions is diagnosable.
                 logger.info("memory job skipped an unmappable ELN entry: %s", exc)
+                skipped += 1
                 continue
-    return reactions
+    if skipped:
+        logger.warning(
+            "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so this pass "
+            "saw %d reaction(s) and not the whole record",
+            skipped,
+            len(reactions),
+        )
+    return CorpusRead(reactions=reactions, complete=not skipped)
+
+
+async def all_reactions() -> list[OrdReaction]:
+    """The corpus as a plain list, for the three note builders that cannot act on completeness.
+
+    They propose notes through the PR-gate, where a human reads what was built; nothing they do
+    rewrites stored state on the strength of "this is everything". The observation miner does, and
+    calls `read_corpus` directly.
+    """
+    return (await read_corpus()).reactions
 
 
 @durable_activity("background")
@@ -87,14 +132,35 @@ async def build_optimization_notes_activity() -> list[Note]:
 
 @durable_activity("background")
 @activity.defn
-async def publish_memory_note_activity(note: Note) -> str:
+async def publish_memory_note_activity(note: Note, actor: str = "") -> str:
     """PR-gate one already-built memory note; return its reference (the fan-out publish step).
 
     Any compound note the note links is minted into the same submission (STO-7). Applying that rule
     here, at the one gate every machine-written note passes through, is what keeps it out of each
     connector: a note author states the link, and the gate makes it resolve.
+
+    `actor` stamps the ambient identity for the duration of the gate, because `propose_note` records
+    a durable `NoteProposal` whose `actor` comes from `ambient_provenance()` — and no activity under
+    `durable/` stamped one, so every proposal a durable job opened was recorded with `actor=""`.
+    `list_note_proposals` scopes a non-reviewer's queue to `principal.oid` and `_visible_proposal`
+    404s the detail view, so the chemist who launched the job could not see the PR opened on their
+    behalf. That surface's own docstring gives exactly that as the reason it exists.
+
+    Empty is the honest default and stays supported: the memory-synthesis jobs are system-triggered
+    (a schedule, no user), and stamping a synthetic actor on them would make an unattributed
+    proposal look attributed. Absent means absent.
     """
-    return await propose_note(note, default_submitter(), dependencies=compound_dependencies(note))
+    if not actor:
+        return await propose_note(
+            note, default_submitter(), dependencies=compound_dependencies(note)
+        )
+    token = set_current_identity(actor, frozenset())
+    try:
+        return await propose_note(
+            note, default_submitter(), dependencies=compound_dependencies(note)
+        )
+    finally:
+        reset_current_identity(token)
 
 
 @durable_workflow("background")
@@ -118,8 +184,28 @@ class PublishNoteWorkflow:
         )
 
 
-def _slice_for_this_run(notes: list[Note], id_prefix: str) -> list[Note]:
-    """Take at most `memory_max_notes_per_run` notes, rotating the window on each daily run.
+@durable_activity("background")
+@activity.defn
+async def resolve_notes_per_run() -> int:
+    """Resolve the per-run note cap outside workflow code, as `resolve_fan_out_limit` does.
+
+    `_slice_for_this_run`'s return value *is* the input list to `fan_out`, so the cap decides how
+    many `StartChildWorkflow` commands the workflow emits. Reading live settings inside workflow
+    code makes that a function of the replaying worker's config rather than of history: measured
+    with `workflow.now()` pinned and the corpus fixed, `cap=25` emitted 25 children
+    (campaign-000..024) and `cap=10` emitted 10 (campaign-000..009). A redeploy that lowers the
+    value mid-fan-out therefore replays 10 starts against 25 recorded child-started
+    events — a non-determinism error, which is a workflow *task* failure, which retries forever
+    ignoring the retry policy and wedges the run (the trap D-093 documents).
+
+    `orchestrator.py` states this rule and captures its own bound through a local activity; the line
+    above it in the same function did not.
+    """
+    return settings.memory_max_notes_per_run
+
+
+def _slice_for_this_run(notes: list[Note], cap: int, id_prefix: str) -> list[Note]:
+    """Take at most `cap` notes, rotating the window on each daily run.
 
     These jobs rescan the whole corpus with no cursor and had no ceiling on what one run could
     propose. In practice they stay quiet — an id anchored on a cluster's smallest member reuses its
@@ -133,9 +219,9 @@ def _slice_for_this_run(notes: list[Note], id_prefix: str) -> list[Note]:
     corpus is reached within one cycle, after which every note is a no-op re-proposal.
 
     Sorted by id so the ordering is stable rather than incidental to build order, and
-    `workflow.now()` rather than a wall clock because a workflow must replay identically.
+    `workflow.now()` rather than a wall clock because a workflow must replay identically. `cap` is
+    passed in rather than read here for the same reason — see `resolve_notes_per_run`.
     """
-    cap = settings.memory_max_notes_per_run
     if cap <= 0 or len(notes) <= cap:
         return notes
     ordered = sorted(notes, key=lambda note: note.id)
@@ -167,8 +253,14 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
         start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
         retry_policy=BAD_DATA_RETRY,
     )
+    cap = await workflow.execute_local_activity(
+        resolve_notes_per_run,
+        # The generic short-activity budget, as `resolve_fan_out_limit` uses beside it.
+        start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+        retry_policy=BAD_DATA_RETRY,
+    )
     return await fan_out(
-        PublishNoteWorkflow, _slice_for_this_run(notes, id_prefix), id_prefix=id_prefix
+        PublishNoteWorkflow, _slice_for_this_run(notes, cap, id_prefix), id_prefix=id_prefix
     )
 
 

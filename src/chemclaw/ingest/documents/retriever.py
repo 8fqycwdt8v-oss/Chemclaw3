@@ -149,6 +149,14 @@ class ShareDocumentRetriever:
                 exc_info=True,
             )
             return []
+        except Exception:
+            # What makes "never raises" above true rather than aspirational. `_search` embeds the
+            # query through the provider seam, which raises its own client's exception types — an
+            # `openai.APIError` is in neither list above, so a rate-limited embedding endpoint
+            # escaped this leg and failed the whole turn. Naming that vendor's tree here would
+            # import it; the contract is the promise in the docstring, so it is written as one.
+            logger.exception("%s: unexpected search failure, returning no evidence", self.name)
+            return []
         return hits
 
     async def _search(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:

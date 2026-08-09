@@ -39,6 +39,8 @@ from pathlib import Path
 import frontmatter
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.metrics_bridge import degraded
+
 logger = logging.getLogger(__name__)
 
 # Where a skill's frontmatter lives inside its directory — the Agent Skills spec's filename.
@@ -125,7 +127,17 @@ def _read_manifest(path: Path) -> SkillManifest | None:
     try:
         return SkillManifest.model_validate(frontmatter.load(path).metadata)
     except Exception as exc:
-        logger.warning(
-            "skill %s has unreadable frontmatter, treating it as undeclared: %s", path, exc
+        # WARNING rather than the helper's ERROR default: `make skill-validate` is a CI gate over
+        # exactly this, so an unreadable manifest is caught before it ships and a live occurrence
+        # is an authoring problem in the corpus, not an outage. The counter is still what makes it
+        # visible at all — a skill silently absent from every turn produces no other signal.
+        degraded(
+            logger,
+            "skill_manifest",
+            "skill %s has unreadable frontmatter, treating it as undeclared: %s",
+            path,
+            exc,
+            level=logging.WARNING,
+            exc_info=False,
         )
         return None

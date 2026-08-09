@@ -7,12 +7,15 @@ fan-out and nothing else.
 """
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import chemclaw.ingest.eln.warehouse.retriever as retriever_module
 from chemclaw.core.config import settings
+from chemclaw.core.embeddings import embed_texts
 from chemclaw.ingest.eln.warehouse.retriever import WarehouseVectorRetriever
 from tests import warehouse_fake
 
@@ -191,3 +194,59 @@ def test_a_misconfigured_source_costs_this_leg_and_no_other(
     retriever = WarehouseVectorRetriever(binding=binding, name="eln-warehouse")
 
     assert asyncio.run(retriever.retrieve("ester formation", {})) == []
+
+
+class _ProviderError(Exception):
+    """What an embedding client raises — none of the types this retriever used to catch."""
+
+
+def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The query is embedded *inside* this leg, so the provider's own errors are this leg's too.
+
+    They are not `WarehouseQueryError`, `ConnectionError` or `OSError`, so before this they escaped
+    into `gather_evidence`'s `gather` — which has no `return_exceptions` — and a rate-limited
+    embedding endpoint failed the whole turn, including the answer the knowledge graph had already
+    produced.
+    """
+    monkeypatch.setattr(
+        retriever_module, "embed_texts", lambda texts: (_ for _ in ()).throw(_ProviderError("429"))
+    )
+    warehouse_fake.prime(**_hits())
+    retriever = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
+
+    assert asyncio.run(retriever.retrieve("ester formation", {})) == []
+
+
+def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blocking provider call must not freeze the loop that serves every other SSE stream.
+
+    Counted rather than asserted qualitatively: a free loop ticks continuously through a 0.4 s
+    provider call, and an inline call yields zero ticks in the same window.
+    """
+    real = embed_texts
+
+    def _slow(texts: list[str]) -> list[list[float]]:
+        time.sleep(0.4)
+        return real(texts)
+
+    monkeypatch.setattr(retriever_module, "embed_texts", _slow)
+    warehouse_fake.prime(**_hits())
+    retriever = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
+
+    async def _run() -> int:
+        ticks = 0
+
+        async def _heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        beat = asyncio.create_task(_heartbeat())
+        await retriever.retrieve("ester formation", {})
+        beat.cancel()
+        return ticks
+
+    assert asyncio.run(_run()) > 5, "the loop kept running while the provider was blocking"

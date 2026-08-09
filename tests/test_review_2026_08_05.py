@@ -142,7 +142,10 @@ def test_a_job_that_fails_inside_the_wait_is_framed_wherever_it_was_awaited() ->
     with pytest.raises(jobs_module.ConnectorJobError) as caught:
         asyncio.run(
             jobs_module._await_briefly(
-                _FailingHandle("unknown ALPB solvent '2-methyltetrahydrofuran'"), 5.0, "compare"
+                _FailingHandle("unknown ALPB solvent '2-methyltetrahydrofuran'"),
+                5.0,
+                "compare",
+                "compare-1",
             )
         )
     assert "'compare' job ran and failed" in str(caught.value)

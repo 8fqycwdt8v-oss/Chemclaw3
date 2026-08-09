@@ -50,6 +50,13 @@ error anywhere. `sync.reembed_stale` refreshes them from the `content` stored be
 so the fix is a database-to-database pass that never touches the share and runs even when the mount
 is down.
 
+**And a chunk is only good for the chunking that cut it.** The same argument one step out
+(`chunking_key`, migration 040): `chunk_chars` and `chunk_overlap_chars` decide what text each
+vector describes, and until D-2026-08-08 neither of the crawl's two gates could see them change —
+so re-tuning them re-chunked *nothing*, and when a re-chunk did happen for another reason it left
+the finer cutting's higher ordinals stranded, which `reembed_stale` then adopted as current. Both
+gates now compare it, and a document's chunks are replaced rather than merged.
+
 **Identity is the content, not the path.** `doc_id` is the hash of the parsed text, so the same
 report in four project folders is one set of chunks and one embedding call, and a rename is free.
 It is `backfill_corpus.note_for_document`'s rule and D-011's, applied to embeddings.

@@ -287,5 +287,21 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-07-a-manifest-must-say-who-may-read-it](D-2026-08-07-a-manifest-must-say-who-may-read-it.md) | The mount is a boundary, and omission is not a decision |
 | [D-2026-08-07-one-bad-file-must-not-stop-the-corpus](D-2026-08-07-one-bad-file-must-not-stop-the-corpus.md) | The guard belongs at the boundary, not on the constructor |
 | [D-2026-08-07-the-mark-means-observed-not-processed](D-2026-08-07-the-mark-means-observed-not-processed.md) | The sweep reads the drain's own evidence |
+| [D-2026-08-08-a-borrowed-connection-is-bounded-by-default](D-2026-08-08-a-borrowed-connection-is-bounded-by-default.md) | The safe bound is the default, and the escape hatch is a different function |
+| [D-2026-08-08-a-category-has-no-outside](D-2026-08-08-a-category-has-no-outside.md) | The two BO tool-surface defects an audit found, and the eight it refuted |
+| [D-2026-08-08-a-degraded-check-must-not-clear-the-gate](D-2026-08-08-a-degraded-check-must-not-clear-the-gate.md) | The substitute was more generous |
+| [D-2026-08-08-a-derived-index-must-record-what-derived-it](D-2026-08-08-a-derived-index-must-record-what-derived-it.md) | A derived index must record what derived it |
+| [D-2026-08-08-a-partial-answer-must-say-so](D-2026-08-08-a-partial-answer-must-say-so.md) | Seven science defects that render as clean results |
 | [D-2026-08-08-a-prefix-the-documents-never-carried](D-2026-08-08-a-prefix-the-documents-never-carried.md) | The string a gate matches on belongs to one definition, and the prose that teaches it is checked |
+| [D-2026-08-08-a-private-import-of-a-type-alias-is-not-a-dependency](D-2026-08-08-a-private-import-of-a-type-alias-is-not-a-dependency.md) | A private import of a type alias is not a dependency |
+| [D-2026-08-08-a-rollback-that-is-not-a-schema-step](D-2026-08-08-a-rollback-that-is-not-a-schema-step.md) | A rollback that is not a schema step |
+| [D-2026-08-08-a-rule-with-no-test-is-a-claim](D-2026-08-08-a-rule-with-no-test-is-a-claim.md) | The enforcement layer for rules this repository already states |
+| [D-2026-08-08-a-served-tool-is-a-reachable-tool](D-2026-08-08-a-served-tool-is-a-reachable-tool.md) | The allow-list guarded the agent, not the port |
+| [D-2026-08-08-a-slot-lives-as-long-as-its-response](D-2026-08-08-a-slot-lives-as-long-as-its-response.md) | A slot lives as long as its response, and a check that runs before the queue checks nothing |
+| [D-2026-08-08-a-survivor-is-a-hypothesis](D-2026-08-08-a-survivor-is-a-hypothesis.md) | A survivor is a hypothesis, not a finding |
+| [D-2026-08-08-a-test-that-survives-the-mutation-it-names](D-2026-08-08-a-test-that-survives-the-mutation-it-names.md) | A test that survives the mutation it names |
 | [D-2026-08-08-a-vector-store-is-not-a-catalogue](D-2026-08-08-a-vector-store-is-not-a-catalogue.md) | Only the dense half is pluggable, and the rest stays in Postgres |
+| [D-2026-08-08-an-outage-is-not-a-missing-job](D-2026-08-08-an-outage-is-not-a-missing-job.md) | Six durable failures that reported the wrong thing |
+| [D-2026-08-08-identity-must-travel-with-the-work](D-2026-08-08-identity-must-travel-with-the-work.md) | A role name is not an entitlement |
+| [D-2026-08-08-redaction-must-outlive-the-formatter](D-2026-08-08-redaction-must-outlive-the-formatter.md) | The leak lived in the path no test took |
+| [D-2026-08-08-the-inventory-that-vouched-for-itself](D-2026-08-08-the-inventory-that-vouched-for-itself.md) | Seven claims, re-measured, and the two that became tests |

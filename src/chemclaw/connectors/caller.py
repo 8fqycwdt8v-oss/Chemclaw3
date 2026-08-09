@@ -56,14 +56,26 @@ def bind_caller(actor: str, session_id: str, correlation_id: str) -> CallerToken
 
 
 def reset_caller(tokens: CallerTokens) -> None:
-    """Unbind the request's caller, so one request's identity cannot leak into the next."""
+    """Unbind the caller bound by the matching `bind_caller`.
+
+    This used to claim "so one request's identity cannot leak into the next", which measurement
+    disproved: the reset in the HTTP middleware never governed what a *tool body* read, because a
+    tool runs in the MCP session-manager task and so saw the handshake's identity for the life of
+    the session. `connectors/server.py::_bind_caller_per_tool_call` binds and resets around each
+    tool call, which is what actually gives one call its own identity; this function is the
+    unbinding half of both, and claims only that.
+    """
     _caller_actor.reset(tokens.actor)  # type: ignore[arg-type]
     _caller_session.reset(tokens.session)  # type: ignore[arg-type]
     _caller_correlation.reset(tokens.correlation)  # type: ignore[arg-type]
 
 
 def caller_provenance() -> tuple[str, str, str]:
-    """The request's `(actor, session_id, correlation_id)`, empty strings off the request path.
+    """The serving call's `(actor, session_id, correlation_id)`, empty strings off that path.
+
+    "The serving call's" is load-bearing and was once wrong: read from a tool body this returned
+    the identity of the request that opened the MCP session, so a durable row a connector wrote
+    named the chemist who happened to connect first rather than the one who asked.
 
     Empty rather than `None` because every consumer writes them into a record whose columns default
     to `''`: a connector tool exercised directly (a test, a CLI) genuinely has no caller, and that

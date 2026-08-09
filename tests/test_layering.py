@@ -23,8 +23,17 @@ bless an accidental module-scope sibling import identically, because both are "n
 module-scope list". So this file checks **both scopes**, against **two different policies**:
 module-scope edges must be in `_ALLOWED_MODULE_EDGES` (the package dependency graph the four-layer
 architecture actually has); function-scope edges may additionally use `_ALLOWED_LAZY_EDGES`, each
-entry a documented, deliberate exception. An import guarded by `if TYPE_CHECKING:` is excluded from
-both graphs — it is never executed and creates no runtime edge, so it carries no layering risk.
+entry a documented, deliberate exception.
+
+**`if TYPE_CHECKING:` is a third bucket, not an exemption.** It used to be skipped outright, on the
+reasoning that such an import never executes and so creates no runtime edge. That is true and it is
+not the whole story: a *skipped* import is an unchecked one, so the guard doubled as a working
+escape hatch — `if TYPE_CHECKING: from chemclaw.agent import X` inside `core` would have passed
+every test here. The measurement that makes this cheap to close is that the hatch guards **zero**
+cross-package imports today, so the skip was dead code documenting a way around the rule. Those
+imports are now walked into their own scope and checked against `_ALLOWED_AT_ANY_SCOPE`: an
+annotation-only dependency is still a dependency a reader has to reason about, and declaring it
+costs one row.
 
 **Six package-level cycles are real, not accidental**, each recorded in `_CYCLE_EDGES` with the
 one-line reason a reader needs. Five are "data down, control up" pairs where a registry builds and
@@ -123,20 +132,22 @@ class _Import:
     file: Path
     lineno: int
     target: str
-    in_function: bool
+    scope: str  # "module", "function" or "type_checking"
 
 
 class _ImportVisitor(ast.NodeVisitor):
     """Collect every first-party (`chemclaw.*`) import in one file, tagged by scope.
 
-    `if TYPE_CHECKING:` blocks are skipped entirely (not just tagged): an import gated on it never
-    runs, so it is not a dependency edge at all, only an annotation.
+    `if TYPE_CHECKING:` bodies go into their own scope rather than being discarded, so an
+    annotation-only edge is visible and declarable instead of silently exempt. The `orelse` branch
+    is what actually runs, so it is walked as ordinary code.
     """
 
     def __init__(self, module: str, path: Path) -> None:
         self.module = module
         self.path = path
         self.func_depth = 0
+        self.type_checking_depth = 0
         self.imports: list[_Import] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -157,15 +168,24 @@ class _ImportVisitor(ast.NodeVisitor):
         )
         if not is_type_checking:
             self.generic_visit(node)
-        # else: skip the guarded body outright (both branches - `orelse` runs when TYPE_CHECKING
-        # is false, i.e. always at runtime, so it is walked like normal code by generic_visit above
-        # only in the non-guarded case; here we deliberately visit neither branch's imports as
-        # runtime edges for the `if` body, which is the only one that ever held the annotation-only
-        # import).
+            return
+        self.type_checking_depth += 1
+        for stmt in node.body:
+            self.visit(stmt)
+        self.type_checking_depth -= 1
+        # `orelse` runs when TYPE_CHECKING is false, i.e. always at runtime: ordinary code.
+        for stmt in node.orelse:
+            self.visit(stmt)
 
     def _record(self, target: str, lineno: int) -> None:
-        if target.startswith("chemclaw"):
-            self.imports.append(_Import(self.path, lineno, target, self.func_depth > 0))
+        if not target.startswith("chemclaw"):
+            return
+        scope = (
+            "type_checking"
+            if self.type_checking_depth
+            else ("function" if self.func_depth else "module")
+        )
+        self.imports.append(_Import(self.path, lineno, target, scope))
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -198,11 +218,11 @@ _PACKAGES = sorted({_package_of(m) for m in _MODULE_NAMES.values()} - {"chemclaw
 Edge = tuple[str, str]
 
 
-def _edges(*, in_function: bool) -> dict[Edge, list[_Import]]:
+def _edges(scope: str) -> dict[Edge, list[_Import]]:
     """Cross-package import edges at the given scope, keyed by (source package, target package)."""
     out: dict[Edge, list[_Import]] = {}
     for imp in _IMPORTS:
-        if imp.in_function != in_function:
+        if imp.scope != scope:
             continue
         src = _package_of(_MODULE_NAMES[imp.file])
         dst = _package_of(imp.target)
@@ -212,8 +232,9 @@ def _edges(*, in_function: bool) -> dict[Edge, list[_Import]]:
     return out
 
 
-_MODULE_SCOPE_EDGES = _edges(in_function=False)
-_FUNCTION_SCOPE_EDGES = _edges(in_function=True)
+_MODULE_SCOPE_EDGES = _edges("module")
+_FUNCTION_SCOPE_EDGES = _edges("function")
+_TYPE_CHECKING_EDGES = _edges("type_checking")
 
 # ---------------------------------------------------------------------------------------------
 # The declared policy: which package may depend on which. This is the one part of this file that
@@ -395,6 +416,20 @@ def test_function_scope_imports_are_declared() -> None:
         if edge not in _ALLOWED_AT_ANY_SCOPE
     }
     assert not violations, "undeclared function-scope import(s):\n" + _format_violations(violations)
+
+
+def test_type_checking_imports_are_declared() -> None:
+    """An annotation-only cross-package import is declared like any other, not exempt.
+
+    Zero such imports exist today — which is what makes stating the rule free, and what made the
+    old outright skip dead code that nonetheless documented a way around every check above.
+    """
+    violations = {
+        edge: imports
+        for edge, imports in _TYPE_CHECKING_EDGES.items()
+        if edge not in _ALLOWED_AT_ANY_SCOPE
+    }
+    assert not violations, "undeclared TYPE_CHECKING import(s):\n" + _format_violations(violations)
 
 
 def test_cycle_edges_are_all_still_real() -> None:

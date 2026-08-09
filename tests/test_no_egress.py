@@ -46,7 +46,11 @@ _INFRASTRUCTURE_HOSTS = {
     "login.microsoftonline.com",
 }
 
-_URL = re.compile(r"https?://([A-Za-z0-9.-]+)")
+# Userinfo is skipped rather than captured. Written without the `(?:…@)?` group this read the
+# *credential* as the hostname: a docstring example `https://svc:token@llm.internal/v1` — added to
+# explain why the endpoint is digested before it reaches a durable column — made this gate fail on
+# a third-party "host" called `svc`. The host of a URL with userinfo is what follows the `@`.
+_URL = re.compile(r"https?://(?:[^/@\s]*@)?([A-Za-z0-9.-]+)")
 
 # Our own in-cluster Services and loopback. A connector is a Chemclaw component we deploy, reached
 # at

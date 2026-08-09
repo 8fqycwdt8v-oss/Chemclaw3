@@ -41,7 +41,7 @@ from temporalio.client import WorkflowExecutionStatus
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
-from chemclaw.core.db import connect as db_connect
+from chemclaw.core.db import connection as db_connection
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -246,7 +246,7 @@ def _lane(script: str, *args: str, env: Mapping[str, str] | None = None) -> str:
 
 async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
     """One value from the live database, through the application's own connection helper."""
-    async with await db_connect(settings.postgres_dsn) as conn:
+    async with db_connection(settings.postgres_dsn) as conn:
         cursor = await conn.execute(sql, params)
         row = await cursor.fetchone()
         return None if row is None else row[0]
@@ -603,7 +603,12 @@ async def family_b_tool_truth(expect_tools: Sequence[str]) -> list[Finding]:
 #
 # The temperature varies per process for the reason `live_jobs._RUN_TEMPERATURE_K` does: the
 # workflow id is a hash of the payload, so a fixed one makes every rerun a rejoin of the first.
-_CHAOS_TEMPERATURE_K = 300.0 + (int(time.time()) % 971) / 100.0
+#
+# `% 971` recurred every 16.2 minutes — 1.35x the ~12-minute period that had already been *measured*
+# failing this harness (`cli/storm_behaviours.py` records 6 of 81 soak rounds reporting "0
+# job_records row(s) written", which was D-011's cache working correctly and being read as a
+# failure). Same modulus as the other two copies now: ~27.8 hours, past any soak this harness runs.
+_CHAOS_TEMPERATURE_K = 300.0 + (int(time.time()) % 100_000) / 100_000.0
 _CHAOS_PAYLOAD: dict[str, Any] = {
     "kind": "reaction",
     "reactants": ["c1ccccc1", "[H][H]", "[H][H]", "[H][H]"],

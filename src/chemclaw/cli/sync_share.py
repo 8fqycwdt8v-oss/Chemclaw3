@@ -98,9 +98,12 @@ async def _drain(name: str, share: DocumentShareSource, *, limit: int) -> SyncRe
     index = default_document_index()
     # Same order as the durable workflow: a vector made by a superseded model is wrong *now*, and
     # this pass reads stored text rather than the share, so it is also the part that still works
-    # when the mount is unavailable.
+    # when the mount is unavailable. Scoped to *this* share's chunking — the command is "sync this
+    # share", and a chunk cut under any other one is either another share's business or about to be
+    # re-cut by the crawl below, in which case refreshing it is paid for and then discarded.
+    chunkings = {share.share_binding().chunking_key}
     while True:
-        refresh = await reembed_stale(index, settings.document_reembed_batch_size)
+        refresh = await reembed_stale(index, chunkings, settings.document_reembed_batch_size)
         if refresh.embedded:
             logger.info("%s: re-embedded %d stale chunk(s)", name, refresh.embedded)
         if not refresh.has_more:

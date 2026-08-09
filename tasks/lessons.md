@@ -1509,3 +1509,79 @@ build the dependency, stand up the service. And when a gate fails for a suspecte
 reason, run it on the unchanged base commit before saying so: "environmental" is a measurement, and
 the base-versus-head delta is what turns it into one. Escalating to the user is the right move only
 after the cheap paths are spent, not instead of them.
+
+## A gate's red is a message, not a count (2026-08-08, the review-and-hardening campaign)
+
+I recorded two `tests/test_pka.py` failures as "pre-existing on unchanged `main`", attributed them to
+"an environment difference in the tblite numerics", and briefed **six** lane agents to ignore them.
+All of it was wrong, and the evidence was in the output I had already produced:
+
+```
+E  Failed: Timeout (>180.0s) from pytest-timeout.
+```
+
+Not an assertion failure. The assertions never ran. Confirmed by lifting the cap: `--timeout=0` →
+**2 passed in 1071.49 s**, on a box running four other agents, against a 180 s marker. Nothing about
+a pKa value was ever wrong.
+
+The cost was not the wasted red. It was that a false baseline propagated: the campaign ran for hours
+against a gate state that did not exist, one lane spent its budget refuting my claim, and it reached
+the *right* conclusion ("not a code defect") from the *wrong* evidence ("does not reproduce" — it
+reproduces reliably, under load), which nearly buried the real finding a second time. The same root
+cause turned out to explain every other red the campaign had written off as environmental:
+`test_bo_constraints`, `test_bo_predict` ×2, `test_reizman` — six tests, one cause, hard
+`@pytest.mark.timeout` markers that **override `--timeout` on the command line** and so cannot be
+relaxed for a contended run.
+
+**Rule:** read a failing test's *message* before characterising it. "N failed" is not a diagnosis,
+and the two words that distinguish `Timeout` from `AssertionError` change what the failure means, who
+owns it, and whether it is a defect at all. Never hand a "known failure" to another agent without the
+failure text attached — a baseline is evidence, and evidence gets quoted, not summarised.
+
+## A fix reopens the hole it closes, and only a review over the seam sees it (2026-08-08, same campaign)
+
+Six lanes ran in parallel worktrees, each adversarially reviewed. Every review found roughly seven
+real defects and **about a third were introduced by the fix under review**, repeatedly in the same
+shape: the lane understood the defect class, fixed the named instance, and recreated it one step
+away.
+
+- The lane that moved attachment parsing off the event loop to stop a whole-pod freeze added, four
+  files later, a 422 handler rendering `exc.errors()` — one error object per bad list element, 683,520
+  errors and ~32 MB of response from a 2 MB body, on the same single worker, reachable by any
+  authenticated caller.
+- The lane whose ADR is titled *a partial answer must say so* shipped two truncation flags that were
+  provably `len(hits) == cap` — the exact inference its own docstring condemns — so a complete scan
+  announced itself as partial and a true negative rendered as inconclusive.
+- The lane that fixed a retracted observation keeping its support made a *degraded corpus read*
+  authoritative, rewriting evidence downward: support 3 → 1, measured.
+- And I reintroduced the campaign's own ReDoS one rule over: `_NOT_MID_TOKEN` was added to bound a
+  quadratic JWT pattern, and `_HAS_DIGIT` shipped as `_OPAQUE*\d` in a lookahead — 72 KB in 8.1 s,
+  unauthenticated through the uvicorn access log, 21 s of held logging lock against a 10 s readiness
+  probe.
+
+None of these was visible to the lane that wrote it. Two were invisible to *any* per-lane run: a
+`degraded(..., exc_info=False)` crash that only fires when an earlier test has installed the logging
+filter, and a suite that was **red at HEAD while every lane's own subset was green**.
+
+**Rule:** after fixing a defect class, grep the diff for the class — not the instance — before
+claiming it closed. And a campaign of parallel lanes needs a review *of the seam*, run over the
+combined diff with the whole suite, because a per-lane green is structurally unable to see an
+interaction. Budget it as a phase, not as a formality.
+
+## Delete the row in the commit that closes it — including your own (2026-08-08, same campaign)
+
+`CLAUDE.md` says a `DEFERRED`/`BACKLOG` row whose work is done is deleted in the same commit, because
+a row that outlives its closure reads as live state. I wrote a commit that removed both private MAF
+imports, emptied `_KNOWN_PRIVATE_IMPORTS`, and **left the backlog row still saying "Two modules still
+import `agent_framework._harness._loop`"** — and shipped no ADR for the decision at all. A critic
+pass found both, three hours later.
+
+Worse, the same pass found the campaign's "Refuted by measurement — do not re-open" list instructing
+the next session to skip a *live* defect: "filtered-HNSW recall loss does not exist, because the index
+was never used" had its premise falsified by a later lane that restored the index — and then measured
+recall@10 = 0.116 uniform-random. A refutation is only valid against the tree it was measured on.
+
+**Rule:** a commit that closes a tracked item edits the tracker in the same commit, and a "do not
+re-open" list is re-validated whenever the code under it changes. Notes to the next session are
+load-bearing: the failure mode is not an untidy file, it is a competent successor confidently
+skipping the thing that matters.

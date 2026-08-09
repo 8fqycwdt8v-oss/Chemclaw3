@@ -58,6 +58,14 @@ not exist, and ADR ids with no file — none of which any gate could see.
    correct and nothing was keeping it that way. (The count of keys checked is not written here on
    purpose — it would only go stale the way `.env.example:3` did; if it matters, it is a `len()`
    in a test, not a number in this docstring.)
+8. Every **metric name** written as a whole backticked span must be one `core/metrics.py` declares.
+9. Every **PromQL series selector** (`chemclaw_x{…}`) must too — over a corpus that includes
+   `docs/decisions/`, which rules 5-8 exclude. A wrong series name is worse than a wrong path,
+   because it does not fail: the alert renders, matches nothing, and reads as healthy forever. That
+   is how `chemclaw_degradations_total{subsystem="log_redaction"}` — the only documented alert for
+   the one *security* degradation in this tree, naming a counter that has never existed — passed
+   every gate. `check_metric_citations` carries the measurement for why the two rules have
+   different reach.
 
 **`Makefile` and `.env.example` join the operator corpus for the same reason (F17).** Both are
 operator-facing — a contributor reads them before either document above — and both were outside
@@ -84,8 +92,9 @@ documents is this wider corpus.
 **Why the rules are split by corpus rather than merged.** Rule 2 (every bare `snake_case` token must
 be an agent tool) is safe over skills because that prose talks about tools and almost nothing else.
 Over `SECURITY.md` or the runbook it would fire on every settings name, SQL column, metric and path
-fragment — hundreds of false positives. So agent prose gets rules 1-4, operator prose gets 5-7, and
-each rule names the one namespace it can resolve. That is also what keeps a new rule cheap to argue
+fragment — hundreds of false positives. So agent prose gets rules 1-4, operator prose gets 5-8, the
+one spelling narrow enough to survive a wider corpus gets rule 9, and each rule names the one
+namespace it can resolve. That is also what keeps a new rule cheap to argue
 for: it either has an authoritative resolver or it does not belong here.
 
 **What deliberately stays out.** Counts ("three secrets", "six bundles") are the other half of the
@@ -104,6 +113,7 @@ from pathlib import Path
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import Settings, settings
+from chemclaw.core.metrics import declared_metric_names
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
@@ -220,6 +230,24 @@ _ADR = re.compile(r"\b(D-(?:\d{4}-\d{2}-\d{2}-[a-z0-9-]+|\d{3}|A\d+[a-z]?))\b")
 # (`CHEMCLAW_SERVICE_*`) is not read as a key whose name happens to end there.
 _SUB_DECISION = re.compile(r"\b(D-A\d+[a-z]?)\b")
 _ENV_KEY = re.compile(r"\b(CHEMCLAW_[A-Z0-9_]*[A-Z0-9])\b")
+# A metric name cited as a whole code span — `chemclaw_turns_in_flight`, or the same with a label
+# matcher, `chemclaw_tokens_total{profile}`. The span has to *end* at the name (or its matcher),
+# which is what keeps `` `chemclaw_agent.py` `` out: a module path is not a citation of a series.
+# The label names inside the matcher are not checked here; `tests/test_metric_declarations.py`
+# pins those against `_COUNTER_LABELS` at the call sites, and prose writes them in three
+# abbreviated spellings (`{profile}`, `{profile="fast"}`, `by (subsystem)`) that mean the same
+# thing to a reader and nothing to a resolver.
+_METRIC = re.compile(r"`(chemclaw_[a-z0-9_]+)(?:\{[^`}]*\})?`")
+# A PromQL **series selector**: a metric name immediately followed by a label matcher. This is the
+# one spelling that is unambiguously an instruction to *query*, which is why rule 9 may run it over
+# a corpus rules 5-8 deliberately exclude.
+_METRIC_SELECTOR = re.compile(r"\b(chemclaw_[a-z0-9_]+)\{")
+
+# `chemclaw_`-prefixed names in the operator corpus that are not metrics. One entry, and it is a
+# real namespace collision rather than an exception granted to a mistake: `chemclaw_app` is the
+# Postgres role the service connects as. Explicit and short for the same reason
+# `_NON_SETTINGS_ENV` is — adding one is a review decision.
+_NON_METRIC_NAMES = frozenset({"chemclaw_app"})
 
 # Environment variables that are legitimately not `Settings` fields. Explicit and short, for the
 # same reason `_ALLOWED_NON_TOOLS` is: adding one is a review decision.
@@ -266,6 +294,25 @@ def _operator_sources() -> dict[str, str]:
     if env_example.is_file():
         sources[_ENV_EXAMPLE] = env_example.read_text(encoding="utf-8")
     return sources
+
+
+def _selector_sources() -> dict[str, str]:
+    """Rule 9's corpus: every Markdown document in the tree except the archive.
+
+    Wider than rules 5-8's corpus on purpose. A PromQL selector in a *merged* ADR is still the
+    sentence an operator builds an alert from — `docs/decisions/` is exactly where the one naming
+    a series that has never existed survived every gate — and the selector spelling is narrow
+    enough to carry that reach. `docs/archive/` stays out for the reason it always has: an
+    archived document is a record of what was true then. Dot-directories are skipped so the
+    virtualenv and the worktree metadata are not walked.
+    """
+    archive = _ROOT / "docs" / "archive"
+    return {
+        str(path.relative_to(_ROOT)): path.read_text(encoding="utf-8")
+        for path in sorted(_ROOT.rglob("*.md"))
+        if not any(part.startswith(".") for part in path.relative_to(_ROOT).parts)
+        and archive not in path.parents
+    }
 
 
 def _decision_files() -> list[Path]:
@@ -335,6 +382,49 @@ def check_operator_prose() -> list[str]:
     return problems
 
 
+def check_metric_citations() -> list[str]:
+    """Rules 8-9: a metric name written down for an operator must be one the registry declares.
+
+    The failure this catches is silent in a way the others are not. A path that does not exist is
+    found the moment someone opens it; a series name that does not exist *renders*, as an alert
+    that matches nothing and therefore never fires. `chemclaw_degradations_total{subsystem=
+    "log_redaction"}` was the only documented alert for the one security degradation in this tree
+    and named a counter that has never existed (the counter is `chemclaw_degraded_total`).
+
+    **Two rules, because two spellings carry different amounts of evidence.**
+
+    Rule 8 — a whole backticked span that *is* a metric name — runs over the operator corpus only.
+    Measured there: 13 candidates, 11 declared, and the two that are not are both `chemclaw_app`,
+    the Postgres role.
+
+    Rule 9 — a PromQL series selector, `name{…}` — runs over every Markdown document outside the
+    archive. A label matcher means "query this", which no module path, database role or log marker
+    is ever written as. Measured across the whole tree: 10 selectors, 9 declared, and the tenth was
+    the defect above.
+
+    **Rule 8 deliberately does not get rule 9's reach**, and that is not caution — it is measured.
+    `docs/decisions/` holds five backticked `chemclaw_*` spans that no registry declares, and four
+    of them are *correct*: a module (`chemclaw_agent`), the Postgres role, a log marker
+    (`chemclaw_plans_consumed`), and — the decisive one — `chemclaw_tool_latency_seconds` in
+    D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose, an ADR whose subject is that the
+    runbook named a stale metric. Widening rule 8 over that corpus would fail the build on an ADR
+    for correctly quoting the name it exists to say was wrong, and the fix would be editing a
+    merged decision — which CLAUDE.md forbids and which would be the wrong thing anyway.
+    """
+    declared = declared_metric_names()
+    problems: list[str] = []
+    for origin, text in _operator_sources().items():
+        for name in sorted(set(_METRIC.findall(text)) - _NON_METRIC_NAMES - declared):
+            problems.append(f"{origin}: names the metric `{name}`, which no registry declares")
+    for origin, text in _selector_sources().items():
+        for name in sorted(set(_METRIC_SELECTOR.findall(text)) - declared):
+            problems.append(
+                f"{origin}: queries {name}{{…}}, which no registry declares — an alert built "
+                "from this reads an empty series forever and looks healthy"
+            )
+    return problems
+
+
 def check_prose_contract() -> list[str]:
     """Return one problem string per violation; empty means the prose matches the tool surface."""
     # One definition of the union, shared with the two other validators and the agent itself, so a
@@ -359,13 +449,16 @@ def check_prose_contract() -> list[str]:
 
 def main() -> int:
     """CLI: report every prose/capability mismatch; non-zero exit fails the CI gate."""
-    problems = check_prose_contract() + check_operator_prose()
+    problems = check_prose_contract() + check_operator_prose() + check_metric_citations()
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
         print(f"\n{len(problems)} prose/capability mismatch(es)", file=sys.stderr)
         return 1
-    print("prose contract OK: every named tool, note type, path, ADR id and config key resolves")
+    print(
+        "prose contract OK: every named tool, note type, path, ADR id, config key and metric "
+        "resolves"
+    )
     return 0
 
 

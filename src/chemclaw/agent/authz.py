@@ -68,17 +68,19 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset({"request_development_report"
 # configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
 # every *read* tool stays open (the dev-friendly posture), but a tool that launches a job or
 # mutates state must never be callable by any authenticated user just because nobody remembered
-# to gate it — writes are closed by default, opened by explicit operator config. The index_*
-# entries are defense in depth: the MCP `allowed_tools` boundary already keeps them off the
-# agent (D-029), so this gate only matters if an operator ever widens that list.
+# to gate it — writes are closed by default, opened by explicit operator config.
+#
+# The `index_molecule`/`index_reaction` entries were removed with the tools themselves
+# (D-2026-08-08-a-served-tool-is-a-reachable-tool): they were served on the unauthenticated `/mcp`
+# port, declared by no manifest, and called by nothing — the ELN sync writes the fingerprint index
+# in process. A deny-list entry for a name nothing serves reads as a control and is not one, and
+# nothing validates these names against the live tool surface.
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
         "compute_dft_energy",  # launches a durable HPC/DFT run
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
-        "index_molecule",  # mutates the fingerprint index
-        "index_reaction",  # mutates the fingerprint index
     }
 )
 

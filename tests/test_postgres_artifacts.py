@@ -17,6 +17,7 @@ import asyncio
 
 import pytest
 
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.science.calc.artifacts import ArtifactStore, content_address
 from chemclaw.science.calc.postgres_artifacts import PostgresArtifactStore, default_artifact_store
@@ -130,6 +131,53 @@ def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> N
         assert await store.open(second.content_hash) == b"refreshed hessian" * 5
 
     asyncio.run(_run())
+
+
+def test_relinking_an_artifact_without_a_cost_keeps_what_the_original_run_measured() -> None:
+    """`compute_seconds` is written once and never erased — the eviction ranking depends on it.
+
+    `_UPSERT_LINK` is `ON CONFLICT DO UPDATE`, so any later write to the same `(calc_key, name)`
+    that does not carry a cost would otherwise `SET compute_seconds = NULL`. `put`'s signature
+    makes that the *default* — `compute_seconds` is keyword-only with a `None` default and only
+    `run_cached_with_artifacts` passes one — so a re-`put` from any other path is the ordinary
+    case, not an exotic one.
+
+    A nulled cost is not a cosmetic loss: `_EVICT_TO_FIT` ranks by
+    `COALESCE(MAX(a.compute_seconds) / …, 0)`, and 0 is the bottom of the order. The four-minute
+    Hessian the ranking exists to protect would be evicted *first*, and the next question about
+    that molecule pays for the run again — D-011's cost guarantee inverted by an upsert clause.
+
+    Replacing that line with `compute_seconds = EXCLUDED.compute_seconds,` leaves the whole
+    artifact and eviction suite green (measured: 42 passed).
+    """
+
+    async def _run() -> tuple[float | None, float | None]:
+        store = await _store_or_skip()
+        calc_key = "pgart-cost:1"
+        await store.put(calc_key, "hessian", b"expensive hessian" * 5, compute_seconds=240.0)
+        after_first = await _recorded_cost(calc_key)
+        # The same bytes again from a path that does not time itself — a backfill, a re-index.
+        await store.put(calc_key, "hessian", b"expensive hessian" * 5)
+        return after_first, await _recorded_cost(calc_key)
+
+    recorded, after_rewrite = asyncio.run(_run())
+    assert recorded == 240.0
+    assert after_rewrite == 240.0, (
+        "a costless rewrite erased the measured cost; the blob now ranks at the bottom of the "
+        "eviction order and the expensive run it stands for will be repeated"
+    )
+
+
+async def _recorded_cost(calc_key: str) -> float | None:
+    """The `compute_seconds` stored against a calculation's `hessian` link row."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT compute_seconds FROM calculation_artifacts "
+            "WHERE calc_key = %s AND name = 'hessian'",
+            (calc_key,),
+        )
+        row = await cur.fetchone()
+    return None if row is None or row[0] is None else float(row[0])
 
 
 def test_list_for_orders_by_name_and_is_scoped_to_its_own_calculation() -> None:

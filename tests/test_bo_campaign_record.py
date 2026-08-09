@@ -21,12 +21,14 @@ from typing import Any
 
 import pytest
 
+from chemclaw.core.ids import stable_hash
 from chemclaw.science.bo.campaign_record import (
     _IDENTIFYING_EXCLUSIONS,
     _SPACE_FIELDS,
     Campaign,
     InMemoryCampaignStore,
     Suggestion,
+    _space_of,
     campaign_id_for,
     campaign_store,
     read_campaign_thread,
@@ -108,6 +110,46 @@ def test_descriptors_do_not_change_a_campaign_s_identity() -> None:
         }
     )
     assert campaign_id_for(featurized) == campaign_id_for(bare)
+
+
+def _ordering_problem(
+    parameters: list[ContinuousParameter | CategoricalParameter],
+) -> OptimizationProblem:
+    """One problem over exactly `parameters`, in the order given."""
+    return OptimizationProblem(
+        parameters=parameters, objectives=[Objective(name="yield", direction="maximize")]
+    )
+
+
+def test_the_order_the_space_was_written_in_does_not_fork_the_campaign() -> None:
+    """The same decision space is one campaign however the caller happened to list it.
+
+    Constraint *terms* were already canonicalized against precisely this failure (`_canonical`),
+    and the two lists beside them were not: `[temperature, solvent]` and `[solvent, temperature]`
+    hashed to two ids, and reversing the categories gave a third — three empty histories over one
+    optimization, which is the fork `read_campaign_thread` exists to prevent.
+
+    Parameter order is provably inert: measured with a fixed seed, `[T, E, S]` and `[S, E, T]`
+    propose byte-identical candidates. Category order moves the acquisition optimizer slightly
+    (a bare `CategoricalInput` is ordinally encoded), which is why only the *identity* payload is
+    sorted — the problem the surrogate sees keeps the caller's order.
+    """
+    temperature = ContinuousParameter(name="temperature", lower=20.0, upper=120.0)
+    solvent = CategoricalParameter(name="solvent", categories=["THF", "toluene"])
+    reversed_solvent = CategoricalParameter(name="solvent", categories=["toluene", "THF"])
+
+    canonical = campaign_id_for(_ordering_problem([solvent, temperature]))
+    assert campaign_id_for(_ordering_problem([temperature, solvent])) == canonical
+    assert campaign_id_for(_ordering_problem([temperature, reversed_solvent])) == canonical
+    # And it must still tell two genuinely different spaces apart.
+    assert (
+        campaign_id_for(
+            _ordering_problem(
+                [CategoricalParameter(name="solvent", categories=["THF", "DMF"]), temperature]
+            )
+        )
+        != canonical
+    )
 
 
 # --- what a campaign accumulates ------------------------------------------------------------
@@ -360,15 +402,25 @@ def test_the_bo_connector_serves_and_declares_resuming(store: InMemoryCampaignSt
 
 # --- the campaign-id compatibility pins (W3) ---------------------------------------------------
 
-# Captured from `main` **before** the `objectives` migration, by re-running the M-2 script. These
-# are the ids every campaign already in a `bo_campaigns` table was written under. A change that
-# moves any of them does not break a test somewhere — it tells every chemist with a running
-# campaign that their campaign is new, silently, because `read_campaign_thread` cannot find a row
-# it never wrote.
-_BASELINE_IDS = {
+# The ids these three shapes hash to. A change that moves one does not break a test somewhere — it
+# tells every chemist with a running campaign that their campaign is new, silently, because
+# `read_campaign_thread` cannot find a row it never wrote. So each move is a decision, recorded.
+#
+# **They moved once, on purpose**: `campaign_id_for` now canonicalizes the parameter and category
+# order (D-2026-08-08-a-partial-answer-must-say-so), and all three of these shapes happen to be
+# written unsorted. Each landed *on the id its sorted spelling already carried* — the values below
+# were captured from the pre-canonicalization code by hashing each shape rewritten in sorted order,
+# so nothing new was minted: the unsorted spelling joined the sorted one's row. That is also the
+# pin that an already-sorted campaign keeps its id, which is what bounds the re-partition.
+_PRE_CANONICALIZATION_IDS = {
     "continuous-only": "campaign-6958b7edaa261c83",
     "mixed": "campaign-55e5f929fe83a9a5",
     "with-structures": "campaign-109f34eac28892ab",
+}
+_BASELINE_IDS = {
+    "continuous-only": "campaign-a97f5dd910a2cc79",
+    "mixed": "campaign-acfb471df76f2863",
+    "with-structures": "campaign-59d74ed90e64b3f2",
 }
 
 
@@ -405,6 +457,61 @@ def _baseline_problems() -> dict[str, OptimizationProblem]:
 def test_a_single_objective_problem_keeps_the_id_it_had_before_the_migration() -> None:
     """The hard-coded ids are the whole safety net for `objectives` and for the allowlist."""
     for label, problem in _baseline_problems().items():
+        assert campaign_id_for(problem) == _BASELINE_IDS[label], label
+
+
+def _pre_canonicalization_id(problem: OptimizationProblem) -> str:
+    """`campaign_id_for` as it hashed *before* parameter and category order were canonicalized.
+
+    Rebuilt here rather than asserted about, because the claim this pins is a statement about the
+    old algorithm and the old algorithm is gone: the id a shape carried then cannot be recovered by
+    calling the current function, which sorts whatever it is handed. The first assertion below
+    keeps the reconstruction honest — it must reproduce the three ids captured from the parent
+    commit, or this helper has drifted from the code it stands in for.
+
+    Faithful for the three baseline shapes only: none carries a constraint or a second objective,
+    so the two conditional keys of the identity payload are not reproduced here.
+    """
+    space: list[dict[str, Any]] = []
+    for parameter in problem.parameters:
+        dumped = _space_of(parameter)
+        if isinstance(parameter, CategoricalParameter):
+            # The old payload kept the caller's category order, which is precisely the fork.
+            dumped["categories"] = list(parameter.categories)
+        space.append(dumped)  # and the caller's parameter order, unsorted
+    identity = {"space": space, "objective": problem.objective.model_dump(mode="json")}
+    return f"campaign-{stable_hash(identity)}"
+
+
+def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
+    """The one deliberate id move, pinned in both directions so it can never happen quietly.
+
+    Each shape above is written unsorted, so ordering canonicalization had to move it. What is
+    asserted here is *where*: onto the id the same space already carried when written in sorted
+    order, so an already-sorted campaign keeps its row and its unsorted twin merges into it. Rows
+    written under the pre-canonicalization ids are orphaned — a one-time cost, recorded in
+    `BACKLOG.md`, against a fork that would otherwise recur on every re-declaration.
+
+    **This test used to be unable to fail.** It hashed the sorted spelling with the *new* code,
+    which sorts anyway, so its first assertion restated the pin one function above and its second
+    compared two literals; mutations removing either sort left it green. The claim is about the old
+    algorithm, so the old algorithm has to appear — `_pre_canonicalization_id` is it.
+    """
+    for label, problem in _baseline_problems().items():
+        rewritten = [
+            p.model_copy(update={"categories": sorted(p.categories)})
+            if isinstance(p, CategoricalParameter)
+            else p
+            for p in problem.parameters
+        ]
+        sorted_spelling = problem.model_copy(
+            update={"parameters": sorted(rewritten, key=lambda p: p.name)}
+        )
+        # As written, the shape used to hash here — the row now orphaned.
+        assert _pre_canonicalization_id(problem) == _PRE_CANONICALIZATION_IDS[label], label
+        # And its sorted spelling already carried the id it has now: the move is a merge onto an
+        # existing row, not a newly minted one. This is the whole claim.
+        assert _pre_canonicalization_id(sorted_spelling) == _BASELINE_IDS[label], label
         assert campaign_id_for(problem) == _BASELINE_IDS[label], label
 
 

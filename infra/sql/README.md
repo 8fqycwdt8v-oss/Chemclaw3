@@ -7,6 +7,14 @@ schema is **forward-only and additive** — no migration may drop, rename, trunc
 `tests/test_migrations_are_additive.py`). New SQL is a new numbered file; an applied file is never
 edited, because the ledger flags the changed checksum as drift.
 
+That check asks **two** questions, because destroying data and ending the rollback are different
+things with different answers (D-2026-08-08-a-rollback-that-is-not-a-schema-step). Destroying data
+is refused outright. Leaving the *previous image* unable to write — `SET NOT NULL` on an existing
+column, or a dropped or replaced key — is refused unless the migration is listed in
+`_REVIEWED_ROLLBACK_BREAKS` with the statements read and an ADR saying what an operator does
+instead of "deploy the previous image". Exactly one migration is: `041_document_chunk_identity.sql`,
+whose rollback procedure is in that ADR.
+
 `grants/` is not part of that set and is invisible to the runner's non-recursive glob by
 construction. See the note at the bottom.
 
@@ -17,21 +25,31 @@ caller. **Disposal** is what bounds its growth, and a blank there means nothing 
 `docs/planning/BACKLOG.md` row for the tables retention neither prunes nor refuses is the record of
 which those are.
 
-`tests/test_schema_inventory.py` checks this table against the `CREATE TABLE` statements on disk in
-both directions, because an inventory nobody verifies is read, believed, and wrong — the only other
-table inventory in this repository sits in `docs/archive/` and is seventeen migrations stale.
+`tests/test_schema_inventory.py` checks this table against the SQL on disk, because an inventory
+nobody verifies is read, believed, and wrong — the only other table inventory in this repository
+sits in `docs/archive/` and is seventeen migrations stale. It checks the **set** of tables in both
+directions, and the **Migration** column against the statements that name each table. That second
+check is newer than this paragraph, and it was added because the column was itself the example:
+four of twenty-seven rows named only the migration that created the table and omitted a later one
+that added a column to it. **Written by** and **Disposal** stay unchecked on purpose — they are
+judgements, and a test for them would be a second copy of the answer.
+
+A cell lists **every** migration that touches the table, oldest first, so a row answers "when did
+this last change shape". Two files may share a number — `037` is both `037_bo_suggestion_provenance.sql`
+and `037_document_index.sql` — and the cell says `037` once; the ledger tracks whole filenames, so
+the pair applies in filename order and neither shadows the other.
 
 | Table | Migration | Written by | Disposal |
 | --- | --- | --- | --- |
 | `schema_migrations` | 000 | `core/migrate.py` | never — the ledger is the record of its own work, and the runtime role cannot write it at all |
-| `calculation_results` | 001 (+024 indexes) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an HPC run (D-011). Bounded by cost policy, not by a clock |
+| `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an HPC run (D-011). Bounded by cost policy, not by a clock |
 | `molecule_fingerprints` | 002 (+004) | `science/fingerprints/store.py` | — |
 | `reaction_fingerprints` | 003 (+004) | `science/fingerprints/store.py` | — |
 | `audit_events` | 006 (+010, 011, 026) | `agent/audit_store.py` | **refused**: deleting from a hash chain is indistinguishable from the tampering it detects. Safe disposal needs archive-then-reseal — BACKLOG STO-13 |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
-| `session_messages` | 008 (+022) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145), plus in-line compaction on write (D-151) |
+| `session_messages` | 008 (+022, 026) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145), plus in-line compaction on write (D-151) |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
-| `note_index` | 012 (+035) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`); rows for deleted notes are not removed |
+| `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
 | `session_owners` | 013 (+021) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
 | `user_preferences` | 015 | `agent/preferences.py` | — |
 | `predictions` | 016 | `science/calc/calibration.py` | — |
@@ -42,14 +60,14 @@ table inventory in this repository sits in `docs/archive/` and is seventeen migr
 | `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | — (consumed rows are marked, not removed) |
 | `job_records` | 023 (+033) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
 | `observations` | 025 | `memory/observations.py` | stale rows retired by status, not deleted |
-| `note_proposals` | 027 | `kg/proposal_store.py` | — |
+| `note_proposals` | 027 (+036) | `kg/proposal_store.py` | — |
 | `measurements` | 030 | `science/calc/calibration.py` | — |
 | `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | — |
-| `bo_suggestions` | 031 | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
+| `bo_suggestions` | 031 (+037) | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
 | `audit_anchors` | 032 | `agent/audit_anchor.py` | never — an anchor is the evidence a trailing truncation happened, so the runtime role cannot delete one |
 | `turn_costs` | 033 | `agent/turn_cost_store.py` | — |
-| `document_files` | 037 | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
-| `document_chunks` | 037 | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any chunk no remaining file points at. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
+| `document_files` | 037 (+040, 041) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
+| `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
 
 ## Two things the shape of this table will not tell you
 

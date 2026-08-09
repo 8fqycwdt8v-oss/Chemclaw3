@@ -48,17 +48,45 @@ logger = logging.getLogger(__name__)
 ObservationStatus = Literal["open", "promoted", "retired"]
 ObservationOrigin = Literal["corpus-mining", "interaction"]
 
-# Accumulate rather than replace: a second run that sees the same finding backed by another
-# reaction must raise its support, not restate it. Postgres has no array-union operator, so the
-# union is spelled out — `array_agg(DISTINCT ...)` over the concatenation, ordered so the stored
-# value is stable and a no-op run produces a byte-identical row.
-_UPSERT = """
+# **A run is authoritative for the rows it names — when, and only when, it saw the whole corpus.**
+#
+# The union these replace could only ever grow, so a member that left the cluster stayed forever: a
+# reaction re-assayed SUCCESS is dropped by `mine_corpus` before fingerprinting, yet its note id
+# remained in `evidence_note_ids` and kept counting toward `support`. Proved end to end — an
+# observation crossed the promotion threshold on three notes while its own refreshed statement said
+# "failed in 2 runs across 2 projects", so the generated PR body contradicted itself in consecutive
+# paragraphs and cited a documented success as evidence of failure. `retire_stale` cannot reach it
+# either, because the row is still being re-observed. So a complete pass **replaces** both arrays,
+# and support tracks the corpus in both directions.
+#
+# Replacing on *every* pass, however, reintroduces the same defect one layer down: a pass that read
+# only part of the corpus would rewrite evidence *down* and render as an authoritative statement of
+# what the record holds. `chemclaw.durable.memory_jobs.read_corpus` cannot promise completeness —
+# an entry `map_to_ord` rejects is skipped and the read goes on — so it reports whether it was
+# complete, and a partial pass falls back to the union: it may add what it saw and may never delete
+# what it could not see. A retraction it cannot distinguish from an invisible member simply waits
+# for the next complete pass, which is the only pass entitled to make it.
+_REPLACE = """
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
 ON CONFLICT (id) DO UPDATE SET
-    -- The statement restates what the accumulated evidence shows, so it is refreshed rather than
-    -- kept: a row whose evidence says three projects must not still read "two projects".
+    -- The statement restates what the current evidence shows, so it is refreshed rather than kept:
+    -- a row whose evidence says three projects must not still read "two projects".
     statement = EXCLUDED.statement,
+    evidence_note_ids = EXCLUDED.evidence_note_ids,
+    projects_seen = EXCLUDED.projects_seen,
+    last_seen = now()
+"""
+
+# Postgres has no array-union operator, so the union is spelled out — `array_agg(DISTINCT ...)` over
+# the concatenation, ordered so the stored value is stable and a no-op run produces a byte-identical
+# row. The statement is *kept*, not refreshed: it was written by a pass that saw more than this one,
+# and replacing it would leave a "one project" sentence beside three-project evidence — the exact
+# self-contradiction the replacement above exists to remove, arrived at from the other side.
+_ACCUMULATE = """
+INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
+VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
+ON CONFLICT (id) DO UPDATE SET
     evidence_note_ids = (
         SELECT array_agg(DISTINCT e ORDER BY e)
           FROM unnest(observations.evidence_note_ids || EXCLUDED.evidence_note_ids) AS e
@@ -187,9 +215,7 @@ class Observation(BaseModel):
 @asynccontextmanager
 async def _connection() -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     """Borrow a connection with the configured per-statement timeout."""
-    async with db.connection(
-        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
+    async with db.connection(settings.postgres_dsn) as conn:
         yield conn
 
 
@@ -214,20 +240,36 @@ def _observation(row: tuple[Any, ...]) -> Observation:
     )
 
 
-async def record(observations: list[Observation]) -> int:
-    """Upsert observations, accumulating support onto rows that already exist. Returns the count.
+async def record(observations: list[Observation], *, complete: bool) -> int:
+    """Upsert observations. Returns the count.
 
-    Accumulating rather than replacing is what makes support mean anything across runs: the same
-    finding seen again with a different reaction behind it is more supported, not restated.
+    `complete` says whether the pass that produced these read the **whole** corpus. It is required
+    and keyword-only because it decides whether a row may shrink, and a caller that has not thought
+    about it is exactly the caller that must not silently get the authoritative branch:
+
+    - `True` — each observation replaces the row it names, so a member the record has since
+      retracted stops counting instead of backing a promotion forever (`_REPLACE`).
+    - `False` — the pass may only add what it saw (`_ACCUMULATE`). It read part of the corpus, so
+      an absent member is not evidence of a retraction, and deleting on that basis would state a
+      partial reading as the complete one.
+
+    Support accumulates across runs either way; only a complete pass may take it back down.
     """
     if not observations:
         return 0
+    statement = _REPLACE if complete else _ACCUMULATE
+    if not complete:
+        logger.warning(
+            "recording %d observation(s) from a partial corpus read: evidence can only be added "
+            "this pass, so a retraction waits for the next complete one",
+            len(observations),
+        )
     async with _connection() as conn:
         async with conn.cursor() as cur:
             for observation in observations:
                 identified = observation.with_id()
                 await cur.execute(
-                    _UPSERT,
+                    statement,
                     {
                         "id": identified.id,
                         "statement": identified.statement,

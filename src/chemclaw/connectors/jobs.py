@@ -52,6 +52,7 @@ from chemclaw.durable.connector_job import (
     ConnectorJobInput,
     ConnectorJobResult,
     ConnectorJobWorkflow,
+    envelope_from_result,
     failure_reason,
 )
 
@@ -394,6 +395,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     client.get_workflow_handle(workflow_id, result_type=ConnectorJobResult),
                     job.inline_wait_seconds,
                     job.name,
+                    workflow_id,
                 )
                 if existing is not None:
                     return existing
@@ -427,7 +429,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # nothing, correctly: it returns an existing id without starting anything.
         record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
         if job.inline_wait_seconds is not None:
-            finished = await _await_briefly(handle, job.inline_wait_seconds, job.name)
+            finished = await _await_briefly(handle, job.inline_wait_seconds, job.name, workflow_id)
             if finished is not None:
                 # It answered inside the turn, so there is no background work to announce and
                 # nothing for the chemist to poll — the result *is* the tool's return value.
@@ -468,7 +470,9 @@ async def _mark_awaiting_if_harness(job_id: str, job_name: str) -> None:
     await mark_awaiting_job(session, job_id, title=f"Await the {job_name} job {job_id}")
 
 
-async def _await_briefly(handle: Any, budget: float, job_name: str) -> ConnectorJobResult | None:
+async def _await_briefly(
+    handle: Any, budget: float, job_name: str, workflow_id: str
+) -> ConnectorJobResult | None:
     """Wait up to `budget` seconds for a started job, or `None` if it is still running.
 
     `None` means "not finished yet", never "failed": a genuine workflow failure is framed here as a
@@ -492,7 +496,11 @@ async def _await_briefly(handle: Any, budget: float, job_name: str) -> Connector
 
     The result is *validated*, not cast: the envelope is the connector contract, and a
     bundle-authored workflow returning some other shape should fail here by name rather than hand
-    the model an unlabelled dict to interpret.
+    the model an unlabelled dict to interpret. It validates through `envelope_from_result`, the
+    same decode the agent's two waiters use — this site used to call `model_validate` itself and
+    so answered the identical bad result with a raw pydantic `ValidationError`, which
+    `_sanitize_tool_errors` passes through as a written domain message because it is a `ValueError`.
+    Two collectors, one bad input, two different things said to the chemist.
     """
     try:
         finished = await asyncio.wait_for(handle.result(), budget)
@@ -514,4 +522,4 @@ async def _await_briefly(handle: Any, budget: float, job_name: str) -> Connector
         raise ConnectorJobError(
             f"the {job_name!r} job ran and failed: {failure_reason(exc.__cause__ or exc)}"
         ) from exc
-    return ConnectorJobResult.model_validate(finished)
+    return envelope_from_result(workflow_id, finished)

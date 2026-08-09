@@ -28,13 +28,27 @@ def _enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_disabled_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With `budget_enabled` off, check never raises and record books nothing (no change)."""
+    """With `budget_enabled` off, check never raises and record books nothing.
+
+    The second half is the load-bearing one and it used to be asserted only in this docstring:
+    while budgets are off `check` returns before looking at anything, so whether `record` booked
+    is invisible to it, and deleting `record`'s own `if not settings.budget_enabled: return`
+    changed nothing any test could see (measured: 77 tests still passed).
+
+    So the disabled period is *re-read* through an enabled tracker. Nothing must have been
+    booked, because a deployment that turns budgets on — the chart does, `values.yaml` ships
+    `budget_enabled: true` — would otherwise start every already-live session partway through its
+    cap and refuse turns nobody had paid for.
+    """
     monkeypatch.setattr(settings, "budget_enabled", False)
     monkeypatch.setattr(settings, "budget_max_turns_per_session", 1)
     tracker = BudgetTracker()
     tracker.record("s1", "alice", tokens=10_000_000)
     tracker.record("s1", "alice", tokens=10_000_000)
     tracker.check("s1", "alice")  # no cap enforced while disabled
+
+    monkeypatch.setattr(settings, "budget_enabled", True)
+    tracker.check("s1", "alice")  # a cap of 1 turn, and nothing was ever booked against it
 
 
 def test_session_turn_cap_refuses_the_next_turn(

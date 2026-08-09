@@ -12,12 +12,14 @@ business, and this capability scales on its own.
 """
 
 import asyncio
+import logging
+import subprocess
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
 from chemclaw.core.chem import canonical_smiles, substructure_pattern
@@ -64,10 +66,44 @@ from chemclaw.science.calc.xtb_thermo import ThermochemistryResult, ThermoSpec, 
 
 server = FastMCP("calc")
 
+logger = logging.getLogger(__name__)
+
 
 def default_store() -> ResultStore:
     """Return the production result store (Postgres). Overridden in tests."""
     return PostgresStore()
+
+
+async def resolve_calculator_versions() -> None:
+    """Resolve the xTB backend once at startup, off the event loop, before a request needs it.
+
+    `pka_calc_version()` names the optimizer that relaxes the base, so it resolves the backend —
+    and wherever that resolves to the `xtb` binary (always under `xtb_engine=xtb`, and under the
+    `auto` default on any pod that has the binary), it shells out to `xtb --version` on the first
+    call in a process, `lru_cache`d thereafter. `run_cached_pka` guards its own call with
+    `asyncio.to_thread`; three other call sites do not — `_log_prediction` builds the version for
+    the ledger, and `calculator_trust`/`calculator_outliers` reach it through `_calibrated`. So
+    `calculator_trust("pka")`, an ordinary *first* call in a fresh pod, could hold this process's
+    single event loop — every session's stream, not just its own — for up to the 30 s subprocess
+    timeout.
+
+    Guarding each caller would leave the same trap set for the next one, so the resolution is
+    hoisted to the one place a process starts: after this, every call site hits a warm cache and
+    none of them can block. Honest limit: `on_start` is *started*, not awaited (see
+    `connector_app`), so a request arriving in the first milliseconds can still win the race and
+    pay the resolution once — the window is startup-sized, not per-request, and shrinking it
+    further would mean blocking readiness on a diagnostic.
+
+    Swallows its own failures, as the `on_start` contract requires: a connector that refuses to
+    start because it could not ask a binary for its version is strictly worse than one that starts
+    and resolves the version on first use.
+    """
+    try:
+        version = await asyncio.to_thread(pka_calc_version)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("could not resolve the xTB backend at startup: %s", exc)
+        return
+    logger.info("calc connector resolved its calculator version: %s", version)
 
 
 async def _log_prediction(
@@ -423,8 +459,9 @@ async def calculator_trust(property_name: str) -> Calibration:
     has run about 0.4 log units low over 18 measurements" is a far more useful caveat than a generic
     "predictions are uncertain".
 
-    Read `n` first. Below the configured minimum the figures are not yet meaningful — say the
-    calculator has not been calibrated rather than quoting a bias from three points.
+    **Read `verdict` first**, then `n`. A disabled ledger, an empty one and too few points are all
+    "the accuracy is unknown", never "the calculator is accurate" — and the figures are `None`
+    rather than 0.0 in those states so a zero cannot be misread as a measurement.
     `uncertainty_coverage` is the subtle one: a low value means the stated error bars are too
     narrow, so the *uncertainty* is misleading even when the values look close.
 
@@ -457,10 +494,67 @@ class OutlierResidual(BaseModel):
     within_uncertainty: bool | None = None
 
 
+class OutlierReport(BaseModel):
+    """The worst misses, **and whether the ledger was in a position to name any**.
+
+    Why this is not a bare `list[OutlierResidual]`: an empty list meant three things a chemist must
+    never see conflated — the ledger is disabled, nothing has been measured yet, and the filter
+    matched nothing. `calibration_enabled` defaults to **False**, so the shipped deployment served
+    the first of those as an empty list, and this tool's own docstring tells the model that a short
+    list means few measurements. That is the same collapse `Calibration` carries a verdict for; the
+    listing beside it was left without one.
+
+    `measured` is the ledger's size *before* `matching` filtered it, which is what separates "no
+    measurement exists" from "no measured molecule contains that fragment" — two answers a chemist
+    testing a hypothesis about a class acts on very differently.
+    """
+
+    calc_type: str
+    enabled: bool
+    measured: int
+    residuals: list[OutlierResidual] = Field(default_factory=list)
+    matching: str = ""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before concluding anything from the length of this list.
+
+        `computed_field` rather than a plain property for the reason `Calibration.verdict` and
+        `FingerprintSearch.verdict` are: a bare property is not serialized, so the sentence would
+        never reach the model that writes the answer.
+        """
+        if not self.enabled:
+            return (
+                "CALIBRATION NOT RECORDED: the prediction ledger is disabled, so no "
+                f"{self.calc_type} prediction has ever been scored against a measurement. An "
+                "empty list here is NOT evidence that the calculator has no outliers — nothing "
+                "was measured. Say its accuracy is unknown and that an operator must enable the "
+                "ledger."
+            )
+        if not self.measured:
+            return (
+                f"UNCALIBRATED: no measurement has been reconciled against a {self.calc_type} "
+                "prediction of this calculator version, so there is nothing to be wrong about "
+                "yet. Its accuracy is unknown, not good."
+            )
+        if not self.residuals:
+            return (
+                f"No measured molecule contains {self.matching!r}, so this class is untested — "
+                f"the ledger holds {self.measured} measurement(s) of other molecules. This is NOT "
+                "evidence that the calculator handles the class well."
+            )
+        return (
+            f"{len(self.residuals)} of {self.measured} measured molecule(s), worst first. Every "
+            "row is a measurement someone made, so a short list means few measurements, not a "
+            "well-behaved calculator — check `calculator_trust`'s `n`."
+        )
+
+
 @server.tool()
 async def calculator_outliers(
     property_name: str, matching: str = "", limit: int = 10
-) -> list[OutlierResidual]:
+) -> OutlierReport:
     """Show where a calculator was most wrong, molecule by molecule — optionally on one class.
 
     `calculator_trust` answers "how far off is this calculator on average". This answers the
@@ -473,8 +567,9 @@ async def calculator_outliers(
     the whole ledger. If the filtered errors are much larger than the unfiltered ones, say so in
     the answer and treat a prediction for that class as weak evidence.
 
-    Every row is a real measurement someone made, so a short list means few measurements, not a
-    well-behaved calculator. Check `calculator_trust`'s `n` before concluding anything.
+    **Read `verdict` before you read the length of `residuals`.** Every row is a real measurement
+    someone made, so a short list means few measurements, not a well-behaved calculator — and an
+    empty one may mean the ledger is switched off entirely.
 
     Args:
         property_name: A calibrated property — "solubility" or "pka".
@@ -483,25 +578,30 @@ async def calculator_outliers(
         limit: How many to return, largest absolute error first.
 
     Returns:
-        The worst misses, each with what was predicted, what was measured, the signed error, and
-        whether the calculator's own uncertainty covered it.
+        The worst misses — each with what was predicted, what was measured, the signed error, and
+        whether the calculator's own uncertainty covered it — with the ledger's state beside them.
     """
     version, unit = _calibrated(property_name)
-    residuals = await reconciled_for(property_name, version)
-    if matching:
-        residuals = await _only_matching(residuals, matching)
+    measured = await reconciled_for(property_name, version)
+    residuals = await _only_matching(measured, matching) if matching else measured
     worst = sorted(residuals, key=lambda r: abs(r.error), reverse=True)
-    return [
-        OutlierResidual(
-            smiles=r.subject,
-            predicted=r.predicted,
-            observed=r.observed,
-            error=r.error,
-            unit=unit,
-            within_uncertainty=r.within_uncertainty,
-        )
-        for r in worst[: max(1, min(limit, settings.calc_outliers_max_results))]
-    ]
+    return OutlierReport(
+        calc_type=property_name,
+        enabled=settings.calibration_enabled,
+        measured=len(measured),
+        matching=matching,
+        residuals=[
+            OutlierResidual(
+                smiles=r.subject,
+                predicted=r.predicted,
+                observed=r.observed,
+                error=r.error,
+                unit=unit,
+                within_uncertainty=r.within_uncertainty,
+            )
+            for r in worst[: max(1, min(limit, settings.calc_outliers_max_results))]
+        ],
+    )
 
 
 async def _only_matching(residuals: list[Residual], query: str) -> list[Residual]:

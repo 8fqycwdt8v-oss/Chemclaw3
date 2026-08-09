@@ -22,6 +22,7 @@ import asyncio
 
 import httpx
 import pytest
+from starlette.responses import Response
 
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.connectors.identity import (
@@ -245,4 +246,278 @@ def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
             requested_by="user-1",
         ).correlation_id
         == ""
+    )
+
+
+# --- The other half of the credential: something that checks it -------------------------------
+
+
+def test_a_bearer_connector_refuses_an_unauthenticated_mcp_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mode: bearer` was send-only — this file tested the sending half and nothing tested a check.
+
+    `_EnvBearerAuth` above puts an `Authorization` header on every call, and no connector ever read
+    one: `connector_app` took no manifest, the string "Authorization" did not appear in
+    `connectors/server.py`, and `connector-validate` raised no objection. A deployment following
+    the manifest's own advice ("bearer for everything in-cluster") mounted a secret, recorded the
+    control as enabled, and served every tool to anything that could reach the pod. Proved before
+    the fix by completing an unauthenticated MCP handshake against the real app.
+
+    Enforced as middleware rather than a route dependency, and that is why the gap was easy to
+    miss: `/mcp` is `app.mount`ed, and a mount bypasses the enclosing app's dependencies — anything
+    written as `Depends(...)` would have guarded the two routes that need it least.
+
+    `/healthz` stays open deliberately (a kubelet probe carries no identity), so both halves are
+    asserted here or the fix would be a liveness outage rather than a control.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.setenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", "s3cret-token-value")
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
+    )
+    # A context manager so the app's lifespan runs: `/mcp` is the mounted MCP transport and its
+    # session manager is started there, so a bare `TestClient` would fail on the accepted request
+    # for a reason unrelated to authorization.
+    with TestClient(connector_app(FastMCP("probe"), name="probe")) as client:
+        assert client.get("/healthz").status_code == 200, "probes must stay open"
+        assert client.post("/mcp", json={}).status_code == 401
+        assert (
+            client.post(
+                "/mcp", json={}, headers={"Authorization": "Bearer wrong-token"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/mcp", json={}, headers={"Authorization": "Bearer s3cret-token-value"}
+            ).status_code
+            != 401
+        ), "the configured token must reach the MCP transport"
+
+
+def test_a_bearer_connector_with_no_token_configured_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing secret must refuse, not compare against `""` and accept every caller.
+
+    The failure mode this rules out is the one that looks like success: an unset variable making
+    `expected` empty, an empty `Authorization` header matching it, and the connector serving
+    everything while the deployment believes the credential is in force.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.delenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
+    )
+    client = TestClient(connector_app(FastMCP("probe"), name="probe"))
+    assert client.post("/mcp", json={}).status_code == 401
+    assert client.post("/mcp", json={}, headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_a_mode_none_connector_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every shipped bundle declares `auth: mode: none`; the middleware must not appear for them.
+
+    The boundary for those is the NetworkPolicy, which is a deployment decision, not a code one —
+    so adding a check where none is declared would break `make connectors` and the transport tests
+    without any manifest asking for it.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.setattr("chemclaw.connectors.server._declared_bearer_env", lambda name: None)
+    with TestClient(connector_app(FastMCP("probe"), name="probe")) as client:
+        assert client.post("/mcp", json={}).status_code != 401
+
+
+def test_an_unreadable_manifest_makes_the_connector_refuse_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real `_declared_bearer_env`, on the path where it decides whether a control exists.
+
+    The three tests above monkeypatch that function away, so the function that decides whether the
+    connector is guarded at all was executed by none of them — which is how its first version came
+    to fail *open*. `discovered()` parses every bundle in `connectors_dirs` and raises on one bad
+    YAML, so a typo in an operator's prepended directory (the documented PATH-like override), or a
+    mount briefly unreadable at pod start, took every bearer-mode connector in the process
+    anonymous while logging only that it "could not read manifests to resolve its auth mode".
+
+    A control whose absence is decided by a file being unreadable is not a control. The connector
+    now refuses until an operator fixes the manifest.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.registry import ConnectorError
+    from chemclaw.connectors.server import _declared_bearer_env, connector_app
+
+    def _unreadable() -> dict[str, object]:
+        raise ConnectorError("/etc/connectors/other/connector.yaml: invalid manifest")
+
+    monkeypatch.setattr("chemclaw.connectors.registry.discovered", _unreadable)
+    assert _declared_bearer_env("probe") is not None, (
+        "an unresolved auth mode must not read as none"
+    )
+
+    client = TestClient(connector_app(FastMCP("probe"), name="probe"))
+    assert client.get("/healthz").status_code == 200, "probes stay open so the pod can be drained"
+    assert client.post("/mcp", json={}).status_code == 401
+    assert (
+        client.post("/mcp", json={}, headers={"Authorization": "Bearer anything"}).status_code
+        == 401
+    )
+
+
+def test_a_mode_none_bundle_resolves_to_no_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other real-resolution case: every shipped bundle declares `mode: none`.
+
+    Without this, "fail closed on an unreadable manifest" could be satisfied by failing closed
+    always, which would break `make connectors`, the dev composite and the transport tests.
+    """
+    from chemclaw.connectors.server import _declared_bearer_env
+
+    assert _declared_bearer_env("molfp") is None
+    assert _declared_bearer_env("not-a-bundle") is None
+
+
+def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compare_digest` on `str` raises `TypeError` unless both sides are ASCII.
+
+    Starlette decodes header bytes as latin-1, so one non-ASCII byte turned the auth boundary into
+    a 500 with a traceback that any remote party could produce at will — and made "fail closed" a
+    property of an exception handler upstream rather than of the branch written for it.
+
+    Driven through the middleware's own `dispatch` rather than `TestClient`, because httpx encodes
+    outgoing headers as ASCII and refuses to send the bytes a real server accepts. The scope is the
+    shape uvicorn builds: raw bytes, decoded latin-1 by Starlette.
+    """
+    from starlette.requests import Request
+
+    from chemclaw.connectors.server import BearerAuthMiddleware
+
+    monkeypatch.setenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", "s3cret-token-value")
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
+    )
+    middleware = BearerAuthMiddleware(app=None, connector="probe")
+
+    async def _never_called(_request: Request) -> Response:
+        raise AssertionError("the request must not reach the application")
+
+    async def _status_for(raw_header: bytes) -> int:
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": [(b"authorization", raw_header)],
+                "query_string": b"",
+            }
+        )
+        response = await middleware.dispatch(request, _never_called)
+        return int(response.status_code)
+
+    for raw in (b"Bearer \xff", b"Bearer s3cret-token-valu\xe9", b"Bearer \xc3\xa9"):
+        assert asyncio.run(_status_for(raw)) == 401, f"{raw!r} did not produce a clean refusal"
+
+
+def test_a_tool_reads_the_caller_of_the_call_it_serves_not_of_the_handshake() -> None:
+    """The identity a connector stamps on a durable row must be the one that asked for the row.
+
+    `CallerLogMiddleware` binds the caller in `dispatch`, an ASGI task — but a tool body runs in
+    the MCP session-manager task created by `initialize`, so the contextvar it read was whatever
+    the *handshake* set, for the whole life of the MCP session. Measured over the real
+    streamable-HTTP transport, handshaking with alice's headers and then calling the tool with
+    bob's on the same `mcp-session-id`: the tool body read
+    `('alice-oid', 'sess-alice', 'corr-alice')`. The middleware's own log line for that same call
+    printed bob, because it reads the headers directly — so the log and the durable row this
+    feature exists to reconcile disagreed with each other.
+
+    Two docstrings asserted the opposite ("each request runs in its own task context, so a
+    ContextVar set here is already invisible to the next one"; "so one request's identity cannot
+    leak into the next"). Both are corrected, and this is the test that keeps the corrected
+    version true.
+
+    Not a cross-user leak today — two independent MCP sessions showed no bleed — so what this
+    pins is attribution, which is exactly what `caller_provenance` exists to provide.
+    """
+    from fastapi.testclient import TestClient
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.caller import caller_provenance
+    from chemclaw.connectors.server import connector_app
+
+    seen: list[tuple[str, str, str]] = []
+    server = FastMCP("probe")
+
+    @server.tool()
+    def whoami() -> str:
+        """Record the caller the tool body sees."""
+        seen.append(caller_provenance())
+        return "ok"
+
+    def who(name: str) -> dict[str, str]:
+        return {
+            HEADER_ACTOR: f"{name}-oid",
+            HEADER_SESSION: f"sess-{name}",
+            HEADER_CORRELATION: f"corr-{name}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+
+    # `base_url` on a loopback host because `FastMCP`'s transport ships its own DNS-rebinding
+    # guard (`allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"]`), and TestClient's default
+    # `testserver` host is refused with 421 before any of this is reached.
+    with TestClient(
+        connector_app(server, name="probe"), base_url="http://127.0.0.1:8000"
+    ) as client:
+        opened = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "probe", "version": "1"},
+                },
+            },
+            headers=who("alice"),
+        )
+        session_id = opened.headers["mcp-session-id"]
+        client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            headers={**who("alice"), "mcp-session-id": session_id},
+        )
+        client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "whoami", "arguments": {}},
+            },
+            headers={**who("bob"), "mcp-session-id": session_id},
+        )
+
+    assert seen == [("bob-oid", "sess-bob", "corr-bob")], (
+        "a tool called by bob on a session alice opened must be attributed to bob; "
+        f"got {seen} — the caller is frozen at the MCP handshake again"
     )

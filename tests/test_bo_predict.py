@@ -591,3 +591,62 @@ def test_the_defaulted_fold_count_clamps_up_to_two_at_the_observation_floor() ->
     cross-validated at all, and `min(5, 2)` alone would be right here only by coincidence.
     """
     assert surrogate_fit_quality(_problem(), _runs()[:2])[0].folds == 2
+
+
+# --- a point's *values*, not only its parameter names ------------------------------------------
+#
+# `_require_points_match` checked that a point names exactly the declared parameters and never what
+# it names them with. The asymmetry that makes this matter is BoFire's, and it is measured: `tell`
+# runs `validate_experimental`, so the identical mistake in an **observation** already comes back as
+# a plain `ValueError` the connector forwards verbatim; `predict` runs no validation at all, so the
+# same mistake in a **point** arrives as a `KeyError`/`TypeError` that `connectors.server` replaces
+# with "an internal error occurred" — nothing the model can repair from, so it retries.
+
+
+def test_the_tool_refuses_a_point_naming_a_category_the_problem_does_not_have() -> None:
+    """A ligand nobody declared is not an extrapolation — it is a level with no encoding.
+
+    Measured before the fix: `strategy.predict` on `{"solvent": "DMF"}` over a two-level `solvent`
+    raised `KeyError: "None of [Index(['DMF'], dtype='str')] are in the [index]"`, which is neither
+    a `ValueError` nor one of `_SURROGATE_FAILURES`.
+    """
+    with pytest.raises(ValueError, match=r"points\[0\]"):
+        asyncio.run(predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "DMF"}]))
+
+
+def test_the_refusal_names_the_parameter_the_value_and_the_levels_that_exist() -> None:
+    """Which one, and what may it be: that is the whole repair — a bare refusal is a dead end."""
+    with pytest.raises(ValueError) as raised:
+        asyncio.run(predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "DMF"}]))
+    message = str(raised.value)
+    assert "'solvent'" in message
+    assert "'DMF'" in message
+    assert "THF" in message and "toluene" in message
+
+
+def test_the_tool_refuses_a_point_whose_continuous_value_is_not_a_number() -> None:
+    """The same fault in the other direction, measured as a `TypeError` before the fix.
+
+    `{"temperature": "hot"}` reached torch as an object-dtype array ("can't convert np.ndarray of
+    type numpy.object_"), where the same value in an observation already yields BoFire's own "not
+    all values of input feature `temperature` are numerical".
+    """
+    with pytest.raises(ValueError, match=r"points\[0\]"):
+        asyncio.run(
+            predict_outcome(_problem(), _runs(), [{"temperature": "hot", "solvent": "THF"}])
+        )
+
+
+def test_a_point_outside_a_continuous_bound_is_still_answered() -> None:
+    """The documented behaviour the value check must not break.
+
+    "Out-of-range points are answered, not refused" is true of a *range*: the model extrapolates and
+    the widened sd is the honest signal. Pinned because the natural over-fix for the category case —
+    validating every point through `point_in_domain` — would silently turn this documented answer
+    into a refusal, and `point_in_domain` returns False for both.
+    """
+    answer = asyncio.run(
+        predict_outcome(_problem(), _runs(), [{"temperature": 400.0, "solvent": "THF"}], False)
+    )
+    assert not answer.predictions[0].in_domain
+    assert "extrapolating" in answer.predictions[0].summary

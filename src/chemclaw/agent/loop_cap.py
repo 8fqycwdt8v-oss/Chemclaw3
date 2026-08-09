@@ -37,7 +37,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from agent_framework._harness._loop import ShouldContinueCallable, ShouldContinueResult
+from chemclaw.agent.harness_types import ShouldContinueCallable, ShouldContinueResult
 
 
 @dataclass(slots=True)

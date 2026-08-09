@@ -60,6 +60,14 @@ def test_the_reference_store_satisfies_the_protocol() -> None:
     assert isinstance(QdrantVectorStore(client=_FakeClient()), VectorStore)
 
 
+# The chunking these fixtures are cut under. `ChunkRecord` gained a required `chunking_key` in
+# D-2026-08-08-a-derived-index-must-record-what-derived-it: a chunk row's identity is
+# `(doc_id, chunking_key, ordinal)`, because `doc_id` is a content hash shared across shares
+# while the cutting is per-share. These fixtures exercise the point-id contract, which is
+# indifferent to the value — so one constant, named, rather than a literal at each site.
+_CHUNKING = "2000:200"
+
+
 @_sync
 async def test_a_search_ranks_by_similarity_and_drops_non_matches() -> None:
     """Best first, and a vector orthogonal to the query is not a hit at all.
@@ -397,8 +405,20 @@ def test_every_chunk_is_filed_under_its_document_not_under_itself() -> None:
     anywhere. One builder now, so a second caller has nowhere to differ.
     """
     chunks = [
-        ChunkRecord(doc_id="doc-abc", ordinal=0, content="first", embedding=[1.0, 0.0]),
-        ChunkRecord(doc_id="doc-abc", ordinal=3, content="fourth", embedding=[0.0, 1.0]),
+        ChunkRecord(
+            doc_id="doc-abc",
+            chunking_key=_CHUNKING,
+            ordinal=0,
+            content="first",
+            embedding=[1.0, 0.0],
+        ),
+        ChunkRecord(
+            doc_id="doc-abc",
+            chunking_key=_CHUNKING,
+            ordinal=3,
+            content="fourth",
+            embedding=[0.0, 1.0],
+        ),
     ]
     points = _points_for(chunks)
     assert [point.id for point in points] == ["doc-abc#0", "doc-abc#3"]
@@ -415,7 +435,13 @@ async def test_the_adapter_writes_both_the_reference_and_the_group() -> None:
     client = _FakeClient()
     await QdrantVectorStore(client=client).upsert(
         COLLECTION,
-        _points_for([ChunkRecord(doc_id="doc-a", ordinal=2, content="x", embedding=[1.0])]),
+        _points_for(
+            [
+                ChunkRecord(
+                    doc_id="doc-a", chunking_key=_CHUNKING, ordinal=2, content="x", embedding=[1.0]
+                )
+            ]
+        ),
     )
     (_, written) = client.upserted[0]
     assert written[0].payload == {"ref": "doc-a#2", "group": "doc-a"}

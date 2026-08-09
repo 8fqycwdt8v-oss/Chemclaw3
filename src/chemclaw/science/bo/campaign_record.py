@@ -78,6 +78,14 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
     different campaign" failure `read_campaign_thread` exists to prevent.
     """
     dumped = parameter.model_dump(mode="json", include=_SPACE_FIELDS)
+    if isinstance(parameter, CategoricalParameter):
+        # The set of choices is the space; the order they were typed in is not. `["THF","toluene"]`
+        # and `["toluene","THF"]` offer the same experiments and hashed to two campaigns. Sorted
+        # here in the *identity* payload only — the problem the surrogate sees keeps the caller's
+        # order, because a bare `CategoricalInput` is ordinally encoded and reordering it moves the
+        # acquisition optimizer (measured: `equiv` 2.1018 vs 2.0691 on one fixed-seed round). That
+        # jitter is far below experimental resolution; a split history is not.
+        dumped["categories"] = sorted(parameter.categories)
     if (
         isinstance(parameter, CategoricalParameter)
         and parameter.structures is None
@@ -125,8 +133,18 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     **Descriptors are excluded when they were computed from the structures, and included when the
     caller stated them** — see `_space_of`. Constraints are canonicalized so the order the caller
     happened to write a sum in cannot fork a campaign — see `_canonical`.
+
+    **The parameter list and each parameter's categories are canonicalized for the same reason**,
+    which the constraint fix did not extend to them: a space is a set of axes, and the order a
+    caller listed them in carries no information — measured, `[T, E, S]` and `[S, E, T]` propose
+    byte-identical candidates under a fixed seed — yet each ordering minted its own campaign with
+    its own empty history. `objectives` is deliberately *not* sorted: the lead objective is
+    privileged (`Campaign.objective`, `_objective_output`), so their order is semantic.
     """
-    space = [_space_of(parameter) for parameter in problem.parameters]
+    space = sorted(
+        (_space_of(parameter) for parameter in problem.parameters),
+        key=lambda dumped: str(dumped["name"]),
+    )
     # The legacy key, always, spelled exactly as it was. A single-objective problem must hash to the
     # byte-identical payload it hashed to before `objectives` existed, or every recorded campaign
     # becomes unreachable — `read_campaign_thread` would tell each chemist their campaign is new.

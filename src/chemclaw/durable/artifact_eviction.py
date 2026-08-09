@@ -122,10 +122,7 @@ async def evict_cold_artifacts() -> EvictionOutcome:
         outcome.skipped.append("artifact eviction disabled (no idle window, no size ceiling)")
         return outcome
 
-    async with connection(
-        settings.postgres_dsn,
-        statement_timeout_seconds=settings.pg_statement_timeout_seconds,
-    ) as conn:
+    async with connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             if idle_days > 0:
                 await cur.execute(_EVICT_IDLE, (idle_days,))

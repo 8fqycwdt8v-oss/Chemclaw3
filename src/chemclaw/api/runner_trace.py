@@ -266,9 +266,22 @@ def _result_text(content: Any, /) -> str | None:
 
 
 def approval_prompt(request: Any) -> str:
-    """Render a user-input/approval request as a short prompt string for the UI."""
+    """Render a user-input/approval request as a short prompt string for the UI.
+
+    The attribute scan is the duck-typed part, for a provider that words its own prompt. MAF does
+    not: the only user-input request this codebase actually produces is a
+    `function_approval_request` `Content`, whose `prompt`/`message`/`text`/`description` are all
+    unset and whose subject lives on a nested `function_call`. Falling straight through to the
+    generic string asked a chemist to approve *something* — measured against a real MAF content,
+    which is what `tests/test_runner.py::test_an_approval_request_names_the_tool_it_would_run`
+    now drives, since every fake update in the suite hard-coded `user_input_requests=[]` and this
+    branch had never been executed by a test.
+    """
     for attr in ("prompt", "message", "text", "description"):
         value = getattr(request, attr, None)
         if value:
             return str(value)
+    name = getattr(getattr(request, "function_call", None), "name", None)
+    if name:
+        return f"Approve calling {name}?"
     return "Approval requested."

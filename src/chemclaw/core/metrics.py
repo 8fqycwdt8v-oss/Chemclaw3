@@ -94,6 +94,43 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_audit_sink_failures_total": (
         "GxP audit records that could not be persisted (the trail is incomplete)."
     ),
+    # The durable subsystem's counterpart to `chemclaw_connectors_unreachable_total`. It did not
+    # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
+    # it reads `tool.is_connected` over connector tools and never names Temporal, so a broker
+    # outage produced no server-side signal at all at the shipped log level.
+    # **Turns, not requests, and Temporal, not "a subsystem".** Both halves were briefly untrue: a
+    # second increment sat in `api/middleware._subsystem_unavailable`, which fires per *HTTP
+    # request* for any `SubsystemUnavailableError` — a family that includes `DocumentIndexError`,
+    # i.e. a pgvector failure with no Temporal in it. One series carried two populations with two
+    # different denominators, and `ChemclawDurableUnreachable` alerted on their sum while its
+    # summary said "Temporal is not answering its health probe". The request-path population has
+    # its own counter below; `tests/test_metric_declarations.py` holds this one to its one site.
+    "chemclaw_durable_unreachable_total": (
+        "Turns whose durable-subsystem health probe failed (Temporal did not answer)."
+    ),
+    # The request-path counterpart, and the sibling of `chemclaw_db_unavailable_total` — the same
+    # shape for the same reason: one counter per shedding handler, counting the requests that
+    # handler shed. Which subsystem was unavailable is in the `shedding` log line the handler
+    # writes; it is not a label, because the value would be an exception class name and a bounded
+    # label set that nobody enumerates is the cardinality trap `chemclaw_degraded_total` needed a
+    # dedicated test to stay out of.
+    "chemclaw_subsystem_unavailable_total": (
+        "HTTP requests shed with 503 because a subsystem they needed was unavailable."
+    ),
+    # Non-zero means the provider reported usage this process could not parse, so those turns were
+    # metered at zero. The budget guard meters what this reports, so a non-zero rate here means the
+    # runaway-cost refusal is not binding — while every dashboard shows a deployment costing
+    # nothing. Distinct from "no usage reported at all", which is legitimate and counts nothing.
+    "chemclaw_usage_unreadable_total": (
+        "Streamed usage contents that carried no readable token count (the turn metered zero)."
+    ),
+    # Non-zero means answers are being scored by the citation gate rather than the LLM judge. The
+    # two measure different things (resolvability vs faithfulness), so this is not a slow path — it
+    # is a weaker verdict, and without a counter a judge outage looked identical to a healthy
+    # deployment on every dashboard.
+    "chemclaw_verifier_degraded_total": (
+        "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
+    ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it
@@ -153,6 +190,13 @@ _COUNTERS: dict[str, str] = {
     # is not read as "the LLM endpoint is full".
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
+    ),
+    # The upload cap's own shed, counted separately from the turn admission because the resource
+    # is different: parse slots meter CPU in worker threads, permits meter LLM turns. A pod
+    # refusing every upload and a pod being sent none look identical without this.
+    "chemclaw_attachment_parses_shed_total": (
+        "Uploads refused with 503 because every parse slot was still busy after "
+        "`attachment_parse_queue_seconds`."
     ),
     # The two refusals that happen *before* a turn exists, and so were invisible to every counter
     # above: they are per-request, not per-turn. Unlabelled deliberately — a per-principal series
@@ -220,6 +264,24 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_history_rows_compacted_total": (
         "Stored conversation rows removed by durable compaction after a turn."
     ),
+    # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
+    # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
+    # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,
+    # `durable/publish.py`, `kg/graph.py`) — so a preference store that had stopped writing, a cost
+    # ledger losing every row and a redaction filter that never resolved its token names all read
+    # from outside exactly like a healthy service. Each is individually right to swallow — the
+    # alternative is failing a chemist's turn over telemetry — which is precisely why the swallow
+    # has to leave a number behind.
+    #
+    # One counter with a `subsystem` label rather than one counter per site: the operator question
+    # is "is anything degraded, and what", which is `sum by (subsystem)` over a single series
+    # family, and a per-site counter would make that a union of a dozen metric names that has to be
+    # edited every time a site is added. `agent/audit.py`'s dedicated
+    # `chemclaw_audit_sink_failures_total` stays as it is — a lost GxP record is a named
+    # regulatory fact with its own alert, not a member of a general family.
+    "chemclaw_degraded_total": (
+        "Operations that failed and were continued past with reduced function, by subsystem."
+    ),
 }
 
 # Latency histograms. Two, not more: a turn is the unit a chemist waits on, and a tool call is the
@@ -269,6 +331,12 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
     # profile) rather than anything a caller can name.
     "chemclaw_repeated_tool_calls_total": ("tool",),
+    # The tightest bound of any label here: a subsystem name is a string literal at a `degraded()`
+    # call site, so the whole value set is enumerable from the source and `tests/test_degraded.py`
+    # enumerates it — across both call spellings (`degraded(...)` and `<module>.degraded(...)`) and
+    # both argument forms, since its first version saw only the bare-name positional one and a
+    # per-connector f-string label went past it silently. Nothing a request carries reaches here.
+    "chemclaw_degraded_total": ("subsystem",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes
@@ -309,6 +377,18 @@ _GAUGES: dict[str, str] = {
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
     ),
 }
+
+
+def declared_metric_names() -> frozenset[str]:
+    """Every metric name this registry declares — counters, histograms and gauges together.
+
+    Public because a metric name is a contract with things *outside* this process, and the only
+    other place it is written down is prose: `docs/guides/runbook.md` tells an operator what to
+    query, and an ADR tells them what to alert on. `make prose-validate` resolves those citations
+    against this set (D-2026-08-08). Exposed as one function rather than three tables so a fourth
+    kind of metric cannot be added without every reader of "what is declared" seeing it.
+    """
+    return frozenset(_COUNTERS) | frozenset(_HISTOGRAMS) | frozenset(_GAUGES)
 
 
 class Metrics:
