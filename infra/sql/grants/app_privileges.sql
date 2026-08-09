@@ -62,7 +62,12 @@ BEGIN
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
         'plan_approvals, note_index, sync_cursors, turn_costs, '
-        'molecule_fingerprints, reaction_fingerprints TO %I', app_role);
+        'molecule_fingerprints, reaction_fingerprints, tool_result_links TO %I', app_role);
+    -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
+    -- though retention deletes only the blob: a cascading delete is performed with the referencing
+    -- table's owner privileges, not the deleting role's, so the link rows go without DELETE ever
+    -- being granted on them. Withholding it is not a formality — it is what keeps "the sweep
+    -- deletes blobs and links follow" the only way a link row can disappear.
     -- Insert only: written once and never revised. `bo_suggestions` is a campaign's history, and
     -- the sequence *is* the history (031), so an UPDATE would rewrite it.
     EXECUTE format('GRANT INSERT ON bo_suggestions TO %I', app_role);
@@ -83,7 +88,7 @@ BEGIN
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs, document_files, document_chunks TO %I', app_role);
+        'artifact_blobs, document_files, document_chunks, tool_result_blobs TO %I', app_role);
 
     -- Sequences for every table the role may INSERT into (BIGSERIAL needs USAGE on its sequence).
     -- All of them rather than a list: a sequence confers no read of any table's rows, and an

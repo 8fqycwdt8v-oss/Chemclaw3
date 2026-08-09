@@ -1,13 +1,22 @@
 """Reading a turn's streamed updates: tool-call reassembly and the approval prompt.
 
-Everything here is a pure function of the provider-shaped objects `chemclaw.api.runner` receives
-from `agent.run` — no ambient state, no session, no contextvars. The two wire budgets it applies are
-read from `settings` rather than written as literals, which is the repo's rule for a threshold and
-does not make the functions impure: an ENV value is a constant of the process, not state a turn
-carries. That is why it lives beside the runner
+Everything here is a function of the provider-shaped objects `chemclaw.api.runner` receives from
+`agent.run` and of what the caller injected — **no ambient state, no session, no contextvars**. The
+wire budgets it applies are read from `settings` rather than written as literals, which is the
+repo's rule for a threshold and does not make the functions impure: an ENV value is a constant of
+the process, not state a turn carries. That is why it lives beside the runner
 rather than inside it: the runner's own module is a lifecycle (contextvars, an `AsyncExitStack`, a
 rollback), and this is the one part of the per-turn path that can be exercised by handing it a
 content object and comparing the events that come back.
+
+**`feed` is a coroutine and does one write**, which is the one thing here that is not pure and is
+worth stating rather than hiding. A tool result is now persisted so a surface can fetch the whole
+of it (`api/tool_results.py`), and the write has to happen *before* the event naming it is yielded
+— announcing a ref and then storing the bytes leaves a window in which a client that follows the
+ref finds nothing. The store is reached through an injected `ResultSink`, not through the session
+id or a contextvar, so the sentence above stays literally true: this module still does not know
+what a session is, and a trace built with no sink (every test that does not care, the CLI paths)
+behaves exactly as it did.
 
 Duck-typed throughout, deliberately. MAF's function-call and function-result content classes are
 not stable top-level exports and their shape varies by version, so these match on structure (a
@@ -20,6 +29,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from chemclaw.api.events import Event, ToolCallEvent, ToolResultEvent
+from chemclaw.api.tool_results import ResultSink
 from chemclaw.core.config import settings
 from chemclaw.core.quantities import returned_values
 from chemclaw.kg.note import mentioned_ids
@@ -75,8 +85,16 @@ class ToolCallTrace:
     than importing a concrete type.
     """
 
-    def __init__(self) -> None:
-        """Start an empty trace; one per turn, since every field is scoped to that turn."""
+    def __init__(self, sink: ResultSink | None = None) -> None:
+        """Start an empty trace; one per turn, since every field is scoped to that turn.
+
+        `sink` is where a result's full text is stored so a surface can fetch it back
+        (`api/tool_results.py`); `None` stores nothing and every `result_ref` stays empty, which is
+        the honest state and the one every consumer already has to handle. Injected rather than
+        resolved from the session id here because this class deliberately knows nothing about
+        sessions — see the module docstring.
+        """
+        self._sink = sink
         self._names: dict[str, str] = {}
         self._fragments: dict[str, list[str]] = {}
         # The name of every call already announced, kept so its result can be reported under the
@@ -102,8 +120,13 @@ class ToolCallTrace:
         """
         return list(self._issued.values())
 
-    def feed(self, update: Any) -> list[Event]:
-        """Take one streamed update; return the calls it issued and the results it returned."""
+    async def feed(self, update: Any) -> list[Event]:
+        """Take one streamed update; return the calls it issued and the results it returned.
+
+        A coroutine because storing a result is a database write and it has to complete *before*
+        the event naming it is handed back — see the module docstring. With no sink there is
+        nothing to await and this is a synchronous function wearing `async`.
+        """
         growing: set[str] = set()
         done: set[str] = set()
         results: list[Event] = []
@@ -141,6 +164,11 @@ class ToolCallTrace:
                             preview=text[: settings.agent_audit_max_arg_chars],
                             note_ids=mentioned_ids(text),
                             numbers=_capped_numbers(tool, text),
+                            # The fourth read of the same `text`, and the one that gives a surface
+                            # the result's *shape* rather than its ids and figures. Awaited here
+                            # rather than after the loop so the bytes are durable before the ref
+                            # naming them leaves the process.
+                            result_ref=await _stored_ref(self._sink, tool, text),
                         )
                     )
                 continue
@@ -217,6 +245,38 @@ def _capped_numbers(tool: str, text: str) -> list[float]:
         settings.stream_max_result_numbers,
     )
     return values[: settings.stream_max_result_numbers]
+
+
+async def _stored_ref(sink: ResultSink | None, tool: str, text: str) -> str:
+    """Store `text` and return the ref a surface fetches it by, or `""` when it was not stored.
+
+    Deliberately the same shape as `_capped_numbers` above, because it is the same rule one step
+    further on: the bound comes from `settings` rather than a literal, an over-cap result is
+    *refused rather than trimmed*, and the refusal is logged. Trimming would be the worse failure
+    here — a truncated `ScreenResult` is still valid JSON and would render as a complete hazard
+    screen with flags missing, which is precisely the "silent truncation reads as completeness"
+    problem the numbers cap exists to avoid, made worse by the payload looking whole.
+
+    Measured in bytes, not characters, because the cap is protecting a `BYTEA` column: a result
+    full of multi-byte characters is up to four times its length in what is actually written.
+
+    `""` covers every way a result can fail to be stored — no sink, over the cap, or a write that
+    raised (swallowed one layer down in `session_sink`). One value, one meaning, and none of them
+    fails the turn.
+    """
+    if sink is None or settings.stream_max_result_bytes <= 0:
+        return ""
+    size = len(text.encode("utf-8"))
+    if size > settings.stream_max_result_bytes:
+        logger.warning(
+            "tool %s returned %d bytes, over the %d-byte store cap; its trace event carries no "
+            "result_ref and the full result is not fetchable",
+            tool,
+            size,
+            settings.stream_max_result_bytes,
+        )
+        return ""
+    return await sink(tool, text)
 
 
 def _arguments_complete(fragments: list[str] | None) -> bool:

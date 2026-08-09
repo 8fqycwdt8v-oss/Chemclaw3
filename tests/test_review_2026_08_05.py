@@ -34,7 +34,7 @@ from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
-from tests.fakes import FakeUpdate
+from tests.fakes import FakeUpdate, fed
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -313,8 +313,8 @@ def test_an_empty_fragment_mid_document_does_not_split_one_call_into_two() -> No
     trace = ToolCallTrace()
     events: list[Any] = []
     for chunk in ('{"smi', "", 'les": "CCO"}'):
-        events.extend(trace.feed(_fragment("c1", "predict_pka", chunk)))
-    events.extend(trace.feed(_fragment("c1", "predict_pka", "")))
+        events.extend(fed(trace, _fragment("c1", "predict_pka", chunk)))
+    events.extend(fed(trace, _fragment("c1", "predict_pka", "")))
     calls = [e for e in events if isinstance(e, ToolCallEvent)]
     assert len(calls) == 1
     assert calls[0].arguments == '{"smiles": "CCO"}'
@@ -472,7 +472,7 @@ def test_a_content_with_a_name_but_no_call_id_is_still_traced() -> None:
     """
     trace = ToolCallTrace()
     content = SimpleNamespace(name="find_notes", arguments='{"text": "suzuki"}')
-    events = trace.feed(SimpleNamespace(contents=[content]))
+    events = fed(trace, SimpleNamespace(contents=[content]))
     calls = [event for event in events if isinstance(event, ToolCallEvent)]
     assert [call.tool for call in calls] == ["find_notes"]
 
@@ -489,7 +489,7 @@ def test_an_update_with_no_contents_attribute_is_skipped_rather_than_fatal() -> 
 
 def trace_feed_is_empty(trace: ToolCallTrace, update: Any) -> bool:
     """Feed one update and report that it produced nothing — a name for the assertion above."""
-    return trace.feed(update) == []
+    return fed(trace, update) == []
 
 
 def test_one_unreadable_content_does_not_drop_the_ones_after_it() -> None:
@@ -500,13 +500,14 @@ def test_one_unreadable_content_does_not_drop_the_ones_after_it() -> None:
     function call arrive together — so this silently loses calls.
     """
     trace = ToolCallTrace()
-    events = trace.feed(
+    events = fed(
+        trace,
         SimpleNamespace(
             contents=[
                 SimpleNamespace(text="thinking out loud"),
                 SimpleNamespace(call_id="c1", name="predict_pka", arguments='{"smiles": "CCO"}'),
             ]
-        )
+        ),
     )
     calls = [event for event in events if isinstance(event, ToolCallEvent)]
     assert [call.tool for call in calls] == ["predict_pka"]
@@ -514,13 +515,14 @@ def test_one_unreadable_content_does_not_drop_the_ones_after_it() -> None:
     # The second `continue` too: a fragment for a call this trace never saw opened is skipped, and
     # a real call after it in the same update must still be read.
     fresh = ToolCallTrace()
-    after_orphan = fresh.feed(
+    after_orphan = fed(
+        fresh,
         SimpleNamespace(
             contents=[
                 SimpleNamespace(call_id="never-opened", arguments='{"x":'),
                 SimpleNamespace(call_id="c2", name="find_notes", arguments='{"text": "a"}'),
             ]
-        )
+        ),
     )
     assert [c.tool for c in after_orphan if isinstance(c, ToolCallEvent)] == ["find_notes"]
 
@@ -535,7 +537,7 @@ def test_a_call_flushed_without_a_name_is_announced_under_its_key() -> None:
     """
     trace = ToolCallTrace()
     trace._names["c-keyed"] = "predict_pka"
-    trace.feed(SimpleNamespace(contents=[SimpleNamespace(call_id="c-keyed", arguments='{"a":')]))
+    fed(trace, SimpleNamespace(contents=[SimpleNamespace(call_id="c-keyed", arguments='{"a":')]))
     del trace._names["c-keyed"]  # the opening content is gone, as a replayed stream would leave it
     calls = [event for event in trace.flush() if isinstance(event, ToolCallEvent)]
     assert [call.tool for call in calls] == ["c-keyed"]
@@ -551,8 +553,9 @@ def test_the_result_number_cap_is_a_ceiling_not_an_exclusive_bound(
     """
     exact = ", ".join(str(n + 0.5) for n in range(settings.stream_max_result_numbers))
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.runner_trace"):
-        events = ToolCallTrace().feed(
-            SimpleNamespace(contents=[SimpleNamespace(call_id="c", name="calc", result=exact)])
+        events = fed(
+            ToolCallTrace(),
+            SimpleNamespace(contents=[SimpleNamespace(call_id="c", name="calc", result=exact)]),
         )
     numbers = [getattr(event, "numbers", None) for event in events]
     assert any(n is not None and len(n) == settings.stream_max_result_numbers for n in numbers)

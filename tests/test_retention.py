@@ -29,8 +29,14 @@ from tests.pg import migrated_db_or_skip
 
 
 def test_only_spent_operational_rows_are_prunable() -> None:
-    """The prunable set is closed and small — a new table is a deliberate addition, not a sweep."""
-    assert set(_PRUNABLE) == {"session_events", "session_messages"}
+    """The prunable set is closed and small — a new table is a deliberate addition, not a sweep.
+
+    `tool_result_blobs` is the third and is the one member that holds no *record*: it is the full
+    text of what a tool returned, kept so a surface can render it, and the answers it describes
+    live in `calculation_results` and `job_records`. That is what makes a plain age cutoff the
+    right instrument for it and the wrong one for the three tables refused below.
+    """
+    assert set(_PRUNABLE) == {"session_events", "session_messages", "tool_result_blobs"}
 
 
 def test_the_hash_chained_audit_trail_is_never_pruned() -> None:

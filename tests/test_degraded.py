@@ -43,6 +43,7 @@ _EXPECTED_SUBSYSTEMS = {
     "plan_approval",
     "preferences",
     "skill_manifest",
+    "tool_result_store",
 }
 
 

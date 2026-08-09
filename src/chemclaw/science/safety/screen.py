@@ -58,9 +58,28 @@ class HazardFlag(BaseModel):
 
 
 class ScreenResult(BaseModel):
-    """The flags raised for one molecule or reaction, worst first."""
+    """The flags raised for one molecule or reaction, worst first, and what was screened.
+
+    `screened` is the **canonical** SMILES of every structure this result covers, in the order they
+    were given and deduplicated — the same string `chemclaw.core.chem.require_canonical_smiles`
+    produces, taken off the molecule the screen has already parsed rather than by parsing a second
+    time.
+
+    Two things it fixes, and neither is cosmetic. First, a clean screen used to serialize to
+    `{"flags": [], "verdict": …}` — nothing in the payload said *what* had been screened, so "no
+    rule matched" arrived with no subject, which for a result whose whole discipline is that it
+    must never read as a clearance is the wrong thing to be vague about. Second, it gives a
+    consumer a stable entity key without shipping RDKit: `COc1ccc(Br)cc1` and `BrC1=CC=C(OC)C=C1`
+    are one molecule and two strings, and a surface holding only the caller's spelling cannot know
+    that.
+
+    Deliberately *not* used to rewrite `HazardFlag.matched`, which stays the caller's own spelling:
+    `matched` answers "which input did this rule fire on", and for a pair rule it is `"a + b"`
+    rather than a structure at all.
+    """
 
     flags: list[HazardFlag] = Field(default_factory=list)
+    screened: list[str] = Field(default_factory=list)
 
     @property
     def max_severity(self) -> Severity | None:
@@ -263,7 +282,11 @@ def screen_structure(smiles: str) -> ScreenResult:
         for rule in table.structural
         if len(molecule.GetSubstructMatches(patterns[rule.id])) >= rule.min_matches
     ]
-    return ScreenResult(flags=_sorted(flags))
+    # `Chem.MolToSmiles` on the molecule already in hand *is* what `require_canonical_smiles`
+    # returns for this input — canonicalizing through the string would parse the same SMILES a
+    # second time and raise a second exception type for an input `parse_molecule` has already
+    # accepted.
+    return ScreenResult(flags=_sorted(flags), screened=[str(Chem.MolToSmiles(molecule))])
 
 
 def screen_reaction(component_smiles: list[str]) -> ScreenResult:
@@ -300,7 +323,11 @@ def screen_reaction(component_smiles: list[str]) -> ScreenResult:
             )
             for a, b in matches
         )
-    return ScreenResult(flags=_sorted(flags))
+    # Deduplicated *again* after canonicalizing, because `molecules` is keyed on the caller's
+    # spelling: a reaction listing `CCO` and `OCC` is one substance written twice, and a component
+    # list a surface treats as entities must not show it as two.
+    canonical = list(dict.fromkeys(str(Chem.MolToSmiles(m)) for m in molecules.values()))
+    return ScreenResult(flags=_sorted(flags), screened=canonical)
 
 
 def at_least(severity: Severity | None, threshold: Severity) -> bool:

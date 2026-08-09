@@ -20,6 +20,23 @@ a records story with no disposal story is incomplete.
   repair and bricks the session permanently. So this table is pruned per session through
   `droppable_rows`, which refuses any row whose partner is not also expiring.
 
+- `tool_result_blobs` — the full text of what a tool returned, kept so a surface can fetch it
+  (`api/tool_results.py`, migration 042). This is the table that shows what the three refusals
+  below actually turn on, because it is the one that holds no *record*: the answers are in
+  `calculation_results` and `job_records`, and a trace blob is a view of a turn that already
+  happened, so a swept one costs a chemist a rendering they can ask for again and never a
+  recomputation. That is what makes a plain `created_at` cutoff sufficient here — no LRU, no cost
+  ordering, because ordering evictions by value only pays when what is being ordered is expensive
+  to regenerate, and nothing here is. `tool_result_links.content_hash` is `ON DELETE CASCADE`, so
+  the link rows go with the blob and this sweep needs no orphan pass.
+
+  Its window still defaults to 0 like the others, and that is a deliberate uniformity rather than
+  a considered policy for this table: `retention_enabled` is off by default, so a number here would
+  differ from 0 only for a deployment that switched retention on without stating this window —
+  which is exactly the case `test_retention_is_off_until_a_policy_is_stated` refuses. The cost is
+  that the highest-volume table in this set is unbounded until an operator says otherwise, and
+  `infra/sql/README.md` says so rather than implying a bound that does not exist.
+
 - `audit_events` is **refused**, by design, not by omission. The table is hash-chained
   (`infra/sql/011`), so deleting its oldest rows leaves the surviving head pointing at a `prev_hash`
   that no longer exists — indistinguishable from tampering, which is precisely what the chain is
@@ -72,9 +89,15 @@ from chemclaw.durable.publish import BAD_DATA_RETRY
 # completion, the session waited on it forever, and the harness "awaiting job" todo never flipped.
 # It also destroyed the `system-audit-integrity` and `system-eval-drift` alerts, which by
 # construction are never consumed, so retention silently deleted the tamper evidence.
+#
+# `tool_result_blobs` carries the bare `TRUE` because there is nothing to qualify: every row is a
+# trace blob and every trace blob past its window may go. Its link rows are not listed separately
+# and must not be — they cascade from the blob (042), so listing them would be a second, racing
+# definition of the same disposal.
 _PRUNABLE: dict[str, tuple[str, str]] = {
     "session_events": ("created_at", "consumed_at IS NOT NULL"),
     "session_messages": ("created_at", "TRUE"),
+    "tool_result_blobs": ("created_at", "TRUE"),
 }
 
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
@@ -118,6 +141,7 @@ def _window_days(table: str) -> int:
     return {
         "session_events": settings.retention_session_events_days,
         "session_messages": settings.retention_session_messages_days,
+        "tool_result_blobs": settings.retention_tool_results_days,
     }[table]
 
 

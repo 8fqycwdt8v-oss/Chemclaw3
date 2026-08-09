@@ -1612,3 +1612,31 @@ Rules for myself:
 
 Third instance this campaign of the same shape: the defect sat one step from where the fix was
 applied — sibling rule, neighbouring class, other half of a contract.
+
+## A default that changes nothing is not worth a second rule (2026-08-09)
+
+Building the tool-result store I gave `retention_tool_results_days` a 30-day default, on a sound
+argument: the table holds no *record*, so unlike conversation history there is no GxP policy to
+defer to the operator, and deferring it anyway means an unbounded table. Two tests then failed —
+`test_retention_is_off_until_a_policy_is_stated` pins every window at 0, and the closed `_PRUNABLE`
+set is asserted verbatim.
+
+The second failure was the test working as designed: it exists to force a conscious update, and
+updating it was the right move. The first was not. My instinct was to rewrite the guard with a
+paragraph explaining why my table is special — and the measurement that killed that is one line:
+`retention_enabled` is `False` by default, so on a default deployment 30 deletes exactly as much as
+0 does. The two values differ only for a deployment that switched retention on and did not state
+this window, which is precisely the case that test refuses. The whole argument bought nothing and
+cost a second rule.
+
+Rules for myself:
+
+- Before weakening a guard test to fit a change, compute what the change actually buys **on the
+  configuration that ships**. A principled default guarded by a feature flag that is off is not a
+  default, it is a comment.
+- Distinguish the two kinds of failing invariant test: one that enumerates a set (meant to be
+  edited, deliberately) from one that asserts a rule (meant to be obeyed). Editing the first is the
+  procedure; editing the second needs a reason that survives being measured.
+- When the honest answer is "uniform rule, and the cost is real", write the cost where an operator
+  will meet it — here `infra/sql/README.md`'s Disposal column says this table is unbounded until
+  someone sets a window — rather than in the config comment nobody reads twice.

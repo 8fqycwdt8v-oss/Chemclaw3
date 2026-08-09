@@ -244,6 +244,21 @@ class ToolResultEvent(BaseModel):
     completeness. Measured on real results the cap is far out of reach: 5 values for an ICH
     lookup, 27 for a charge table, 49 for a full electronic-properties calculation, 36 for an
     18-chunk evidence sweep.
+
+    `result_ref` is the third thing the same split produces, and it is what closes it. `note_ids`
+    and `numbers` let a scorer check *ids* and *figures* against the full result; they cannot give
+    a surface the result's **shape**, so a `ScreenResult`'s severities and citations, a
+    `ChargeTable`'s rows and a solvent ranking still reached the chemist as prose about them.
+    This carries a reference to the stored full text — fetched from
+    `GET /sessions/{id}/tool-results/{ref}` — instead of the payload, so the wire budget the preview
+    exists to keep is untouched: a surface pulls the one result it decided to render, once, rather
+    than every result being streamed to every consumer.
+
+    **Empty means "not stored", and it is one meaning with three causes** — the store is off
+    (`stream_max_result_bytes` at 0), the result was over that cap, or the write failed. A consumer
+    has exactly one thing to check, and none of the three ever costs the turn its answer: storing a
+    trace blob is a rendering, and no rendering is worth failing a turn over
+    (`chemclaw.api.tool_results`).
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -251,6 +266,7 @@ class ToolResultEvent(BaseModel):
     preview: str = ""
     note_ids: list[str] = Field(default_factory=list)
     numbers: list[float] = Field(default_factory=list)
+    result_ref: str = ""
 
 
 # The closed taxonomy. Each member is a *different thing for the user to do* — retry, wait, fix the

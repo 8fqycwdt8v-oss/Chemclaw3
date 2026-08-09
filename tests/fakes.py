@@ -27,6 +27,7 @@ files, five of them inside near-identical `async def _drive()` wrappers. It take
 the raw form, which is how a helper ends up used by three call sites out of seven.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -71,3 +72,19 @@ async def asgi_client(app: Any, **client_kwargs: Any) -> AsyncIterator[httpx.Asy
         transport=httpx.ASGITransport(app=app), base_url="http://test", **client_kwargs
     ) as client:
         yield client
+
+
+def fed(trace: Any, update: Any) -> list[Any]:
+    """`trace.feed(update)` driven to completion from a synchronous test.
+
+    `ToolCallTrace.feed` became a coroutine when a tool result grew somewhere to be stored (the
+    write has to land before the event naming it is yielded), and the forty call sites that read
+    it are ordinary `def` tests with no event loop. Turning all forty into `async def` would have
+    made the suite's shape depend on an implementation detail of the trace; this keeps them
+    reading exactly as they did.
+
+    `asyncio.run` per call is honest here rather than wasteful: a trace built with no sink — which
+    is every one of those tests — awaits nothing at all, so the loop is created and torn down
+    around a coroutine that never suspends.
+    """
+    return asyncio.run(trace.feed(update))

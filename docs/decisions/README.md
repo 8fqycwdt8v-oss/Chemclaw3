@@ -310,5 +310,6 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-08-the-inventory-that-vouched-for-itself](D-2026-08-08-the-inventory-that-vouched-for-itself.md) | Seven claims, re-measured, and the two that became tests |
 | [D-2026-08-09-a-connector-we-do-not-run](D-2026-08-09-a-connector-we-do-not-run.md) | Hosting is a deployment fact, and the URL is the whole knob |
 | [D-2026-08-09-a-hand-written-list-of-columns-drifts](D-2026-08-09-a-hand-written-list-of-columns-drifts.md) | Seven review findings against the offboarding and seam work |
+| [D-2026-08-09-a-preview-is-not-a-result](D-2026-08-09-a-preview-is-not-a-result.md) | A preview is not a result, so give the result somewhere to live |
 | [D-2026-08-09-a-scope-that-matches-no-point](D-2026-08-09-a-scope-that-matches-no-point.md) | The group moved to the cutting and the scope stayed at the document |
 | [D-2026-08-09-a-twin-rule-is-one-string](D-2026-08-09-a-twin-rule-is-one-string.md) | A twin rule is one string, and a guard must be measured |

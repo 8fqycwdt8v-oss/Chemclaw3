@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from chemclaw.agent.agent_pool import AgentPool
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
+from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.interaction_tools import (
     approval_owner,
     approval_status,
@@ -59,9 +60,11 @@ from chemclaw.api.middleware import (
 from chemclaw.api.routes import (
     approvals,
     jobs,
+    notes,
     ops,
     plan,
     proposals,
+    results,
     sessions,
     streams,
     turns,
@@ -75,6 +78,7 @@ from chemclaw.api.state import (
     _default_turn_claims,
     _LiveSessions,
 )
+from chemclaw.api.tool_results import load_tool_result
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -102,8 +106,10 @@ __all__ = [
     "approval_status",
     "cancel_job",
     "decide_approval",
+    "expand_note",
     "job_status",
     "list_pending_approvals",
+    "load_tool_result",
     "probe_connectors",
     "request_note_reindex",
     "search_job_records",
@@ -351,7 +357,18 @@ def create_app(
     # stable relative to the pre-split file. Each module registers its handlers on the app
     # directly rather than contributing an `APIRouter` — see any `register` docstring for why
     # `include_router` cannot be used here since FastAPI 0.139.
-    for module in (ops, sessions, turns, streams, plan, approvals, proposals, jobs):
+    for module in (
+        ops,
+        sessions,
+        turns,
+        streams,
+        results,
+        plan,
+        approvals,
+        proposals,
+        notes,
+        jobs,
+    ):
         module.register(app)
 
     if _STATIC_DIR.is_dir():

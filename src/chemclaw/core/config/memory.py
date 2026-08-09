@@ -66,6 +66,21 @@ class MemorySettings(BaseSettings):
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
+    # Stored tool results (`api/tool_results.py`, migration 042) — the highest-volume table this
+    # sweep touches, at up to one row per tool call.
+    #
+    # It was written with a 30-day default first, on the argument that this table holds no *record*
+    # of anything — the answers are in `calculation_results` (D-011) and `job_records` (D-157), so
+    # there is no GxP policy to defer and deferring it only means an unbounded table. The argument
+    # is sound and it buys nothing: `retention_enabled` is False by default, so on a default
+    # deployment a number here deletes exactly as much as 0 does. The only deployment the two
+    # differ for is one that switched retention on and did not state this window — and that is
+    # precisely the case `test_retention_is_off_until_a_policy_is_stated` exists to refuse. One
+    # rule for every window is worth more than a default that changes nothing.
+    #
+    # The cost is stated rather than hidden: until an operator sets this, the table grows, and it
+    # grows faster than the two above it. `infra/sql/README.md` says so in its Disposal column.
+    retention_tool_results_days: int = Field(default=0, ge=0)
     # How many expired sessions one conversation-prune pass may work
     # (D-2026-08-05-a-sweep-that-commits-once). The conversation prune costs three round trips per
     # session — it cannot be one `DELETE`, because whether an expired row may go depends on rows
