@@ -1585,3 +1585,30 @@ recall@10 = 0.116 uniform-random. A refutation is only valid against the tree it
 re-open" list is re-validated whenever the code under it changes. Notes to the next session are
 load-bearing: the failure mode is not an untidy file, it is a competent successor confidently
 skipping the thing that matters.
+
+## A stub blinds the test to the contract it stubs (2026-08-09)
+
+Merging `origin/main` surfaced a total retrieval outage in `ExternalVectorDocumentIndex`: points
+were grouped `doc_id@chunking_key`, the scope handed to `VectorStore.search` was bare `doc_id`, and
+the intersection was empty for every query. Three tests covered the path and all three were green.
+
+Two of them monkeypatched the scope function away. **A stub returns what it was written to return,
+so it can never disagree with its caller — which means it also cannot detect that the real function
+stopped agreeing.** The third called the real query but asserted only that a scope was computed, not
+what shape it had.
+
+Rules for myself:
+
+- When stubbing a collaborator, ask what the stub makes *unobservable*, and make sure some other
+  test observes it. Here the missing one is trivial: drive the real store end-to-end and assert the
+  **score**, since a chunk queried with its own embedding must score 1.0. Content assertions would
+  not have caught it — the content came back right, resolved from the catalogue.
+- An identity change (id, key, group, cache key) is never local. Grep for every other place that
+  *spells* the identity before reviewing whether the new spelling is correct, and prefer making the
+  spelling one shared function so the drift becomes impossible rather than merely caught.
+- "Returns empty" is a camouflaged failure: correctly-empty and catastrophically-empty are
+  indistinguishable at the call site. Any function whose empty result is a legitimate answer needs a
+  test that proves the non-empty case actually happens.
+
+Third instance this campaign of the same shape: the defect sat one step from where the fix was
+applied — sibling rule, neighbouring class, other half of a contract.
