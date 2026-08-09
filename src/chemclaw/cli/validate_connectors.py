@@ -33,14 +33,19 @@ Read-only; touches nothing.
 """
 
 import asyncio
-import importlib
 import inspect
 from pathlib import Path
 from typing import Any
 
 from chemclaw.connectors.jobs import _params_model, build_job_tool, resolve_precondition
 from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
-from chemclaw.connectors.registry import ConnectorError, discovered, enabled, job_tools
+from chemclaw.connectors.registry import (
+    ConnectorError,
+    discovered,
+    enabled,
+    job_tools,
+    server_tools_module,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 
@@ -122,7 +127,11 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     never the third option it looked like.
 
     A bundle with no server module is not a violation: `qm` is job-only, and its capability is a
-    Temporal workflow behind `jobs:` rather than an MCP surface.
+    Temporal workflow behind `jobs:` rather than an MCP surface. A bundle that *has* one and no
+    `server` object in it is a different thing entirely, and used to return the same empty list:
+    the rule then passed without ever asking what is served. All six bundles with an endpoint
+    define `server = FastMCP(...)`, so the only way in is a rename — the change this rule most
+    needs to survive — and it is reported.
 
     Costs one import of every bundle's server package (measured 20.8s for the whole gate, mostly
     rdkit and the ML stack). That is a real cost for a CI gate and it is the price of asking the
@@ -132,25 +141,29 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     """
     if manifest.endpoint is None:
         return []
-    target = f"chemclaw.connectors.{manifest.name}.server.tools"
     try:
-        module = importlib.import_module(target)
+        # `server_tools_module` returns None only for "this bundle has no server module" — `qm` is
+        # job-only, its capability a Temporal workflow behind `jobs:`. A *transitive*
+        # ModuleNotFoundError (a missing rdkit, a renamed dependency) means the bundle is broken and
+        # comes back out of it, because swallowing that made the rule pass vacuously for exactly the
+        # bundle most likely to be misbuilt.
+        module = server_tools_module(manifest.name)
     except ModuleNotFoundError as exc:
-        # Only "this bundle has no server module" is not a violation — `qm` is job-only, its
-        # capability a Temporal workflow behind `jobs:`. A *transitive* ModuleNotFoundError (a
-        # missing rdkit, a renamed dependency) means the bundle is broken, and swallowing it made
-        # the rule pass vacuously for exactly the bundle most likely to be misbuilt.
-        if exc.name == target:
-            return []
         return [f"connector {manifest.name!r}: its server module could not be imported ({exc})"]
     except Exception as exc:
         # Anything else — an ImportError from a submodule, a failure at import time — is reported
         # rather than propagated, so CI prints "connector X: ..." instead of a bare traceback from
         # a validator that never reached its own `main()`.
         return [f"connector {manifest.name!r}: its server module raised on import ({exc!r})"]
+    if module is None:
+        return []
     server = getattr(module, "server", None)
     if server is None:
-        return []
+        return [
+            f"connector {manifest.name!r}: its server module defines no `server`, so this rule "
+            "cannot ask what the bundle actually serves and would pass without checking anything. "
+            "The declared tools stay unverified against the running surface until it is restored"
+        ]
     served = {tool.name for tool in asyncio.run(server.list_tools())}
     return [
         f"connector {manifest.name!r}: tool {tool!r} is served on /mcp but the manifest does not "

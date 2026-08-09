@@ -23,6 +23,7 @@ from chemclaw.core.session_context import (
     reset_current_session_id,
     set_current_session_id,
 )
+from tests.fakes import FakeUpdate
 
 _SPEC = JobSpec.model_validate(
     {
@@ -101,13 +102,6 @@ def test_a_durable_launch_stamps_the_current_session(monkeypatch) -> None:  # ty
     assert client.started and client.started[0].session_id == "sess-42"
 
 
-class _Update:
-    def __init__(self, text: str = "") -> None:
-        self.text = text
-        self.contents: list[object] = []
-        self.user_input_requests: list[object] = []
-
-
 class _EchoSessionAgent:
     """A fake agent whose turn echoes the ambient session id the runner stamped."""
 
@@ -125,7 +119,7 @@ class _EchoSessionAgent:
         **_run_options: Any,
     ) -> object:
         async def _gen() -> object:
-            yield _Update(text=get_current_session_id() or "NONE")
+            yield FakeUpdate(text=get_current_session_id() or "NONE")
 
         return _gen()
 

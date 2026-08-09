@@ -19,6 +19,7 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.documents.external_index import (
     ExternalVectorDocumentIndex,
     _points_for,
+    group_key,
     parse_point_id,
     point_id,
 )
@@ -513,11 +514,13 @@ async def test_an_unfiltered_search_is_still_scoped_to_its_own_source(
     # The catalogue lookup is the part that needs a database; stub it, since what is under test is
     # whether a scope is passed at all.
     async def _eligible(source: str, filters: DocumentFilter) -> set[str]:
-        return {"doc-a", "doc-b"}
+        return {group_key("doc-a", "400:40"), group_key("doc-b", "400:40")}
 
-    monkeypatch.setattr(index, "_eligible_documents", _eligible)
+    monkeypatch.setattr(index, "_eligible_cuttings", _eligible)
     await index.search_dense("share-A", [1.0, 0.0], 8, DocumentFilter())
-    assert store.scopes == [{"doc-a", "doc-b"}], "an unfiltered search reached the store unscoped"
+    assert store.scopes == [{"doc-a@400:40", "doc-b@400:40"}], (
+        "an unfiltered search reached the store unscoped"
+    )
 
 
 @_sync
@@ -531,7 +534,7 @@ async def test_a_source_with_no_eligible_documents_returns_nothing(
     async def _none_eligible(source: str, filters: DocumentFilter) -> set[str]:
         return set()
 
-    monkeypatch.setattr(index, "_eligible_documents", _none_eligible)
+    monkeypatch.setattr(index, "_eligible_cuttings", _none_eligible)
     assert await index.search_dense("share-A", [1.0, 0.0], 8, DocumentFilter()) == []
     assert store.scopes == [], "an empty scope still reached the store"
 
@@ -588,8 +591,8 @@ class _FakeCursor:
     async def execute(self, sql: str, params: Any = None) -> None:
         self._executed.append(sql)
 
-    async def fetchall(self) -> list[tuple[str]]:
-        return [("doc-a",), ("doc-b",)]
+    async def fetchall(self) -> list[tuple[str, str]]:
+        return [("doc-a", "400:40"), ("doc-b", "4000:400")]
 
     async def __aenter__(self) -> "_FakeCursor":
         return self
@@ -614,22 +617,29 @@ class _FakeConnection:
 async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_eligible_documents` has no fast path, because the source is always a restriction.
+    """`_eligible_cuttings` has no fast path, because the source is always a restriction.
 
     The stronger half of the source-scoping fix. The sibling test above pins that `search_dense`
     forwards whatever scope it is given; this one pins that a scope is actually *computed* for an
     unfiltered query — the exact short-circuit that shipped the bug, and the one a future
     optimization would be tempted to reintroduce.
+
+    It also pins the *shape* of what is computed, which the sibling cannot: a stubbed
+    `_eligible_cuttings` returns whatever the stub was written to return, so when the points moved
+    to `doc_id@chunking_key` and this query kept selecting bare doc ids, both sibling tests stayed
+    green while every real dense search returned nothing. The scope must be spelled in `group_key`
+    terms and must carry the chunking, because that is what the points are filed under.
     """
     executed: list[str] = []
     index = ExternalVectorDocumentIndex(_RecordingStore())
     monkeypatch.setattr(index, "_connection", lambda: _FakeConnection(executed))
 
-    eligible = await index._eligible_documents("share-A", DocumentFilter())
+    eligible = await index._eligible_cuttings("share-A", DocumentFilter())
 
     assert executed, "an unfiltered query returned a scope without asking the catalogue"
     assert "source = %(src)s" in executed[0]
-    assert eligible == {"doc-a", "doc-b"}
+    assert "chunking_key" in executed[0], "a scope that cannot see the cutting cannot match a point"
+    assert eligible == {"doc-a@400:40", "doc-b@4000:400"}
 
 
 @_sync

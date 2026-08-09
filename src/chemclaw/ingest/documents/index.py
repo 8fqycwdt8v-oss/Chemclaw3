@@ -525,26 +525,26 @@ CLAIMED_SQL = (
 # than a join, so a document copied into four folders contributes one row rather than four
 # competing for the same top-k slots. The chunking clause is what keeps a share citing its own
 # cutting when another share holds the same document at a different chunk size.
-_ELIGIBLE = (
-    "EXISTS (SELECT 1 FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
+#
+# Written once and shared by both, rather than spelled twice: eligibility and citation must select
+# over the *same* file rows or a chunk becomes searchable while citing a path that no longer
+# satisfies the filters. Two copies of a five-clause predicate is a divergence waiting for whichever
+# of them gets a sixth clause first.
+_FILE_MATCH = (
+    "FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
     "AND f.chunking_key = c.chunking_key "
     "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
     "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
-    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)) "
+    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)"
 )
+_ELIGIBLE = f"EXISTS (SELECT 1 {_FILE_MATCH}) "
 # The citation, resolved in the same statement: the smallest matching path. Deterministic, so a
 # repeated question cites the same file rather than alternating between copies.
 #
 # Public because `external_index.py` resolves its hits with the identical rule after searching an
 # external store. Two spellings of "which path does this content get cited as" would be two
 # citation policies, and they would diverge the first time either was tuned.
-CITATION_SQL = (
-    "(SELECT min(f.path) FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
-    "AND f.chunking_key = c.chunking_key "
-    "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
-    "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
-    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)) AS path "
-)
+CITATION_SQL = f"(SELECT min(f.path) {_FILE_MATCH}) AS path "
 
 
 class PostgresDocumentIndex:

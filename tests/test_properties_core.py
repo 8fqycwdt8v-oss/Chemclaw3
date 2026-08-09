@@ -32,7 +32,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, assume, given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
@@ -238,7 +238,7 @@ def _notes(draw: st.DrawFn) -> Note:
 
 
 @given(_notes())
-@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=150)
 def test_a_note_survives_the_write_read_round_trip(note: Note) -> None:
     """`parse_note(write(render_note(n))) == n`, quantified rather than asserted in a docstring.
 
@@ -260,7 +260,7 @@ def test_a_note_survives_the_write_read_round_trip(note: Note) -> None:
     dependencies=st.lists(_notes(), max_size=5),
     directory=st.sampled_from(["knowledge", "kg/notes"]),
 )
-@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=100)
 def test_a_submission_writes_each_note_once_with_its_subject_first(
     note: Note, dependencies: list[Note], directory: str
 ) -> None:
@@ -290,7 +290,7 @@ def test_a_submission_writes_each_note_once_with_its_subject_first(
     turns=st.lists(st.integers(min_value=-50, max_value=500), min_size=1, max_size=25),
     cap=st.integers(min_value=1, max_value=8),
 )
-@settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(max_examples=100)
 def test_the_budget_refusal_is_permanent_once_a_cap_is_reached(turns: list[int], cap: int) -> None:
     """A scope that has been refused stays refused — the guard's one safety property.
 
@@ -303,6 +303,13 @@ def test_the_budget_refusal_is_permanent_once_a_cap_is_reached(turns: list[int],
     trustworthy, `_book` clamps with `max(tokens, 0)`, and a clamp that was removed would let a
     bad usage report *refund* a session's budget.
     """
+    # The manual `MonkeyPatch()` is required here and is the one place in this repository that is
+    # true: pytest's `monkeypatch` fixture is function-scoped, and a function-scoped fixture is set
+    # up *once* around a `@given` test while the body runs once per example — so every example
+    # after the first would inherit whatever the previous one left. Hypothesis says so by raising
+    # `HealthCheck.function_scoped_fixture`. Patching and undoing inside the body is what gives
+    # each example a clean tracker. (The `suppress_health_check` that used to sit on `@settings`
+    # here suppressed nothing, because this test takes no fixture for it to fire on.)
     patch = pytest.MonkeyPatch()
     patch.setattr(config, "budget_enabled", True)
     patch.setattr(config, "budget_max_turns_per_session", cap)

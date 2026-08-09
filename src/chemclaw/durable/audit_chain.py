@@ -185,7 +185,9 @@ async def verify_chain(dsn: str | None = None, *, anchor: Anchor | None = None) 
     in `audit_anchors` was restored along with everything else and now agrees with the truncated
     trail. Left None, the newest signed anchor in the database is used, which still catches
     tampering that did not think to rewrite the anchors. No anchor at all (no secret configured, or
-    none taken yet) means the first three checks run and the fourth is skipped.
+    none taken yet) means the first three checks run and the fourth is skipped — but an anchor that
+    exists and cannot be *read* is a reported problem, not a skipped check, because those two are
+    the same `None` and only one of them is benign.
     """
     target = dsn if dsn is not None else settings.postgres_dsn
     check = ChainCheck()
@@ -201,7 +203,7 @@ async def verify_chain(dsn: str | None = None, *, anchor: Anchor | None = None) 
             after = int(str(records[-1][0]))
             if len(records) < page_size:
                 break
-    held_to = anchor if anchor is not None else await latest_anchor(target)
+    held_to, rejected = (anchor, 0) if anchor is not None else await latest_anchor(target)
     if held_to is not None:
         check.problems.extend(
             compare(
@@ -210,5 +212,25 @@ async def verify_chain(dsn: str | None = None, *, anchor: Anchor | None = None) 
                 max_event_id=check.last_id,
                 tip_hash=check.tip_hash,
             )
+        )
+    elif rejected:
+        # **An unreadable control is not an absent one.** Skipping past invalid anchors is right
+        # for a rotated key, but `latest_anchor` bounds that scan, and reaching the bound used to
+        # return a bare None — which this function then treated exactly like "no secret configured"
+        # and "no anchor taken yet", appending nothing. Seventeen `INSERT`s of junk therefore
+        # disabled the high-water mark and reported clean, needing no forgery and no key: the
+        # same bypass `test_one_junk_anchor_does_not_disable_the_high_water_mark` closed at one
+        # row, reopened one bound higher.
+        # `rejected` is what the bounded scan saw, not the table's height — a valid anchor may sit
+        # behind the window, which is why rotating the key back is the first remedy offered.
+        # Neither remedy is `--reseal`: the CLI refuses that while any problem stands, and rightly,
+        # because re-sealing over a trail whose completeness was never confirmed signs whatever is
+        # already missing and makes it the baseline.
+        check.problems.append(
+            f"audit anchor could not be read: the {rejected} newest anchor(s) scanned all failed "
+            "their signature check and no valid anchor was reachable behind them, so the trail "
+            "was NOT held against a high-water mark — restore CHEMCLAW_AUDIT_ANCHOR_SECRET to the "
+            "value these were signed under, or re-run with `--anchor` and the anchor recovered "
+            "from the logs; do not read this as a clean trail"
         )
     return check.problems

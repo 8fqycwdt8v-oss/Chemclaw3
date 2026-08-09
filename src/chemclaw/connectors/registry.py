@@ -23,12 +23,14 @@ profile narrows it afterwards — so a connector can add to what is *offered* an
 """
 
 import asyncio
+import importlib
 import logging
 import os.path
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
 from functools import cache
 from pathlib import Path
+from types import ModuleType
 from typing import Any, assert_never
 
 import httpx
@@ -157,6 +159,33 @@ def enabled() -> list[ConnectorManifest]:
             f"connectors_enabled names unknown connector(s) {unknown}; discovered: {sorted(found)}"
         )
     return [found[name][1] for name in names]
+
+
+def server_tools_module(connector: str) -> ModuleType | None:
+    """A bundle's `server.tools` module, or `None` when the bundle ships no MCP server at all.
+
+    The one definition of "import a bundle's tool functions", because the two validators that do
+    it — `make connector-validate` (does the served surface match the manifest) and
+    `make template-validate` (does a template step pass arguments the tool takes) — had opposite
+    answers to the same question, and only one of them was right.
+
+    Both callers skip an endpoint-less bundle before asking (that is how `qm`, which is jobs-only,
+    never reaches here), so `None` means the narrower thing: a bundle that declares an endpoint and
+    has no module behind it.
+
+    A *transitive* import failure propagates. Only `ModuleNotFoundError` naming this exact module
+    means "no server module"; a missing or renamed dependency underneath it means the bundle is
+    broken, and swallowing that leaves a validator checking less and still reporting success —
+    measured, `validate_templates` resolved 46 signatures instead of 50 and printed "template
+    validation passed" for a bundle that could not be imported at all.
+    """
+    target = f"chemclaw.connectors.{connector}.server.tools"
+    try:
+        return importlib.import_module(target)
+    except ModuleNotFoundError as exc:
+        if exc.name == target:
+            return None
+        raise
 
 
 def declared_note_types() -> frozenset[str]:

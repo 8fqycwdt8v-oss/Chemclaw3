@@ -243,6 +243,17 @@ _METRIC = re.compile(r"`(chemclaw_[a-z0-9_]+)(?:\{[^`}]*\})?`")
 # a corpus rules 5-8 deliberately exclude.
 _METRIC_SELECTOR = re.compile(r"\b(chemclaw_[a-z0-9_]+)\{")
 
+# Metrics a *merged* ADR cites in selector form and the registry no longer declares. Rule 9 reaches
+# into `docs/decisions/` on purpose — that reach caught the one selector naming a series that has
+# never existed — but it thereby takes on the hazard rule 8 refuses: a merged ADR is never edited
+# (CLAUDE.md), so the day a counter is retired or renamed, `make ci` goes red on a document with no
+# legal remedy. Simulated by dropping one counter from `declared_metric_names()`: six merged ADRs
+# carry selectors today and one of them failed immediately. This is that remedy — one reviewed line,
+# the same release valve `_NON_METRIC_NAMES` and `_NON_SETTINGS_ENV` already are. Empty today; an
+# entry is the deliberate act of retiring a series the record still quotes, and it must name a
+# metric no live document depends on, since rule 9 stops checking it everywhere.
+_RETIRED_METRIC_NAMES: frozenset[str] = frozenset()
+
 # `chemclaw_`-prefixed names in the operator corpus that are not metrics. One entry, and it is a
 # real namespace collision rather than an exception granted to a mistake: `chemclaw_app` is the
 # Postgres role the service connects as. Explicit and short for the same reason
@@ -297,21 +308,30 @@ def _operator_sources() -> dict[str, str]:
 
 
 def _selector_sources() -> dict[str, str]:
-    """Rule 9's corpus: every Markdown document in the tree except the archive.
+    """Rule 9's corpus: the operator documents plus all of `docs/`, minus the archive.
 
     Wider than rules 5-8's corpus on purpose. A PromQL selector in a *merged* ADR is still the
     sentence an operator builds an alert from — `docs/decisions/` is exactly where the one naming
     a series that has never existed survived every gate — and the selector spelling is narrow
     enough to carry that reach. `docs/archive/` stays out for the reason it always has: an
-    archived document is a record of what was true then. Dot-directories are skipped so the
-    virtualenv and the worktree metadata are not walked.
+    archived document is a record of what was true then.
+
+    **Enumerated rather than `rglob`ed from the repository root**, which is what it used to be.
+    That walked the *working directory*, not the repository: `make mutants` copies the whole tree
+    into `mutants/`, so a gitignored copy of the docs joined the gate and one probe file dropped
+    there failed `make prose-validate` on a path no commit contains. Measured on this tree: 425
+    files in the corpus with a mutmut copy present, 424 without, and the same hazard applies to any
+    vendored checkout or tool cache at the root. Both roots below carry every selector-bearing
+    document that walk found — 9 of them, `deploy/README.md` plus eight under `docs/` — so the
+    union costs no reach and cannot be widened by build output. A new *documentation* root is one
+    line here, deliberately.
     """
     archive = _ROOT / "docs" / "archive"
+    paths = [_ROOT / name for name in _OPERATOR_DOCS] + sorted((_ROOT / "docs").rglob("*.md"))
     return {
         str(path.relative_to(_ROOT)): path.read_text(encoding="utf-8")
-        for path in sorted(_ROOT.rglob("*.md"))
-        if not any(part.startswith(".") for part in path.relative_to(_ROOT).parts)
-        and archive not in path.parents
+        for path in paths
+        if path.is_file() and archive not in path.parents
     }
 
 
@@ -397,8 +417,9 @@ def check_metric_citations() -> list[str]:
     Measured there: 13 candidates, 11 declared, and the two that are not are both `chemclaw_app`,
     the Postgres role.
 
-    Rule 9 — a PromQL series selector, `name{…}` — runs over every Markdown document outside the
-    archive. A label matcher means "query this", which no module path, database role or log marker
+    Rule 9 — a PromQL series selector, `name{…}` — runs over the operator documents and all of
+    `docs/` outside the archive (`_selector_sources`, which says why that is a list and not a walk).
+    A label matcher means "query this", which no module path, database role or log marker
     is ever written as. Measured across the whole tree: 10 selectors, 9 declared, and the tenth was
     the defect above.
 
@@ -410,6 +431,13 @@ def check_metric_citations() -> list[str]:
     runbook named a stale metric. Widening rule 8 over that corpus would fail the build on an ADR
     for correctly quoting the name it exists to say was wrong, and the fix would be editing a
     merged decision — which CLAUDE.md forbids and which would be the wrong thing anyway.
+
+    **Rule 9 keeps that reach, so it takes on the hazard rule 8 avoids by not reaching, and needs
+    the valve rule 8 does not.** Six merged ADRs carry selectors today: the day a counter is
+    retired or renamed, each of them is a red build on a document nobody may edit. Simulated by
+    dropping one counter from the declared set, exactly one ADR failed.
+    `_RETIRED_METRIC_NAMES` is where such a retirement lands — one reviewed line, the same shape as
+    this module's two other release valves — instead of in the history of a merged decision.
     """
     declared = declared_metric_names()
     problems: list[str] = []
@@ -417,7 +445,7 @@ def check_metric_citations() -> list[str]:
         for name in sorted(set(_METRIC.findall(text)) - _NON_METRIC_NAMES - declared):
             problems.append(f"{origin}: names the metric `{name}`, which no registry declares")
     for origin, text in _selector_sources().items():
-        for name in sorted(set(_METRIC_SELECTOR.findall(text)) - declared):
+        for name in sorted(set(_METRIC_SELECTOR.findall(text)) - declared - _RETIRED_METRIC_NAMES):
             problems.append(
                 f"{origin}: queries {name}{{…}}, which no registry declares — an alert built "
                 "from this reads an empty series forever and looks healthy"

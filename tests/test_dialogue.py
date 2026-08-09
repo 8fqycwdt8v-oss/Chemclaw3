@@ -14,7 +14,6 @@ requested dry run into a real HPC submission).
 """
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +23,7 @@ from chemclaw.agent.dialogue_tools import ask_clarifying_question
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from chemclaw.api.runner import run_turn
+from tests.fakes import FakeUpdate
 
 
 class _AskingAgent:
@@ -41,7 +41,7 @@ class _AskingAgent:
     ) -> Any:
         async def _gen() -> Any:
             await ask_clarifying_question("Which campaign?", ["proj-x", "proj-y"])
-            yield SimpleNamespace(text="", contents=[], user_input_requests=[])
+            yield FakeUpdate()
 
         return _gen()
 
@@ -98,7 +98,7 @@ def test_the_runner_binds_and_clears_the_flag() -> None:
         ) -> Any:
             async def _gen() -> Any:
                 seen.append(is_dry_run())
-                yield SimpleNamespace(text="ok", contents=[], user_input_requests=[])
+                yield FakeUpdate(text="ok")
 
             return _gen()
 

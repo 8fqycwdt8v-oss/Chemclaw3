@@ -20,6 +20,8 @@ from collections.abc import Iterator
 
 import pytest
 
+from tests.fakes import FakeUpdate
+
 
 @pytest.fixture
 def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[object]]:
@@ -194,16 +196,10 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
 
     from chemclaw.api.runner import run_turn
 
-    class _Update:
-        def __init__(self, text: str) -> None:
-            self.text = text
-            self.contents: list[object] = []
-            self.user_input_requests: list[object] = []
-
     class _Agent:
         def run(self, message: str, **_options: Any) -> object:
             async def _gen() -> Any:
-                yield _Update("ok")
+                yield FakeUpdate("ok")
 
             return _gen()
 

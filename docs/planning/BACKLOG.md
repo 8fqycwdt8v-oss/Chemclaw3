@@ -3,6 +3,89 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the deep-review fix batch (2026-08-09)
+
+**Migrations 040 and 041 are deliberately not consolidated.** A review argued they should be one
+file: no deployment has ever applied 040 without 041, so the split records the order the author
+discovered things rather than a sequence any operator walks, and `NOT NULL DEFAULT ''` on the
+`ADD COLUMN` would fold 041's two `UPDATE`s and two `SET NOT NULL`s into it. That argument was
+sound when both files were unmerged. **They are now on `main`**, which changes the answer: this
+repository's rule is that a merged migration's statements never change
+(`test_no_merged_migration_had_its_statements_changed`), and consolidating means rewriting one
+merged file and deleting another. Rewriting history to tidy a seam is not worth suspending a rule
+the same campaign spent a lane strengthening — and the checksum guard would be correct to fail it.
+What *is* still worth doing is the 040 header, which promises a tail-drop that 041 then deletes, so
+a reader of 040 alone is told about a mechanism that does not exist.
+*Trigger:* the header seam — any edit to `infra/sql/040_document_chunking_key.sql`. The
+consolidation itself: never, unless the migration set is ever rebuilt from scratch before a first
+production deployment.
+
+
+Five correctness defects found in the hardening campaign's own output; four were fixed in place and
+one was refuted in its remedy. This is the piece deliberately not done.
+
+- [ ] **`logging.handleError` prints a malformed record's raw `msg`/`args` to stderr, unredacted**
+      — [S]. Surfaced by the fix that stopped `SecretRedactingFilter.filter` raising into the
+      caller: a record the filter cannot process now continues to the handler, which fails the same
+      way and routes to `Handler.handleError`, and CPython's `handleError` writes
+      `Message: %r\nArguments: %s` straight from `record.msg`/`record.args`. So a *malformed* call
+      that also carries a credential in its args — `logger.info("connecting to %s %s", dsn)` — puts
+      that DSN on stderr, which in a container is the log stream. This is stock `logging` behavior
+      with no filter installed at all, and the fix restored it rather than creating it; it is listed
+      because this deployment installs a redaction filter precisely to not accept it. Not closed
+      now because every cheap option is wrong: rewriting `record.args` in the except branch would
+      corrupt a record whose malformation was *not* fatal, and `raiseExceptions = False` would
+      silence the malformation report that is the whole point of letting the record through.
+      **Trigger**: a credential found in stderr that the filter should have caught, or any move to
+      a structured/JSON stderr handler (which is the point where owning `handleError` becomes
+      natural).
+
+- [ ] **Carry structured tool results into `turn_evidence`, instead of their serialization** — [M].
+      `api/runner_trace.py` stringifies each tool result and `verifier.turn_evidence` takes
+      `Sequence[str]`, so the judge prompt is handed a JSON blob — envelopes escaped inside string
+      literals, plus `source_note_id`/`retriever`/`score` scaffolding it has no use for. Measured
+      on a 40-chunk `gather_evidence` sweep: 7260 bytes of tool output, of which the framing costs
+      +325 bytes and 80 defanged delimiters. The campaign's `verifier._framed` guard tried to fix
+      this at the wrap and could not — no producer returns a bare envelope, so it never fired once
+      (now deleted, with the reasoning pinned by
+      `test_a_serialized_tool_result_is_framed_once_and_stays_enclosed`). Neither of the two
+      wrap-level alternatives is better: skipping the wrap puts scaffolding at top level in the one
+      prompt that treats `ENVELOPE_TAG` as authoritative, and splitting the blob to frame each gap
+      measured +3565 bytes at 40 chunks. The saving is only available one layer down, by passing
+      the chunks themselves so the judge sees note bodies and their own ids.
+      **Trigger**: a verifier prompt-size or judge-latency problem, or the next change to what
+      `runner_trace.tool_result_text` returns — whichever comes first.
+
+## Open — Left by the gates-and-validators deep fix (2026-08-09)
+
+Six findings on the gates themselves, four of them a validator that could pass vacuously. These are
+what those fixes deliberately did not close.
+
+- [ ] **Rule 9's corpus is now a list, so a selector outside it is unseen** — [S]. `_selector_sources`
+      walked the working directory, which let `make mutants`' gitignored copy of the tree fail
+      `make prose-validate`; it is now the operator documents plus `docs/`. That trades a widening
+      hazard for a narrowing one: a PromQL selector written into a package `README.md`, a `SKILL.md`
+      or `tests/README.md` is no longer checked. Measured at the time of the change: 0 such
+      selectors, all 9 selector-bearing documents still in the corpus. The alternative — deriving
+      the corpus from `git ls-files` — keeps the full reach and cannot see build output either, at
+      the cost of a subprocess and of behaving differently outside a checkout (the tests monkeypatch
+      the root into a `tmp_path`). *Trigger:* the first selector that belongs in a document outside
+      `docs/`, or any second reason to want "the files the repository tracks" as a corpus.
+
+- [ ] **`make template-validate` reports a broken bundle as a traceback** — [S]. A transitive import
+      failure now propagates out of `_resolvable_signatures` instead of being swallowed, which is
+      the point (it used to check less and print "template validation passed"). It exits non-zero
+      and prints a real `ModuleNotFoundError`, where `make connector-validate` — which runs first in
+      `make ci` and names the same bundle — prints a one-line problem. *Trigger:* a second validator
+      needs to survive a broken bundle, i.e. the moment "which bundle" stops being obvious from the
+      gate that already failed.
+
+- [ ] **The old `CHEMCLAW_TEST_TIMEOUT_SCALE` spelling survives in two places** — [XS]. The knob is
+      `PYTEST_TIMEOUT_SCALE` now (it is a pytest knob; the `CHEMCLAW_` prefix is the claim that a key
+      is a `Settings` field, and prose rule 7 enforces exactly that). `tasks/todo.md` still uses the
+      old name in a session log, and so does a merged ADR, which is never edited. Neither is in any
+      gate's corpus. *Trigger:* the next edit to `tasks/todo.md` for any other reason.
+
 ## Open — Left by the pluggable vector store (2026-08-08)
 
 Record: `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The seam ships with a
@@ -305,6 +388,18 @@ are what that change deliberately did not do.
       stated reason false for the molecules newly matched. **Trigger**: a process chemist confirms
       that an inorganic peroxide plus a ketone carries the same TATP-formation hazard, and supplies
       the citation; then widen the pattern *and* the prose together.
+- [ ] **The reagent identity table holds no hydrazine, so it cannot check a hydrazine widening** —
+      [M]. `chemclaw.core.reagents._TABLE` is 87 names over **61** distinct structures, and its only
+      N–N structures are two azides and the triazole of TBTU/HATU. Three places cited it as "83
+      distinct structures" showing a hydrazine widening "matches hydrazinium salts and nothing
+      else"; re-measured, **zero** of the 61 change verdict under any of the three widenings, so the
+      set could never have established that claim (D-2026-08-09-a-twin-rule-is-one-string). The
+      prose is corrected and `tests/test_safety.py::_NOT_A_HYDRAZINE` now carries a 106-structure
+      panel instead. Adding hydrazine, its hydrate and its hydrochloride/sulfate salts to the
+      identity table would make the shared table able to check this itself — and they belong there
+      anyway, since the table's job is resolving what a source calls a reagent. **Trigger**: the next
+      change to `core/reagents`, or the next safety rule whose scope is a class the table should
+      already name; add the hydrazines with their CAS/aliases and re-run the panel.
 - [ ] **`complex-hydride-with-chlorinated-solvent` misses sodium hydride** — [M]. Its `left` arm is
       `[$([AlH4-]),$([BH4-])]`, so `['[H-].[Na+]', 'ClCCl']` raises **nothing** (measured through
       `screen_reaction`), while `oxidizer-with-reductant` already lists `[H-]` among its reductants
@@ -384,14 +479,56 @@ three are what that lane could not close.
       *Trigger:* the next time the two implementations of a filter diverge, or a new filter is added
       to `CalculationQuery`.
 
-- [ ] **Twenty test files each define their own fake streamed update** — [S]. Each hard-codes the
-      fields the runner branches on; `user_input_requests=[]` was one, and it kept the approval
-      branch unexecuted by any test until D-2026-08-08 fixed the one fake in `tests/test_runner.py`
-      to derive it from `contents` the way MAF does. The other nineteen still assert a shape MAF
-      does not have, so the next field the runner learns to read will be invisible to all of them in
-      the same way. One shared builder in `tests/conftest.py`, mirroring `AgentResponseUpdate`,
-      would fix the class rather than the instance.
-      *Trigger:* the next runner change that reads a new attribute off a streamed update.
+- [x] **Twenty test files each define their own fake streamed update** — closed. `tests/fakes.py`
+      holds one `FakeUpdate` whose `user_input_requests` is a property derived from `contents`, as
+      MAF's `AgentResponseUpdate` derives it, and all fourteen files use it: six local `_Update`
+      classes deleted, fourteen inline `SimpleNamespace(..., user_input_requests=[])` sites
+      rewritten. Thirteen of the fourteen previously hard-coded the field empty, so no fake but
+      `test_runner.py`'s could reach the runner's approval branch. `grep user_input_requests
+      tests/` now finds the one definition and no copies. It went to `tests/fakes.py` rather than
+      `conftest.py`: pytest loads `conftest` before every session for fixtures and hooks, and these
+      are helpers a test imports by name.
+
+- [ ] **Six test files define a byte-identical fake agent** — [S]. `create_session(self, *,
+      session_id)` plus a `run(stream=True)` generator, in `test_approvals`, `test_auth`,
+      `test_metrics`, `test_profile_discovery`, `test_runner`, `test_service`,
+      `test_service_events`, `test_disconnect_teardown` and `test_session_context` — nine
+      definitions of one shape. It is the identical argument to the streamed-update row above
+      (closed), and it was left out of that change on purpose: the update fakes had a *measured*
+      defect behind them (an unexecuted approval branch) while these have only duplication, and the
+      nine differ in what their generator yields, so a shared class needs a scripted-updates
+      parameter designed rather than a mechanical substitution. `tests/fakes.py` exists and is
+      where it goes.
+      *Trigger:* the next time the runner learns to call a new method on the agent — at which point
+      all nine go stale together, which is exactly what happened to the update fakes.
+
+- [ ] **488 function-local imports in `tests/`** — [S]. Measured across `tests/*.py`: 530 before
+      the two clusters below were hoisted, 488 after. The largest remaining groups are `settings`
+      ×46, `asyncio` ×12, `Principal/require_principal` ×11, `discovered` ×10, `METRICS` ×9,
+      `TestClient` ×8, `connector_app` ×7. Most defer nothing: `settings` is a
+      singleton whose identity never changes, so a module-scope binding is equivalent, and several
+      files already import these at module scope beside functions that re-import them. The
+      genuinely justified ones — the subprocess probes and the post-`monkeypatch` imports — must
+      keep a comment saying what they defer and why, which is the rule this row is really asking
+      for. Two clusters are already done: `tests/test_logging.py` (24 re-imports of a module it
+      imports at module scope, plus two `import logging as stdlib_logging` in a file whose line 8
+      is `import logging` — two names for one module), and `FastMCP` in the four files this session
+      owned. `tests/test_deploy_chart.py:576` keeps its local `FastMCP` only because that file
+      belonged to a parallel session.
+      *Trigger:* do it as one mechanical pass with its own review, or when a local import is found
+      shadowing a differently-bound module-scope name (the `stdlib_logging` shape).
+
+- [ ] **`.github/workflows/ci.yml` checks out with `fetch-depth: 1`, which makes the migration
+      immutability check unrunnable in CI** — [S], and it is a one-line fix outside `tests/`.
+      `actions/checkout@v4` defaults to a depth-1 clone, where every file looks introduced by the
+      graft commit and `git show <graft>:file` is the working tree's own content. Measured on a
+      depth-1 clone whose `HEAD` already carried a smuggled `ALTER TABLE` appended to a merged
+      `006_audit_events.sql`: `test_no_merged_migration_had_its_statements_changed` reported no
+      edit, with all 42 migrations "compared". The test now counts comparisons that *span* a commit
+      and skips with this instruction rather than passing, so CI reports one honest skip instead of
+      a false green — but the check itself does not run there until the workflow sets
+      `fetch-depth: 0`.
+      *Trigger:* take it with the next change to `.github/workflows/ci.yml`.
 
 ## Open — Left by the mutation-testing lane (2026-08-08, D-2026-08-08-a-survivor-is-a-hypothesis)
 
@@ -500,12 +637,40 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       chunks), so this knob's absence is now felt on both indexes and the document one is the table
       designed for millions of rows. Measured against an exact scan: recall@10 **1.0000** on
       clustered vectors (the shape a real corpus has) and **0.116** on uniformly random ones (the
-      pathological case for any ANN index). **And a `within`/eligibility set makes it worse**: the
-      predicate is a post-filter over the ef_search candidate list, not a bound on the scan, so a
-      selective one returns fewer than k — measured, `Index Scan` + `Rows Removed by Filter`, and
-      5 of 8 rows at `within=0.10` with the index forced. `GraphRetriever` always passes one.
-      No knob exists to trade latency back for recall. *Trigger:* a corpus where a note a chemist
-      knows exists does not come back, or the first recall regression an eval catches.
+      pathological case for any ANN index). **And an eligibility predicate makes it worse**: it is
+      a post-filter over the ef_search candidate list, not a bound on the scan, so a selective one
+      returns fewer than k. **Re-measured, because the number this row used to carry — "5 of 8 at
+      `within=0.10` with the index forced" — does not reproduce.** `enable_seqscan=off` does not
+      force the *vector* index for a `note_id = ANY(...)` scope: `EXPLAIN ANALYZE` at N=20,000,
+      tight clusters, k=8, `ef_search=40` gives `Index Scan using note_index_pkey` + top-N
+      heapsort, which is exact — 8 of 8, and 0 of 20 queries short in every note-index
+      configuration tried, planner or forced. Where the shortfall is real is the *document* index,
+      whose eligibility is an `EXISTS` over `document_files` the planner cannot collapse into a key
+      scan — but it is **small**: same corpus size and k, tables `ANALYZE`d, 2 of 20 queries short
+      at a source holding 90% of the table and 1 of 20 at one holding 0.5%, none at all on
+      uniform-random embeddings. **The large numbers came from stale statistics, not from ANN
+      recall**: before `ANALYZE`, the same statements went short on 13 of 20 and 20 of 20 queries
+      (6 rows of a possible 160 at the narrowest), because the planner was working from default
+      estimates. `hnsw.iterative_scan` is `off` on this server and is the knob that addresses the
+      residual directly; `hnsw.ef_search` is the blunter one. Neither is a setting, and neither is
+      the first thing to reach for — autovacuum's `ANALYZE` on a bulk-loaded corpus is.
+      *Trigger:* a corpus where a note or a document a chemist knows exists does not come back, or
+      the first recall regression an eval catches.
+
+- [ ] **An unfiltered external-store search ranks across every share and can return nothing** —
+      [S]. `ExternalVectorDocumentIndex._eligible_documents` returns `None` when a query carries no
+      tag or date filter, so `VectorStore.search` ranks over the whole collection — which holds
+      every enabled share's points — and `_resolve` then drops the hits belonging to another
+      source. That is exactly the post-filter the scope exists to avoid, moved one level out.
+      Measured against the live catalogue with the reference store: 100 chunks of another share
+      close to the query, 10 of the queried share further away, k=8 → **0 hits of 8**. The fix is to
+      scope unconditionally, and its cost is the residual `_eligible_documents` already states: a
+      `SELECT DISTINCT doc_id` over the source on *every* dense query, which on a single-share
+      million-document deployment (the common shape) is the expensive end of the same trade. A
+      per-source collection is not an escape — a document held by two shares has one chunk set and
+      one embedding call by design, which is what makes a TB share affordable. Unreachable while
+      `vector_store_provider` is `pgvector`. *Trigger:* the first deployment that sets a non-pgvector
+      provider, or the first that enables a second document share.
 
 - [ ] **`chunking_key` names the chunk *settings*, not the chunker** — [S]. `041` made
       `(doc_id, chunking_key, ordinal)` a chunk row's identity, and `chunking_key` is
@@ -1275,14 +1440,6 @@ the `D-2026-08-01-*` ADRs). These are what the fixes uncovered and deliberately 
   because the sole `connect()` caller on that path runs in the front door, not the MCP server — a
   trap for the first connector server that needs Temporal. Not fixed because no `helm` binary and
   no cluster exist here to render the change against.
-- [ ] **REV-4 [Low] — four hazard rules are narrow rather than wrong.** From the rule-by-rule audit
-  (~90 molecules): `peroxide` and `n-halamine` miss the sanitised ionic spellings (Na2O2 parses to
-  `[O-][O-]`, both X1; chloramine-T's `[N-]Cl` is X2); `hydrazine`'s `H2,H1` excludes fully
-  substituted free hydrazines such as UDMH while its prose says "free hydrazine motif";
-  `complex-hydride-with-chlorinated-solvent` matches *gem*-dihalides only, so 1,2-dichloroethane
-  does not fire. Recorded rather than widened — widening a cited hazard rule on taste is how a
-  table stops being citable. The azide table's own precedent for the ionic gap was a *separate*
-  rule (`non-carbon-azide`), which is the shape a fix should take.
 - [ ] **REV-5 [Low] — local development needs pgvector >= 0.7.** The migrations use
   `bit_jaccard_ops`; the common distribution package is 0.6.0, so a database stood up from `apt`
   fails to migrate. Pre-existing. CI is unaffected (it provides a pgvector-enabled Postgres), so

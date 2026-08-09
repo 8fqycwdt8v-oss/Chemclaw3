@@ -42,6 +42,7 @@ import inspect
 from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import discovered as discovered_connectors
 from chemclaw.connectors.registry import enabled as enabled_connectors
+from chemclaw.connectors.registry import server_tools_module
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 from chemclaw.templates.registry import TemplateError, discovered, enabled
@@ -74,6 +75,13 @@ def _resolvable_signatures() -> dict[str, inspect.Signature]:
     `make connector-validate`'s question, and answering it twice, differently, here would be worse
     than not answering it.
 
+    **A bundle that cannot be imported is not "skipped", it is broken.** This used to swallow every
+    `ImportError`, transitive ones included, which is the vacuous pass the paragraph below warns
+    against, arrived at from the other direction: one injected missing dependency in `chem` took
+    the resolved set from 50 signatures to 46 and still printed "template validation passed".
+    `server_tools_module` is now the single definition of that import, shared with
+    `make connector-validate`, and it raises rather than returning `None` for that case.
+
     **The agent import is load-bearing, not incidental.** `registered_tools()` is populated as an
     import side effect of `chemclaw.agent.chemclaw_agent`, so without it this returns the connector
     half only: measured, 30 signatures and 31 advertised tools uncovered, against 50 and 11 with it.
@@ -88,9 +96,8 @@ def _resolvable_signatures() -> dict[str, inspect.Signature]:
         endpoint = manifest.endpoint
         if endpoint is None:
             continue
-        try:
-            module = importlib.import_module(f"chemclaw.connectors.{name}.server.tools")
-        except ImportError:
+        module = server_tools_module(name)
+        if module is None:
             continue
         for tool_name in endpoint.tools:
             fn = getattr(module, tool_name, None)

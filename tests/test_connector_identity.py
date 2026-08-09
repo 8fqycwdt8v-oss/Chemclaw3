@@ -22,6 +22,7 @@ import asyncio
 
 import httpx
 import pytest
+from mcp.server.fastmcp import FastMCP
 from starlette.responses import Response
 
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
@@ -272,7 +273,6 @@ def test_a_bearer_connector_refuses_an_unauthenticated_mcp_request(
     asserted here or the fix would be a liveness outage rather than a control.
     """
     from fastapi.testclient import TestClient
-    from mcp.server.fastmcp import FastMCP
 
     from chemclaw.connectors.server import connector_app
 
@@ -311,7 +311,6 @@ def test_a_bearer_connector_with_no_token_configured_fails_closed(
     everything while the deployment believes the credential is in force.
     """
     from fastapi.testclient import TestClient
-    from mcp.server.fastmcp import FastMCP
 
     from chemclaw.connectors.server import connector_app
 
@@ -333,7 +332,6 @@ def test_a_mode_none_connector_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> 
     without any manifest asking for it.
     """
     from fastapi.testclient import TestClient
-    from mcp.server.fastmcp import FastMCP
 
     from chemclaw.connectors.server import connector_app
 
@@ -358,7 +356,6 @@ def test_an_unreadable_manifest_makes_the_connector_refuse_everything(
     now refuses until an operator fixes the manifest.
     """
     from fastapi.testclient import TestClient
-    from mcp.server.fastmcp import FastMCP
 
     from chemclaw.connectors.registry import ConnectorError
     from chemclaw.connectors.server import _declared_bearer_env, connector_app
@@ -457,7 +454,6 @@ def test_a_tool_reads_the_caller_of_the_call_it_serves_not_of_the_handshake() ->
     pins is attribution, which is exactly what `caller_provenance` exists to provide.
     """
     from fastapi.testclient import TestClient
-    from mcp.server.fastmcp import FastMCP
 
     from chemclaw.connectors.caller import caller_provenance
     from chemclaw.connectors.server import connector_app

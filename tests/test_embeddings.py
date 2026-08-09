@@ -158,6 +158,41 @@ def test_config_key_carries_no_part_of_the_endpoint_it_identifies(
         assert leaked not in key, f"the key carries {leaked!r}: {key}"
 
 
+def test_every_slot_of_the_config_key_says_what_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator reads this string out of two durable columns, so no slot may be empty.
+
+    The default deployment rendered `hash:::1536` — two empty slots, because `embedding_model`
+    defaults to `""` as well as the endpoint — which reads as truncated or corrupt rather than as
+    "no endpoint, no model name". Filled and prefixed, every field names itself.
+    """
+    _use_settings(monkeypatch, embedding_provider="hash")
+    assert provider.embedding_config_key() == "hash:ep-none:d1536:model-none"
+
+
+def test_a_colon_in_the_model_name_cannot_be_read_as_a_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one free-form field is last, so Ollama/vLLM naming cannot make the key unparseable.
+
+    `nomic-embed-text:v1.5` is an ordinary model name. With the dimension after it the key had five
+    colon-separated fields and no way to tell which was which; with the model last, everything after
+    the third colon is the model and nothing else can be.
+    """
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="nomic-embed-text:v1.5",
+        llm_base_url="https://llm.internal/v1",
+    )
+    provider_name, endpoint, dimension, model = provider.embedding_config_key().split(":", 3)
+    assert (provider_name, dimension, model) == (
+        "openai_compatible",
+        "d1536",
+        "nomic-embed-text:v1.5",
+    )
+    assert endpoint.startswith("ep-")
+
+
 def test_config_key_of_the_hash_provider_names_no_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

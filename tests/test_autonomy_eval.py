@@ -30,6 +30,7 @@ from chemclaw.core.config import settings
 from chemclaw.evals.harness import load_eval_cases
 from chemclaw.evals.metric import EvalCase, MetricError, registered_names
 from chemclaw.evals.metrics import precision_recall_f1
+from tests.fakes import FakeUpdate
 
 _ANSWER = {"type": "answer", "text": "done", "unsupported_claims": [], "review_required": False}
 
@@ -46,13 +47,6 @@ def _score(name: str, case: EvalCase) -> Any:
     from chemclaw.evals.metric import get_metric
 
     return get_metric(name)(case)
-
-
-class _Update:
-    def __init__(self, text: str = "") -> None:
-        self.text = text
-        self.contents: list[object] = []
-        self.user_input_requests: list[object] = []
 
 
 def _drive(agent: Any, session_id: str) -> list[Event]:
@@ -91,10 +85,10 @@ def test_a_committed_transcript_is_the_shape_the_front_door_really_emits(
         ) -> Any:
             async def _gen() -> Any:
                 await mark_awaiting_job(session, "qm-1", title="Compute the DFT energy")
-                yield _Update(text="working ")
-                yield _Update(text="still ")  # plan unchanged: must not re-emit
+                yield FakeUpdate(text="working ")
+                yield FakeUpdate(text="still ")  # plan unchanged: must not re-emit
                 await complete_awaiting_job(session, "qm-1", reason="finished")
-                yield _Update(text="done.")
+                yield FakeUpdate(text="done.")
 
             return _gen()
 
@@ -143,7 +137,7 @@ def test_a_turn_that_defers_to_a_durable_job_is_not_a_runaway(
         ) -> Any:
             async def _gen() -> Any:
                 await mark_awaiting_job(session, "qm-9", title="Await the DFT job")
-                yield _Update(text="I've started the DFT run, job qm-9.")
+                yield FakeUpdate(text="I've started the DFT run, job qm-9.")
 
             return _gen()
 

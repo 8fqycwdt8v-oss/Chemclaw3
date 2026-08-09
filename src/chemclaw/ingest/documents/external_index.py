@@ -252,20 +252,31 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         """
         if not any(query_embedding):
             return []
-        eligible = await self._eligible_documents(source, filters)
+        eligible = await self._eligible_cuttings(source, filters)
         if not eligible:
             return []
-        # The scope is a set of *documents*, which is exactly what `VectorStore.search` narrows on:
-        # a point's group is its `doc_id`. Eligibility is a property of the file rows a document is
-        # reachable through, so it can never be finer than the document, and asking the catalogue to
-        # enumerate every chunk of every eligible document would turn a filter into a second scan.
+        # The scope is a set of *cuttings*, spelled with the same `group_key` the points were
+        # written under — that identity is the whole contract between the two calls, and it broke
+        # once already: the points moved to `doc_id@chunking_key` and the scope stayed at `doc_id`,
+        # so the intersection was empty and every scoped search returned nothing at all. Eligibility
+        # is a property of the file rows a cutting is reachable through, so it is never finer than
+        # the cutting, and asking the catalogue to enumerate every chunk would turn a filter into a
+        # second scan.
         matches = await self._store.search(self._collection, query_embedding, top_k, eligible)
         if not matches:
             return []
         return await self._resolve(source, matches, filters)
 
-    async def _eligible_documents(self, source: str, filters: DocumentFilter) -> set[str]:
-        """The doc ids of `source` satisfying `filters`. Always a set — never "no restriction".
+    async def _eligible_cuttings(self, source: str, filters: DocumentFilter) -> set[str]:
+        """The `group_key`s of `source` satisfying `filters`. Always a set — never "no restriction".
+
+        **Cuttings, not documents, and the two must be spelled by `group_key` on both sides.** A
+        point's group is `doc_id@chunking_key`, because `_ELIGIBLE` decides eligibility per cutting:
+        a share that cuts a document at its own size must never be served another share's cutting of
+        the same text. Returning bare doc ids here made the scope disjoint from every group in the
+        store, so `VectorStore.search` matched nothing and this backend answered *every* dense query
+        with `[]` — a total retrieval outage that no test saw, because the failure mode of a scope
+        that is too narrow looks exactly like a corpus with no eligible documents.
 
         **The source is always a restriction, and skipping the scope for an unfiltered query was a
         bug.** Every enabled share writes into one collection
@@ -283,8 +294,8 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         `None`, and this method now never produces the latter.
 
         **The stated residual, and it is a real limit.** This enumerates the source's matching
-        documents and sends them to the store, so an unfiltered query over a million-document share
-        builds a million-id filter. That is not a "documented cost" so much as a ceiling on how far
+        cuttings and sends them to the store, so an unfiltered query over a million-document share
+        builds a million-key filter. That is not a "documented cost" so much as a ceiling on how far
         this composition scales as written; `docs/planning/BACKLOG.md` carries the row and names the
         fix (a source the store can filter on itself, which needs a payload the sync can maintain
         through content dedup — the hard part, and why it is not done here). Correct first.
@@ -292,7 +303,8 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT DISTINCT doc_id FROM document_files WHERE source = %(src)s "
+                    "SELECT DISTINCT doc_id, chunking_key FROM document_files "
+                    "WHERE source = %(src)s "
                     "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(tags)) "
                     "AND (%(since)s::timestamptz IS NULL OR modified_at >= %(since)s) "
                     "AND (%(until)s::timestamptz IS NULL OR modified_at <= %(until)s)",
@@ -304,7 +316,9 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                     },
                 )
                 rows = await cur.fetchall()
-        return {row[0] for row in rows}
+        # Built by the same function the points were written with, so the two spellings cannot drift
+        # apart again without a compile-time-visible change.
+        return {group_key(doc_id, chunking) for doc_id, chunking in rows}
 
     async def _resolve(
         self, source: str, matches: list[VectorMatch], filters: DocumentFilter

@@ -58,6 +58,16 @@ from chemclaw.core.migrate import _statements
 _MIGRATIONS = Path(__file__).resolve().parents[1] / "infra" / "sql"
 _DECISIONS = Path(__file__).resolve().parents[1] / "docs" / "decisions"
 
+# How an identifier may be spelled. Both patterns below used to say `\w+`, which is the bare
+# lower-case spelling every merged migration happens to use and only that one — so a
+# schema-qualified, `ONLY`, `IF EXISTS` or quoted table name walked through both checks. `ALTER
+# TABLE ONLY …` is the form **`pg_dump` emits**, i.e. the likeliest thing an author pastes out of a
+# dump while writing a migration, which made the miss the opposite of academic. Written once and
+# substituted into every position that names a table or a column, so the two buckets cannot drift
+# into policing different spellings of the same statement.
+_NAME = r"[\w.\"]+"  # `t`, `public.t`, `"t"`, `public."t"`
+_TABLE = rf"(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?{_NAME}"  # ALTER TABLE [IF EXISTS] [ONLY] name
+
 # Statements that destroy data, or the object holding it. Matched on statement *starts* (after
 # optional whitespace) rather than anywhere in the file, so the word "drop" in a comment — or
 # `DROP` inside a `CREATE INDEX … WHERE` predicate — is not a false positive.
@@ -69,7 +79,7 @@ _DESTROYS_DATA = re.compile(
     r"DROP\s+(?:TABLE|SCHEMA|TYPE|VIEW|DATABASE)"
     r"|TRUNCATE"
     r"|DELETE\s+FROM"
-    r"|ALTER\s+TABLE\s+\w+\s+(?:DROP\s+COLUMN|RENAME)"
+    rf"|ALTER\s+TABLE\s+{_TABLE}\s+(?:DROP\s+COLUMN|RENAME)"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -96,9 +106,9 @@ _DESTROYS_DATA = re.compile(
 # answer to an over-flag is a reviewed exemption naming the statement, not a looser pattern.
 _BREAKS_PREVIOUS_IMAGE = re.compile(
     r"^\s*(?:"
-    r"ALTER\s+TABLE\s+\w+\s+ALTER\s+(?:COLUMN\s+)?\w+\s+SET\s+NOT\s+NULL"
-    r"|ALTER\s+TABLE\s+\w+\s+DROP\s+CONSTRAINT"
-    r"|ALTER\s+TABLE\s+\w+\s+ADD\s+(?:CONSTRAINT\s+\w+\s+)?PRIMARY\s+KEY"
+    rf"ALTER\s+TABLE\s+{_TABLE}\s+ALTER\s+(?:COLUMN\s+)?{_NAME}\s+SET\s+NOT\s+NULL"
+    rf"|ALTER\s+TABLE\s+{_TABLE}\s+DROP\s+CONSTRAINT"
+    rf"|ALTER\s+TABLE\s+{_TABLE}\s+ADD\s+(?:CONSTRAINT\s+{_NAME}\s+)?PRIMARY\s+KEY"
     r"|DROP\s+INDEX"
     r")",
     re.IGNORECASE | re.MULTILINE,
@@ -213,6 +223,16 @@ def test_a_migration_leaves_the_previous_image_able_to_write(path: Path) -> None
         ("ALTER TABLE document_files ALTER COLUMN chunking_key SET NOT NULL;", 0, 1),
         # Unambiguous data destruction stays destruction.
         ("ALTER TABLE t DROP COLUMN c;", 1, 0),
+        # The four spellings of a table name Postgres accepts, on the same destructive statement.
+        # `ALTER TABLE ONLY` is the one `pg_dump` emits, so it is the likeliest thing an author
+        # pastes; a check that reads only the bare identifier misses all four.
+        ("ALTER TABLE public.audit_events DROP COLUMN actor;", 1, 0),
+        ("ALTER TABLE ONLY audit_events DROP COLUMN actor;", 1, 0),
+        ("ALTER TABLE IF EXISTS audit_events DROP COLUMN actor;", 1, 0),
+        ('ALTER TABLE "audit_events" DROP COLUMN actor;', 1, 0),
+        # …and on the two rollback breaks that are spelled with a table name.
+        ("ALTER TABLE public.document_files ALTER COLUMN k SET NOT NULL;", 0, 1),
+        ("ALTER TABLE ONLY document_chunks DROP CONSTRAINT document_chunks_pkey;", 0, 1),
         ("DROP TABLE t;", 1, 0),
         ("TRUNCATE t;", 1, 0),
         ("DELETE FROM t WHERE x;", 1, 0),
@@ -283,6 +303,11 @@ def test_every_migration_is_re_runnable() -> None:
     assert not offenders, "migrations must be re-runnable:\n" + "\n".join(offenders)
 
 
+def _git(repo: Path, *args: str) -> str:
+    """`git` in `repo`, stdout only. A failure is the empty string — every caller treats it so."""
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+
 def test_no_merged_migration_had_its_statements_changed() -> None:
     """A merged migration's *statements* are immutable. Its comments are not, and that is the fix.
 
@@ -300,18 +325,45 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
     Asked of git because the question *is* history: what a file contained in the commit that
     introduced it. A file added in the working tree and not yet committed is skipped — it has not
     landed, so it is still free to change.
+
+    **Two ways this answers without having looked, and only one of them is the empty glob.**
+
+    *No history at all* — a tarball, or `git` absent — makes every `git log` empty, so every file
+    takes the not-yet-merged branch and the check passes having compared nothing. Measured: on a
+    copy of the tree with `.git` removed, this passed green.
+
+    *Truncated history* is the one a count cannot see, because the count stays healthy while the
+    comparison stops spanning anything. On a `git clone --depth=1` every file looks introduced by
+    the graft commit, and the graft commit **is** `HEAD`, so `git show <introduced>:file` returns
+    the working tree's own content and each file is compared against itself. Measured on a
+    depth-1 clone whose `HEAD` already carried a `smuggled` `ALTER TABLE` appended to a merged
+    `006_audit_events.sql`: reported as no edit, 42 files "compared". `actions/checkout` defaults
+    to `fetch-depth: 1`, so that is exactly the CI checkout.
+
+    So what is counted is not "files looked at" but **comparisons that span a commit** — the
+    introducing commit is not `HEAD`. That one number distinguishes all three cases without a
+    second mechanism: 42 here, 0 on a depth-1 clone, 0 with no `.git`. A migration genuinely added
+    in `HEAD` is excluded from it and from the check, which is right: it has nothing earlier to
+    differ from.
+
+    The floor is an assertion, except where git says the history is truncated — then it is a skip
+    naming the fix, because a truncated checkout is a CI setting rather than a defect in the tree
+    and a red build would say the wrong thing about it. This repository's own checkout is shallow
+    at 103 commits and still spans every migration, so the skip is narrow: it fires only when the
+    truncation has eaten every comparison.
     """
     repo = _MIGRATIONS.parents[1]
+    head = _git(repo, "rev-parse", "HEAD")
     edited: list[str] = []
+    compared = 0
     for path in sorted(_MIGRATIONS.glob("*.sql")):
-        introduced = subprocess.run(
-            ["git", "log", "--diff-filter=A", "--format=%H", "--", path.name],
-            cwd=_MIGRATIONS,
-            capture_output=True,
-            text=True,
-        ).stdout.split()
+        introduced = _git(
+            _MIGRATIONS, "log", "--diff-filter=A", "--format=%H", "--", path.name
+        ).split()
         if not introduced:
             continue  # added in the working tree; not merged, so not yet immutable
+        if introduced[-1] == head:
+            continue  # introduced by the commit under test — there is no earlier version to differ
         original = subprocess.run(
             ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
             cwd=repo,
@@ -320,8 +372,20 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
         )
         if original.returncode != 0:
             continue  # renamed on the way in; `--follow` semantics are not worth the ambiguity
+        compared += 1
         if _statements(original.stdout) != _statements(path.read_text(encoding="utf-8")):
             edited.append(path.name)
+    if compared < 30 and _git(repo, "rev-parse", "--is-shallow-repository") == "true":
+        pytest.skip(
+            f"truncated history: only {compared} migration(s) could be compared against an "
+            "earlier commit, so this check would compare files against themselves and pass "
+            "whatever was edited. Set `fetch-depth: 0` on actions/checkout to run it."
+        )
+    assert compared >= 30, (
+        f"only {compared} of {len(list(_MIGRATIONS.glob('*.sql')))} migrations were compared "
+        "against the commit that introduced them; the rest had no earlier version to compare "
+        "with. This test has just passed without asking its question of anything."
+    )
     assert not edited, (
         f"migration(s) whose statements changed after being merged: {edited}. The runner keys on a "
         "checksum of exactly this, so it breaks `make db-migrate` on every database that already "

@@ -2,7 +2,7 @@
 
 `pyproject.toml` caps every test at 180 s and two files tighten that further with
 `@pytest.mark.timeout(...)`. A marker overrides `--timeout` and `PYTEST_TIMEOUT`, so before
-`CHEMCLAW_TEST_TIMEOUT_SCALE` existed the tests with the tightest caps were precisely the ones no
+`PYTEST_TIMEOUT_SCALE` existed the tests with the tightest caps were precisely the ones no
 command line could relax — and a contended machine turned them red with their assertions never
 run. Two reviewers read that red as a numerical failure, and a hardening campaign spent hours
 against the baseline it produced.
@@ -68,7 +68,7 @@ def test_a_marker_alone_still_fails_a_test_that_outruns_it(
     a timed-out test is not weak evidence about the code — it is none, because the assertions never
     ran.
     """
-    monkeypatch.delenv("CHEMCLAW_TEST_TIMEOUT_SCALE", raising=False)
+    monkeypatch.delenv("PYTEST_TIMEOUT_SCALE", raising=False)
     _write_suite(pytester)
     result = pytester.runpytest_subprocess("-p", "no:randomly")
     result.assert_outcomes(failed=1)
@@ -80,13 +80,13 @@ def test_a_marker_alone_still_fails_a_test_that_outruns_it(
 def test_the_scale_relaxes_a_marker_no_command_line_flag_can_reach(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole point: `--timeout` cannot lift a marker, `CHEMCLAW_TEST_TIMEOUT_SCALE` can.
+    """The whole point: `--timeout` cannot lift a marker, `PYTEST_TIMEOUT_SCALE` can.
 
     The same suite, the same 1 s marker, the same 1.6 s of work — passing only because the scale
     was applied to the marker itself. Removing the `_apply_timeout_scale(config, items)` call from
     `pytest_collection_modifyitems` fails this and leaves the rest of the suite green.
     """
-    monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "4")
+    monkeypatch.setenv("PYTEST_TIMEOUT_SCALE", "4")
     _write_suite(pytester)
     pytester.runpytest_subprocess("-p", "no:randomly").assert_outcomes(passed=1)
 
@@ -106,7 +106,7 @@ def test_scaling_a_marker_keeps_the_timeout_method_it_carried(
     `os._exit(1)`, so the session ends with no test outcome at all; `signal` reports an ordinary
     failure. Asserting on the absence of a normal outcome is what distinguishes them.
     """
-    monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "2")
+    monkeypatch.setenv("PYTEST_TIMEOUT_SCALE", "2")
     pytester.makeconftest(_CONFTEST)
     pytester.makeini("[pytest]\ntimeout = 30\n")
     pytester.makepyfile(
@@ -134,13 +134,28 @@ def test_the_scale_defaults_to_one_and_refuses_nonsense(monkeypatch: pytest.Monk
     `0` and a negative are refused rather than clamped, because either would read as "no timeout
     at all" — turning the knob that exists to keep the caps usable into one that deletes them.
     """
-    monkeypatch.delenv("CHEMCLAW_TEST_TIMEOUT_SCALE", raising=False)
+    monkeypatch.delenv("PYTEST_TIMEOUT_SCALE", raising=False)
     assert timeout_scale() == 1.0
 
-    monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "2.5")
+    monkeypatch.setenv("PYTEST_TIMEOUT_SCALE", "2.5")
     assert timeout_scale() == 2.5
 
     for bad in ("", "lots", "0", "-1"):
-        monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", bad)
-        with pytest.raises(UsageError, match="CHEMCLAW_TEST_TIMEOUT_SCALE"):
+        monkeypatch.setenv("PYTEST_TIMEOUT_SCALE", bad)
+        with pytest.raises(UsageError, match="PYTEST_TIMEOUT_SCALE"):
             timeout_scale()
+
+
+def test_the_knob_does_not_wear_the_products_config_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`CHEMCLAW_*` is a claim: the key comes from the one `pydantic-settings` config.
+
+    This one does not and must not — how loaded the machine is has nothing to do with a deployment,
+    and `core/config/`'s parity test requires every field to appear in `.env.example`. Under the old
+    name the claim was false and only *invisible*: prose-contract rule 7 fails any `CHEMCLAW_*` key
+    that is not a `Settings` field, and it reads the operator corpus, which `tests/README.md` is
+    outside of. Measured before the rename — one sentence about it in `README.md`, the natural place
+    to tell someone how to run the suite on a loaded machine — `make prose-validate` failed with
+    "names CHEMCLAW_TEST_TIMEOUT_SCALE, which is not a Settings field".
+    """
+    monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "8")
+    assert timeout_scale() == 1.0, "the product prefix must not name a pytest knob"

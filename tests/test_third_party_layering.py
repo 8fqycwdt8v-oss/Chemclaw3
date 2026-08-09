@@ -37,6 +37,15 @@ meaning are mapped; `pydantic`, `numpy`, `yaml`, `networkx`, `pypdf` create no l
 absent on purpose. That is a real limit — a stack nobody named cannot be policed — so a new
 architecturally-significant dependency belongs in `_STACKS` at the same time it enters the lockfile.
 
+**That limit bounds the stack policy and nothing else.** It used to bound the private-import
+ratchet too, because both questions were asked through the same early return, and the effect was
+that a rule whose whole subject is "an unbounded dependency moves a private name" saw eight
+distributions. Measured: `import pydantic._internal._model_construction` in `kg/graph.py` passed
+this file, all eight tests. The two questions are separate now — a layer edge needs a named stack,
+reaching into a dependency's internals does not — and the ratchet covers every root that is not
+first-party. It flags nothing today: measured over `src/`, all 31 underscore-prefixed imports name
+`chemclaw` itself, which is a different question (`tests/test_layering.py`'s) and not this one's.
+
 **The other limits, each measured rather than supposed.** A review enumerated what this policy
 provably cannot see, and every item below is written down because a limit nobody states reads as
 coverage:
@@ -48,8 +57,14 @@ coverage:
   This is the sharpest hole and it is **not** closed here — closing it means a re-export policy
   ("which first-party symbols carry a stack with them"), which is a design decision, not a walk.
   Tracked in `BACKLOG.md`.
-- **A dynamic import.** `importlib.import_module("temporalio")` in `science/` passes. An AST walk
-  cannot resolve a string, and a rule banning `importlib` outright would be a different rule.
+- **A dynamic import**, which defeats both rules for one reason. `importlib.import_module(
+  "temporalio")` in `science/` passes the stack policy and `importlib.import_module(
+  "pydantic._internal")` passes the private ratchet: an AST walk cannot resolve a string, and a
+  rule banning `importlib` outright would be a different rule. This is the residual the ratchet
+  keeps after it stopped being limited to named roots.
+- **Attribute access, on either rule.** `sys._getframe`, or `pydantic._internal` reached as an
+  attribute of an already-imported `pydantic`, is not an `import` statement and is not seen. The
+  rule is about what a module *imports*, which is what breaks at process start.
 - **An aliased clock of a root** — anything that reaches a stack without naming its distribution
   root in an `import` statement.
 - **Package-keyed allowed rows against file-keyed leaks.** `_KNOWN_LEAKS` is keyed by file so a
@@ -241,11 +256,13 @@ _KNOWN_LEAKS: dict[Site, str] = {
     ),
 }
 
-# Imports of a *private* third-party module: `agent_framework._harness._loop` is not API, and
+# Imports of a *private* module of any dependency: `agent_framework._harness._loop` is not API, and
 # `agent-framework-core` is required as `>=1.11.0` with no upper bound, so a patch release that
 # moves any of these symbols is an ImportError at process start of both the front door and the
 # worker. The risk is not hypothetical: `FunctionCallContent`/`FunctionResultContent` are already
-# absent from the package top level in 1.11.0. Keyed by (file, target) — a third one fails.
+# absent from the package top level in 1.11.0. Nothing in that argument is about MAF — every
+# dependency here is floor-pinned the same way — so the rule is not restricted to `_STACKS`'s
+# roots; `pydantic._internal` is the same bet. Keyed by (file, target) — a third one fails.
 #
 # **Three of the five this rule first found were not necessary at all.** The review recorded five;
 # asking the installed package rather than the comments beside them showed that `todos_remaining`,
@@ -320,8 +337,21 @@ class _Visitor(ast.NodeVisitor):
             self.visit(stmt)
 
     def _record(self, target: str, lineno: int) -> None:
-        stack = _STACKS.get(target.split(".")[0])
-        if stack is None:
+        """Keep an import if it carries a layer edge, or if it reaches into *any* dependency.
+
+        Two questions, deliberately not one gate. The stack policy is about named roots and
+        early-returns for anything `_STACKS` gives no layering meaning — that is the watch-list the
+        module docstring describes. The private-import ratchet is about a versioning bet nobody
+        made on purpose, and that bet is identical whichever distribution is on the other end of
+        it: `pydantic._internal`, `networkx.algorithms._x` and `agent_framework._harness` all move
+        without a major bump. Filtering both questions through `_STACKS` made the ratchet see eight
+        roots while its docstring implied it saw the tree; an unstacked private import is kept with
+        `stack=""`, which `_edges` skips and no policy row can match.
+        """
+        parts = target.split(".")
+        stack = _STACKS.get(parts[0], "")
+        reaches_inside = parts[0] != "chemclaw" and any(p.startswith("_") for p in parts[1:])
+        if not stack and not reaches_inside:
             return
         scope = (
             "type_checking"
@@ -370,10 +400,16 @@ _IMPORTS = _collect()
 
 
 def _edges(scope: str) -> dict[Edge, list[_Imp]]:
-    """The (package, stack) edges observed at one scope, keyed by edge."""
+    """The (package, stack) edges observed at one scope, keyed by edge.
+
+    Imports with no stack are dropped rather than keyed as a `(package, "")` edge: they are in
+    `_IMPORTS` only because the private-import ratchet asked for them, they carry no layering
+    meaning by construction, and an empty-stack edge matches no policy row — so keeping them would
+    report one private import twice, once under a rule that has nothing to say about it.
+    """
     out: dict[Edge, list[_Imp]] = defaultdict(list)
     for imp in _IMPORTS:
-        if imp.scope == scope:
+        if imp.scope == scope and imp.stack:
             out[(imp.package, imp.stack)].append(imp)
     return dict(out)
 
@@ -384,8 +420,9 @@ _TYPE_CHECKING_EDGES = _edges("type_checking")
 
 
 def _format(imports: list[_Imp]) -> str:
+    """One line per import. An unstacked one names its distribution root, which is what it has."""
     return "\n".join(
-        f"  {i.package} -> {i.stack}: {i.path}:{i.lineno} ({i.target})"
+        f"  {i.package} -> {i.stack or i.target.split('.')[0]}: {i.path}:{i.lineno} ({i.target})"
         for i in sorted(imports, key=lambda i: (i.package, i.stack, i.path, i.lineno))
     )
 
@@ -449,7 +486,7 @@ def test_no_known_leak_is_stale() -> None:
 
 
 def _private_imports() -> list[_Imp]:
-    """Imports naming an underscore-prefixed submodule of a third-party distribution."""
+    """Imports naming an underscore-prefixed submodule of a dependency, whatever the dependency."""
     return [imp for imp in _IMPORTS if any(p.startswith("_") for p in imp.target.split(".")[1:])]
 
 

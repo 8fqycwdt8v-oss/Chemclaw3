@@ -142,12 +142,20 @@ def _unbalanced_quote_csv_bytes(field_chars: int = 200_000) -> bytes:
     return b'name,value\n"' + b"x" * field_chars
 
 
-def _highly_compressible_xlsx_bytes(rows: int = 200_000) -> bytes:
+def _highly_compressible_xlsx_bytes(rows: int = 20_000) -> bytes:
     """A workbook that is small on disk and large in memory — the ratio, not the size, is the point.
 
     Every size limit upstream of the parser bounds *compressed* bytes, and OOXML is a zip. Repeated
     identical rows compress to almost nothing, so this passes `max_file_bytes` and
     `attachment_max_bytes` comfortably while expanding by a couple of orders of magnitude.
+
+    **The row count is chosen against the two properties its caller asserts, not for size.** The
+    test refuses the workbook against a `document_max_expanded_bytes` of 1 MB and measures
+    `ratio > 20`. Building 200,000 rows through openpyxl cost 5.5 s of the suite for margin nobody
+    used — measured: 35.7 MB expanded, ratio 22.8. 20,000 rows costs 0.43 s and gives 3.5 MB
+    expanded at ratio 21.8: still 3.5× the cap and clear of the ratio floor. 10,000 would also pass
+    (1.75 MB, ratio 21.0) and is not taken, because 5,000 measures 19.9 — one step below the
+    assertion — and a fixture one step from failing is a fixture that fails on an openpyxl release.
     """
     book = Workbook()
     sheet = book.active

@@ -37,6 +37,7 @@ from agent_framework import AgentSession
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
+from tests.fakes import FakeUpdate
 
 
 def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:
@@ -77,7 +78,7 @@ async def _cancel_mid_turn(stream: AsyncIterator[Event], stalled: asyncio.Event)
 def _update(text: str, tokens: int) -> Any:
     """A streamed update carrying `tokens` of reported usage, shaped as MAF emits it."""
     usage = SimpleNamespace(usage_details={"total_token_count": tokens})
-    return SimpleNamespace(text=text, contents=[usage], user_input_requests=[])
+    return FakeUpdate(text=text, contents=[usage])
 
 
 class _EndlessAgent:

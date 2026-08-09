@@ -37,6 +37,7 @@ from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import crawl_share
+from chemclaw.ingest.documents.external_index import ExternalVectorDocumentIndex
 from chemclaw.ingest.documents.index import (
     ChunkRecord,
     DocumentFilter,
@@ -53,6 +54,7 @@ from chemclaw.ingest.documents.sync import (
     reembed_stale,
     sync_share,
 )
+from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from tests.document_fixtures import (
     _blank_pdf_bytes,
     _docx_bytes,
@@ -1066,6 +1068,50 @@ def test_compaction_carries_the_sweep_guard_across_continue_as_new() -> None:
     assert asyncio.run(prune_share("b", index, started, compacted["b"])) == 0
 
 
+def test_the_continue_as_new_bound_is_carried_in_state_not_read_live() -> None:
+    """The command count must come from history, never from the replaying worker's config.
+
+    `document_sync_max_iterations` decides when `continue_as_new` is emitted, so it decides how
+    many activity commands the run schedules — exactly what `resolve_notes_per_run` was added to
+    the memory jobs for (`D-2026-08-08-an-outage-is-not-a-missing-job`). Read live, a redeploy that
+    lowers it mid-drain replays `continue_as_new` earlier than history records it: a
+    non-determinism error, which is a workflow *task* failure, which retries forever and wedges the
+    run (the trap D-093 documents).
+
+    Temporal is unavailable in this environment, so this asserts the *structure* that makes the
+    replay safe rather than executing a replay: the value is captured once in the activity, carried
+    on the plan, and carried on the state across `continue_as_new`. The workflow body must contain
+    no live read of it — an AST check, because that is the property that actually broke.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from chemclaw.durable import document_sync
+    from chemclaw.durable.document_sync import DocumentSyncPlan, DocumentSyncState
+
+    assert "max_iterations" in DocumentSyncPlan.model_fields
+    assert "max_iterations" in DocumentSyncState.model_fields
+
+    # The activity is where a live read belongs: it runs once per drain and its result is recorded.
+    plan_src = inspect.getsource(document_sync.plan_document_sync)
+    assert "settings.document_sync_max_iterations" in plan_src
+
+    run_src = textwrap.dedent(inspect.getsource(document_sync.DocumentShareSyncWorkflow.run))
+    tree = ast.parse(run_src)
+    live_reads = [
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "settings"
+    ]
+    assert "document_sync_max_iterations" not in live_reads, (
+        "the continue-as-new bound must come from `state.max_iterations`, captured in the plan "
+        f"activity; the workflow body still reads settings for: {sorted(set(live_reads))}"
+    )
+
+
 def test_a_wedged_drain_leaves_has_more_set_for_the_guard() -> None:
     """A pass that reports more work but no cursor advance must not merge into "finished"."""
     from chemclaw.durable.document_sync import _merge_by_source
@@ -1489,5 +1535,124 @@ def test_the_postgres_backend_gates_on_the_chunking_and_sweeps_only_unclaimed_cu
         # Now the first share is re-chunked coarsely too. Nothing claims 400:40 any more: it goes.
         await index.upsert([fine_file.model_copy(update={"chunking_key": "2000:200"})], coarse, key)
         assert await _stored_cuttings() == [("2000:200", 0)], "the superseded cutting was swept"
+
+    asyncio.run(_run())
+
+
+async def _stored_keys(doc_id: str) -> list[tuple[str, int, str]]:
+    """Every `(chunking_key, ordinal, embedding_key)` the catalogue holds for one document."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunking_key, ordinal, embedding_key FROM document_chunks "
+                "WHERE doc_id = %s ORDER BY chunking_key, ordinal",
+                (doc_id,),
+            )
+            return [(row[0], row[1], row[2]) for row in await cur.fetchall()]
+
+
+def test_the_external_store_backend_carries_the_chunking_through_every_write() -> None:
+    """The other `DocumentIndex`, against the real catalogue and the reference `VectorStore`.
+
+    It had no live-Postgres test at all, and every method it overrides predates the chunking key —
+    so all four properties below were false and unobserved, reachable the day a deployment sets
+    `vector_store_provider` to anything but `pgvector`. Each was measured against this database
+    before the fix:
+
+    1. `point_id` was `doc_id#ordinal`, so two shares holding one document wrote **one** point and
+       the second overwrote the first — a share then answering every query with another share's
+       vector.
+    2. `store_embeddings` keyed its `embedding_key` update on `(doc_id, ordinal)`, so re-embedding
+       one cutting stamped the new key on the other cutting too, whose vector was never touched.
+       That row reads as current forever and `reembed_stale` skips it — precisely the
+       silent-wrong-vector failure `embedding_key` exists to prevent.
+    3. `prune_stale` spelled "orphan" as `f.doc_id = c.doc_id`, a third definition disagreeing with
+       `CLAIMED_SQL`: a superseded cutting survived here and the base class deleted it next call.
+    4. `upsert` delegates to the base, which deletes unclaimed cuttings per write — and did so
+       without naming them, so their points stayed in the store with nothing left to address them.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        store = InMemoryVectorStore()
+        index = ExternalVectorDocumentIndex(store, collection="chunks")
+        key = embedding_config_key()
+        fine_vector, coarse_vector = await asyncio.to_thread(
+            embed_texts, ["the fine cutting of a protocol", "the whole protocol at once"]
+        )
+
+        fine_file = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        fine = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=0,
+                content="the fine cutting of a protocol",
+                embedding=fine_vector,
+            )
+        ]
+        coarse_file = fine_file.model_copy(
+            update={"source": "sharedrive-2", "chunking_key": "4000:400"}
+        )
+        coarse = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="4000:400",
+                ordinal=0,
+                content="the whole protocol at once",
+                embedding=coarse_vector,
+            )
+        ]
+        await index.upsert([fine_file], fine, key)
+        await index.upsert([coarse_file], coarse, key)
+
+        # (1) One point per row rather than per `(doc_id, ordinal)`, and each share still answers
+        # with *its own* vector. The **score** is the assertion, not the content: querying with a
+        # chunk's own embedding must score 1.0, and under the collision it did not — the content
+        # still came back right, because `CITATION_SQL` dropped the other share's row on the way
+        # out, so only the score ever showed that the wrong vector had been searched.
+        (fine_hit,) = await index.search_dense(SOURCE, fine_vector, 5, DocumentFilter())
+        assert fine_hit.content == "the fine cutting of a protocol"
+        assert fine_hit.score == pytest.approx(1.0)
+        (coarse_hit,) = await index.search_dense("sharedrive-2", coarse_vector, 5, DocumentFilter())
+        assert coarse_hit.content == "the whole protocol at once"
+        assert coarse_hit.score == pytest.approx(1.0)
+
+        # (2) Re-embedding one cutting marks that row and no other.
+        await index.store_embeddings(fine, "key-of-the-next-model")
+        assert await _stored_keys("doc-1") == [
+            ("4000:400", 0, key),
+            ("400:40", 0, "key-of-the-next-model"),
+        ]
+
+        # (4) The fine share is re-chunked coarsely. The base's per-write cleanup deletes the row
+        # it superseded, and the point that addressed it goes with it — the obligation the subclass
+        # previously had no way to see.
+        await index.upsert([fine_file.model_copy(update={"chunking_key": "4000:400"})], coarse, key)
+        assert await _stored_cuttings() == [("4000:400", 0)]
+        # Asked of the store through its own interface: the fine cutting's point is gone and the
+        # coarse one is still there, which is what "the vectors went with the rows" means.
+        assert {m.id for m in await store.search("chunks", fine_vector, 10)} == {"doc-1@4000:400#0"}
+
+        # (3) And the sweep agrees with `CLAIMED_SQL` rather than a local spelling of it: a cutting
+        # no file row claims is an orphan even while the *document* still has one.
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "UPDATE document_files SET chunking_key = '400:40' WHERE source = %s", (SOURCE,)
+            )
+            await conn.commit()
+        assert await index.prune_stale("sharedrive-2", await index.clock()) == 1
+        assert await _stored_cuttings() == [], "the unclaimed cutting was swept here, not later"
+        assert await store.search("chunks", coarse_vector, 10) == [], "and its point went with it"
 
     asyncio.run(_run())

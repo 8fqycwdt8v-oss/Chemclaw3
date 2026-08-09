@@ -16,7 +16,14 @@
 
        Every rule below alerts on a *rate*, not a total, so a counter that moved once during a
        deploy does not page anyone forever. Severities: `critical` = a GxP record or a correctness
-       invariant is being lost right now; `warning` = degraded, look at it today. */ -}}
+       invariant is being lost right now; `warning` = degraded, look at it today.
+
+       **`for:` cannot express "sustained" over an `increase(...) > 0`, and two rules here used to
+       claim it did.** `increase(c[10m]) > 0` keeps returning a sample for the whole ten minutes
+       after a *single* increment, so any `for:` shorter than the range window is satisfied by one
+       blip: the alert is not suppressed, only late. Where a rule means "more than the odd blip",
+       the count is the threshold and `for:` is `0m`. The three `increase(...) > 0` + `for: 0m`
+       alerts are correct as written — their intent *is* the first increment. */ -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -74,16 +81,21 @@ spec:
               dashboard reads low. Critical because the failure mode is an unbounded bill that
               looks like an idle deployment. Usually an upstream rename of the usage keys.
         - alert: ChemclawDurableUnreachable
-          expr: increase(chemclaw_durable_unreachable_total[10m]) > 0
-          for: 5m
+          expr: >-
+            increase(chemclaw_durable_unreachable_total[10m])
+            > {{ .Values.monitoring.alerts.durableUnreachableWarning }}
+          for: 0m
           labels:
             severity: warning
           annotations:
             summary: Temporal is not answering its health probe
             description: >-
-              Chemists are being told durable jobs are unavailable. `for: 5m` because a single
-              broker blip is reported on the turn's own stream and needs no page; a sustained rate
-              is an outage nothing else surfaces server-side.
+              Chemists are being told durable jobs are unavailable. The threshold is what suppresses
+              a single broker blip — that is reported on the turn's own stream and needs no page —
+              while a sustained rate is an outage nothing else surfaces server-side. It is a count
+              and not a `for:` because `increase(...) > 0` keeps returning a sample for the whole
+              range window after one increment, so a `for:` under 10m would have paged on the blip
+              anyway, five minutes late.
 
         {{- /* The PR-gate publish is best-effort by design (a dead git remote must not fail a
                finished calculation), so this counter is the only signal that knowledge is being
@@ -117,8 +129,10 @@ spec:
               running and admit a second turn on the same session.
 
         - alert: ChemclawRollbackWatermarkUnavailable
-          expr: increase(chemclaw_rollback_watermark_unavailable_total[5m]) > 0
-          for: 5m
+          expr: >-
+            increase(chemclaw_rollback_watermark_unavailable_total[5m])
+            > {{ .Values.monitoring.alerts.rollbackWatermarkWarning }}
+          for: 0m
           labels:
             severity: warning
           annotations:
@@ -126,7 +140,9 @@ spec:
             description: >-
               A turn rolled back on client disconnect without a watermark, which risks leaving an
               orphaned `tool_use` behind — the failure mode that bricks a session permanently,
-              because `message_pairing`'s repair only self-heals the other half of the pair.
+              because `message_pairing`'s repair only self-heals the other half of the pair. The
+              threshold carries the "more than the odd one" judgement its `for: 5m` used to claim
+              and could not make: the range window is 5m too, so one increment satisfied it.
 
     - name: chemclaw.availability
       rules:

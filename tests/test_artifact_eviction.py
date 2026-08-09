@@ -98,15 +98,13 @@ def test_with_no_policy_the_job_reclaims_nothing_and_says_so() -> None:
     assert outcome.skipped == ["artifact eviction disabled (no idle window, no size ceiling)"]
 
 
-def test_the_size_sweep_selects_by_a_running_total_rather_than_a_fixed_count() -> None:
-    """Evicting until the store fits is a statement about bytes, not about rows.
-
-    A top-N delete would reclaim a fixed number of blobs regardless of their size, so a store over
-    its ceiling by one large artifact would need many passes — or would over-evict small ones. The
-    window function is what makes one statement land exactly at the point the store fits again.
-    """
-    assert "SUM(b.stored_bytes) OVER" in _EVICT_TO_FIT
-    assert "cumulative >" in _EVICT_TO_FIT
+# "The size sweep selects by a running total rather than a fixed count" was asserted here as
+# `"SUM(b.stored_bytes) OVER" in _EVICT_TO_FIT` and `"cumulative >" in _EVICT_TO_FIT`, and is
+# asserted below on rows instead. `cumulative` is a CTE column name: renaming it failed the check
+# with the behaviour identical, and rewriting the window into a correlated subquery — a real change
+# to how the sweep selects — passed it. `test_the_size_sweep_keeps_the_valuable_blobs_and_drops_
+# the_cheap_idle_ones` seeds four equal-sized blobs against an 800-byte ceiling and asserts exactly
+# two survive, which is the same claim stated where a top-N delete cannot satisfy it.
 
 
 def test_every_reclaim_reports_what_it_removed() -> None:
@@ -167,7 +165,9 @@ async def _surviving_blobs() -> set[str]:
         return {str(row[0]) for row in await cur.fetchall()}
 
 
-def test_the_size_sweep_keeps_the_valuable_blobs_and_drops_the_cheap_idle_ones() -> None:
+def test_the_size_sweep_keeps_the_valuable_blobs_and_drops_the_cheap_idle_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The ordering, asserted on rows: an expensive artifact outlives a cheap one of equal size.
 
     Four blobs of 400 bytes each, all idle for ten days, differing only in what they cost to
@@ -179,23 +179,19 @@ def test_the_size_sweep_keeps_the_valuable_blobs_and_drops_the_cheap_idle_ones()
     `cumulative >= 0 AND %s IS NOT NULL` (deletes every blob) or reversing the value `ORDER BY`
     to `ASC` (evicts the most expensive first) leaves every text assertion in this file green.
     """
+    monkeypatch.setattr(settings, "artifact_store_max_bytes", 800)
+    monkeypatch.setattr(settings, "artifact_evict_idle_days", 0)
 
     async def _run() -> tuple[set[str], EvictionOutcome]:
         await migrated_db_or_skip()
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(settings, "artifact_store_max_bytes", 800)
-        monkeypatch.setattr(settings, "artifact_evict_idle_days", 0)
-        try:
-            await _clear_artifacts()
-            # value = compute_seconds / idle days; all idle 10 days, so ordering is by cost.
-            await _seed_blob("expensive", 400, 10, 300.0)
-            await _seed_blob("moderate", 400, 10, 100.0)
-            await _seed_blob("cheap", 400, 10, 1.0)
-            await _seed_blob("uncosted", 400, 10, None)
-            outcome = await evict_cold_artifacts()
-            return await _surviving_blobs(), outcome
-        finally:
-            monkeypatch.undo()
+        await _clear_artifacts()
+        # value = compute_seconds / idle days; all idle 10 days, so ordering is by cost.
+        await _seed_blob("expensive", 400, 10, 300.0)
+        await _seed_blob("moderate", 400, 10, 100.0)
+        await _seed_blob("cheap", 400, 10, 1.0)
+        await _seed_blob("uncosted", 400, 10, None)
+        outcome = await evict_cold_artifacts()
+        return await _surviving_blobs(), outcome
 
     surviving, outcome = asyncio.run(_run())
     assert surviving == {"expensive", "moderate"}, (
@@ -205,7 +201,9 @@ def test_the_size_sweep_keeps_the_valuable_blobs_and_drops_the_cheap_idle_ones()
     assert (outcome.oversize_blobs, outcome.oversize_bytes) == (2, 800)
 
 
-def test_a_cheap_blob_read_yesterday_outranks_an_expensive_one_nobody_has_opened() -> None:
+def test_a_cheap_blob_read_yesterday_outranks_an_expensive_one_nobody_has_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Value is cost *per idle day*, not cost — the second half of the ranking expression.
 
     Ten seconds of compute read yesterday beats a hundred seconds unread for a hundred days,
@@ -213,25 +211,23 @@ def test_a_cheap_blob_read_yesterday_outranks_an_expensive_one_nobody_has_opened
     the cheap blob is also the stale one cannot tell the divisor from the tiebreaker, and
     `MAX(a.compute_seconds)` alone survives it (measured — it did).
     """
+    monkeypatch.setattr(settings, "artifact_store_max_bytes", 400)
+    monkeypatch.setattr(settings, "artifact_evict_idle_days", 0)
 
     async def _run() -> set[str]:
         await migrated_db_or_skip()
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(settings, "artifact_store_max_bytes", 400)
-        monkeypatch.setattr(settings, "artifact_evict_idle_days", 0)
-        try:
-            await _clear_artifacts()
-            await _seed_blob("cheap-read-yesterday", 400, 1, 10.0)
-            await _seed_blob("costly-unread-for-months", 400, 100, 100.0)
-            await evict_cold_artifacts()
-            return await _surviving_blobs()
-        finally:
-            monkeypatch.undo()
+        await _clear_artifacts()
+        await _seed_blob("cheap-read-yesterday", 400, 1, 10.0)
+        await _seed_blob("costly-unread-for-months", 400, 100, 100.0)
+        await evict_cold_artifacts()
+        return await _surviving_blobs()
 
     assert asyncio.run(_run()) == {"cheap-read-yesterday"}
 
 
-def test_the_idle_sweep_removes_only_blobs_past_the_stated_window() -> None:
+def test_the_idle_sweep_removes_only_blobs_past_the_stated_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The idle trigger is a window, not a switch.
 
     A blob inside the window stays however cheap it was, because the ceiling is the instrument for
@@ -239,20 +235,16 @@ def test_the_idle_sweep_removes_only_blobs_past_the_stated_window() -> None:
     `last_access_at < now()` — which reads almost identically — would reclaim the whole store on
     every pass, and no assertion on the statement text would notice.
     """
+    monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
+    monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)
 
     async def _run() -> tuple[set[str], EvictionOutcome]:
         await migrated_db_or_skip()
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
-        monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)
-        try:
-            await _clear_artifacts()
-            await _seed_blob("stale", 700, 90, 5.0)
-            await _seed_blob("fresh", 900, 2, 5.0)
-            outcome = await evict_cold_artifacts()
-            return await _surviving_blobs(), outcome
-        finally:
-            monkeypatch.undo()
+        await _clear_artifacts()
+        await _seed_blob("stale", 700, 90, 5.0)
+        await _seed_blob("fresh", 900, 2, 5.0)
+        outcome = await evict_cold_artifacts()
+        return await _surviving_blobs(), outcome
 
     surviving, outcome = asyncio.run(_run())
     assert surviving == {"fresh"}
@@ -260,7 +252,9 @@ def test_the_idle_sweep_removes_only_blobs_past_the_stated_window() -> None:
     assert outcome.skipped == ["size ceiling disabled"]
 
 
-def test_an_evicted_blob_takes_its_link_row_and_leaves_the_answer() -> None:
+def test_an_evicted_blob_takes_its_link_row_and_leaves_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The load-bearing property, asserted on rows rather than on the absence of a substring.
 
     Two halves, and each fails differently. `calculation_results` must survive: evicting an answer
@@ -270,40 +264,34 @@ def test_an_evicted_blob_takes_its_link_row_and_leaves_the_answer() -> None:
     are gone, and a test that only asserts the job contains no `DELETE FROM calculation_artifacts`
     passes just as well if that cascade were dropped from the schema tomorrow.
     """
+    monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
+    monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)
 
     async def _run() -> tuple[int, int]:
         await migrated_db_or_skip()
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
-        monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)
-        try:
-            await _clear_artifacts()
-            await _seed_blob("doomed", 100, 90, 42.0)
-            async with db.connection(settings.postgres_dsn) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "INSERT INTO calculation_results "
-                        "(key, calc_type, calc_version, input_hash, params_hash, result) "
-                        "VALUES ('evict-probe', 'pka', 'v1', 'h', 'p', %s) "
-                        "ON CONFLICT (key) DO NOTHING",
-                        (Jsonb({"pka": 4.2}),),
-                    )
-                await conn.commit()
-
-            await evict_cold_artifacts()
-
-            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await _clear_artifacts()
+        await _seed_blob("doomed", 100, 90, 42.0)
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT count(*) FROM calculation_results WHERE key = 'evict-probe'"
+                    "INSERT INTO calculation_results "
+                    "(key, calc_type, calc_version, input_hash, params_hash, result) "
+                    "VALUES ('evict-probe', 'pka', 'v1', 'h', 'p', %s) "
+                    "ON CONFLICT (key) DO NOTHING",
+                    (Jsonb({"pka": 4.2}),),
                 )
-                answers = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) FROM calculation_artifacts WHERE content_hash = 'doomed'"
-                )
-                links = await cur.fetchone()
-            return (int(answers[0]) if answers else -1, int(links[0]) if links else -1)
-        finally:
-            monkeypatch.undo()
+            await conn.commit()
+
+        await evict_cold_artifacts()
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT count(*) FROM calculation_results WHERE key = 'evict-probe'")
+            answers = await cur.fetchone()
+            await cur.execute(
+                "SELECT count(*) FROM calculation_artifacts WHERE content_hash = 'doomed'"
+            )
+            links = await cur.fetchone()
+        return (int(answers[0]) if answers else -1, int(links[0]) if links else -1)
 
     surviving_answers, surviving_links = asyncio.run(_run())
     assert surviving_answers == 1, "eviction destroyed a cached answer; D-011 says it never can"

@@ -400,6 +400,32 @@ def test_the_argument_check_covers_the_same_tools_whatever_the_call_order() -> N
     assert int(count) > 40, f"only {count} signatures resolved in a fresh interpreter"
 
 
+def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other way into the coverage loss the test above measures — and it was still open.
+
+    `_resolvable_signatures` caught every `ImportError`, so a bundle whose dependency stack is
+    missing or renamed was indistinguishable from `qm`, which legitimately has no server module.
+    Measured on this tree with one missing import injected into `connectors/chem/server/tools.py`:
+    50 signatures became 46 and `make template-validate` printed "template validation passed" and
+    exited 0, while `make connector-validate` named the same bundle as broken. Two gates, one
+    situation, opposite answers — so the import is now one shared function that raises, and this
+    pins the raising half.
+    """
+    from chemclaw.cli.validate_templates import _resolvable_signatures
+
+    missing_dep = ModuleNotFoundError("No module named 'rdkit'")
+    missing_dep.name = "rdkit"
+
+    def fail_for_bundles(name: str) -> Any:
+        raise missing_dep
+
+    monkeypatch.setattr("chemclaw.connectors.registry.importlib.import_module", fail_for_bundles)
+    with pytest.raises(ModuleNotFoundError, match="rdkit"):
+        _resolvable_signatures()
+
+
 # --- the run --------------------------------------------------------------------------
 
 

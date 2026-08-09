@@ -6,11 +6,11 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
-# `deps-audit`'s scratch files and the two patterns that classify its output. Named here rather
-# than inlined in the recipe so `tests/test_deploy_chart.py` can assert the classification against
-# the same strings the target uses, instead of a second copy that can drift from it.
-AUDIT_REQUIREMENTS ?= /tmp/chemclaw-requirements.txt
-AUDIT_LOG ?= /tmp/chemclaw-pip-audit.log
+# The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
+# recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings
+# the target uses, instead of a second copy that can drift from it. There are no scratch-path
+# variables beside them any more: the recipe classifies what the command *said*, holding it in a
+# shell variable, and writes its one scratch file with `mktemp` (see the target).
 # A real finding. Checked first and never excused, so an advisory whose text mentions a connection
 # failure cannot be read as one.
 AUDIT_FOUND := Found [0-9]+ known vulnerabilit
@@ -191,12 +191,23 @@ deps-audit:  ## Check the locked dependency closure for known vulnerabilities (s
 	@# A real finding is never mistaken for an outage: `Found N known vulnerabilities` is checked
 	@# first and fails unconditionally, so a connection string appearing in an advisory's text
 	@# cannot buy an exemption.
-	@uv export --no-hashes --no-dev --format requirements-txt > $(AUDIT_REQUIREMENTS)
-	@set +e; uvx pip-audit --no-deps --disable-pip -r $(AUDIT_REQUIREMENTS) 2>&1 | tee $(AUDIT_LOG); \
-	rc=$${PIPESTATUS[0]}; set -e; \
+	@#
+	@# **The classified bytes are the ones the command produced, held in a variable.** They used to
+	@# be read back from a log file the run piped into with `tee`, and that is a different question:
+	@# `tee`'s own failure was never examined, so a `tee` that could not write left the greps reading
+	@# whatever was already at that fixed, world-writable path. Measured — a real finding, a genuinely
+	@# failing `tee` (read-only mount), and a stale log holding a connection error — the target
+	@# printed "SKIPPED ... unreachable" and exited 0 on a vulnerable lockfile. Capturing removes the
+	@# whole class: there is no second copy of the output that can disagree with the first. The one
+	@# scratch file left is the export, and it is an `mktemp` rather than a fixed name, because a
+	@# predictable path in a shared /tmp is a symlink someone else can plant.
+	@scratch=$$(mktemp -d); trap 'rm -rf "$$scratch"' EXIT; \
+	uv export --no-hashes --no-dev --format requirements-txt > "$$scratch/requirements.txt"; \
+	report=$$(uvx pip-audit --no-deps --disable-pip -r "$$scratch/requirements.txt" 2>&1) && rc=0 || rc=$$?; \
+	printf '%s\n' "$$report"; \
 	if [ $$rc -ne 0 ]; then \
-	  if grep -qE '$(AUDIT_FOUND)' $(AUDIT_LOG); then exit $$rc; fi; \
-	  if ! grep -qE '$(AUDIT_UNREACHABLE)' $(AUDIT_LOG); then exit $$rc; fi; \
+	  if grep -qE '$(AUDIT_FOUND)' <<<"$$report"; then exit $$rc; fi; \
+	  if ! grep -qE '$(AUDIT_UNREACHABLE)' <<<"$$report"; then exit $$rc; fi; \
 	  if [ -n "$${CI:-}" ]; then \
 	    echo "deps-audit: the advisory database is unreachable and this is CI — the supply-chain"; \
 	    echo "deps-audit: check cannot be skipped where the network is a given. Failing."; \

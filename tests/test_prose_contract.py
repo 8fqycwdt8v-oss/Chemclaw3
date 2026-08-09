@@ -372,6 +372,54 @@ def test_rule_9_reads_the_decisions_and_leaves_the_archive_alone() -> None:
     assert not any(origin.startswith("docs/archive/") for origin in origins)
 
 
+def test_rule_9s_corpus_cannot_be_widened_by_build_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The corpus is the repository's documents, not whatever the working directory holds.
+
+    It used to be `rglob("*.md")` from the root, so `make mutants` — which copies the whole tree
+    into the gitignored `mutants/` — put a second copy of every document into the gate. Proven
+    before the fix by dropping one probe file into `mutants/docs/guides/`:
+
+        mutants/docs/guides/_probe.md: queries chemclaw_bogus_total{…}, which no registry declares
+        1 prose/capability mismatch(es)
+
+    `make ci` red on a path no commit contains, and the same hazard for any vendored checkout or
+    tool cache at the root. The union costs no reach: 424 walked files became 290, and all 9
+    documents that carry a selector are still in it.
+    """
+    (tmp_path / "docs" / "guides").mkdir(parents=True)
+    (tmp_path / "docs" / "guides" / "real.md").write_text("real", encoding="utf-8")
+    (tmp_path / "README.md").write_text("root", encoding="utf-8")
+    (tmp_path / "mutants" / "docs" / "guides").mkdir(parents=True)
+    (tmp_path / "mutants" / "docs" / "guides" / "real.md").write_text("copy", encoding="utf-8")
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    origins = prose._selector_sources()
+    assert "docs/guides/real.md" in origins
+    assert "README.md" in origins
+    assert not any(origin.startswith("mutants/") for origin in origins), origins
+
+
+def test_a_retired_metric_a_merged_adr_quotes_has_a_legal_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule 9 reaches into `docs/decisions/`, where the fix rule 8 assumes is forbidden.
+
+    Rule 8 stays out of that corpus precisely because "the fix would be editing a merged decision —
+    which CLAUDE.md forbids". Rule 9 reaches in anyway, and six merged ADRs carry selectors today:
+    simulated by dropping `chemclaw_repeated_tool_calls_total` from the declared set, the gate went
+    red on D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice, with no edit anyone is allowed to
+    make. `_RETIRED_METRIC_NAMES` is the remedy, and it is empty until a retirement needs it.
+    """
+    assert prose._RETIRED_METRIC_NAMES == frozenset(), "an entry here is a reviewed retirement"
+    text = 'the alert was `chemclaw_retired_total{subsystem="x"}`'
+    monkeypatch.setattr(prose, "_operator_sources", dict)
+    monkeypatch.setattr(prose, "_selector_sources", lambda: {"docs/decisions/D-x.md": text})
+    assert len(check_metric_citations()) == 1, "the reach itself must stay"
+    monkeypatch.setattr(prose, "_RETIRED_METRIC_NAMES", frozenset({"chemclaw_retired_total"}))
+    assert check_metric_citations() == []
+
+
 def test_the_non_metric_allowlist_is_small_and_deliberate() -> None:
     """One entry, and it is a namespace collision rather than a pardoned mistake."""
     assert prose._NON_METRIC_NAMES == frozenset({"chemclaw_app"})

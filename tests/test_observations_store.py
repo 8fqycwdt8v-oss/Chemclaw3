@@ -73,12 +73,12 @@ def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
     Support must follow the corpus: a finding seen again with another reaction behind it ends up
     backed by both notes and both projects.
 
-    **This used to assert something subtly different** — that two runs reporting *disjoint*
-    evidence are unioned by the SQL. That union is what let evidence outlive the corpus, so it is
-    gone: a run is authoritative for the rows it names, and both miners emit an observation's
-    complete membership because they mine the whole corpus every pass (`all_reactions()` reads
-    from `datetime.min`). Accumulation now comes from the miner seeing more, which is the only
-    place it can come from and still mean "what the record currently shows".
+    **Accumulation comes from the miner seeing more, and from nowhere else.** A run is
+    authoritative for the rows it names: the SQL replaces an observation's evidence rather than
+    unioning it, because a union lets evidence outlive the corpus that justified it. That is safe
+    only because both miners emit an observation's *complete* membership every pass — they mine the
+    whole corpus each time (`all_reactions()` reads from `datetime.min`) — which is what makes
+    "supported by N notes" mean "what the record currently shows" rather than "what it ever showed".
     """
 
     async def _run() -> None:
@@ -116,9 +116,9 @@ def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
     that says "failed in 2 runs across 2 projects … no successful run is in this cluster" one
     paragraph before "supported by 3 merged notes across 3 projects".
 
-    **This test used to hand-write two `_finding(...)` payloads** while its docstring claimed the
-    real chain, which proved only that the SQL replaces an array — not that the miner ever emits
-    the shrunken cluster that makes replacement mean anything.
+    Hand-written `_finding(...)` payloads cannot state this. Feeding the store two payloads whose
+    evidence lists differ proves the SQL replaces an array; what has to be shown is that the miner
+    *emits* the shrunken cluster, which is the step that makes replacement mean anything.
     """
     monkeypatch.setattr(settings, "observation_promote_min_evidence", 3)
     monkeypatch.setattr(settings, "observation_promote_min_projects", 2)
@@ -329,6 +329,66 @@ def test_a_promoted_observation_leaves_the_open_set() -> None:
         observation = (await store.open_observations())[0]
 
         await store.set_status(observation.id, "promoted")
+        assert await store.open_observations() == []
+        assert await store.promotable() == []
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
+def test_a_retired_observation_comes_back_when_the_corpus_does(
+    complete: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retirement has to be reversible, or the tier empties permanently instead of breathing.
+
+    Neither `_REPLACE` nor `_ACCUMULATE` touched `status`, and every read is `status = 'open'`, so
+    a re-observed finding had its evidence replaced and its `last_seen` bumped while staying
+    invisible to `open_observations`, `promotable` and `recall_observations` forever. Measured
+    before the fix, on both statements: `retire_stale() == 1`, then re-recording left
+    `status='retired'` with a fresh `last_seen`, and the row appeared in neither read.
+
+    Two ordinary paths reach it — a finding that lapses for `observation_retire_after_days` and
+    returns, and an ingest source quiet for that long — so this is a permanently dead row rather
+    than a temporarily hidden one. It also stops being counted by `retire_stale`, which is the
+    tier's own stated instrumentation for whether the miners are producing noise.
+    """
+    monkeypatch.setattr(settings, "observation_retire_after_days", 30)
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        await store.record([_finding()], complete=complete)
+        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+            await conn.execute("UPDATE observations SET last_seen = now() - interval '90 days'")
+            await conn.commit()
+
+        assert await store.retire_stale() == 1
+        assert await store.open_observations() == []
+
+        # The corpus produces the finding again: it must return to the open set.
+        await store.record([_finding()], complete=complete)
+        revived = await store.open_observations()
+        assert len(revived) == 1, "a re-observed finding must leave the retired state"
+        assert revived[0].status == "open"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
+def test_re_observing_a_promoted_observation_does_not_reopen_it(complete: bool) -> None:
+    """Revival must reach `retired` only — `promoted` is the state that stops the nightly PR.
+
+    `test_a_promoted_observation_leaves_the_open_set` pins why: a promoted finding that returned to
+    the open set would be re-promoted on the next pass and open the same PR forever. The miners
+    keep re-observing a promoted finding by construction, so this is the routine case, not an edge.
+    """
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        await store.record([_finding()], complete=complete)
+        promoted = (await store.open_observations())[0]
+        await store.set_status(promoted.id, "promoted")
+
+        await store.record([_finding()], complete=complete)
         assert await store.open_observations() == []
         assert await store.promotable() == []
 

@@ -29,7 +29,9 @@ from chemclaw.science.safety.notes import hazard_problems, structures_in
 from chemclaw.science.safety.screen import (
     SafetyRulesError,
     ScreenResult,
+    _RuleTable,
     at_least,
+    read_rule_table,
     screen_reaction,
     screen_structure,
 )
@@ -644,9 +646,13 @@ def test_a_hydrazinium_salt_is_a_hydrazine_to_both_rules() -> None:
         assert "oxidizer-with-reductant" in {
             f.rule_id for f in screen_reaction([salt, "OO"]).flags
         }, salt
-    # Measured across the 83 distinct structures of the reagent identity table, the widening newly
-    # matches hydrazinium salts and nothing else. These are the near misses that keep it honest:
-    # an ordinary ammonium or amine salt has no N–N bond, and an acylated one is a hydrazide.
+    # This once cited "the 83 distinct structures of the reagent identity table" as showing the
+    # widening matched hydrazinium salts and nothing else. Re-measured: the table holds 87 names
+    # over 61 distinct structures, and *zero* of them change verdict under any of the three
+    # widenings — it contains no hydrazine in any form (its only N–N structures are two azides and
+    # the triazole of TBTU/HATU). The set could never have established the claim. The near misses
+    # below do the work instead: an ordinary ammonium or amine salt has no N–N bond, an acylated
+    # one is a hydrazide, and `_NOT_A_HYDRAZINE` carries the full panel.
     for innocent in (
         "[NH4+].[Cl-]",  # ammonium chloride
         "[NH3+]CC[NH3+].[Cl-].[Cl-]",  # ethylenediamine dihydrochloride
@@ -655,6 +661,90 @@ def test_a_hydrazinium_salt_is_a_hydrazine_to_both_rules() -> None:
         "NC(=O)N[NH3+].[Cl-]",  # semicarbazide hydrochloride — acylated, so a hydrazide
     ):
         assert "hydrazine" not in {f.rule_id for f in screen_structure(innocent).flags}, innocent
+
+
+# A 1,1-disubstituted hydrazine beside an oxidiser, kept as (name, SMILES, rule) for the same
+# reason `_PREVIOUSLY_SILENT` is: a future narrowing has to name the compound it would silence.
+# UDMH + H2O2 / N2O4 is the archetypal hypergolic pair — it ignites on contact, with no ignition
+# source — and it is the exact molecule the structural rule already learned about once.
+_HYPERGOLIC = [
+    ("UDMH (1,1-dimethylhydrazine)", "CN(C)N", "oxidizer-with-reductant"),
+    ("1,1-dimethylhydrazinium chloride", "C[NH+](C)N.[Cl-]", "oxidizer-with-reductant"),
+    ("N-aminopiperidine", "NN1CCCCC1", "oxidizer-with-reductant"),
+    ("N-aminomorpholine", "NN1CCOCC1", "oxidizer-with-reductant"),
+]
+
+
+@pytest.mark.parametrize(("name", "smiles", "rule"), _HYPERGOLIC)
+def test_a_disubstituted_hydrazine_is_a_reductant_to_the_pair_rule(
+    name: str, smiles: str, rule: str
+) -> None:
+    """The pair rule kept the H-on-both-nitrogens form its structural twin had already dropped.
+
+    Measured before the fix: `NN + OO` and `[NH3+]N.[Cl-] + OO` both raised
+    `oxidizer-with-reductant`, while `CN(C)N + OO` raised only `hydrazine` and `peroxide` — the
+    hypergolic pair was the one that screened clean on the rule named for it. The structural
+    `hydrazine` rule had been widened for UDMH by name, and its twin in `incompatible_pairs` was
+    left demanding H on both nitrogens, which excludes every N,N-disubstituted hydrazine.
+    """
+    assert rule in {f.rule_id for f in screen_reaction([smiles, "OO"]).flags}, name
+
+
+def test_the_hydrazine_pair_arm_is_its_structural_twin_verbatim() -> None:
+    """The two hydrazine patterns must be the *same string*, not merely both recently widened.
+
+    This rule set has now been half-fixed twice — the peroxide widening reached the structural
+    rule before its pair arm, and the hydrazine widening did it again with the H requirement, each
+    time leaving a screen that reads clean. Pinning individual molecules cannot prevent the third
+    occurrence, because the next divergence will be some molecule nobody listed. Pinning the
+    patterns equal does: the same motif, screened by the same characters, in both places.
+
+    `left` deliberately keeps its own spelling — an oxidiser arm is a union over four structural
+    rules, not a twin of any one of them.
+    """
+    table = read_rule_table(settings.safety_rules_path, _RuleTable)
+    structural = next(r.smarts for r in table.structural if r.id == "hydrazine")
+    pair = next(r.right for r in table.incompatible_pairs if r.id == "oxidizer-with-reductant")
+    assert f"$({structural})" in pair, (
+        "the `oxidizer-with-reductant` right arm must embed the `hydrazine` rule's SMARTS "
+        f"verbatim; structural={structural!r} right={pair!r}"
+    )
+
+
+# 1,2-diarylhydrazines: routine nitrobenzene-reduction products and benzidine-rearrangement
+# precursors, silenced by an `!$(N[a])` guard whose stated purpose (keeping azo systems out) is
+# served entirely by `NX3` — an azo nitrogen is `NX2` and never matched either way.
+_ARYL_HYDRAZINES = [
+    ("1,2-diphenylhydrazine (hydrazobenzene)", "c1ccccc1NNc1ccccc1", "hydrazine"),
+    ("1-methyl-1-phenylhydrazine", "CN(N)c1ccccc1", "hydrazine"),
+]
+
+
+@pytest.mark.parametrize(("name", "smiles", "rule"), _ARYL_HYDRAZINES)
+def test_a_diarylhydrazine_is_still_a_hydrazine(name: str, smiles: str, rule: str) -> None:
+    """A guard aimed at azo systems hit hydrazines instead, and only when *both* N were aryl.
+
+    Measured with and without `!$(N[a])`: azobenzene was False either way, phenylhydrazine True
+    either way, and hydrazobenzene was the single molecule the guard changed — from True to
+    False. It bit only when both nitrogens are aryl-bound, because with one aryl nitrogen the
+    match is simply found from the other direction, which is why it looked harmless.
+    """
+    assert rule in {f.rule_id for f in screen_structure(smiles).flags}, name
+
+
+def test_an_azo_compound_is_excluded_by_coordination_not_by_an_aryl_guard() -> None:
+    """The reason azo systems stay out, pinned so the guard is not reintroduced to "restore" it.
+
+    An azo nitrogen is two-coordinate with no hydrogen; `[NX3,NX4+]` cannot match it. This holds
+    for the aryl and the alkyl case alike, which an `!$(N[a])` guard never covered.
+    """
+    for name, smiles in (
+        ("azobenzene", "c1ccc(cc1)/N=N/c1ccccc1"),
+        ("azoxybenzene", "c1ccccc1[N+]([O-])=Nc1ccccc1"),
+        ("diethyl azodicarboxylate (DEAD)", "CCOC(=O)/N=N/C(=O)OCC"),
+        ("azo-tert-butane", "CC(C)(C)/N=N/C(C)(C)C"),
+    ):
+        assert "hydrazine" not in {f.rule_id for f in screen_structure(smiles).flags}, name
 
 
 def test_a_complex_hydride_fires_against_a_vicinal_dichloride_too() -> None:
@@ -690,6 +780,58 @@ def test_widening_a_rule_did_not_make_a_routine_reagent_hazardous(name: str, smi
     """None of the widened patterns may fire on an everyday, unremarkable reagent."""
     widened = {"peroxide", "hydrazine", "n-halamine"}
     assert widened.isdisjoint({f.rule_id for f in screen_structure(smiles).flags}), name
+
+
+# The false-positive half of dropping the H requirement and the aryl guard. Every one of these
+# carries a nitrogen the widened pattern could plausibly reach — a second nitrogen, a cation, an
+# N–O bond, an aryl amine, an acylated N–N — and none of them is a hydrazine. A widened safety
+# pattern that cries wolf gets the whole screen switched off, so this half is load-bearing.
+_NOT_A_HYDRAZINE = [
+    ("ammonium chloride", "[NH4+].[Cl-]"),
+    ("ethylenediamine", "NCCN"),
+    ("ethylenediamine dihydrochloride", "[NH3+]CC[NH3+].[Cl-].[Cl-]"),
+    ("piperazine", "C1CNCCN1"),
+    ("DABCO", "C1CN2CCN1CC2"),
+    ("triethylamine", "CCN(CC)CC"),
+    ("aniline", "Nc1ccccc1"),
+    ("aniline hydrochloride", "[NH3+]c1ccccc1.[Cl-]"),
+    ("N,N-dimethylaniline", "CN(C)c1ccccc1"),
+    ("hydroxylamine", "NO"),
+    ("hydroxylamine hydrochloride", "[NH3+]O.[Cl-]"),
+    ("urea", "NC(=O)N"),
+    ("guanidine", "NC(N)=N"),
+    ("imidazole", "c1cnc[nH]1"),
+    ("pyrazole", "c1cc[nH]n1"),  # aromatic N–N: `NX3`/`NX2`, and not a free hydrazine
+    ("morpholine", "C1COCCN1"),
+    ("acetohydrazide", "CC(=O)NN"),  # acylated, so a hydrazide
+    ("tert-butyl carbazate (Boc-hydrazine)", "CC(C)(C)OC(=O)NN"),
+    ("semicarbazide hydrochloride", "NC(=O)N[NH3+].[Cl-]"),
+    # Not listed: tosylhydrazide. `!$(NC=O)` excludes *acyl* hydrazides, not sulfonyl ones, so it
+    # fires at HEAD and still fires — unchanged by both widenings, and correctly so: TsNHNH2 is a
+    # free N–H hydrazine and a diimide-forming reductant, which is what the rule's prose names.
+    ("tetramethylhydrazine", "CN(C)N(C)C"),  # a hydrazine, but no N–H: deliberately out of scope
+    ("acetone hydrazone", "CC(C)=NN"),  # the sp2 nitrogen is `NX2`
+    ("DMF", "CN(C)C=O"),
+    ("nitrobenzene", "O=[N+]([O-])c1ccccc1"),
+]
+
+
+@pytest.mark.parametrize(("name", "smiles"), _NOT_A_HYDRAZINE)
+def test_the_widened_hydrazine_pattern_stays_quiet_on_ordinary_nitrogen(
+    name: str, smiles: str
+) -> None:
+    """Neither hydrazine rule may fire on a molecule that merely contains nitrogen.
+
+    Measured over a 106-row panel — the 61 distinct structures of the reagent identity table plus
+    45 hand-picked hydrazine-adjacent and nitrogen-bearing reagents — exactly five molecules
+    changed verdict across both rules, every one a hydrazine: UDMH, N-aminopiperidine,
+    N-aminomorpholine and 1-methyl-1-phenylhydrazine on the pair arm (the H asymmetry), and
+    hydrazobenzene plus 1-methyl-1-phenylhydrazine on the structural rule (the aryl guard).
+    Nothing in this list moved, in either direction.
+    """
+    fired = {f.rule_id for f in screen_reaction([smiles, "OO"]).flags}
+    assert "hydrazine" not in fired, name
+    assert "oxidizer-with-reductant" not in fired, name
 
 
 # --- the genotoxicity alert table -----------------------------------------------------

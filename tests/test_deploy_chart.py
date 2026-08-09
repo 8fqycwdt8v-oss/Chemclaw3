@@ -1214,8 +1214,45 @@ def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> No
     assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
 
 
+def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
+    """Two hand-maintained lists whose whole contract is that they agree, and nothing checked it.
+
+    CLAUDE.md's claim is "CI runs exactly these, so a green `make` locally means a green CI". That
+    is one word in a `Makefile` prerequisite list and one step in a workflow, kept in step by
+    memory — which is exactly how `deps-audit` came to be in neither. That instance was fixed and
+    pinned; the *mechanism* was not, so the next gate to be added to one list and forgotten in the
+    other fails nothing. This closes the class instead of the instance.
+
+    `helm-validate` is the one gate deliberately in the other job: it needs `helm` and
+    `kubeconform` and no Python, so it runs in `chart` in parallel rather than lengthening `check`.
+    The split is asserted rather than tolerated — a gate quietly moving between jobs is a change to
+    what blocks a merge.
+    """
+    ci_target = next(
+        line
+        for line in (DEPLOY.parent / "Makefile").read_text().splitlines()
+        if line.startswith("ci:")
+    )
+    gates = ci_target.split(":", 1)[1].split("##")[0].split()
+    assert len(gates) > 10, f"the `make ci` prerequisite list did not parse: {gates}"
+
+    workflow = (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
+    check_job, chart_job = workflow.split("\n  chart:")
+
+    def targets(job: str) -> set[str]:
+        """Every make target a job's steps invoke, `make lint type cov` counting as three."""
+        return {t for command in re.findall(r"run: make (.+)", job) for t in command.split()}
+
+    assert "helm-validate" in targets(chart_job), "the chart gate left the job that has helm"
+    missing = [gate for gate in gates if gate not in targets(check_job) | targets(chart_job)]
+    assert not missing, (
+        f"`make ci` runs {missing} and no step in ci.yml does, so a green local gate is not a "
+        "green CI — the exact drift that let deps-audit sit in neither list"
+    )
+
+
 def _run_deps_audit(
-    tmp_path: Path, stdout: str, exit_code: int, *, ci: str | None
+    tmp_path: Path, stdout: str, exit_code: int, *, ci: str | None, stale_log: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run `make deps-audit` against a stubbed `uvx pip-audit`, with `CI` set or unset.
 
@@ -1224,24 +1261,33 @@ def _run_deps_audit(
     *output*, and only one of them can be produced by unplugging a cable. `pip-audit` also caches
     its responses, so an offline run after an online one legitimately succeeds; a stub is the only
     way to ask the question deterministically.
+
+    `stale_log` sets up the one situation these stubs used to be blind to: a `tee` that cannot
+    write, with bytes already sitting at the log path it was meant to overwrite. It stubs `tee`
+    itself as a command that writes nothing and fails, seeds that text at the historical
+    `AUDIT_LOG` path, and passes that path on the command line — everything the deleted
+    file-reading recipe needed to classify the wrong bytes. Nothing under test may consult it.
     """
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     (stub_dir / "uv").write_text("#!/bin/sh\necho '# stub export'\n")
     (stub_dir / "uvx").write_text(f"#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n")
-    for stub in ("uv", "uvx"):
+    stubs = ["uv", "uvx"]
+    overrides = []
+    if stale_log is not None:
+        log = tmp_path / "audit.log"
+        log.write_text(stale_log)
+        (stub_dir / "tee").write_text("#!/bin/sh\ncat > /dev/null\nexit 1\n")
+        stubs.append("tee")
+        overrides.append(f"AUDIT_LOG={log}")
+    for stub in stubs:
         (stub_dir / stub).chmod(0o755)
     env = {k: v for k, v in os.environ.items() if k != "CI"}
     env["PATH"] = f"{stub_dir}:{env['PATH']}"
     if ci is not None:
         env["CI"] = ci
     return subprocess.run(
-        [
-            "make",
-            "deps-audit",
-            f"AUDIT_REQUIREMENTS={tmp_path / 'requirements.txt'}",
-            f"AUDIT_LOG={tmp_path / 'audit.log'}",
-        ],
+        ["make", "deps-audit", *overrides],
         cwd=DEPLOY.parent,
         env=env,
         capture_output=True,
@@ -1299,6 +1345,42 @@ def test_a_real_finding_fails_even_offline(tmp_path: Path) -> None:
     result = _run_deps_audit(tmp_path, noisy, 1, ci=None)
     assert result.returncode != 0, result.stdout + result.stderr
     assert "SKIPPED" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_the_audit_classifies_what_the_command_said_not_what_a_file_holds(
+    tmp_path: Path,
+) -> None:
+    """The hole the three tests above could not see: the classified bytes came from a *file*.
+
+    The recipe piped `pip-audit` into `tee $(AUDIT_LOG)`, took the status from `PIPESTATUS[0]` and
+    then grepped the log. `tee`'s own failure is `PIPESTATUS[1]` and was never examined, so a `tee`
+    that could not write left the greps reading whatever already sat at that fixed, world-writable
+    path. Measured against the deleted recipe with a real (not stubbed) `tee` failure — an EROFS
+    mount — a stale log holding a connection error, and `pip-audit` reporting two vulnerabilities:
+
+        deps-audit: SKIPPED - the advisory database is unreachable and CI is unset.
+        make exit=0
+
+    A vulnerable lockfile, reported as an outage, on the target that exists to prevent exactly
+    that. The three tests above all passed throughout, because none of them ever made `tee` fail.
+
+    Both halves are asserted. The behavioural half hands the run every ingredient that used to
+    flip it; the structural half is what keeps this from passing vacuously if the file ever comes
+    back under another variable's name — the classification's input has to be the captured output.
+    """
+    result = _run_deps_audit(tmp_path, _FOUND, 1, ci=None, stale_log=_UNREACHABLE)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "SKIPPED" not in result.stdout, result.stdout
+    assert "Found 2 known vulnerabilities" in result.stdout, (
+        "the operator never even saw the finding"
+    )
+    recipe = (DEPLOY.parent / "Makefile").read_text().split("deps-audit:")[1].split("\nexplain:")[0]
+    commands = [line for line in recipe.splitlines() if not line.lstrip().startswith(("@#", "#"))]
+    assert not any("tee" in line for line in commands), (
+        "deps-audit pipes into tee again, so its classification reads a file rather than the "
+        f"command's output: {commands}"
+    )
 
 
 @pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
@@ -1382,6 +1464,37 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
         "chemclaw_tokens_total",
     ]:
         assert metric in rule, f"{metric} has no alert"
+
+
+def test_no_alert_asks_for_to_suppress_what_only_a_threshold_can() -> None:
+    """`for:` cannot mean "sustained" over an `increase(...) > 0`, and two rules claimed it did.
+
+    `increase(c[10m]) > 0` returns a sample continuously for ~10 minutes after a *single*
+    increment, so a `for:` shorter than the range window is satisfied by one blip: the alert is not
+    suppressed, only late. `ChemclawDurableUnreachable` was annotated "`for: 5m` because a single
+    broker blip … needs no page" while paging on exactly that, five minutes afterwards;
+    `ChemclawRollbackWatermarkUnavailable` had the same shape with a 5m window and a 5m `for:`.
+    Both now put the judgement in the count, where it can actually be made.
+
+    The rule is general because the mistake is: a threshold of `0` over a range window admits no
+    `for:` short enough to filter anything. `for: 0m` on a `> 0` is correct and stays — three
+    alerts here mean the first increment and say so.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    for block in re.split(r"\n\s*- alert: ", rule)[1:]:
+        name = block.splitlines()[0].strip()
+        expr = block.split("expr:")[1].split("for:")[0]
+        window = re.search(
+            r"increase\(chemclaw_[a-z_]+\[(\d+)m\]\)\s*>\s*0\b", " ".join(expr.split())
+        )
+        held = re.search(r"for:\s*(\d+)m", block)
+        if window is None or held is None:
+            continue
+        assert int(held.group(1)) == 0, (
+            f"{name} counts every increment over {window.group(1)}m and then waits "
+            f"{held.group(1)}m, which suppresses nothing — the expression stays true for the whole "
+            "window after one increment. Put the judgement in the threshold instead."
+        )
 
 
 def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:

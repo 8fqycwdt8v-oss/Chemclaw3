@@ -580,6 +580,32 @@ class SecretRedactingFilter(logging.Filter):
         applied to a string that does not exist yet. `logging.Formatter.format` reuses a populated
         `exc_text` instead of re-rendering, so ours is what is emitted — including under a
         deployment's own formatter, which is the same reason this is a filter and not a formatter.
+
+        **Nothing this method does may raise**, which is why the whole of it sits in a try. Filters
+        run inside `Handler.handle` but *outside* the try/except that wraps `emit()`, so an
+        exception here is not logging's to report — it lands in whoever called `logger.info(...)`.
+        The `exc_info=False` crash below is one instance of that; measurement found five, every
+        field this method touches (a `%`-format mismatch, a `msg` whose `__str__` raises, a
+        pass-through `exc_info` tuple, a non-string `exc_text` or `stack_info`). Keeping the record
+        is the right answer to all five rather than merely the safe-looking one: each is a
+        malformation `Formatter.format` hits too, so the handler routes it to `handleError` ->
+        stderr, which is exactly what happens with no filter installed. Returning `False` would
+        trade a crash for a silently dropped log line, which is worse than either.
+        """
+        try:
+            self._redact(record)
+        except Exception:
+            # See the note above: a record this filter cannot process is one the formatter cannot
+            # process either, so it goes on to be reported by logging's own error path.
+            pass
+        return True
+
+    def _redact(self, record: logging.LogRecord) -> None:
+        """Rewrite every text field of `record` in place.
+
+        Called only from `filter`, which owns the guarantee that a malformed record is reported by
+        logging rather than raised at the caller — so this body is free to be written for the
+        well-formed case.
         """
         message = record.getMessage()
         redacted = redact_secrets(message, self._connector_token_envs)
@@ -591,13 +617,14 @@ class SecretRedactingFilter(logging.Filter):
         # Truthiness, not `is not None`, and the difference is a crash. `Logger._log` stores
         # whatever it was handed: `logger.error(..., exc_info=False)` puts the *bool* on the record,
         # so `is not None` sent `False` into `formatException`, which subscripts it —
-        # `TypeError: 'bool' object is not subscriptable`. Filters run inside `Handler.handle`,
-        # outside logging's own error handling, so that propagated to whoever was logging. It
-        # reached production code through `metrics_bridge.degraded(..., exc_info=False)`: the one
-        # site passing it is `skill_manifest`, inside the `except` whose whole purpose is to skip a
-        # malformed `SKILL.md` and continue, so a single bad manifest made `build_agent` raise.
+        # `TypeError: 'bool' object is not subscriptable`, which reached production code through
+        # `metrics_bridge.degraded(..., exc_info=False)`: the one site passing it is
+        # `skill_manifest`, inside the `except` whose whole purpose is to skip a malformed
+        # `SKILL.md` and continue, so a single bad manifest made `build_agent` raise.
         # `logging`'s own `Formatter.format` has always tested truthiness here; matching it is both
-        # the fix and the reason no other formatter had this problem.
+        # the fix and the reason no other formatter had this problem. Still load-bearing now that
+        # `filter` catches: `exc_info=False` is a *well-formed* call, and letting it raise into that
+        # catch would skip the two redaction steps below and leak a credential in `stack_info`.
         if record.exc_info and record.exc_text is None:
             # `_EXC_RENDERER` is built once at module scope: constructing a `Formatter` here would
             # be per-record work, and `formatException` reaches `traceback`, which `logging` has
@@ -607,7 +634,6 @@ class SecretRedactingFilter(logging.Filter):
             record.exc_text = redact_secrets(record.exc_text, self._connector_token_envs)
         if record.stack_info:
             record.stack_info = redact_secrets(record.stack_info, self._connector_token_envs)
-        return True
 
 
 class ContextFilter(logging.Filter):

@@ -21,6 +21,7 @@ import asyncio
 from collections.abc import Callable, Iterator
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 from starlette.testclient import TestClient
 
 from chemclaw.core.metrics_bridge import record_metric
@@ -145,8 +146,6 @@ def test_a_connector_serves_metrics_and_still_serves_mcp() -> None:
     *before* the mount or fall through to a transport that answers it with a protocol error. That
     ordering has one comment and now two routes relying on it.
     """
-    from mcp.server.fastmcp import FastMCP
-
     from chemclaw.connectors.server import connector_app
 
     app = connector_app(FastMCP("probe"), name="probe")

@@ -16,11 +16,22 @@ repository rather than of a function, and that no type checker can see:
 | Module | Guards |
 | --- | --- |
 | `test_layering.py` | the four layers: `core` imports no sibling, retrieval imports no orchestration |
+| `test_third_party_layering.py` | the other half: which package may import which third-party *stack*, and that nothing reaches into a dependency's private modules |
 | `test_packaging.py` | `src/` holds exactly one package; the wheel, coverage and `mypy` agree |
 | `test_repo_map.py` | every directory has a README, and `ARCHITECTURE.md` matches the tree |
 | `test_deploy_chart.py` | the Containerfile COPY set, and chart ↔ entrypoint in **both** directions |
+| `test_helm_chart.py` | the chart's configuration keys and the app's `Settings`, both directions |
 | `test_decision_log.py` | ADR ids are unique and the ledger matches the files |
+| `test_deferred_register.py` | `DEFERRED.md` stays a register of pending work, not a log of past reviews (D-154) |
 | `test_no_egress.py` | no shipped module names a third-party data host (D-089) |
+| `test_vendored_source.py` | the one sanctioned vendored dataset stays the only escalation of that rule |
+| `test_migrations_are_additive.py` | no migration destroys data or ends the "deploy the previous image" rollback |
+| `test_schema_inventory.py` | `infra/sql/README.md` lists exactly the tables that exist, with the migrations that touch each |
+| `test_database_privileges.py` | the SQL grant matrix is derived from the code rather than maintained beside it |
+| `test_metric_declarations.py` | every metric name a call site uses is declared |
+| `test_docstring_paths.py` | every module path a docstring or comment points at is a file that exists |
+| `test_prose_contract.py` | the agent's prose names only capability the agent actually has |
+| `test_harness_types.py` | the locally-declared MAF harness aliases still match MAF's, and no `src/` module imports its private loop module |
 
 ## A structural test must be shown failing
 
@@ -31,20 +42,28 @@ set reports green while asserting nothing. It has happened twice —
 discover, and `make db-migrate` globbed a moved directory and applied zero migrations in silence.
 
 So: after writing or moving one of these, **break it on purpose and watch it fail** before trusting
-the green. Each of the modules above now asserts against a non-empty set explicitly, which is the
-cheap version of the same discipline.
+the green. Each of the modules above pins itself against emptiness explicitly — either a count floor
+(`assert len(files) >= 30`) or a both-directions check, where a declared row that stops being
+observed fails as loudly as an observation with no row. That is the cheap version of the same
+discipline, and adding a module to this table means giving it one.
 
-## Running on a loaded machine: `CHEMCLAW_TEST_TIMEOUT_SCALE`
+**A count floor is not always enough, and `test_migrations_are_additive.py` is the worked example.**
+Its history check compared all 42 migrations on a `--depth=1` checkout — a healthy-looking count —
+while every comparison was a file against itself, because the graft commit *is* `HEAD` there. What
+it counts now is comparisons that span a commit. If a check reads the environment rather than only
+the tree, ask what the environment can take away without changing the count.
+
+## Running on a loaded machine: `PYTEST_TIMEOUT_SCALE`
 
 Every test is capped at 180 s (`pyproject.toml`), and a few compute-bound ones carry a tighter
 `@pytest.mark.timeout(...)` so a spiking optimizer names itself instead of eating the whole file's
 budget. **A marker overrides `--timeout` and `PYTEST_TIMEOUT`**, so the tightest caps were the ones
 no command line could relax — the wrong way round when the machine is busy.
 
-`CHEMCLAW_TEST_TIMEOUT_SCALE` multiplies every cap, markers included:
+`PYTEST_TIMEOUT_SCALE` multiplies every cap, markers included:
 
 ```
-CHEMCLAW_TEST_TIMEOUT_SCALE=4 make test    # ~4x slack, every cap, same relative tightness
+PYTEST_TIMEOUT_SCALE=4 make test    # ~4x slack, every cap, same relative tightness
 ```
 
 Reach for it when you see the `timeouts — these assertions never ran` section in the output. That

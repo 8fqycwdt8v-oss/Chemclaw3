@@ -48,6 +48,23 @@ logger = logging.getLogger(__name__)
 ObservationStatus = Literal["open", "promoted", "retired"]
 ObservationOrigin = Literal["corpus-mining", "interaction"]
 
+# Re-observing a finding revives it. Retirement means "the corpus stopped supporting this", and
+# the corpus is entitled to change its mind: a finding that lapses for
+# `observation_retire_after_days` and returns, or an ingest source quiet for that long, both come
+# back through here — two ordinary paths, not edge cases. Without this the row kept its evidence
+# replaced and its `last_seen` bumped by every subsequent pass while every read
+# (`open_observations`, `promotable`, `recall_observations`) filters `status = 'open'` — so it was
+# invisible *permanently*, and it never re-entered `retire_stale`'s count either, which is the
+# tier's own instrumentation for whether the miners are producing noise. A dead tier rather than a
+# breathing one.
+#
+# `retired -> open` only. The column holds exactly three values (migration `025` constrains it), and
+# `promoted` must survive re-observation untouched: the miners keep re-observing a promoted finding
+# by construction, and reopening it would re-promote it on the next sweep and open the same PR every
+# night — the failure `test_a_promoted_observation_leaves_the_open_set` exists to prevent.
+_REVIVE = """
+    status = CASE WHEN observations.status = 'retired' THEN 'open' ELSE observations.status END"""
+
 # **A run is authoritative for the rows it names — when, and only when, it saw the whole corpus.**
 #
 # The union these replace could only ever grow, so a member that left the cluster stayed forever: a
@@ -66,7 +83,7 @@ ObservationOrigin = Literal["corpus-mining", "interaction"]
 # complete, and a partial pass falls back to the union: it may add what it saw and may never delete
 # what it could not see. A retraction it cannot distinguish from an invisible member simply waits
 # for the next complete pass, which is the only pass entitled to make it.
-_REPLACE = """
+_REPLACE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
 ON CONFLICT (id) DO UPDATE SET
@@ -75,7 +92,7 @@ ON CONFLICT (id) DO UPDATE SET
     statement = EXCLUDED.statement,
     evidence_note_ids = EXCLUDED.evidence_note_ids,
     projects_seen = EXCLUDED.projects_seen,
-    last_seen = now()
+    last_seen = now(),{_REVIVE}
 """
 
 # Postgres has no array-union operator, so the union is spelled out — `array_agg(DISTINCT ...)` over
@@ -83,7 +100,7 @@ ON CONFLICT (id) DO UPDATE SET
 # row. The statement is *kept*, not refreshed: it was written by a pass that saw more than this one,
 # and replacing it would leave a "one project" sentence beside three-project evidence — the exact
 # self-contradiction the replacement above exists to remove, arrived at from the other side.
-_ACCUMULATE = """
+_ACCUMULATE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
 ON CONFLICT (id) DO UPDATE SET
@@ -95,7 +112,7 @@ ON CONFLICT (id) DO UPDATE SET
         SELECT array_agg(DISTINCT p ORDER BY p)
           FROM unnest(observations.projects_seen || EXCLUDED.projects_seen) AS p
     ),
-    last_seen = now()
+    last_seen = now(),{_REVIVE}
 """
 
 _COLUMNS = (

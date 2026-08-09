@@ -348,7 +348,9 @@ async def reembed_stale(
     re-cut and re-embed it. Refreshing it here would be paid for and then discarded — measured at
     17 embedding calls for a document worth 1 on the run after an upgrade, because migrations 038
     and 040 move both keys at once. The chunkings are passed in rather than read here because this
-    module is deliberately dependency-injected: the caller owns which shares are enabled.
+    module is deliberately dependency-injected: the caller owns which shares are enabled. That
+    also means a *disabled* share's rows are excluded and no crawl will ever repair them — right
+    for the other reason, that no search reaches a disabled source either.
 
     Args:
         index: The document index to refresh.

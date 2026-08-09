@@ -95,9 +95,16 @@ class NoteIndex(Protocol):
     ) -> list[IndexHit]:
         """Return up to `top_k` notes most cosine-similar to `query_embedding`, best first.
 
-        `within` restricts hits to the given note ids *before* the top-k cut, so a caller's
-        eligibility filter keeps full recall instead of competing with ineligible neighbors for
-        the k slots. None means the whole index.
+        `within` restricts hits to the given note ids, and `None` means the whole index. It is
+        applied in the backend's own query rather than to the result, so the top-k slots are mostly
+        not spent on notes the caller would discard.
+
+        **"Mostly" is the contract, not "always", and a caller must not read fewer than `top_k`
+        hits as "there were no others".** On a backend whose dense search is approximate — pgvector
+        HNSW, which is what production runs — the scope is a filter over the index's candidate
+        list rather than a bound on what the scan considers, so a selective `within` can leave
+        fewer than k candidates surviving. Only the in-memory reference and the lexical leg are
+        exact. `PostgresNoteIndex.__init__` carries the measurement.
         """
         ...
 
@@ -222,16 +229,39 @@ class PostgresNoteIndex:
         #
         # **On the dense path that is a tendency, not the guarantee this comment used to claim.**
         # With the HNSW index actually in use (see the tie-break below), the predicate is a *post*
-        # filter over the ef_search candidate list, not a bound on what the index scan considers:
-        # measured, `Index Scan using note_index_embedding_idx` with `Rows Removed by Filter: 29`
-        # above it. So a selective `within` can leave fewer than k candidates surviving and the
-        # query returns short. At N=20,000, k=8, clustered embeddings and a random eligible subset,
-        # the planner falls back to a Seq Scan once the filter is selective enough and the search is
-        # exact again — but forcing the index at `within=0.10` returned **5 of 8**. `GraphRetriever`
-        # always passes a `within`, so this is the only path production takes, and a `type=` filter
-        # that *correlates* with the embedding clusters will be worse than the random subset
-        # measured here. No knob trades latency back for recall; the `hnsw.ef_search` row in
-        # `docs/planning/BACKLOG.md` is where one would come from.
+        # filter over the ef_search candidate list, not a bound on what the index scan considers,
+        # so a selective `within` can leave fewer than k candidates surviving. That is why
+        # `NoteIndex.search_dense`'s contract says "mostly".
+        #
+        # **What this comment claimed as the measurement was not reproducible, and the re-measure
+        # is the interesting part.** N=20,000, tight clusters, k=8, pgvector 0.8.0,
+        # `hnsw.ef_search=40`, `hnsw.iterative_scan=off`, `EXPLAIN ANALYZE` on this very statement:
+        #
+        #   unscoped, planner or `enable_seqscan=off` -> Index Scan using note_index_embedding_idx,
+        #                                                8 of 8
+        #   within=0.10, planner                      -> Seq Scan + top-N heapsort, 8 of 8 (exact)
+        #   within=0.10, `enable_seqscan=off`         -> Index Scan using note_index_pkey + top-N
+        #                                                heapsort, 8 of 8 (exact)
+        #
+        # 0 of 20 queries returned short in any of the four. The earlier "forcing the index at
+        # `within=0.10` returned 5 of 8" rests on `enable_seqscan=off` forcing the *vector* index,
+        # and it does not: with a `note_id = ANY(...)` predicate the planner takes the primary key
+        # instead, which is exact. So at this scale the scoped note query is exact under **both**
+        # plans the planner will produce, and the shortfall above is a hazard the shape permits
+        # rather than one this corpus exhibits — the estimated cost of the exact scan grows with N
+        # while the HNSW path's startup cost does not, so a large enough corpus flips it.
+        #
+        # `PostgresDocumentIndex` is where the same shape does bite, mildly: its eligibility is an
+        # `EXISTS` over another table, which the planner cannot collapse into a key scan the way it
+        # collapses this array, so it stays a filter above an HNSW scan — 2 of 20 queries short at
+        # one source size, 1 of 20 at another, on an analyzed database. Its docstring carries the
+        # table. The asymmetry is the predicate's shape, not `within` itself.
+        #
+        # `GraphRetriever` always passes a `within`, so the scoped plan is the only one production
+        # takes. No knob trades latency back for recall; the `hnsw.ef_search` row in
+        # `docs/planning/BACKLOG.md` is where one would come from — and `hnsw.iterative_scan`,
+        # which is `off` on this server and is the knob that addresses this directly, belongs in
+        # that row too.
         #
         # The lexical statement below carries no such caveat: `ts_rank` over the GIN index is exact,
         # and there `within` really is a bound before the LIMIT. So is the InMemory backend, which

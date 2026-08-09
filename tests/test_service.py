@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from chemclaw.api.app import LiveSession, _LiveSessions, create_app
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from tests.fakes import FakeUpdate, asgi_client
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -61,13 +62,6 @@ class _SpyMcpTool:
         self.exited += 1
 
 
-class _Update:
-    def __init__(self, text: str = "") -> None:
-        self.text = text
-        self.contents: list[object] = []
-        self.user_input_requests: list[object] = []
-
-
 class _FakeAgent:
     """Fake agent: yields two tokens per turn. Connectors are the front door's business, not its."""
 
@@ -86,8 +80,8 @@ class _FakeAgent:
         **_run_options: Any,
     ) -> object:
         async def _gen() -> object:
-            yield _Update(text="hi ")
-            yield _Update(text="there")
+            yield FakeUpdate(text="hi ")
+            yield FakeUpdate(text="there")
 
         return _gen()
 
@@ -328,7 +322,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
         ) -> object:
             async def _gen() -> object:
                 record_job_started("qm-sse", "report")
-                yield _Update(text="submitted")
+                yield FakeUpdate(text="submitted")
 
             return _gen()
 
@@ -415,8 +409,6 @@ def test_a_queued_turn_runs_once_a_permit_frees(monkeypatch) -> None:  # type: i
     on the same code path as the run, and a mistake there (releasing a permit never taken, or
     returning after the wait) would end the stream instead of continuing into the turn.
     """
-    import httpx
-
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
@@ -436,8 +428,7 @@ def test_a_queued_turn_runs_once_a_permit_frees(monkeypatch) -> None:  # type: i
                     await asyncio.sleep(0.01)
             semaphore.release()
 
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             releaser = asyncio.create_task(_free_a_permit_once_the_turn_waits())
             res = await client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
@@ -1058,8 +1049,6 @@ def test_a_concurrent_burst_cannot_overrun_the_budget_by_more_than_the_permits(
 
     Counterfactual: delete the re-check in `_turn_events` and this reports ten answers.
     """
-    import httpx
-
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.core.config import settings
 
@@ -1074,10 +1063,7 @@ def test_a_concurrent_burst_cannot_overrun_the_budget_by_more_than_the_permits(
             agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
         )
         app.dependency_overrides[require_principal] = lambda: Principal(oid="u1", upn="u1@corp")
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", timeout=30
-        ) as client:
+        async with asgi_client(app, timeout=30) as client:
             sessions = [(await client.post("/sessions")).json()["session_id"] for _ in range(10)]
 
             async def _turn(session_id: str) -> list[dict[str, Any]]:
@@ -1173,7 +1159,7 @@ def _gated_agent_factory(
                 if message == blocked_message:
                     started.set()
                     await gate.wait()
-                yield _Update(text="done")
+                yield FakeUpdate(text="done")
 
             return _gen()
 
@@ -1188,14 +1174,12 @@ def test_concurrent_turn_on_same_session_is_409() -> None:
     (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
     the running turn's stream ends.
     """
-    import httpx
 
     async def _run() -> None:
         gate = asyncio.Event()
         started = asyncio.Event()
         app = create_app(agent_factory=_gated_agent_factory(gate, started, "first"))
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             first = asyncio.create_task(
                 client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
@@ -1214,14 +1198,12 @@ def test_concurrent_turn_on_same_session_is_409() -> None:
 
 def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
     """The per-session gate is per session: a turn on another session is not blocked."""
-    import httpx
 
     async def _run() -> None:
         gate = asyncio.Event()
         started = asyncio.Event()
         app = create_app(agent_factory=_gated_agent_factory(gate, started, "blocked"))
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             first = (await client.post("/sessions")).json()["session_id"]
             second = (await client.post("/sessions")).json()["session_id"]
             blocked = asyncio.create_task(
@@ -1256,9 +1238,9 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
             async def _gen() -> object:
                 import asyncio
 
-                yield _Update(text="partial")
+                yield FakeUpdate(text="partial")
                 await asyncio.sleep(60)  # a hung LLM endpoint: never yields again
-                yield _Update(text="never")
+                yield FakeUpdate(text="never")
 
             return _gen()
 
@@ -1301,8 +1283,7 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
         app = create_app(agent_factory=lambda _profile: _FakeAgent())
         # Zero permits: the turn parks on the semaphore *after* taking the session's slot.
         app.state.turn_semaphore = asyncio.Semaphore(0)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             waiting = asyncio.create_task(
                 client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
@@ -1358,8 +1339,7 @@ def test_a_mid_turn_job_completion_survives_a_disconnect_rollback(monkeypatch) -
         gate = asyncio.Event()
         started = asyncio.Event()
         app = create_app(agent_factory=_gated_agent_factory(gate, started, "park"))
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             live_session = app.state.live_sessions.get(session_id).session
             await mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1")
@@ -1403,8 +1383,6 @@ def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch)
     assertion fails — the transcript read rehydrates a second handle while the first still
     streams.
     """
-    import httpx
-
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_max_live_sessions", 1)
@@ -1417,8 +1395,7 @@ def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch)
             owner_store=_FakeOwnerStore(),
             connector_factory=_no_connectors,
         )
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             first = (await client.post("/sessions")).json()["session_id"]
             original = app.state.live_sessions.get(first).session
             turn = asyncio.create_task(
@@ -1466,8 +1443,7 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
 
     async def _run() -> None:
         app = create_app(agent_factory=lambda _profile: _FakeAgent())
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             first = asyncio.create_task(client.get(f"/sessions/{session_id}/events"))
             async with asyncio.timeout(5):
