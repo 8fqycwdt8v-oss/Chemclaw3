@@ -26,6 +26,12 @@ tool schema from a callable's signature and docstring exactly as MAF did, so the
 capability surface transfers with no adapter and no second declaration. That is the seam D-118 and
 the R2 layering move bought, collected here rather than argued about.
 
+**Skills are the same skills** (M4), narrowed by the same three predicates
+(`skill_access.skill_permits`) — but enforced on the *backend* rather than on the advertised list,
+because deepagents publishes skill paths into the system prompt and expects a filesystem tool to
+fetch the bodies. `agent/skill_backend.py` says why that difference is a security property and not
+an API detail.
+
 **The middleware chain is the same chain** (M3). Six `@wrap_tool_call` wrappers in the same nesting
 order as the MAF agent's, over the *same* decision functions — `tool_authz.dry_run_refusal`,
 `.denial_result`, `.domain_error_result`, `.failure_detail`, `repeat_guard.count_call`, and
@@ -34,9 +40,10 @@ an authorization decision, a dry-run refusal or a GxP audit row depend on which 
 happens to run, which is the one drift this migration must be incapable of.
 
 What is deliberately *not* here yet, because nothing calls it: the extra state fields (they arrive
-with the phase that reads them), skills (M4), the human gate and the plan approval middleware (M5),
-the checkpointer (M6) and the per-turn connector tools (M7). A stub advertising a capability this
-engine does not have would read as coverage while proving nothing.
+with the phase that reads them), the human gate and the plan-approval middleware (M5), a *durable*
+checkpointer (M6 — the parameter exists, the Postgres saver behind it does not) and the per-turn
+connector tools (M7). A stub advertising a capability this engine does not have would read as
+coverage while proving nothing.
 """
 
 import uuid
@@ -46,7 +53,7 @@ from typing import Any
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents import create_agent
-from langchain.agents.middleware import before_agent
+from langchain_core.runnables import RunnableConfig
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
 # D-075, D-086 among them) and merged ADRs are never edited, so renaming it to mark this second
@@ -103,10 +110,10 @@ def build_langgraph_agent(
         audit_sink: The durable trail. `None` means `default_audit_sink()`; pass `NullAuditSink()`
             to opt out explicitly, never by forgetting.
         checkpointer: Where turn state is persisted between turns. `None` keeps state in the
-            invocation, which is every caller today; M6 is what supplies a real one. Accepted now
-            because the behaviour that depends on it exists now — `reload_skills_each_turn` is
-            answering a staleness question that only a persisted session can pose, and a fix whose
-            proof waits for a later phase is a fix nobody has checked.
+            invocation, which is every caller today; M6 is what supplies the durable one. Accepted
+            now because the behaviour that depends on it exists now — `ReloadingSkillsMiddleware`
+            answers a staleness question only a persisted session can pose, and a fix whose proof
+            waits for a later phase is a fix nobody has checked.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -130,58 +137,80 @@ def build_langgraph_agent(
         # to be bound to none, which is the one thing it must not be.
         tools=[*tools, skill_read_tool(backend)],
         system_prompt=instructions_for(prof),
-        middleware=[
-            reload_skills_each_turn,
-            skills_middleware(prof, tools, backend),
-            *_middleware(audit),
-        ],
+        middleware=[_skills_middleware(backend), *_middleware(audit)],
         name="chemclaw",
         checkpointer=checkpointer,
     )
 
 
-@before_agent
-def reload_skills_each_turn(state: Any, runtime: Any) -> dict[str, Any] | None:
-    """Drop the cached skill listing so every turn re-narrows it against the caller's roles.
+class ReloadingSkillsMiddleware(SkillsMiddleware):
+    """`SkillsMiddleware` that re-narrows its listing every turn instead of caching it.
 
-    `SkillsMiddleware.before_agent` loads skills once and then skips the load whenever
-    `skills_metadata` is already in state — "from a prior turn or checkpointed session", as its own
-    docstring puts it. That is a sensible cache for a fixed skills tree and wrong for a *narrowed*
-    one: the role gate reads the turn's ambient identity, so a listing computed for one caller
-    would be served to the next one on the same session, and under M6's checkpointer a mid-session
-    role change would keep showing skills the caller no longer holds.
+    Upstream loads skills once and then skips the load whenever `skills_metadata` is already in
+    state — "from a prior turn or checkpointed session", as its own docstring says. That is a sound
+    cache for a fixed skills tree and wrong for a narrowed one: the role gate reads the turn's
+    ambient identity, so a listing computed for one caller would be served to the next, and a
+    mid-session role change would keep advertising skills the caller no longer holds. The MAF path
+    never had the problem — `RoleScopedSkillsSource._permits` is consulted on every `get_skills` —
+    so reloading is what makes the two engines agree, not an optimisation given up.
 
-    The MAF path never had this problem — `RoleScopedSkillsSource._permits` is consulted on every
-    `get_skills`, per turn — so clearing the cache is what makes the two engines agree rather than
-    an optimisation given up.
+    **Why a subclass and not a `before_agent` hook that clears the slot.** That was the first
+    attempt and it was worse than the bug: a state update of `{"skills_metadata": None}` leaves the
+    *key* present, so the upstream check still short-circuited and the prompt rendered an empty
+    list — measured, 28 skills on turn one and 0 on every turn after. Hiding the key from the
+    state this method reads is the only version that actually reaches the load.
 
     **This is a staleness fix, not the gate.** `NarrowedSkillsBackend` refuses the *read* on every
-    call regardless, so a stale listing could at worst advertise a skill whose body then comes back
+    call regardless, so a stale listing could at worst advertise a skill whose body then came back
     refused. Fixing the listing keeps the two consistent, which is what a caller reading "these are
     your skills" is entitled to.
-
-    Ordered before `SkillsMiddleware` in the middleware list, because `before_agent` hooks run in
-    ascending order and this one has to clear the slot before that one reads it.
     """
-    if "skills_metadata" not in state:
-        return None
-    return {"skills_metadata": None}
+
+    def before_agent(self, state: Any, runtime: Any, config: RunnableConfig | None = None) -> Any:
+        """Reload against this turn's identity (sync path)."""
+        return super().before_agent(
+            _without_cached_skills(state), runtime, config or RunnableConfig()
+        )
+
+    async def abefore_agent(
+        self, state: Any, runtime: Any, config: RunnableConfig | None = None
+    ) -> Any:
+        """Reload against this turn's identity (async path — the one a turn actually takes).
+
+        `config` is defaulted because LangChain invokes the hook with two arguments, not the three
+        upstream's own signature declares — measured, from the `TypeError` the three-argument
+        override raised on the first run. Forwarding `{}` rather than `None` keeps the upstream
+        backend resolution on the path it expects.
+        """
+        return await super().abefore_agent(
+            _without_cached_skills(state), runtime, config or RunnableConfig()
+        )
 
 
-def skills_middleware(
-    profile: AgentProfile, tools: list[Any], backend: CompositeBackend | None = None
-) -> Any:
-    """Wrap `skills_backend` in deepagents' provider — the plumbing around the decision.
+def _without_cached_skills(state: Any) -> Any:
+    """`state` minus its cached skill listing, so the upstream load is not skipped.
 
-    Split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split from
-    `_build_skills`: the backend is the part with behaviour and the middleware is somebody else's
-    object around it, which exposes no reader for the backend it was given. A test of what an agent
-    can reach would otherwise have to read a private attribute of a third-party class.
+    A copy rather than a mutation: the state belongs to the graph, and removing a key from it for
+    real would be a side effect on everything downstream rather than on one method's view.
     """
-    labelled = _labelled([*settings.skills_dirs, *skills_dirs()])
-    return SkillsMiddleware(
-        backend=backend if backend is not None else skills_backend(profile, tools),
-        sources=[(f"/{label}", label) for label, _ in labelled],
+    return {key: value for key, value in state.items() if key != "skills_metadata"}
+
+
+def _skills_middleware(backend: CompositeBackend) -> Any:
+    """Wrap a narrowed backend in deepagents' provider — the plumbing around the decision.
+
+    Private, and split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split
+    from `_build_skills`: the backend is the part with behaviour and the middleware is somebody
+    else's object around it, exposing no reader for the backend it was given. Tests assert against
+    `skills_backend`, so this half needs no name outside the module.
+
+    Takes the backend rather than building one, because the caller has to hold it anyway — the
+    skills read tool is bound to the same instance, and two backends built from one config would be
+    two objects that merely happen to agree.
+    """
+    return ReloadingSkillsMiddleware(
+        backend=backend,
+        sources=[(f"/{label}", label) for label, _ in _labelled(_skill_dirs())],
     )
 
 
@@ -209,7 +238,7 @@ def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
     an unrouted path reaches `StateBackend` — which is empty, holds no filesystem, and is therefore
     the right thing for a path that matches no skills tree to find.
     """
-    dirs = [*settings.skills_dirs, *skills_dirs()]
+    dirs = _skill_dirs()
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
         declared=declared_tools(dirs),
@@ -223,6 +252,16 @@ def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
             for label, directory in _labelled(dirs)
         },
     )
+
+
+def _skill_dirs() -> list[str]:
+    """Every tree skills are discovered from: the configured one, then each enabled bundle's own.
+
+    One definition because two callers derive from it — the backend routes them and the middleware
+    labels them — and a listing whose routes and sources disagree would advertise skills at paths
+    that resolve to nothing.
+    """
+    return [*settings.skills_dirs, *skills_dirs()]
 
 
 def _labelled(dirs: list[str]) -> list[tuple[str, str]]:

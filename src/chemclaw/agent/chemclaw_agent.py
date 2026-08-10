@@ -283,6 +283,7 @@ def build_agent(
     Returns:
         A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
+    _reject_unsupported_engine()
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolve each profile dimension against the global default (an unset override means "default").
     # The two harness dimensions resolve through `harness_mode`, which is where the plan gate reads
@@ -587,6 +588,35 @@ def history_provider() -> HistoryProvider:
 
         return PostgresHistoryProvider()
     return InMemoryHistoryProvider()
+
+
+def _reject_unsupported_engine() -> None:
+    """Refuse to hand back a MAF agent when the deployment asked for the other engine.
+
+    `settings.agent_engine` selects which framework assembles layer 1, and until the LangGraph
+    engine can actually serve a turn it is only reachable through `build_langgraph_agent` directly.
+    Every production caller — the front door, the CLI, the Temporal template activities — arrives
+    here, so this is the one place that can tell a deployment its choice was not honoured.
+
+    Raising rather than silently building the MAF agent, because a config value that does nothing is
+    worse than one that is missing: `.env.example` documents this knob and `test_config.py` enforces
+    that it is documented, so an operator has every reason to believe setting it did something. The
+    same argument the audit-sink default rests on — a caller that forgets must not silently
+    downgrade the system.
+
+    M8 is what removes this: once the front door can drive a compiled graph's stream, the selection
+    becomes a branch here instead of a refusal.
+
+    Raises:
+        RuntimeError: When `agent_engine` names an engine this path cannot build.
+    """
+    if settings.agent_engine != "maf":
+        raise RuntimeError(
+            f"CHEMCLAW_AGENT_ENGINE={settings.agent_engine!r} is not servable yet: the LangGraph "
+            "engine exists (chemclaw.agent.langgraph_agent) but the front door cannot drive its "
+            "stream until phase M8. Set CHEMCLAW_AGENT_ENGINE=maf, or build the graph directly "
+            "with build_langgraph_agent()."
+        )
 
 
 def instructions_for(profile: AgentProfile) -> str:

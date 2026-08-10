@@ -287,3 +287,47 @@ The staleness fix was verified the way this file keeps insisting on: the hook wa
 test watched to fail. Without that check it would have been a test that passes because the caching
 never engaged under `ainvoke` without a checkpointer — which is precisely the shape of a green test
 that proves nothing.
+
+## Review of M0–M4 (before starting M5)
+
+Six findings, all fixed. Three were real defects, two were tests that proved less than they
+claimed, one was a config knob that lied.
+
+**1. The staleness "fix" deleted the skills layer.** `reload_skills_each_turn` returned
+`{"skills_metadata": None}` to clear the cache. That writes `None` into the slot but leaves the
+*key* present, so `SkillsMiddleware.before_agent` still short-circuited and rendered an empty list:
+measured, **28 skills on turn one and 0 on every turn after**. Worse than the staleness it
+replaced. Replaced by `ReloadingSkillsMiddleware`, which hides the key from the state its
+`before_agent` reads, so the load actually runs. Verified by mutation: reintroducing the staleness
+fails the test, and forcing an empty listing fails it too.
+
+**2. The test that caught it could not have caught it.** It asserted only "the gated skill is gone
+from turn two", which an empty list also satisfies — `set() == set() - {gated}` holds. And its
+parser silently matched nothing, so the set comparison was vacuous on both sides. The test now
+asserts turn two equals turn one *minus exactly the gated skill*, and `_listed_skills` asserts it
+parsed something, so a broken parser is a failure rather than a quiet pass.
+
+**3. A refusal meant different things on the two engines.** `_refusal_message` set
+`status="error"`, which reaches Anthropic as `is_error` on the tool_result block. The MAF twin
+deliberately makes a denial the tool's *successful* result so the model reads it as the answer
+rather than a transient failure worth retrying. Exactly the divergence M3's shared decisions exist
+to prevent, sneaking back in through the envelope they were wrapped in. Removed.
+
+**4. `agent_engine` was a knob that did nothing.** Added in M0, documented in `.env.example`,
+enforced-as-documented by `test_config.py` — and read by no code at all, so
+`CHEMCLAW_AGENT_ENGINE=langgraph` silently served MAF. `build_agent` now refuses, naming the phase
+(M8) that makes the selection real. A config value that quietly does nothing is worse than one that
+is missing.
+
+**5. Dead parameters.** `skills_middleware(profile, tools, backend=None)` had one caller which
+always passed `backend`, making the other two dead and the fallback unreachable. Now
+`_skills_middleware(backend)`, private, since `skills_backend` is the seam tests use.
+
+**6. Stale prose.** The engine module still said skills were "deliberately not here yet", and the
+test module still said asserting on M3–M4 would be "a test of a plan". Both were true when written
+and false when read, which is the failure mode `CLAUDE.md` opens by describing.
+
+Two claims were checked and held, so they are now pinned rather than believed: `wrap_tool_call`
+middleware nests in list order (first = outermost, measured), and no `..` path escapes the skills
+tree (deepagents refuses traversal outright, so `/alpha/../beta/SKILL.md` raises rather than
+resolving past the gate).

@@ -252,8 +252,16 @@ def _refusal_message(request: Any, text: str) -> ToolMessage:
     `tool_call_id` is not optional bookkeeping: an assistant `tool_use` block with no matching
     `tool_result` is a malformed exchange that the provider rejects outright, so a gate that
     refused without echoing the id would turn a refusal into a dead turn.
+
+    **Deliberately not `status="error"`.** The MAF twin makes the refusal the tool's *successful*
+    result — "its message becomes the tool's own successful result, verbatim, no gating" — so the
+    model reads it as the answer to the call rather than as a transient failure worth retrying.
+    `status="error"` reaches Anthropic as `is_error` on the tool_result block, which is the
+    opposite signal, and it would make a denial mean something different depending on
+    `agent_engine`. That is precisely the divergence the shared decisions in this module exist to
+    prevent, and it does not get to sneak back in through the envelope they are wrapped in.
     """
-    return ToolMessage(content=text, tool_call_id=request.tool_call["id"], status="error")
+    return ToolMessage(content=text, tool_call_id=request.tool_call["id"])
 
 
 @wrap_tool_call

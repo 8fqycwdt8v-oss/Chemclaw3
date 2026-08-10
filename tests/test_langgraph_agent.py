@@ -2,23 +2,28 @@
 
 These prove the claims `agent/langgraph_agent.py` makes and nothing it does not yet make. The
 engine is selected by `settings.agent_engine`, lands phase by phase, and this file grows with it;
-asserting here on middleware, skills or gates that M3–M5 have not built would be a test of a plan
-rather than of the code.
+asserting here on a gate M5 has not built would be a test of a plan rather than of the code.
 
-The claims under test:
+The claims under test, in the order the phases landed:
 
-1. **The graph compiles and completes a tool-using turn.** Driven by a scripted fake model rather
-   than a live one, so the assertion is about the wiring — the model is offered Chemclaw's tools,
-   its tool call is executed, and its result comes back into the conversation — and not about model
-   behaviour. That is the same bargain `tests/test_agent.py` strikes for the MAF path.
-2. **The in-process capability surface transfers unchanged.** `core/tool_registry` holds plain
+1. **The graph compiles and completes a tool-using turn** (M1). Driven by a scripted fake model, so
+   the assertion is about the wiring — the model is offered Chemclaw's tools, its tool call is
+   executed, its result comes back — and not about model behaviour. The same bargain
+   `tests/test_agent.py` strikes for the MAF path.
+2. **The in-process capability surface transfers unchanged** (M1). `core/tool_registry` holds plain
    callables, so the same functions the MAF agent advertises reach the model here with no adapter
-   and no second declaration. If that ever stops being true, every tool would need a LangGraph
-   twin, which is the cost the D-118/R2 seam was built to avoid — so it is worth a test rather
-   than an assumption.
+   and no second declaration. If that stopped being true every tool would need a LangGraph twin,
+   which is the cost the D-118/R2 seam was built to avoid.
+3. **The middleware chain is reached, in order** (M3). Each test drives a real turn and asserts what
+   the *model* is handed, because a chain that is attached but inert looks identical from outside to
+   one that is absent. The decisions themselves stay pinned in `test_tool_authz.py`,
+   `test_repeat_guard.py` and `test_audit.py`, against the functions both engines share.
+4. **Skills narrow identically to MAF, and re-narrow every turn** (M4). The gate itself lives in
+   `test_skill_backend.py`; what is asserted here is that this engine reaches it.
 """
 
 import asyncio
+import re
 from typing import Any, cast
 
 import pytest
@@ -31,7 +36,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from chemclaw.agent.audit import AuditEvent, NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
-from chemclaw.agent.chemclaw_agent import _capability_tools, skills_source
+from chemclaw.agent.chemclaw_agent import _capability_tools, build_agent, skills_source
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
@@ -63,6 +68,19 @@ class _ScriptedModel(GenericFakeChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         """Accept the binding and keep replaying the script."""
         return self
+
+
+def _listed_skills(prompt: str) -> set[str]:
+    """The skill names a rendered system prompt advertises.
+
+    Self-checking, because the first version of this helper silently matched nothing and made its
+    caller's assertion vacuous: `set() == set() - {gated}` holds, so a fix that deleted every skill
+    passed a test written to catch exactly that. A parser that returns empty is now a failure of
+    the parser rather than a quiet pass for whatever it was meant to measure.
+    """
+    names = set(re.findall(r"\*\*([a-z0-9][a-z0-9-]*)\*\*:", prompt))
+    assert names, "the skills list could not be parsed from the prompt — the helper is broken"
+    return names
 
 
 class _Recording(_ScriptedModel):
@@ -445,11 +463,13 @@ def test_a_role_change_mid_session_renarrows_the_listing(monkeypatch: pytest.Mon
     `SkillsMiddleware.before_agent` skips its load whenever `skills_metadata` is already in state —
     "from a prior turn or checkpointed session". That is a fine cache for a fixed skills tree and
     wrong for a narrowed one: with M6's checkpointer, state *does* survive the turn, so a listing
-    computed for one caller would be served to the next. `reload_skills_each_turn` clears it, which
-    is what makes this engine match MAF, where the role gate is consulted on every `get_skills`.
+    computed for one caller would be served to the next.
 
-    Driven by handing the second turn the first turn's state, which is exactly what a checkpointer
-    will do — so this fails today if the hook is removed, rather than only once M6 lands.
+    **Both halves are asserted, and the second half is the one that matters.** The first version of
+    this test only checked that the gated skill was gone from turn two, and it passed against a fix
+    that removed *every* skill — 28 listed on turn one, 0 on turn two — because an empty list also
+    contains no gated skill. A staleness fix that silently deletes the whole skills layer after the
+    first turn is worse than the staleness. So turn two must show exactly the ungated remainder.
     """
     gated = sorted(declared_tools([*settings.skills_dirs]))[0]
     monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
@@ -479,3 +499,26 @@ def test_a_role_change_mid_session_renarrows_the_listing(monkeypatch: pytest.Mon
         reset_current_identity(reader)
 
     assert gated not in prompts[1], "a cached listing outlived the roles it was computed for"
+    # The half that catches "fixed it by deleting everything": every other skill is still offered.
+    still_listed = _listed_skills(prompts[1])
+    assert still_listed == _listed_skills(prompts[0]) - {gated}, (
+        f"turn two re-narrowed to {len(still_listed)} skills, expected only {gated} to drop"
+    )
+
+
+def test_asking_for_an_engine_that_cannot_serve_a_turn_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CHEMCLAW_AGENT_ENGINE=langgraph` must not silently hand back the MAF agent.
+
+    The switch is documented in `.env.example` and `test_config.py` enforces that it is, so an
+    operator setting it has every reason to believe it did something. Until M8 teaches the front
+    door to drive a compiled graph's stream, the honest answer is a refusal naming the phase — a
+    config value that quietly does nothing is worse than one that is missing.
+    """
+    monkeypatch.setattr(settings, "agent_engine", "langgraph")
+    with pytest.raises(RuntimeError, match="M8"):
+        build_agent(chat_client=object())
+
+    monkeypatch.setattr(settings, "agent_engine", "maf")
+    assert build_agent(chat_client=object()) is not None
