@@ -115,10 +115,10 @@ def build_langgraph_agent(
         audit_sink: The durable trail. `None` means `default_audit_sink()`; pass `NullAuditSink()`
             to opt out explicitly, never by forgetting.
         checkpointer: Where turn state is persisted between turns. `None` keeps state in the
-            invocation, which is every caller today; M6 is what supplies the durable one. Accepted
-            now because the behaviour that depends on it exists now — `ReloadingSkillsMiddleware`
-            answers a staleness question only a persisted session can pose, and a fix whose proof
-            waits for a later phase is a fix nobody has checked.
+            invocation. The durable one is `chemclaw.agent.checkpointer.checkpointer()`, which the
+            caller supplies rather than this function building: it is an async factory that
+            migrates on first use, and `build_langgraph_agent` is synchronous and resource-free by
+            the same promise `build_agent` makes.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as

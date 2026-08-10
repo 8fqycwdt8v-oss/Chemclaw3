@@ -141,14 +141,21 @@ never what a deployment gets.
       `PostgresHistoryProvider` rather than by `INSERT`, so what is converted is what the production
       writer actually stores. Asserts the call/result *pairing* survives — the thing a per-row
       conversion cannot show one row at a time — plus idempotence and the refusal path.
-- [ ] `AsyncPostgresSaver`; `session_messages` demoted to a read-model projection.
-- [ ] Delete the rollback watermark, the mid-turn-resume wait loop, and `message_pairing.py`'s
-      orphan repair — **after** a kill-mid-turn test proves the checkpointer never half-writes.
-- [ ] Keep `SessionOwnerStore` / `SessionTurnClaims` (chemclaw policy, not framework concern).
-- [ ] `agent/message_migration.py` + a per-row shape version so both forms read during rollout.
-      *The one irreversible step.*
-- [ ] Check whether `agent_durable_compaction_enabled` collapses into the normal path; if so delete
-      it, its `.env.example` rows and D-151's `DEFERRED.md` row in the same commit.
+- [x] **`agent/checkpointer.py`** — `AsyncPostgresSaver` on its **own** autocommit pool. Not the
+      shared one, for three measured reasons: `setup()`'s `CREATE INDEX CONCURRENTLY` cannot run
+      inside a transaction and `db._pool_for` builds pools without autocommit; one `asyncio.Lock`
+      per saver serializes every checkpointer statement, with `alist` yielding *inside* both the
+      lock and the borrowed connection; and the saver enters pipeline mode on whatever connection
+      it borrows.
+- [x] **The GDPR gap is closed.** `leaver.py::_ERASE` now reaches `checkpoints`,
+      `checkpoint_blobs` and `checkpoint_writes`, scoped by `thread_id` through `session_owners`,
+      before the ownership row goes. Proven end to end: seed a turn, erase, count zero.
+- [x] Turn state survives a new process over the same database (two agents, one `thread_id`, the
+      saver dropped between them).
+- [x] `SessionOwnerStore` / `SessionTurnClaims` untouched — chemclaw policy, not framework concern.
+- [ ] `session_messages` as a read-model projection; deleting the rollback watermark, the
+      mid-turn-resume loop and the orphan repair; the `rollback_to`-vs-fork decision;
+      `agent_durable_compaction_enabled`. **All moved to M8/M13 — see the correction below.**
 
 ### M7 — connectors and per-turn tools
 - [ ] Re-base the degrading MCP connectors on `langchain-mcp-adapters`.
@@ -498,3 +505,36 @@ Measured before and after: **3962 passed / 175 skipped** → **4101 passed / 36 
 skips is the xtb and crest binaries and the Temporal test server, which needs an outbound download
 this proxy refuses. If this is worth keeping, its permanent home is `docs/guides/runbook.md` or a
 `SessionStart` hook rather than this file.
+
+**M6 done, with its remaining half moved rather than dropped.**
+
+**The scope correction.** M6 was written as "the checkpointer takes over, `session_messages` becomes
+a projection, the orphan repair and the rollback watermark are deleted". Four of those are
+*deletions of the MAF path* — and the MAF path is the one serving production until M13. The front
+door cannot drive a compiled graph's stream until M8, so `PostgresHistoryProvider`, `rollback_to`,
+`message_pairing`'s repair, the durable compaction and `retention.py`'s pairing-aware sweep are all
+still load-bearing. Deleting them in M6 would break the live engine to tidy up for an engine nothing
+routes to yet.
+
+So M6 delivers the *additive* half — the checkpointer, the erasure fix, the converter — and the
+subtractive half moves to where the thing it replaces actually stops being used. This is the same
+mistake the plan made in M5: grouping work by topic rather than by what has to be true when it
+lands.
+
+**A bug I nearly shipped, caught by testing the guard instead of trusting it.** The checkpointer
+tables are created by `AsyncPostgresSaver.setup()`, not by a migration, so a deployment that has
+never run the LangGraph engine does not have them — and erasure must not become the one operation
+such a deployment cannot perform. The first guard was
+`DELETE FROM checkpoints WHERE to_regclass('checkpoints') IS NOT NULL AND …`, which does **nothing**:
+Postgres resolves the relation when the statement is *parsed*, so the whole erasure failed with
+`relation "checkpoints" does not exist`. That is the state every current deployment is in, so the
+change would have broken GDPR erasure everywhere while its own new test passed — the new test ran
+against a schema where the tables existed. The check is now a separate `pg_class` query, and the
+absent-table case has a test of its own driven through a schema with no checkpointer.
+
+**Two smaller things measured rather than assumed.** `erase_actor` defaults to a *dry run* that
+counts and rolls back, which is right for an unrecoverable operation and meant my first erasure
+test asserted nothing while passing (`applied=False`, 13 rows reported and none deleted). And the
+checkpointer pool is bound to the loop it was opened in, so a test that spans several `asyncio.run`
+calls closes a pool from the wrong loop — production has one loop per process, so the tests now use
+one too.

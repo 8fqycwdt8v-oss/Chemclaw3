@@ -32,9 +32,11 @@ pattern match and no "all users matching". The default is a dry run.
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import psycopg
 
+from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -61,8 +63,29 @@ class ErasureError(ChemclawError):
 # carry no actor of their own — they are reached through the ownership table, which is why that one
 # is deleted last.
 _SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = %(actor)s"
+# The LangGraph checkpointer holds the same conversation as graph state, keyed by `thread_id` —
+# which is the session id. Erasing `session_messages` and leaving these behind would remove a
+# departing person's transcript while their turn state, tool calls and results stayed readable, and
+# the sweep would report success. They are erased in the same session-scoped pass, before
+# `session_owners` goes, for exactly the reason the tables above are.
+#
+# **Skipped when absent, and the skip has to happen before the statement is sent.** These tables are
+# created by `AsyncPostgresSaver.setup()` rather than by a migration in `infra/sql`, so a deployment
+# that has never run the LangGraph engine does not have them — and erasure must not become the one
+# operation such a deployment cannot perform.
+#
+# A `WHERE to_regclass(...) IS NOT NULL` guard inside the statement was the first attempt and does
+# not work: Postgres resolves `DELETE FROM checkpoints` at *parse* time, so the guard never gets
+# evaluated and the whole erasure fails with `relation "checkpoints" does not exist`. Measured
+# against a schema with no checkpointer, which is exactly what every current deployment is. Hence
+# `_existing_tables` below — the check has to be a separate query.
+_CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = tuple(
+    (table, f"DELETE FROM {table} WHERE thread_id IN ({_SESSION_SCOPED})")
+    for table in CHECKPOINT_TABLES
+)
 _ERASE: tuple[tuple[str, str], ...] = (
     ("session_messages", f"DELETE FROM session_messages WHERE session_id IN ({_SESSION_SCOPED})"),
+    *_CHECKPOINT_ERASE,
     ("session_events", f"DELETE FROM session_events WHERE session_id IN ({_SESSION_SCOPED})"),
     # `holder` as well as the session scope: a turn lease names the actor holding it, and releasing
     # a departed person's lease is the point. The session-scoped half alone would leave a lease held
@@ -126,6 +149,24 @@ class ErasureReport:
         return sum(self.retained.values())
 
 
+async def _existing_tables(cur: Any, tables: set[str]) -> set[str]:
+    """Which of `tables` exist on this connection's `search_path`.
+
+    One query rather than a guard inside each statement, because a guard inside the statement
+    cannot work: `DELETE FROM t` resolves `t` when the statement is *parsed*, long before any
+    `WHERE` runs. Every table in `_ERASE` is checked, not just the checkpointer's, so the answer
+    does not depend on remembering which ones might be missing.
+    """
+    await cur.execute(
+        "SELECT c.relname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relkind = 'r' AND c.relname = ANY(%s) "
+        "AND n.nspname = ANY(current_schemas(true))",
+        (sorted(tables),),
+    )
+    return {str(row[0]) for row in await cur.fetchall()}
+
+
 async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
     """Count — and, with `apply`, delete — one actor's conversational rows.
 
@@ -164,7 +205,14 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                     )
                     row = await cur.fetchone()
                     report.retained[table] = int(row[0]) if row else 0
+                present = await _existing_tables(cur, {table for table, _ in _ERASE})
                 for table, statement in _ERASE:
+                    if table not in present:
+                        # Reported as zero rather than omitted: "this deployment holds none of your
+                        # rows there" is true, and a report whose keys vary by deployment is one an
+                        # operator cannot compare against another run.
+                        report.erased[table] = 0
+                        continue
                     await cur.execute(statement, {"actor": actor})
                     report.erased[table] = cur.rowcount if cur.rowcount > 0 else 0
             if apply:

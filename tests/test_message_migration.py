@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from agent_framework import Content, Message
+from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -20,6 +21,10 @@ from langchain_core.messages import (
 )
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent.audit import NullAuditSink
+from chemclaw.agent.checkpointer import CHECKPOINT_TABLES, checkpointer, close_checkpointer
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.leaver import erase_actor
 from chemclaw.agent.message_migration import (
     LANGCHAIN_SHAPE,
     MAF_SHAPE,
@@ -27,10 +32,29 @@ from chemclaw.agent.message_migration import (
     convert_stored_messages,
     to_langchain,
 )
-from chemclaw.agent.session_store import PostgresHistoryProvider
+from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from tests.pg import migrated_db_or_skip
+from chemclaw.core.migrate import migrate
+from tests.pg import (
+    TEST_SCHEMA,
+    create_test_schema,
+    drop_test_schema,
+    migrated_db_or_skip,
+    schema_dsn,
+)
+
+
+class _Replier(GenericFakeChatModel):
+    """Answers once, and binds tools without honouring them (as `test_langgraph_agent` does)."""
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        return self
+
+
+def _replies(text: str) -> Any:
+    """A fake model that answers `text` and calls nothing."""
+    return _Replier(messages=iter([AIMessage(content=text)]))
 
 
 def _stored(role: str, *contents: Content) -> dict[str, Any]:
@@ -270,3 +294,134 @@ async def _shape_of(row_id: int) -> list[tuple[int, str]]:
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
         await cur.execute("SELECT id, message_shape FROM session_messages WHERE id = %s", (row_id,))
         return [(int(r[0]), r[1]) for r in await cur.fetchall()]
+
+
+# --- the checkpointer, and what erasure must reach (M6) -------------------------------------------
+
+
+def test_turn_state_survives_a_new_process_over_the_same_database() -> None:
+    """The durable half of the rebuild: a checkpointed thread outlives the graph that wrote it.
+
+    Two separately-built agents over one `thread_id`, with the process's saver dropped in between —
+    the closest thing to a pod restart a test can stage. What is asserted is that the second agent
+    sees the first turn's messages, which is the whole reason D-2026-08-10 moves turn state here.
+
+    One `asyncio.run` for the whole test, not one per step: the checkpointer pool is bound to the
+    loop it was opened in, so closing it from a second loop raises. Production has one loop per
+    process, so a test that spans several is testing a shape nothing runs.
+    """
+
+    async def _scenario() -> list[str]:
+        await migrated_db_or_skip()
+        thread = {"configurable": {"thread_id": "sess-m6-durable"}}
+        try:
+            first = build_langgraph_agent(
+                model=_replies("remembered"),
+                audit_sink=NullAuditSink(),
+                checkpointer=await checkpointer(),
+            )
+            await first.ainvoke({"messages": [("user", "first question")]}, config=thread)
+
+            # A brand-new agent over the same thread, as a restarted pod would build.
+            second = build_langgraph_agent(
+                model=_replies("second"),
+                audit_sink=NullAuditSink(),
+                checkpointer=await checkpointer(),
+            )
+            snapshot = await second.aget_state(thread)
+            return [str(m.content) for m in snapshot.values["messages"]]
+        finally:
+            await close_checkpointer()
+
+    restored = _run(_scenario())
+
+    assert "first question" in restored
+    assert "remembered" in restored
+
+
+def test_erasure_reaches_turn_state_not_just_the_transcript() -> None:
+    """A departing person's checkpointed conversation goes with their transcript.
+
+    The gap this closes: `_ERASE` deleted `session_messages` and left `checkpoints`,
+    `checkpoint_blobs` and `checkpoint_writes` holding the same conversation as graph state — so the
+    sweep would report success while the turn state stayed readable. Asserted end to end, because
+    the failure mode is precisely an erasure that *looks* like it worked.
+    """
+    actor, session_id = "leaver@example.com", "sess-m6-erasure"
+
+    async def _scenario() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        try:
+            await SessionOwnerStore().record(session_id, actor, None)
+            graph = build_langgraph_agent(
+                model=_replies("state to erase"),
+                audit_sink=NullAuditSink(),
+                checkpointer=await checkpointer(),
+            )
+            await graph.ainvoke(
+                {"messages": [("user", "remember me")]},
+                config={"configurable": {"thread_id": session_id}},
+            )
+            before = await _checkpoint_rows(session_id)
+            # `apply=True` because the default is a dry run that counts and rolls back — which is
+            # the right default for an unrecoverable operation, and would make this test assert
+            # nothing while passing.
+            report = await erase_actor(actor, apply=True)
+            assert report.applied, "the erasure did not commit"
+            assert sum(report.erased[t] for t in CHECKPOINT_TABLES) == before
+            return before, await _checkpoint_rows(session_id)
+        finally:
+            await close_checkpointer()
+
+    before, after = _run(_scenario())
+
+    assert before > 0, "the fixture stored no checkpoint to erase"
+    assert after == 0, "turn state survived the erasure"
+
+
+async def _checkpoint_rows(thread_id: str) -> int:
+    """How many rows the checkpointer holds for one thread, across all three of its tables."""
+    total = 0
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        for table in CHECKPOINT_TABLES:
+            await cur.execute(
+                f"SELECT count(*) FROM {table} WHERE thread_id = %s",
+                (thread_id,),  # noqa: S608
+            )
+            row = await cur.fetchone()
+            total += int(row[0])  # type: ignore[index]
+    return total
+
+
+def test_erasure_still_works_where_the_checkpointer_has_never_run() -> None:
+    """The state every current deployment is in: the checkpointer's tables do not exist.
+
+    Erasure must not become the one operation such a deployment cannot perform. The first attempt
+    at this guard put `WHERE to_regclass('checkpoints') IS NOT NULL` inside the statement, which
+    does nothing — Postgres resolves `DELETE FROM checkpoints` at parse time, so the whole erasure
+    failed with `relation "checkpoints" does not exist`. That is why the check is a separate query,
+    and why this test exists rather than a comment saying the guard works.
+
+    Driven through a schema of its own so the absence is real rather than arranged.
+    """
+
+    async def _scenario() -> dict[str, int]:
+        await migrated_db_or_skip()
+        schema = f"{TEST_SCHEMA}_no_checkpointer"
+        base = settings.postgres_dsn
+        await create_test_schema(base, schema)
+        try:
+            with_schema = schema_dsn(base, schema)
+            original, settings.postgres_dsn = settings.postgres_dsn, with_schema
+            try:
+                await migrate()
+                return (await erase_actor("nobody@example.com")).erased
+            finally:
+                settings.postgres_dsn = original
+        finally:
+            await drop_test_schema(base, schema)
+
+    erased = _run(_scenario())
+
+    assert {erased[table] for table in CHECKPOINT_TABLES} == {0}
+    assert erased["session_messages"] == 0, "the rest of the sweep must still have run"
