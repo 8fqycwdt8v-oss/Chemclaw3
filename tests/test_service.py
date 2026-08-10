@@ -680,6 +680,12 @@ class _FakeOwnerStore:
         # profile survive an eviction rather than a fake supplying what the column would (REV-14).
         self.profiles: dict[str, str | None] = {}
         self.created: dict[str, datetime] = {}
+        # The two facts a conversation list is built from. `titles` is written by the turn route on
+        # a session's first turn, which is also what makes a session *listable* — the real query
+        # derives last-activity from `session_messages` and drops a session with none, so here a
+        # session with no `updated` entry is one nobody has spoken in.
+        self.titles: dict[str, str] = {}
+        self.updated: dict[str, datetime] = {}
 
     async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
         if session_id not in self.owners:
@@ -695,9 +701,23 @@ class _FakeOwnerStore:
             return (True, self.owners[session_id], self.profiles[session_id])
         return (False, None, None)
 
-    async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
-        rows = [(sid, self.created[sid]) for sid, own in self.owners.items() if own == owner]
-        return sorted(rows, key=lambda row: row[1], reverse=True)
+    async def set_title_if_absent(self, session_id: str, title: str) -> None:
+        self.titles.setdefault(session_id, title)
+        # Stands in for the message row the real turn would have written: a turn happened, so this
+        # session now has a last activity and starts being listed.
+        self.updated[session_id] = datetime(2026, 6, 1, tzinfo=UTC) + timedelta(
+            minutes=len(self.updated)
+        )
+
+    async def list_for_owner(
+        self, owner: str | None
+    ) -> list[tuple[str, datetime, datetime, str | None]]:
+        rows = [
+            (sid, self.created[sid], self.updated[sid], self.titles.get(sid))
+            for sid, own in self.owners.items()
+            if own == owner and sid in self.updated
+        ]
+        return sorted(rows, key=lambda row: row[2], reverse=True)
 
 
 class _SharedTurnClaims:
@@ -818,13 +838,24 @@ def test_a_failed_postgres_checkout_sheds_with_503_and_is_counted() -> None:
     assert METRICS.value("chemclaw_db_unavailable_total") == before + 1
 
 
-def test_session_list_is_owner_scoped_and_newest_first() -> None:
-    """`GET /sessions` returns the caller's own sessions, newest first — and nobody else's.
+def _turn(client: TestClient, session_id: str, message: str) -> None:
+    """Run one turn to completion, so the session has an activity and a name."""
+    with client.stream("POST", f"/sessions/{session_id}/messages", json={"message": message}) as r:
+        assert r.status_code == 200
+        for _ in r.iter_lines():
+            pass
+
+
+def test_session_list_is_owner_scoped_and_most_recently_used_first() -> None:
+    """`GET /sessions` returns the caller's own sessions, most recently used first — nobody else's.
 
     The list is how a client that lost its local state finds sessions it still owns; ids are
     minted server-side, so one it forgot is otherwise unreachable while its history sits in the
     store. Scoping is the security half: a session id is a capability, and listing someone else's
     would hand it out.
+
+    Ordered by last activity rather than by creation, which is the order a conversation list is
+    actually read in — `first` is used again below and has to come back to the top.
     """
     from chemclaw.api.auth import Principal, require_principal
 
@@ -836,16 +867,73 @@ def test_session_list_is_owner_scoped_and_newest_first() -> None:
     app.dependency_overrides[require_principal] = lambda: alice
     first = client.post("/sessions").json()["session_id"]
     second = client.post("/sessions").json()["session_id"]
+    _turn(client, first, "What is the pKa of acetic acid?")
+    _turn(client, second, "Which ligand for the Suzuki?")
     app.dependency_overrides[require_principal] = lambda: bob
     bobs = client.post("/sessions").json()["session_id"]
+    _turn(client, bobs, "Bob's question.")
 
     app.dependency_overrides[require_principal] = lambda: alice
     listed = [row["session_id"] for row in client.get("/sessions").json()]
-    assert listed == [second, first]  # newest first
+    assert listed == [second, first]
     assert bobs not in listed
+
+    # Returning to the older conversation moves it to the top. Under the previous ordering — the
+    # row's creation date — it would have stayed second forever, which is the whole complaint.
+    _turn(client, first, "And in DMSO?")
+    assert [row["session_id"] for row in client.get("/sessions").json()] == [first, second]
 
     app.dependency_overrides[require_principal] = lambda: bob
     assert [row["session_id"] for row in client.get("/sessions").json()] == [bobs]
+
+
+def test_session_list_names_each_conversation_after_its_opening_question() -> None:
+    """A conversation list needs names, and the service is the only thing that can supply them.
+
+    Without this the response was ids and dates, so every client had to invent the same
+    placeholder and every restored conversation looked identical until it was opened.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore())
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+
+    _turn(client, session_id, "  What is   the pKa\nof acetic acid? ")
+    # Collapsed, not summarised, and not re-derived from the stored MAF payload.
+    assert client.get("/sessions").json()[0]["title"] == "What is the pKa of acetic acid?"
+
+    # A conversation is named by how it started, so a later turn must not rename it — otherwise the
+    # sidebar entry a chemist navigates by changes under them on every message.
+    _turn(client, session_id, "And in DMSO?")
+    assert client.get("/sessions").json()[0]["title"] == "What is the pKa of acetic acid?"
+
+
+def test_session_list_omits_a_session_nobody_ever_spoke_in() -> None:
+    """A created-but-unused session is not a conversation, and must not be listed as one.
+
+    The companion UI mints the session on the first keystroke so the first message costs one
+    round-trip instead of two, which means every abandoned draft leaves an ownership row. Listing
+    those gave a client a column of empty conversations indistinguishable from ones whose
+    transcript had failed to load — both read as an empty array from outside.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore())
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    used = client.post("/sessions").json()["session_id"]
+    warmed = client.post("/sessions").json()["session_id"]
+    _turn(client, used, "A real question.")
+
+    listed = [row["session_id"] for row in client.get("/sessions").json()]
+    assert listed == [used]
+    assert warmed not in listed
 
 
 def test_session_list_is_empty_without_a_durable_registry() -> None:

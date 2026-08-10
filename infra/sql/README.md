@@ -47,10 +47,10 @@ the pair applies in filename order and neither shadows the other.
 | `reaction_fingerprints` | 003 (+004) | `science/fingerprints/store.py` | — |
 | `audit_events` | 006 (+010, 011, 026) | `agent/audit_store.py` | **refused**: deleting from a hash chain is indistinguishable from the tampering it detects. Safe disposal needs archive-then-reseal — BACKLOG STO-13 |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
-| `session_messages` | 008 (+022, 026) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145), plus in-line compaction on write (D-151) |
+| `session_messages` | 008 (+022, 026, 043) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145), plus in-line compaction on write (D-151) |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
 | `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
-| `session_owners` | 013 (+021) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
+| `session_owners` | 013 (+021, 043) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
 | `user_preferences` | 015 | `agent/preferences.py` | — |
 | `predictions` | 016 | `science/calc/calibration.py` | — |
 | `subscriptions` | 017 (+029) | `agent/subscriptions.py` | deleted on unsubscribe |

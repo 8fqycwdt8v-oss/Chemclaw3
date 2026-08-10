@@ -129,8 +129,18 @@ class SessionOwners(Protocol):
         """Return `(found, owner, profile)` for a session id — all-None when unknown."""
         ...
 
-    async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
-        """The owner's sessions as `(session_id, created_at)`, newest first."""
+    async def set_title_if_absent(self, session_id: str, title: str) -> None:
+        """Name a session after its opening question; a no-op once it has a name."""
+        ...
+
+    async def list_for_owner(
+        self, owner: str | None
+    ) -> list[tuple[str, datetime, datetime, str | None]]:
+        """`(session_id, created_at, updated_at, title)`, newest activity first.
+
+        Sessions with no messages are not listed — see `_OWNER_LIST` in
+        `chemclaw.agent.session_store` for both that and why the order is `updated_at`.
+        """
         ...
 
 

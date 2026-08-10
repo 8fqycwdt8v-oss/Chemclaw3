@@ -111,10 +111,33 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # Newest first: a session list is read as "what was I just working on", and the caller pages from
 # the top. `owner IS NOT DISTINCT FROM %s` rather than `=` so the shared dev principal (a real NULL
 # owner) matches itself instead of dropping every row to SQL's three-valued logic.
+#
+# "Newest" is the last message now, not the row's `created_at`, which is when the session was
+# *started*. The two diverge exactly where it matters: a session opened last Tuesday and abandoned
+# sorted above one used an hour ago, so the top of the list was the least likely thing to be wanted.
+# `created_at` still comes back, because when a conversation began is worth showing; it just no
+# longer decides the order.
+#
+# The lateral is also the filter, deliberately rather than as a trick. `max()` with no GROUP BY
+# always returns a row — NULL when there is nothing to aggregate — so `ON m.updated_at IS NOT NULL`
+# drops precisely the sessions that have never had a turn. Those exist in bulk: the companion UI
+# creates the session on the first keystroke to save a round-trip on the first message, so every
+# abandoned draft leaves an ownership row behind. Listing them handed a caller a column of empty
+# conversations it could not tell apart from ones whose transcript had failed to load — both are an
+# empty array from outside. One join answers "what was the last activity" and "was there any".
 _OWNER_LIST = (
-    "SELECT session_id, created_at FROM session_owners "
-    "WHERE owner IS NOT DISTINCT FROM %s ORDER BY created_at DESC, session_id DESC LIMIT %s"
+    "SELECT o.session_id, o.created_at, m.updated_at, o.title FROM session_owners o "
+    "JOIN LATERAL ("
+    "  SELECT max(created_at) AS updated_at FROM session_messages WHERE session_id = o.session_id"
+    ") m ON m.updated_at IS NOT NULL "
+    "WHERE o.owner IS NOT DISTINCT FROM %s "
+    "ORDER BY m.updated_at DESC, o.session_id DESC LIMIT %s"
 )
+# First writer wins, in one statement and without a read first. A title is derived from a session's
+# opening question, so every later turn would otherwise overwrite it; `title IS NULL` is what lets
+# the turn route call this unconditionally and stay correct. Naming a conversation after how it
+# started rather than where it drifted to is what makes a sidebar scannable.
+_OWNER_TITLE = "UPDATE session_owners SET title = %s WHERE session_id = %s AND title IS NULL"
 
 
 def _crossed_new_compaction_bucket(count_before: int, count_after: int, floor: int) -> bool:
@@ -441,18 +464,43 @@ class SessionOwnerStore:
             return (False, None, None)
         return (True, row[0], row[1])
 
-    async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
-        """The owner's sessions as `(session_id, created_at)`, newest first, capped by config.
+    async def set_title_if_absent(self, session_id: str, title: str) -> None:
+        """Name a session after its opening question, once (see `_OWNER_TITLE`).
+
+        Called on every turn and expected to match nothing after the first, which is why it is one
+        conditional `UPDATE` on the primary key rather than a read followed by a write: the second
+        shape costs two round-trips to discover it has nothing to do, and can lose a race between
+        them. Against a turn that is about to spend seconds in a model, one indexed no-op write does
+        not register.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_OWNER_TITLE, (title, session_id))
+            await conn.commit()
+
+    async def list_for_owner(
+        self, owner: str | None
+    ) -> list[tuple[str, datetime, datetime, str | None]]:
+        """The owner's sessions as `(session_id, created_at, updated_at, title)`, newest first.
+
+        Capped by `service_max_listed_sessions`, and ordered by `updated_at` — see `_OWNER_LIST`
+        for why that is not `created_at`, and why a session with no messages is not listed at all.
 
         This table is already the durable answer to "which sessions exist and who owns them", so
         listing reads it directly rather than adding a second registry that could disagree with the
-        one `_resolve_session` authorizes against.
+        one `_resolve_session` authorizes against. `updated_at` is derived from `session_messages`
+        rather than mirrored onto a column here, because the turn that would have to maintain a
+        mirror already writes the row the derivation reads — a second write per turn is a second
+        thing that can fall out of step.
+
+        A tuple rather than a record type, matching `lookup` above: this module is below the API
+        layer that consumes it, so a shared shape would have to live somewhere neither of them owns.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_OWNER_LIST, (owner, settings.service_max_listed_sessions))
                 rows = await cur.fetchall()
-        return [(row[0], row[1]) for row in rows]
+        return [(row[0], row[1], row[2], row[3]) for row in rows]
 
 
 class SessionTurnClaims:
