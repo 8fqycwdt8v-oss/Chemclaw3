@@ -150,27 +150,7 @@ class ToolCallTrace:
                 # arrived, which is how this reached a second live run still empty.
                 text = _result_text(content)
                 if text is not None:
-                    self.outputs.append(text)
-                    tool = self._issued.get(key) or self._names.get(key, key)
-                    # Ids and values off the *full* text, preview off the truncated one: the same
-                    # reason `outputs` exists at all. A grounding check asking "was this in front
-                    # of the model?" against 200 characters of a 40-chunk sweep calls 39 of 40
-                    # citations fabricated, which is what a live run measured — and the re-run with
-                    # the ids fixed still called six verbatim ICH limits invented, because the
-                    # figures were still only in the preview.
-                    results.append(
-                        ToolResultEvent(
-                            tool=tool,
-                            preview=text[: settings.agent_audit_max_arg_chars],
-                            note_ids=mentioned_ids(text),
-                            numbers=_capped_numbers(tool, text),
-                            # The fourth read of the same `text`, and the one that gives a surface
-                            # the result's *shape* rather than its ids and figures. Awaited here
-                            # rather than after the loop so the bytes are durable before the ref
-                            # naming them leaves the process.
-                            result_ref=await _stored_ref(self._sink, tool, text),
-                        )
-                    )
+                    results.append(await self.returned(key, text))
                 continue
             if isinstance(arguments, Mapping) and arguments:
                 # A structured argument object: the call arrived whole rather than streamed, so it
@@ -214,15 +194,61 @@ class ToolCallTrace:
         """Emit whatever is still open — the stream ended before an untouched update arrived."""
         return self._take(set(self._fragments))
 
+    def issued(self, key: str, tool: str, arguments: str) -> ToolCallEvent:
+        """Announce one *complete* call — the decision, with no reassembly in front of it.
+
+        `feed` reaches this through `_take` after buffering fragments, because MAF streams a call's
+        arguments in pieces. LangGraph's `updates` stream hands over a finished `tool_calls` list,
+        so the graph driver has nothing to reassemble and calls this directly
+        (`chemclaw.api.graph_stream`). What must not differ between the two is everything below:
+        the argument budget, and remembering the name so the result can be reported under it.
+
+        Args:
+            key: The provider's call id, which is what a later result names.
+            tool: The tool's advertised name.
+            arguments: The call's arguments, already rendered as text.
+
+        Returns:
+            The event a surface renders for this call.
+        """
+        self._issued[key] = tool
+        return ToolCallEvent(tool=tool, arguments=arguments[: settings.agent_audit_max_arg_chars])
+
+    async def returned(self, key: str, text: str) -> ToolResultEvent:
+        """Record and describe one tool result — the decision, shared by both engines.
+
+        Ids and values come off the *full* text and the preview off the truncated one, for the
+        reason `outputs` exists at all: a grounding check asking "was this in front of the model?"
+        against 200 characters of a 40-chunk sweep called 39 of 40 citations fabricated in a live
+        run, and the re-run with ids fixed still called six verbatim ICH limits invented because
+        the figures were only in the preview.
+
+        Args:
+            key: The call id this answers, so the result is reported under the call's tool name.
+            text: The result's full text.
+
+        Returns:
+            The event a surface renders for this result.
+        """
+        self.outputs.append(text)
+        tool = self._issued.get(key) or self._names.get(key, key)
+        return ToolResultEvent(
+            tool=tool,
+            preview=text[: settings.agent_audit_max_arg_chars],
+            note_ids=mentioned_ids(text),
+            numbers=_capped_numbers(tool, text),
+            # Awaited here rather than by the caller so the bytes are durable before the ref
+            # naming them leaves the process.
+            result_ref=await _stored_ref(self._sink, tool, text),
+        )
+
     def _take(self, keys: set[str]) -> list[Event]:
         events: list[Event] = []
         for key in [k for k in self._fragments if k in keys]:
-            arguments = "".join(self._fragments.pop(key))[: settings.agent_audit_max_arg_chars]
-            name = self._names.pop(key, key)
-            # Remembered rather than discarded: the result content carries no name, so this is
+            arguments = "".join(self._fragments.pop(key))
+            # Remembered rather than discarded: the result content carries no name, so `issued` is
             # what lets `ToolResultEvent` report which tool answered.
-            self._issued[key] = name
-            events.append(ToolCallEvent(tool=name, arguments=arguments))
+            events.append(self.issued(key, self._names.pop(key, key), arguments))
         return events
 
 

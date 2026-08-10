@@ -287,7 +287,6 @@ def build_agent(
     Returns:
         A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
-    _reject_unsupported_engine()
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolve each profile dimension against the global default (an unset override means "default").
     # The two harness dimensions resolve through `harness_mode`, which is where the plan gate reads
@@ -594,33 +593,21 @@ def history_provider() -> HistoryProvider:
     return InMemoryHistoryProvider()
 
 
-def _reject_unsupported_engine() -> None:
-    """Refuse to hand back a MAF agent when the deployment asked for the other engine.
+def graph_engine_selected() -> bool:
+    """Whether this deployment's turns run on the LangGraph engine (M8).
 
-    `settings.agent_engine` selects which framework assembles layer 1, and until the LangGraph
-    engine can actually serve a turn it is only reachable through `build_langgraph_agent` directly.
-    Every production caller — the front door, the CLI, the Temporal template activities — arrives
-    here, so this is the one place that can tell a deployment its choice was not honoured.
+    The one reader of `settings.agent_engine` on the serving path, so "which engine is this" has a
+    single definition rather than a string comparison repeated at each branch. It replaces
+    `_reject_unsupported_engine`, which refused to build anything while the front door could not
+    drive a compiled graph's stream — that is what M8 changed.
 
-    Raising rather than silently building the MAF agent, because a config value that does nothing is
-    worse than one that is missing: `.env.example` documents this knob and `test_config.py` enforces
-    that it is documented, so an operator has every reason to believe setting it did something. The
-    same argument the audit-sink default rests on — a caller that forgets must not silently
-    downgrade the system.
-
-    M8 is what removes this: once the front door can drive a compiled graph's stream, the selection
-    becomes a branch here instead of a refusal.
-
-    Raises:
-        RuntimeError: When `agent_engine` names an engine this path cannot build.
+    The **callers** are what makes this small: only the two places that build a turn's agent branch
+    on it (`chemclaw.api.runner.run_turn` and `chemclaw.api.state.FrontDoor.turn_agent`).
+    Everything below them — the tools, the skills, the middleware chain, the profile narrowing, the
+    audit trail — is shared by construction, which is the property this migration is arranged to
+    keep. A third branch on this predicate is a sign something was duplicated instead of extracted.
     """
-    if settings.agent_engine != "maf":
-        raise RuntimeError(
-            f"CHEMCLAW_AGENT_ENGINE={settings.agent_engine!r} is not servable yet: the LangGraph "
-            "engine exists (chemclaw.agent.langgraph_agent) but the front door cannot drive its "
-            "stream until phase M8. Set CHEMCLAW_AGENT_ENGINE=maf, or build the graph directly "
-            "with build_langgraph_agent()."
-        )
+    return settings.agent_engine == "langgraph"
 
 
 def instructions_for(profile: AgentProfile) -> str:

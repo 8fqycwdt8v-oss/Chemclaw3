@@ -102,3 +102,46 @@ def usage_tokens(update: Any) -> TurnUsage:
             )
         )
     return usage
+
+
+def graph_usage_tokens(chunk: Any) -> TurnUsage:
+    """The same reading, off a LangChain message chunk's `usage_metadata` (M8).
+
+    The twin of `usage_tokens`, and it exists rather than a branch inside that function because the
+    two providers name every field differently while meaning the same thing: LangChain reports
+    `input_tokens`/`output_tokens`/`total_tokens` with the cache counts nested under
+    `input_token_details`. What must *not* differ is the arithmetic — the same `TurnUsage`, the
+    same "cache reads are not folded into input" rule, and the same `unreadable` counter — because
+    the budget guard, the cost table and the token counters are all downstream of this and none of
+    them may report a different number depending on `agent_engine`.
+
+    **Cache counts are subtracted from `input`, which `usage_tokens` does not have to do.**
+    Anthropic's own API excludes cache reads from `input_tokens`, and MAF passes that through; the
+    LangChain adapter *includes* them and then breaks them out again in `input_token_details`. So
+    reading both without adjusting would count every cached token twice — once cheap, once
+    expensive — and overstate the priced input of exactly the deployments that cache best.
+
+    A chunk with no usage at all meters zero and is not counted unreadable: most chunks in a stream
+    carry none, and that is the normal case rather than a signal.
+    """
+    details = getattr(chunk, "usage_metadata", None)
+    if not isinstance(details, Mapping):
+        return TurnUsage()
+    nested = details.get("input_token_details")
+    cache = nested if isinstance(nested, Mapping) else {}
+    cache_read = int(cache.get("cache_read") or 0)
+    cache_write = int(cache.get("cache_creation") or 0)
+    reported_input = int(details.get("input_tokens") or 0)
+    total = details.get("total_tokens")
+    if total is None:
+        total = reported_input + int(details.get("output_tokens") or 0)
+    return TurnUsage(
+        input=max(reported_input - cache_read - cache_write, 0),
+        output=int(details.get("output_tokens") or 0),
+        cache_read=cache_read,
+        cache_write=cache_write,
+        total=int(total or 0),
+        # A usage block that was present and yielded no total is the same signal it is on the other
+        # engine: either a genuinely empty update, or the keys moved under us.
+        unreadable=0 if total else 1,
+    )

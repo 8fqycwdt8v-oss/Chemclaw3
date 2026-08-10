@@ -175,11 +175,29 @@ never what a deployment gets.
 - [ ] Delete `agent/agent_pool.py` + test + the D-123 `DEFERRED.md` row — gated on M12's probe.
 
 ### M8 — streaming and the event contract
-- [ ] `graph.astream(stream_mode=["messages","updates","custom"], subgraphs=True)`.
-- [ ] **Delete `core/turn_signals.py`** — the contextvar side-channel exists only because MAF had no
-      custom stream.
-- [ ] `api/events.py` gains agent attribution + a `handoff` event. Sequence the cross-repo change
-      `Chemclaw3_mock` → `Chemclaw3` → `Chemclaw3_ui`.
+- [x] `api/graph_stream.py` — `astream(stream_mode=["messages","updates","custom"], subgraphs=True)`
+      translated into the `Event` union. Tokens from `messages`, calls/results/plan from `updates`,
+      the same signal-drain-first ordering rule the MAF loop obeys.
+- [x] **The engine switch is real.** `graph_engine_selected()` replaces the refusal; exactly two
+      branch points read it (`run_turn` builds the graph, `FrontDoor.turn_agent` declines to lease
+      a pooled agent for it). A whole turn now serves end to end under
+      `CHEMCLAW_AGENT_ENGINE=langgraph`.
+- [x] `ToolCallTrace.issued`/`.returned` extracted — the announce and result *decisions*, with
+      MAF's reassembly in front of them and nothing in front of them on the graph path.
+- [x] `runner_usage.graph_usage_tokens` — the same `TurnUsage` arithmetic off LangChain's
+      `usage_metadata`, subtracting the cache counts from `input` because that adapter includes
+      them where MAF's does not (a double-count that would overstate exactly the deployments that
+      cache best).
+- [x] `api/events.py` gains `agent` attribution (on the three events a specialist can raise) and a
+      `handoff` event, with the dev page's switch updated so `test_dev_page_events.py` still pins
+      the union in both directions.
+- [x] `tests/test_langgraph_stream.py` — twelve tests, the conformance one comparing the whole
+      event sequence rather than membership.
+- [ ] **`core/turn_signals.py` deletion — moved to M13**, with the MAF branch it still serves.
+- [ ] The cross-repo sequence `Chemclaw3_mock` → `Chemclaw3` → `Chemclaw3_ui` for the two contract
+      additions — **not started**; both are additive and defaulted, so no consumer is broken yet.
+- [ ] `durable/template_activities.py` replay through the ported chain (inherited from M7).
+- [ ] `_resume` (mid-turn job resume) on the graph path — off by default, needs its own decision.
 
 ### M9 — agent teams
 - [ ] Five specialists (`evidence`, `computation`, `design`, `safety`, `reporting`) as profiles +
@@ -587,3 +605,50 @@ branch does not exist until M8 makes `build_agent` able to return a graph. Doing
 writing a branch on a condition that is still unreachable. `agent_pool.py`'s deletion stays gated on
 M12's concurrency probe, as planned — the D-123 defect is `agent_framework_anthropic`-specific and
 almost certainly absent here, but "almost certainly" is what the probe is for.
+
+**M8 (partial — the engine serves turns; three items remain).** `make lint type test` green at
+4133 passed, 0 failed.
+
+**What landed.** The front door can drive a compiled graph, so `CHEMCLAW_AGENT_ENGINE=langgraph`
+now selects an engine instead of raising. The shape that made this cheap was deciding *not* to
+adapt: the tempting move is to wrap the graph so it yields MAF-shaped updates and the runner's loop
+consumes it unchanged, which would mean impersonating one framework's private update shape with
+another's — the shape `runner_trace` already refuses to import because it is not stable enough to
+depend on. Emitting the contract directly is less code and is the thing tests actually pin.
+
+Everything else in `run_turn` — the budget ledger, the rollback gate, the cancellation teardown,
+the metrics, the answer assembly — turned out to be genuinely engine-neutral and was not touched.
+That is the payoff from M3's discipline showing up two phases later: the parts that differ between
+engines are the parts that were already isolated.
+
+**Two things measured rather than assumed.**
+
+`ToolCallTrace` is not only an event source — it is what *grades the answer*. `build_answer_event`
+scores grounding against `trace.outputs` and `trace.called_tools` after the stream ends, so an
+engine that emitted a flawless event stream and left the trace empty would mark every answer
+fabricated, which is the exact failure `docs/archive/live-grounded-2026-08-03.md` records. Hence
+`test_the_trace_the_answer_gate_reads_is_populated`, which asserts the thing no event assertion
+would have caught.
+
+And the two providers disagree about what an input token *is*. LangChain's adapter includes cache
+reads in `input_tokens` and then breaks them out again under `input_token_details`; Anthropic's API
+(and MAF, passing it through) excludes them. Reading both without adjusting bills every cached
+token twice — once cheap, once expensive — and overstates the priced input of precisely the
+deployments that cache best, which is the population the REV-10 split exists to measure.
+
+**A bug my own tests found, and it was in the runner rather than the tests.** The graph path called
+`checkpointer()` unconditionally, so a deployment on the in-memory session store would have had to
+reach Postgres to take a single turn. It surfaced as two unrelated tests failing under random
+ordering — the loop-bound saver global outliving the `asyncio.run` that made it — which is a
+symptom worth remembering: an ordering-dependent failure in a module I did not touch was a real
+dependency I had added. The checkpointer is now gated on the same `session_store` setting
+`history_provider` reads, so the two engines cannot disagree about whether a conversation survives
+a restart.
+
+**Three items remain, and two of them are deferrals with the same reason as M5's and M6's.**
+Deleting `core/turn_signals.py` would delete the mechanism the MAF path still uses for every job,
+proposal, question, approval and tool failure — so it goes to M13 with that branch, and until then
+both engines drain the one contextvar rather than maintaining two mechanisms. `_resume` (mid-turn
+job resume) is off by default and its graph equivalent is an `interrupt()` design decision, not a
+port. The third — the cross-repo event-contract sequence — is genuinely not started; both
+additions are defaulted and additive, so nothing downstream is broken meanwhile.

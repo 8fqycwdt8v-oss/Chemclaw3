@@ -149,7 +149,7 @@ async def post_message(
                     # with an empty name, which Anthropic rejects — 20% of turns in a live
                     # 50-user run. The lease is returned even if the turn raises or the client
                     # disconnects, so a pod cannot bleed capacity.
-                    front.agent_pool.lease(live.profile) as turn_agent,
+                    front.turn_agent(live.profile) as turn_agent,
                 ):
                     async for event in run_turn(
                         # The session's profile picks both halves of its surface: the agent

@@ -92,6 +92,12 @@ function addApproval(evt) {
 }
 
 // Apply one decoded event to the transcript; `answerEl` accumulates streamed tokens.
+// Which specialist raised an event, as a trace prefix. Empty for the main agent, which is what
+// every event carried before teams existed — so an untagged line reads exactly as it always did.
+function agentTag(evt) {
+  return evt.agent ? `[${evt.agent}] ` : "";
+}
+
 function applyEvent(evt, answerEl) {
   switch (evt.type) {
     case "queued":
@@ -103,7 +109,7 @@ function applyEvent(evt, answerEl) {
       add("trace", "Plan:\n- " + (evt.todos || []).join("\n- "));
       return answerEl;
     case "tool_call":
-      add("trace", `→ ${evt.tool}(${evt.arguments || ""})`);
+      add("trace", `${agentTag(evt)}→ ${evt.tool}(${evt.arguments || ""})`);
       return answerEl;
     case "token":
       if (!answerEl) answerEl = add("assistant", "");
@@ -113,7 +119,7 @@ function applyEvent(evt, answerEl) {
     case "tool_result":
       // The value itself, not the model's paraphrase of it (D-159). Paired with the `tool_call`
       // line above, the trace now shows a call's whole lifecycle — issued, then what came back.
-      add("trace", `← ${evt.tool} → ${evt.preview || ""}`);
+      add("trace", `${agentTag(evt)}← ${evt.tool} → ${evt.preview || ""}`);
       return answerEl;
     case "job_started":
       add("trace", `⏳ ${evt.kind || "job"} started (${evt.job_id})`);
@@ -145,7 +151,12 @@ function applyEvent(evt, answerEl) {
     case "tool_failed":
       // In the trace, not the error lane: the step failed, the turn did not. Without this the
       // transcript showed a silent gap wherever a tool raised.
-      add("trace", `✗ ${evt.tool} failed — ${evt.message}`);
+      add("trace", `${agentTag(evt)}✗ ${evt.tool} failed — ${evt.message}`);
+      return answerEl;
+    case "handoff":
+      // Its own line rather than a prefix on what follows: a reader needs to see *where* control
+      // went, not only that the next tool call came from somewhere else.
+      add("trace", evt.to ? `⇢ handed to ${evt.to}${evt.reason ? ` — ${evt.reason}` : ""}` : "⇠ back to the main agent");
       return answerEl;
     case "answer":
       if (!answerEl) add("assistant", evt.text);

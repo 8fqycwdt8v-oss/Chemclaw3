@@ -19,7 +19,8 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -28,6 +29,7 @@ from agent_framework import HistoryProvider
 from fastapi import FastAPI, Request
 
 from chemclaw.agent.agent_pool import AgentPool
+from chemclaw.agent.chemclaw_agent import graph_engine_selected
 from chemclaw.agent.plan_approval_store import ApprovalStore
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.connectors.health import ConnectorHealth
@@ -401,6 +403,29 @@ class FrontDoorState:
         """One agent — and therefore one chat client — per concurrent streaming turn (D-123)."""
         pool: AgentPool = self._app.state.agent_pool
         return pool
+
+    @asynccontextmanager
+    async def turn_agent(self, profile: str | None = None) -> AsyncIterator[Any]:
+        """The agent this turn runs on, held for the turn's duration — engine-aware (M8).
+
+        **The two engines want opposite lifetimes, and this is where that difference is spent.**
+        A MAF `Agent` is process-lived and pooled, because D-123 measured that two concurrent turns
+        sharing one chat client corrupt each other's tool calls (8/8 failures), while building one
+        per turn would mean a fresh `AsyncAnthropic` — a fresh connection pool and TLS handshake —
+        every time. A compiled graph is the reverse: LangGraph binds tools at construction and a
+        connector's session must belong to exactly one turn, so the graph *has* to be built inside
+        the turn, and `run_turn` builds it there once the connectors are open (M7).
+
+        So this yields a leased agent on the MAF path and `None` on the graph path, and `None` is
+        not a placeholder for something missing — it is the honest statement that this engine has
+        nothing to hand out before the turn's connectors exist. Naming the difference here keeps it
+        out of the route, which should not have to know which framework is serving.
+        """
+        if graph_engine_selected():
+            yield None
+            return
+        async with self.agent_pool.lease(profile) as agent:
+            yield agent
 
     @property
     def turn_semaphore(self) -> asyncio.Semaphore:

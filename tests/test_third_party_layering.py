@@ -198,6 +198,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "connectors/transport.py builds the MAF tool objects the agent consumes — the one adapter "
         "point where a connector is handed to layer 1"
     ),
+    ("chemclaw.api", "langgraph"): (
+        "api/graph_stream.py translates a compiled graph's stream into the turn event contract "
+        "(M8, D-2026-08-10) — the front door's half of driving the other engine; retires with the "
+        "`maf` rows when that branch is deleted"
+    ),
     ("chemclaw.connectors", "langgraph"): (
         "the same adapter point for the other engine (M7, D-2026-08-10): connectors/transport.py "
         "holds each connector's MCP session open for a turn and registry.py turns what it "

@@ -11,24 +11,34 @@ Extracted at the third caller rather than the first (`test_langgraph_agent.py`,
 repo's Rule of Three. A double used once stays private to the module that uses it.
 """
 
-from collections.abc import Iterable, Sequence
+import json
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
+from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
 
 
 class ScriptedChatModel(GenericFakeChatModel):
-    """A model that replays a fixed script, and accepts tool binding without honouring it.
+    """A model that replays a fixed script, binds tools, and streams the way a real one does.
 
     Subclassed because `create_agent`'s model node calls `.bind_tools(...)` on every request and
     `GenericFakeChatModel.bind_tools` raises `NotImplementedError` — measured, not assumed. Binding
     returns `self` here: the script already contains the tool call under test, so the point of the
     override is that the graph gets a model it can bind, not that the fake reasons about tools.
 
-    What that costs is worth naming. This proves the *loop* — that a tool call is dispatched, run
-    and fed back — and cannot prove that the tool schemas Chemclaw hands over are ones a real model
-    can call. Only a live run covers the schemas; M12's re-validation is where that happens.
+    **`_stream` is overridden for a reason that only shows up under `astream`.** Upstream streams a
+    message by splitting its `content`, so a tool-call turn — whose content is empty, because the
+    call is in `tool_calls` — yields no chunks at all and LangChain raises `ValueError: No
+    generations found in stream`. Measured the first time this fake was driven through
+    `graph_events`. A tool call is therefore streamed as a `tool_call_chunks` fragment, which is
+    the shape a real provider sends and the shape `api/graph_stream` deliberately does *not* read
+    calls from — so this also keeps that decision honest rather than untested.
+
+    What the fake still cannot prove is worth naming: it exercises the *loop*, not the tool schemas
+    Chemclaw hands a provider. Only a live run covers those, and M12 is where that happens.
     """
 
     def __init__(self, script: Sequence[Any] | None = None, **kwargs: Any) -> None:
@@ -46,6 +56,35 @@ class ScriptedChatModel(GenericFakeChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         """Accept the binding and keep replaying the script."""
         return self
+
+    def _stream(
+        self,
+        messages: list[Any],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream the next scripted turn — prose as text, a tool call as a call fragment."""
+        message = next(self.messages)
+        assert isinstance(message, AIMessage)  # `_as_message` only ever produces these
+        if message.tool_calls:
+            call = message.tool_calls[0]
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": call["name"],
+                            "args": json.dumps(call["args"]),
+                            "id": call["id"],
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+            )
+            return
+        yield ChatGenerationChunk(message=AIMessageChunk(content=message.content))
 
 
 def _as_message(step: Any, index: int) -> AIMessage:

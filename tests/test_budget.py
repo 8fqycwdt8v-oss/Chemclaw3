@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
-from chemclaw.api.runner_usage import usage_tokens
+from chemclaw.api.runner_usage import graph_usage_tokens, usage_tokens
 from chemclaw.core.config import settings
 
 
@@ -214,3 +214,41 @@ def test_a_turn_that_metered_no_tokens_books_none(
         tracker.record("s-free", None, tokens=0)
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1)
     tracker.check("s-free", None)  # fifty free turns must not have spent a single token
+
+
+def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
+    """The LangGraph reader must meter the same money the MAF reader does.
+
+    The two providers disagree about what `input_tokens` includes: Anthropic's API excludes cache
+    reads and MAF passes that through, while the LangChain adapter *includes* them and then breaks
+    them out again under `input_token_details`. Reading both without adjusting would bill every
+    cached token as both a cheap read and a fresh input — overstating the priced input of exactly
+    the deployments that cache best, which is the population the split exists to measure (REV-10).
+
+    So `input` here is the *residual*: what was neither read from nor written to the cache.
+    """
+    chunk = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+            "input_token_details": {"cache_read": 700, "cache_creation": 100},
+        }
+    )
+    usage = graph_usage_tokens(chunk)
+    assert (usage.input, usage.cache_read, usage.cache_write) == (200, 700, 100)
+    assert usage.output == 200
+    assert usage.total == 1200
+    # The priced dimensions still account for every input token exactly once.
+    assert usage.input + usage.cache_read + usage.cache_write == 1000
+
+
+def test_a_chunk_with_no_usage_meters_nothing_and_is_not_called_unreadable() -> None:
+    """Most chunks in a stream carry no usage; that is the normal case, not a missing-keys signal.
+
+    The distinction matters because `unreadable` is what would catch an upstream rename — the
+    failure that once booked 50 turns of 15,000 real tokens as zero while the budget guard went on
+    allowing the next one. A counter that fires on every ordinary chunk would say nothing.
+    """
+    assert graph_usage_tokens(SimpleNamespace()).total == 0
+    assert graph_usage_tokens(SimpleNamespace()).unreadable == 0

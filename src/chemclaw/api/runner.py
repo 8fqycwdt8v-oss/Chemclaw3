@@ -23,16 +23,18 @@ import copy
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
 
 from agent_framework import AgentSession
 
-from chemclaw.agent.chemclaw_agent import connector_tools
+from chemclaw.agent.checkpointer import checkpointer
+from chemclaw.agent.chemclaw_agent import connector_tools, graph_engine_selected
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.harness_todo import apply_deferred_completions, todo_titles
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.live_session import reset_current_session, set_current_session
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
@@ -54,6 +56,7 @@ from chemclaw.api.events import (
     TokenEvent,
     ToolFailedEvent,
 )
+from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace, approval_prompt
 from chemclaw.api.runner_usage import TurnUsage, usage_tokens
@@ -131,12 +134,14 @@ async def run_turn(
     connectors: Sequence[Any] | None = None,
     history: Any | None = None,
     profile: str | None = None,
+    graph_factory: Callable[..., Any] = build_langgraph_agent,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
     Args:
         agent: A built Chemclaw agent (classic or harness). Injected by the app; injectable so tests
-            drive it with a fake streaming agent and no live model.
+            drive it with a fake streaming agent and no live model. Unused on the graph engine,
+            which compiles its agent inside the turn — see `graph_factory`.
         session: The caller's conversation session (per user+thread), so the turn resumes context.
         user_message: The chemist's message for this turn.
         actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
@@ -161,6 +166,11 @@ async def run_turn(
             (REV-10) — the surface it selects is chosen by the caller, which passes the matching
             agent and connectors. `None` labels the spend `default`, so every series carries the
             same label set and the family sums to the deployment's whole spend.
+        graph_factory: Builds this turn's compiled graph on the LangGraph engine, given the
+            profile, the turn's identity and its already-open connectors. A parameter rather than
+            a direct call so the graph path has the injection seam the MAF path gets from `agent`:
+            without it, exercising the front door's other engine at all would need a live model
+            credential. Unused on the MAF engine.
 
     Yields:
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
@@ -321,35 +331,63 @@ async def run_turn(
                 unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
             if unreachable:
                 yield CapabilityDegradedEvent(connectors=unreachable)
-            stream = agent.run(
-                user_message, stream=True, session=session, tools=turn_connectors or None
-            )
             # The sink is built here, and only here, because this is where the two things a stored
             # result has to be filed under exist: the session that owns it (which is what the fetch
             # route's ownership gate resolves against) and the turn's correlation id (which is what
             # ties a fetched result back to the audit trail). `ToolCallTrace` deliberately knows
             # neither — see its module docstring.
             tool_trace = ToolCallTrace(sink=session_sink(session.session_id, correlation_id))
-            async for update in stream:
-                turn_usage.add(usage_tokens(update))
-                # Drain *before* this update's own content: a tool that ran while the model was
-                # producing this update ran before the text it then produced, so emitting the
-                # signal first is the truthful transcript order (RCH-4/RCH-5).
-                for signal in drain():
-                    if isinstance(signal, JobSignal):
-                        started_jobs.append(signal.job_id)
-                    yield _signal_event(signal)
-                text = getattr(update, "text", "") or ""
-                if text:
-                    answer_parts.append(text)
-                    yield TokenEvent(text=text)
-                for call in await tool_trace.feed(update):
-                    yield call
-                for request in getattr(update, "user_input_requests", None) or []:
-                    yield ApprovalRequestEvent(prompt=approval_prompt(request))
-                plan_event = await plan.changed(session)
-                if plan_event is not None:
-                    yield plan_event
+            if graph_engine_selected():
+                # The graph engine drives itself and emits the contract directly
+                # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream
+                # is that module's job rather than this loop's. What stays here is the whole rest
+                # of the turn — the budget ledger, the rollback gate, the cancellation teardown,
+                # the metrics — because none of it is a property of which framework produced the
+                # tokens. The graph is compiled *inside* the turn because it binds this turn's
+                # connector tools at construction (M7).
+                async for event in graph_events(
+                    graph_factory(
+                        profile=profile,
+                        actor=actor or "",
+                        correlation_id=correlation_id,
+                        connectors=list(turn_connectors),
+                        checkpointer=await _turn_checkpointer(),
+                    ),
+                    user_message,
+                    config={"configurable": {"thread_id": session.session_id}},
+                    trace=tool_trace,
+                    on_signal=lambda s: (
+                        started_jobs.append(s.job_id) if isinstance(s, JobSignal) else None
+                    ),
+                    usage=turn_usage,
+                ):
+                    if isinstance(event, TokenEvent):
+                        answer_parts.append(event.text)
+                    yield event
+            else:
+                stream = agent.run(
+                    user_message, stream=True, session=session, tools=turn_connectors or None
+                )
+                async for update in stream:
+                    turn_usage.add(usage_tokens(update))
+                    # Drain *before* this update's own content: a tool that ran while the model was
+                    # producing this update ran before the text it then produced, so emitting the
+                    # signal first is the truthful transcript order (RCH-4/RCH-5).
+                    for signal in drain():
+                        if isinstance(signal, JobSignal):
+                            started_jobs.append(signal.job_id)
+                        yield _signal_event(signal)
+                    text = getattr(update, "text", "") or ""
+                    if text:
+                        answer_parts.append(text)
+                        yield TokenEvent(text=text)
+                    for call in await tool_trace.feed(update):
+                        yield call
+                    for request in getattr(update, "user_input_requests", None) or []:
+                        yield ApprovalRequestEvent(prompt=approval_prompt(request))
+                    plan_event = await plan.changed(session)
+                    if plan_event is not None:
+                        yield plan_event
             # The stream is exhausted, so `agent.run` has returned and the history provider has
             # committed this turn's rows as a complete, paired exchange. From here on a teardown
             # has nothing half-written to discard — set the fact the rollback gate reads at the
@@ -667,6 +705,23 @@ async def run_turn(
         reset_current_correlation_id(correlation_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
+
+
+async def _turn_checkpointer() -> Any:
+    """The graph engine's checkpointer, or `None` where this deployment stores nothing durably.
+
+    Gated on `session_store` rather than built unconditionally, and gated on the *same* setting
+    `history_provider` reads — so the two engines agree about whether a conversation survives a pod
+    restart instead of one of them deciding separately. A dev process or a test running on the
+    in-memory store would otherwise have to reach Postgres to take a single turn, which is both a
+    dependency it does not have and a claim about durability it cannot keep.
+
+    Returns:
+        A ready `AsyncPostgresSaver`, or `None` to keep turn state in the invocation.
+    """
+    if settings.session_store != "postgres":
+        return None
+    return await checkpointer()
 
 
 async def _durable_subsystem_reachable() -> bool:
