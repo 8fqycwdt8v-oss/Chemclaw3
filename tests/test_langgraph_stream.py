@@ -294,3 +294,63 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
     finally:
         end_loop_watch(token)
         settings.harness_max_loop_iterations = original
+
+
+def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**The test the unit test could not be.** A decision is not a guard until it is connected.
+
+    `lg_loop_cap` counted correctly, decided correctly, and returned `{"jump_to": "end"}` on every
+    call past the limit — and the loop kept going, because `before_model`'s conditional edge is
+    built from the hook's `can_jump_to` declaration and there was none. Measured at a cap of 1: the
+    hook fired five times, said "end" four times, and four further model/tool round-trips completed
+    anyway. The same shape as the `to_regclass` guard M6 nearly shipped — a check that runs,
+    answers correctly, and is wired to nothing.
+
+    So this drives a whole turn through `run_turn` and asserts the two things a caller can observe:
+    the loop **stopped** (one tool call, not the script's four), and the turn **said so**
+    (`loop_cap_reached`, which is what lets a surface mark the answer partial). A unit test on the
+    hook proves neither, and passed throughout.
+
+    A cap of 1 deliberately: it is the value MAF's inference was blind at, and the value at which
+    this defect is unambiguous.
+    """
+    from chemclaw.api.runner import run_turn
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "agent_engine", "langgraph")
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 1)
+
+    class _Session:
+        session_id = "s-capped"
+        state: dict[str, Any] = {}
+
+    def _factory(**_kwargs: Any) -> Any:
+        # Four tool calls scripted; a working cap must consume exactly one of them.
+        return build_langgraph_agent(
+            ScriptedChatModel(
+                [
+                    {"name": "ask_clarifying_question", "args": {"question": f"q{i}"}}
+                    for i in range(4)
+                ]
+            ),
+            audit_sink=NullAuditSink(),
+        )
+
+    async def _run() -> list[Any]:
+        return [
+            event
+            async for event in run_turn(
+                object(),
+                _Session(),  # type: ignore[arg-type]
+                "go",
+                connectors=[],
+                graph_factory=_factory,
+            )
+        ]
+
+    events = asyncio.run(_run())
+    kinds = [event.type for event in events]
+    assert kinds.count("tool_call") == 1, f"the loop did not stop at the cap: {kinds}"
+    codes = [event.code for event in events if event.type == "error"]
+    assert "loop_cap_reached" in codes, kinds

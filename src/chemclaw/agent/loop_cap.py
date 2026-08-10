@@ -106,7 +106,18 @@ def observe_loop_cap(
     return _should_continue
 
 
-@before_model
+# `can_jump_to` is not decoration, it is the edge. **Without it the cap was inert**, and inert in
+# the worst way: the hook ran, counted correctly, decided correctly and returned `{"jump_to":
+# "end"}` on every call after the limit — and the graph went on looping, because `before_model`'s
+# conditional edge is *built from this declaration*. No declaration, no edge, so nothing reads the
+# instruction. Measured at a cap of 1: the hook fired five times and said "end" four times while
+# four further model/tool round-trips completed anyway.
+#
+# That is why the unit test passed and the turn did not. Calling the hook proves the decision; only
+# a compiled graph proves the decision is connected to anything. This is the same shape as the
+# `to_regclass` guard M6 nearly shipped — a check that runs, returns the right answer, and is wired
+# to nothing.
+@before_model(can_jump_to=["end"])
 def lg_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
     """Count this turn's model calls and end the run when it reaches the cap.
 

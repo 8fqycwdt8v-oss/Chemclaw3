@@ -294,7 +294,20 @@ never what a deployment gets.
       already calls on both paths — answers for both engines. Marking the watch rather than adding
       a branch in the runner is what keeps it one number: the count still lives in `model_calls`.
       Pinned at a cap of 1, the value MAF's inference was blind at, asserting **both** records.
-- [ ] **OPEN, and found while testing the above: the cap may not fire end to end.** Driving
+- [x] **FIXED, and it was the sharper half of the defect.** `@before_model` builds its conditional
+      edge *from the hook's `can_jump_to` declaration*, and `lg_loop_cap` had none — so the hook ran,
+      counted correctly, decided correctly and returned `{"jump_to": "end"}` on every call past the
+      limit, while the graph went on looping because there was no edge to jump along. Measured at a
+      cap of 1: five hook calls, four "end" verdicts, four further model/tool round-trips completed.
+      `@before_model(can_jump_to=["end"])` connects it.
+
+      **This is why the unit test passed and the turn did not.** Calling a hook proves the decision;
+      only a compiled graph proves the decision is wired to anything — the same shape as the
+      `to_regclass` guard M6 nearly shipped, which also ran, also answered correctly, and was
+      attached to nothing. `test_a_capped_turn_actually_stops_and_says_so` drives a whole turn and
+      asserts both observable facts (one tool call, not four; and `loop_cap_reached` emitted),
+      mutation-verified by removing the declaration.
+- [ ] ~~OPEN: the cap may not fire end to end.~~ Driving
       `run_turn` with `harness_max_loop_iterations=1` and a scripted model, the loop made at least
       four model calls and never capped — the turn died on `StopIteration` when the script ran out,
       not on the cap. `lg_loop_cap.before_model` caps correctly when called directly (the test
