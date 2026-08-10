@@ -36,10 +36,11 @@ session can research and propose and can do nothing else.
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from agent_framework import AgentSession, FunctionInvocationContext, function_middleware
+from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.harness_mode import (
@@ -55,7 +56,9 @@ from chemclaw.agent.harness_types import ShouldContinueCallable, ShouldContinueR
 from chemclaw.agent.live_session import get_current_session
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.session_context import get_current_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,49 @@ class PlanNotApprovedError(AuthorizationError):
     A subclass rather than the base so a caller — and a test — can still tell "you lack a role"
     apart from "nobody has approved this yet", which are different problems with different remedies.
     """
+
+
+def plan_identity(items: Sequence[str]) -> str | None:
+    """The hash a human decision is recorded against, or `None` when there is no plan.
+
+    The decision, framework-free, so both engines bind an approval to the same identity. A second
+    hashing rule would be an approval that is valid under one engine and unrecognised under the
+    other — for a *durable* row that outlives the turn that wrote it, which is worse than a
+    divergence in wording.
+
+    `None` for an empty plan is D-167's first fix, and it is a rule rather than a guard: hashing
+    "nothing" yields a constant every session in every deployment also proposes, so a decision
+    recorded against it approves the empty plan globally rather than this session's work. An
+    identity nobody can distinguish is not something a person can meaningfully decide about.
+    """
+    return stable_hash(list(items)) if items else None
+
+
+async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
+    """Whether a live, unspent human approval exists for this plan — the shared lookup.
+
+    Folds "and it has not already been spent" in, because consumption is recorded on the decision
+    itself (`plan_approvals.consumed_at`) rather than in session state. That fold is D-167's last
+    fix: the spent-ness of an approval used to live where a pod roll could drop it while the
+    approval survived.
+    """
+    if plan_hash is None:
+        return False
+    decision = await plan_approval_store().decision(session_id, plan_hash)
+    return bool(decision and decision[0])
+
+
+def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
+    """The refusal an unapproved state-changing call earns — one sentence, both engines."""
+    return PlanNotApprovedError(
+        f"{tool_name} changes stored data or starts work, and the plan it is part of "
+        "has not been approved yet; review the plan and approve it, then ask again"
+    )
+
+
+def gated_call(tool_name: str) -> bool:
+    """Whether this tool is one the plan gate governs at all."""
+    return tool_name in side_effecting_tools()
 
 
 async def plan_is_approved(session: AgentSession) -> bool:
@@ -89,11 +135,7 @@ async def plan_is_approved(session: AgentSession) -> bool:
     as it stands at this instant, and the whole defect being fixed is an authorization that outlived
     the thing it authorized.
     """
-    plan_hash = await approvable_plan_hash(session)
-    if plan_hash is None:
-        return False
-    decision = await plan_approval_store().decision(session.session_id, plan_hash)
-    return bool(decision and decision[0])
+    return await approval_stands(session.session_id, await approvable_plan_hash(session))
 
 
 @function_middleware
@@ -122,7 +164,7 @@ async def enforce_plan_approval(
     if session is None:
         await call_next()
         return
-    if context.function.name not in side_effecting_tools():
+    if not gated_call(context.function.name):
         await call_next()
         return
     if await plan_is_approved(session):
@@ -134,10 +176,7 @@ async def enforce_plan_approval(
     # external-change marker `set_agent_mode` leaves when there is no change to announce.
     if session_mode(session) == EXECUTE_MODE:
         revoke_execute(session)
-    raise PlanNotApprovedError(
-        f"{context.function.name} changes stored data or starts work, and the plan it is part of "
-        "has not been approved yet; review the plan and approve it, then ask again"
-    )
+    raise plan_approval_refusal(context.function.name)
 
 
 def approved_todos_remaining(
@@ -261,3 +300,47 @@ async def consume_turn_approval(session: AgentSession) -> None:
             "unreadable decision, so this costs an extra approval rather than authorizing one",
             session.session_id,
         )
+
+
+# --- the LangGraph wiring ------------------------------------------------------------------------
+
+
+@wrap_tool_call
+async def lg_enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """Refuse a state-changing tool whose session has no approval for its current plan.
+
+    The LangGraph twin of `enforce_plan_approval`, over the same identity (`plan_identity`), the
+    same durable store (`approval_stands`) and the same sentence (`plan_approval_refusal`). An
+    approval is a *durable row* that outlives the turn that wrote it, so the two engines agreeing on
+    what it identifies matters more here than anywhere else in the migration: a hash computed
+    differently would silently invalidate every decision a chemist has already made.
+
+    **The plan is read from graph state, not from an ambient session object.** `TodoListMiddleware`
+    owns `todos` and the `write_todos` tool that maintains them, and `request.state` is this turn's
+    view of it — so the gate asks the plan as it stands at this instant, which is the property
+    `plan_is_approved`'s docstring insists on and had to arrange deliberately under MAF.
+
+    **`awaiting_jobs` needs no exclusion here.** Under MAF a todo waiting on a durable job was
+    marked by prefixing its description, and the identity had to filter those out or an approved
+    plan revoked its own approval the moment it launched a job. Here they are a separate state
+    field (`chemclaw.agent.state.ChemclawState`), so they are not in `todos` and there is nothing to
+    filter.
+
+    Raises:
+        PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;
+            the audit middleware records the refusal and `lg_surface_authorization_denials` relays
+            the reason to the model.
+    """
+    name = request.tool_call["name"]
+    if not gated_call(name):
+        return await handler(request)
+    session_id = get_current_session_id()
+    # No session means no plan to approve and no autonomous loop to gate — a template activity's
+    # tool step, or a one-shot CLI call. Not a hole: those paths still pass through
+    # `lg_enforce_tool_authz` and `authorize_trigger`, which is what governs them.
+    if not session_id:
+        return await handler(request)
+    todos = (request.state or {}).get("todos") or []
+    if await approval_stands(session_id, plan_identity([todo["content"] for todo in todos])):
+        return await handler(request)
+    raise plan_approval_refusal(name)

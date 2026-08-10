@@ -53,6 +53,7 @@ from typing import Any
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.runnables import RunnableConfig
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -67,11 +68,13 @@ from chemclaw.agent.chemclaw_agent import (
     instructions_for,
 )
 from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.plan_gate import gate_applies, lg_enforce_plan_approval
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend, skill_read_tool
 from chemclaw.agent.skill_manifest import declared_tools
+from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.tool_authz import (
     lg_announce_tool_failures,
     lg_enforce_tool_authz,
@@ -137,7 +140,12 @@ def build_langgraph_agent(
         # to be bound to none, which is the one thing it must not be.
         tools=[*tools, skill_read_tool(backend)],
         system_prompt=instructions_for(prof),
-        middleware=[_skills_middleware(backend), *_middleware(audit)],
+        state_schema=ChemclawState,
+        middleware=[
+            TodoListMiddleware(),
+            _skills_middleware(backend),
+            *_middleware(audit, prof),
+        ],
         name="chemclaw",
         checkpointer=checkpointer,
     )
@@ -288,7 +296,7 @@ def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
     return labelled
 
 
-def _middleware(audit: Any) -> list[Any]:
+def _middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     """The tool-call chain, outermost first — the MAF agent's order, ported not redesigned.
 
     The order is load-bearing and every position was argued for once already, so it is reproduced
@@ -308,7 +316,7 @@ def _middleware(audit: Any) -> list[Any]:
     until `entra_required`, `is_dry_run()` is False off the request path, and the repeat counter is
     absent unless a turn started one.
 
-    The plan-approval gate is the seventh and arrives in M5, inserted before
+    The plan-approval gate is the seventh, inserted by `_middleware` before
     `lg_announce_tool_failures` to keep that one innermost.
     """
     return [
@@ -318,5 +326,6 @@ def _middleware(audit: Any) -> list[Any]:
         lg_enforce_tool_authz,
         lg_refuse_writes_on_dry_run,
         lg_refuse_repeated_calls,
+        *([lg_enforce_plan_approval] if gate_applies(profile) else []),
         lg_announce_tool_failures,
     ]

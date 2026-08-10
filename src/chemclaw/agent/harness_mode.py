@@ -213,8 +213,9 @@ async def approvable_plan_hash(session: AgentSession) -> str | None:
     gate asks and what the decision route records against, and `current_plan_hash` stays a
     total function for the *display* route, which has to show something either way.
     """
-    items = await todo_plan_items(session)
-    return stable_hash(items) if items else None
+    from chemclaw.agent.plan_gate import plan_identity
+
+    return plan_identity(await todo_plan_items(session))
 
 
 async def current_plan_hash(session: AgentSession) -> str:

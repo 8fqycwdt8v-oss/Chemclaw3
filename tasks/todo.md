@@ -102,13 +102,25 @@ never what a deployment gets.
       only exists once state survives a turn. A fix whose proof waits for a later phase is a fix
       nobody has checked.
 
-### M5 — one human gate
-- [ ] Collapse the harness plan gate, `interaction_tools.py` and the KG PR-gate onto `interrupt()`
-      / `Command(resume=…)`.
-- [ ] The `mode_set` retraction disappears: never expose the tool. Keep the plan-hash binding.
-- [ ] `TodoListMiddleware` replaces `TodoSessionStore`; promote `"awaiting-job:<id>"` to a real
-      state field.
-- [ ] Loop cap becomes an explicit counter (also fixes the `max_loop_iterations == 1` blind spot).
+### M5 — the plan gate
+- [x] `agent/state.py` — `ChemclawState(PlanningState)` with `awaiting_jobs`. `Todo` is
+      `{content, status}` with **no description field**, which is where MAF's `awaiting-job:`
+      marker lived, so promoting it is forced rather than merely tidier — and the gate's exclusion
+      becomes structural instead of a string parse.
+- [x] `TodoListMiddleware` attached; `write_todos` is the plan the gate reads.
+- [x] The decision extracted: `plan_gate.plan_identity`, `.approval_stands`,
+      `.plan_approval_refusal`, `.gated_call`. Both engines bind an approval to the same hash —
+      the one divergence that would be *retroactive*, silently invalidating decisions a chemist has
+      already recorded.
+- [x] `lg_enforce_plan_approval` reads the plan from `request.state["todos"]` rather than an
+      ambient session object, so it asks the plan as it stands at this instant — the property
+      `plan_is_approved` had to arrange deliberately under MAF.
+- [x] `harness_tool_names()` — a fifth name space in `available_tool_names()`, derived from
+      `TodoListMiddleware().tools` rather than spelled out (D-117 again).
+- [x] The `mode_set` retraction is simply absent: the tool is never exposed, so there is nothing
+      to retract. `harness_mode.py`'s subclass-and-mutate has no counterpart here.
+- [ ] Loop cap as an explicit counter — not started.
+- [ ] `interrupt()` — **the plan's framing needs correcting, see below.**
 
 ### M6 — durable state on the checkpointer
 - [ ] `AsyncPostgresSaver`; `session_messages` demoted to a read-model projection.
@@ -332,3 +344,29 @@ Two claims were checked and held, so they are now pinned rather than believed: `
 middleware nests in list order (first = outermost, measured), and no `..` path escapes the skills
 tree (deepagents refuses traversal outright, so `/alpha/../beta/SKILL.md` raises rather than
 resolving past the gate).
+
+**M5 (partial).** The plan gate holds on the graph engine; `make lint type test` green at 3948
+passed, 0 failed, `prose-validate` passes.
+
+**A correction to the plan, made while implementing it.** M5 was framed as "collapse the harness
+plan gate, `interaction_tools.py` and the KG PR-gate onto one `interrupt()`". Two of those three
+belong together and the third does not, and the difference is their lifecycle rather than their
+shape:
+
+- The plan gate and the interaction approval are **in-turn**: a human answers in seconds while a
+  turn is live, which is exactly what `interrupt()`/`Command(resume=…)` models.
+- The **KG PR-gate is not an in-turn gate at all.** It is a git pull request a human reviews hours
+  or days later, and D-005 is about a human signing off on a *merge*. Holding a turn — and its SSE
+  stream — open across a code review is not a design, it is a leak. Forcing it into `interrupt()`
+  would have replaced a durable, resumable, auditable artifact with a suspended coroutine.
+
+So the collapse is two gates, not three, and the PR-gate stays a PR. That is a smaller win than
+the plan claimed (~350 LOC was the estimate; the honest figure is lower) and it is the right
+outcome.
+
+**And the plan gate itself is deliberately still a refusal, not an interrupt.** Under MAF an
+unapproved state-changing call is refused and the human approves out of band; switching the graph
+engine to *suspend* instead would be a behaviour change on one engine while both are live, which is
+the divergence this migration's whole discipline is against. `interrupt()` becomes the mechanism
+when the front door can drive it (M8) and both engines can be cut over together — with its own
+decision record, because changing when a chemist is asked is a product change and not a port.

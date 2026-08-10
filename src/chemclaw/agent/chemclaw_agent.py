@@ -36,6 +36,7 @@ from agent_framework import (
     # private import bought a hard dependency on an experimental module path for nothing.
     todos_remaining,
 )
+from langchain.agents.middleware import TodoListMiddleware
 
 # Importing each tool module runs its `@tool` decorators, populating the capability-tool
 # registry (a registration side effect, exactly as `evals/__init__.py` seeds the metric
@@ -703,10 +704,30 @@ def skill_tool_names() -> set[str]:
     }
 
 
-def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all four name spaces.
+def harness_tool_names() -> set[str]:
+    """The tools the plan/execute harness registers on an agent it wraps.
 
-    The four are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    Read off `TodoListMiddleware`'s own tool objects rather than spelled out, for the reason
+    `skill_tool_names` reads its constants: an upstream rename becomes a changed value instead of a
+    silently stale allow-list.
+
+    Its own name space because it is one: a harness tool is neither an in-process `@tool`, nor a
+    connector's, nor a template launcher, nor a skill's. D-117 is the standing lesson — three
+    validators once unioned two of the then-four name spaces, so a correct reference to a real tool
+    failed validation. `write_todos` is exactly the sort of name a skill about planning would
+    reasonably cite.
+
+    The MAF harness's equivalents are absent because `create_harness_agent` exposes no constants
+    for them, and inventing string literals here would be the stale allow-list this function is
+    written to avoid. That gap predates this migration and leaves with the MAF branch in M13.
+    """
+    return {tool.name for tool in TodoListMiddleware().tools}
+
+
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all five name spaces.
+
+    The five are genuinely separate — in-process `@tool` functions this process holds as symbols,
     connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
     generated from step templates, and the skill tools MAF attaches — and only the union is
     meaningful. Exposed rather than inlined because four other places need exactly this set: the
@@ -726,6 +747,7 @@ def available_tool_names() -> set[str]:
         *connector_tool_names(),
         *template_tool_names(),
         *skill_tool_names(),
+        *harness_tool_names(),
     }
 
 

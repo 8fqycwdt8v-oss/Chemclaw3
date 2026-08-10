@@ -36,8 +36,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from chemclaw.agent.audit import AuditEvent, NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
-from chemclaw.agent.chemclaw_agent import _capability_tools, build_agent, skills_source
+from chemclaw.agent.chemclaw_agent import (
+    _capability_tools,
+    build_agent,
+    harness_tool_names,
+    skills_source,
+)
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
+from chemclaw.agent.plan_gate import plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
@@ -46,6 +52,7 @@ from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.core.turn_signals import begin_turn, drain, end_turn
 from chemclaw.kg.note import NoteError
@@ -155,8 +162,9 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
 
     advertised = _advertised(graph)
-    assert advertised == {tool.__name__ for tool in _capability_tools()} | {SKILL_READ_TOOL}
-    assert advertised == set(registered_tool_names()) | {SKILL_READ_TOOL}
+    attached = {SKILL_READ_TOOL, *harness_tool_names()}
+    assert advertised == {tool.__name__ for tool in _capability_tools()} | attached
+    assert advertised == set(registered_tool_names()) | attached
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:
@@ -181,7 +189,7 @@ def test_a_profile_narrows_the_graph_surface() -> None:
     # `read_file` survives every profile, and it must: it carries no authority of its own — every
     # read goes through the backend the three narrowings already bound — so taking it away would
     # not attenuate anything, it would only make the profile's remaining skills unreadable.
-    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL}
+    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL, *harness_tool_names()}
     assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 
@@ -522,3 +530,88 @@ def test_asking_for_an_engine_that_cannot_serve_a_turn_fails_loudly(
 
     monkeypatch.setattr(settings, "agent_engine", "maf")
     assert build_agent(chat_client=object()) is not None
+
+
+# --- the plan gate (M5) --------------------------------------------------------------------------
+
+
+def test_a_state_changing_call_is_refused_without_an_approved_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-execution GxP gate holds on this engine: propose before you act.
+
+    A fresh session has no plan, so it has no *approved* plan, so the first state-changing call is
+    refused — the documented behaviour rather than an edge case. Asserted through a real turn, so
+    what is proven is that the gate is reached and its refusal relayed, not that the predicate
+    behind it works (that is `test_plan_gate.py`'s job, against the functions both engines share).
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    write_tool = sorted(set(side_effecting_tools()) & {t.__name__ for t in _capability_tools()})[0]
+    graph = build_langgraph_agent(model=_scripted(write_tool, {}), audit_sink=NullAuditSink())
+
+    session = set_current_session_id("session-1")
+    try:
+        content = _tool_result(_run(graph))
+    finally:
+        reset_current_session_id(session)
+
+    assert content == denial_result(plan_approval_refusal(write_tool))
+    assert "has not been approved yet" in content
+
+
+def test_a_read_only_call_is_untouched_by_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate governs state-changing tools only — a question is not a plan step."""
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    graph = build_langgraph_agent(
+        model=_scripted("ask_clarifying_question", {"question": "x"}), audit_sink=NullAuditSink()
+    )
+
+    session = set_current_session_id("session-2")
+    try:
+        content = _tool_result(_run(graph))
+    finally:
+        reset_current_session_id(session)
+
+    assert "has not been approved yet" not in content
+
+
+def test_both_engines_hash_a_plan_to_the_same_identity() -> None:
+    """An approval is a durable row, so the two engines must agree on what it identifies.
+
+    This is the one place a divergence would be *retroactive*: a hash computed differently would
+    silently invalidate every decision a chemist has already recorded, rather than merely behaving
+    oddly from now on. `plan_identity` is the single definition; what is pinned here is that the
+    LangGraph state shape (`todos[i]["content"]`) feeds it the same items MAF's `todo_plan_items`
+    does, and that the empty plan is nobody's plan under either.
+    """
+    titles = ["gather the evidence", "compute the barrier", "propose the note"]
+    todos = [{"content": title, "status": "pending"} for title in titles]
+
+    assert plan_identity([todo["content"] for todo in todos]) == plan_identity(titles)
+    assert plan_identity([]) is None, "the empty plan is a constant every session shares"
+
+
+def test_the_gate_is_absent_when_the_deployment_did_not_ask_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No harness means no plan, so imposing an approval-first posture would refuse every write.
+
+    The conditional half of `gate_applies`, and the reason the test above cannot pass vacuously:
+    the same tool, the same session, the same turn — refused with the harness on and allowed with
+    it off. A gate that fired unconditionally would look identical in the positive test alone.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "harness_enabled", False)
+    write_tool = sorted(set(side_effecting_tools()) & {t.__name__ for t in _capability_tools()})[0]
+    graph = build_langgraph_agent(model=_scripted(write_tool, {}), audit_sink=NullAuditSink())
+
+    session = set_current_session_id("session-3")
+    try:
+        content = _tool_result(_run(graph))
+    finally:
+        reset_current_session_id(session)
+
+    assert "has not been approved yet" not in content
