@@ -1,0 +1,313 @@
+"""The four invariants of `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` (M9).
+
+A team is the one part of this migration that adds capability rather than porting it, so it is the
+one part where a test suite that only proves "it works" would be negligent. Each invariant below is
+a *security* property, and each test is written to fail if the property is removed rather than to
+pass because the machinery ran.
+
+Invariant 2 — the actor reaching a subagent — is the one the ADR asked to verify **before**
+building, because deepagents issue #569 questioned whether `runtime.config` propagates at all. The
+answer turned out not to depend on that: Chemclaw's actor never travels through graph state or
+through `RunnableConfig`. It is a contextvar bound around the whole turn, and every hop into a
+subagent is spawned with `copy_context()`. So the question "does `_EXCLUDED_STATE_KEYS` filter our
+identity" is moot — there is nothing identity-shaped in state to filter — and the real question is
+whether execution ever leaves the turn's context. `test_the_human_actor_reaches_a_specialist`
+answers that one, which is the question that actually decides whether `require_actor` holds.
+"""
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from chemclaw.agent.audit import NullAuditSink
+from chemclaw.agent.chemclaw_agent import advertised_tool_names
+from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
+from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.team import (
+    REQUIRED_SPECIALIST,
+    SPECIALISTS,
+    TeamError,
+    build_team_middleware,
+    reject_widening,
+    running_specialist,
+    specialist_profiles,
+)
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import (
+    get_current_actor,
+    reset_current_identity,
+    set_current_identity,
+)
+from tests.fakes_langgraph import ScriptedChatModel
+
+
+@pytest.fixture(autouse=True)
+def _discovered() -> None:
+    """Register the shipped profiles, as `create_app` does at startup.
+
+    Autouse and idempotent (`load_profiles` skips a name already registered), because every test
+    here resolves a specialist by name and a suite that ran them against an empty registry would be
+    asserting about profiles that do not exist.
+    """
+    from chemclaw.agent.profile_discovery import load_profiles
+
+    load_profiles()
+
+
+def _default() -> AgentProfile:
+    """The supervisor's profile — the unnarrowed agent every specialist is checked against."""
+    return get_profile(None)
+
+
+# --- invariant 1: attenuation only ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", SPECIALISTS)
+def test_every_shipped_specialist_is_an_attenuation_of_the_default_agent(name: str) -> None:
+    """No specialist in `data/profiles/` advertises a tool the unnarrowed agent does not.
+
+    Parametrized over `SPECIALISTS` rather than a written list so a sixth specialist is covered on
+    the day it is added — the same reason `test_connector_transport.py` parametrizes over
+    discovery.
+    """
+    reject_widening(_default(), get_profile(name))
+    assert advertised_tool_names(get_profile(name)) <= advertised_tool_names(_default())
+
+
+def test_a_specialist_that_would_widen_its_caller_fails_the_build() -> None:
+    """The invariant, proven by violating it — otherwise the test above proves only today's data.
+
+    A narrowed supervisor holding two tools, and a "specialist" holding one it does not: exactly
+    the shape that would turn delegation into a privilege escalation, and exactly the shape
+    `_reject_unknown_tool_names` accepts, because every name here is real and the deployment does
+    provide them all.
+    """
+    supervisor = AgentProfile(name="narrow-boss", tool_names=frozenset({"predict_pka"}))
+    specialist = AgentProfile(
+        name="greedy", tool_names=frozenset({"predict_pka", "start_optimization_campaign"})
+    )
+    with pytest.raises(TeamError, match="would widen"):
+        reject_widening(supervisor, specialist)
+
+
+def test_the_check_that_already_existed_would_not_have_caught_it() -> None:
+    """Why invariant 1 needed new code, stated as a test rather than as a comment.
+
+    `_reject_unknown_tool_names` asks whether a profile names a tool the *deployment* provides. The
+    escalating specialist above passes that check cleanly, because `start_optimization_campaign` is
+    a real tool — it is just not one its caller holds. A test that did not pin this would let
+    someone delete `reject_widening` believing the older check covered it.
+    """
+    from chemclaw.agent.chemclaw_agent import _reject_unknown_tool_names
+
+    greedy = AgentProfile(
+        name="greedy", tool_names=frozenset({"predict_pka", "start_optimization_campaign"})
+    )
+    _reject_unknown_tool_names(greedy)  # passes: both names exist deployment-wide
+
+
+# --- the safety gate -----------------------------------------------------------------------------
+
+
+def test_a_team_without_the_safety_specialist_is_refused() -> None:
+    """`safety` is a gate, not one capability among five, so it is not attenuable away.
+
+    Every other narrowing in this system is permitted because attenuation can only reduce what an
+    agent may do. This one is refused because reducing it removes the check a chemist runs *before*
+    deciding whether to approve work — and a hazard screen nobody ran is not a smaller answer, it
+    is a missing one.
+    """
+    with pytest.raises(TeamError, match="must include"):
+        specialist_profiles(("evidence", "computation"))
+
+
+def test_the_full_team_resolves_and_includes_the_gate() -> None:
+    """The ordinary path, asserted so the refusal above cannot be passing for the wrong reason."""
+    profiles = specialist_profiles()
+    assert [profile.name for profile in profiles] == list(SPECIALISTS)
+    assert REQUIRED_SPECIALIST in {profile.name for profile in profiles}
+
+
+# --- invariant 2: identity reaches a specialist --------------------------------------------------
+
+
+def test_the_human_actor_reaches_a_specialist() -> None:
+    """`require_actor` must hold inside a subagent, and this is what decides whether it does.
+
+    The actor is read ambiently by every tool that attributes work to a person. If execution inside
+    a specialist ran in a context not derived from the turn's, `get_current_actor()` would return
+    `None` there — and under `entra_required` that is a loud refusal, but in dev it silently
+    degrades to the service identity and the GxP trail loses its attribution. That is precisely the
+    failure D-040 found in MAF's `mode_set`.
+
+    Driven through the real wrapper the team uses, in a real event loop, so what is proven is the
+    execution path rather than the reasoning about it.
+    """
+    seen: list[str | None] = []
+
+    class _Specialist:
+        """A stand-in specialist that reports the ambient actor it was invoked under."""
+
+        async def ainvoke(self, state: Any, config: Any = None, **kwargs: Any) -> Any:
+            seen.append(get_current_actor())
+            return {"messages": []}
+
+    from chemclaw.agent.team import _AttributedSpecialist
+
+    async def _turn() -> None:
+        token = set_current_identity("oid-of-a-real-chemist", frozenset({"chemist"}))
+        try:
+            await _AttributedSpecialist("evidence", _Specialist()).ainvoke({})
+        finally:
+            reset_current_identity(token)
+
+    asyncio.run(_turn())
+    assert seen == ["oid-of-a-real-chemist"]
+
+
+def test_a_specialist_cannot_leak_an_identity_change_back_to_its_caller() -> None:
+    """Propagation is strictly downward, which is the polarity that makes the contextvar safe.
+
+    `copy_context()` snapshots at spawn, so a subagent that rebound the actor would affect only its
+    own context. Asserted because the alternative — a specialist able to change who the *parent*
+    thinks it is acting for — would be far worse than losing the actor.
+    """
+    outer = set_current_identity("oid-parent", frozenset())
+    try:
+
+        async def _inner() -> str | None:
+            inner = set_current_identity("oid-impostor", frozenset())
+            try:
+                return get_current_actor()
+            finally:
+                reset_current_identity(inner)
+
+        assert asyncio.run(_inner()) == "oid-impostor"
+        assert get_current_actor() == "oid-parent"
+    finally:
+        reset_current_identity(outer)
+
+
+# --- invariant 3: the trail names the specialist beside the human --------------------------------
+
+
+def test_the_running_specialist_is_stamped_and_always_unstamped() -> None:
+    """The name must not outlive the specialist's invocation.
+
+    A leaked stamp would attribute the *supervisor's* next tool call to a specialist that had
+    already returned — a wrong row in the one table that must not be wrong. Asserted on the raising
+    path too, because that is the path a `finally` exists for and the one nobody exercises by hand.
+    """
+    from chemclaw.core.identity_context import get_current_specialist
+
+    assert get_current_specialist() == ""
+    with running_specialist("safety"):
+        assert get_current_specialist() == "safety"
+    assert get_current_specialist() == ""
+
+    with pytest.raises(RuntimeError), running_specialist("evidence"):
+        assert get_current_specialist() == "evidence"
+        raise RuntimeError("the specialist failed")
+    assert get_current_specialist() == ""
+
+
+# --- invariant 4: skills do not inherit ----------------------------------------------------------
+
+
+def test_a_specialist_sees_only_the_skills_its_own_surface_earns() -> None:
+    """Skills are scoped by the specialist's tools, not by its caller's.
+
+    A skill declares the tools its judgment is about, and `skill_permits` drops one whose tools the
+    agent cannot call. So `safety` — six tools — must not be offered the calculation-selection or
+    experiment-design skills, which are judgment about capabilities it does not hold. This is the
+    capability scope working one level down rather than a fifth rule.
+    """
+    everything = _listed(_default())
+    narrowed = _listed(get_profile("safety"))
+    assert everything, "the supervisor sees no skills at all — the helper is broken"
+    assert narrowed < everything, "the safety specialist sees every skill the supervisor does"
+    assert not any("experiment-design" in entry for entry in narrowed)
+    assert not any("calculation-selection" in entry for entry in narrowed)
+
+
+def _listed(profile: AgentProfile) -> set[str]:
+    """Every skill path one profile's backend will show, across all its skill trees.
+
+    Listed per *route* rather than from `/`, because the composite's default route is a
+    `StateBackend` that refuses to read outside a graph execution — an unrouted path is meant to
+    find nothing, and asking it to is a test artefact rather than the behaviour under test.
+    """
+    from chemclaw.agent.langgraph_agent import _labelled, _skill_dirs
+
+    backend = skills_backend(profile, [])
+    found: set[str] = set()
+    for label, _directory in _labelled(_skill_dirs()):
+        found.update(str(entry["path"]) for entry in backend.ls(f"/{label}/").entries or [])
+    return found
+
+
+# --- the team as built ---------------------------------------------------------------------------
+
+
+def test_the_team_middleware_carries_one_attributed_specialist_per_name() -> None:
+    """The assembled team: five specialists, each compiled and each stamping its own name."""
+    built: list[str] = []
+
+    def _build(profile: AgentProfile, **_kwargs: Any) -> Any:
+        built.append(profile.name)
+        return build_langgraph_agent(
+            ScriptedChatModel(["ok"]), profile=profile, audit_sink=NullAuditSink()
+        )
+
+    middleware = build_team_middleware(_default(), build=_build)
+    assert built == list(SPECIALISTS)
+    assert middleware.subagent_names == frozenset(SPECIALISTS)
+
+
+def test_a_specialist_does_not_get_a_team_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recursion guard, which is a rule rather than a depth limit.
+
+    `build_team_middleware` builds each specialist through `build_langgraph_agent`, so a specialist
+    whose own build attached a team would build five more, each of which would build five more. The
+    guard is "a specialist does not have a team", expressed as membership rather than as a counter —
+    a counter would only bound how badly the rule was broken.
+    """
+    monkeypatch.setattr(settings, "agent_teams_enabled", True)
+    graph = build_langgraph_agent(
+        ScriptedChatModel(["ok"]), profile=get_profile("safety"), audit_sink=NullAuditSink()
+    )
+    assert "task" not in {tool.name for tool in graph.nodes["tools"].bound.tools_by_name.values()}
+
+
+def test_binding_a_config_keeps_the_specialists_name() -> None:
+    """`with_config` must re-wrap, or the attribution silently disappears at the last moment.
+
+    `SubAgentMiddleware` binds each subagent's config and invokes *the result*. If that call
+    returned the bare inner runnable, every specialist's tool calls would land in the audit trail
+    attributed to the supervisor — nothing would fail, nothing would be logged, and the GxP record
+    would simply be wrong. There is no observable symptom, so there has to be a test.
+    """
+    from chemclaw.agent.team import _AttributedSpecialist
+    from chemclaw.core.identity_context import get_current_specialist
+
+    seen: list[str] = []
+
+    class _Inner:
+        """A runnable whose `with_config` returns a *different* object, as LangChain's does."""
+
+        def with_config(self, *_args: Any, **_kwargs: Any) -> "_Inner":
+            return _Inner()
+
+        async def ainvoke(self, _state: Any, _config: Any = None, **_kwargs: Any) -> Any:
+            seen.append(get_current_specialist())
+            return {"messages": []}
+
+    bound = _AttributedSpecialist("safety", _Inner()).with_config({"tags": ["x"]})
+    asyncio.run(bound.ainvoke({}))
+    assert seen == ["safety"]
+
+
+def test_the_team_is_off_by_default() -> None:
+    """A capability M12 has not yet shown to help is not what a deployment gets by accident."""
+    assert settings.agent_teams_enabled is False

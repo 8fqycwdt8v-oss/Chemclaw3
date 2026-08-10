@@ -134,6 +134,105 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
     assert sink.events[0].actor == "u-entra-oid"  # ambient user, not the "unknown" fallback
 
 
+def test_a_specialist_is_recorded_beside_the_human_actor() -> None:
+    """The trail names both: which person authorized the turn, and which agent made the call.
+
+    Invariant 3 of D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor. A subagent is an
+    attenuation of its caller's authority, not a new actor, so recording only the specialist would
+    make the trail worthless under GxP and recording it *as* the actor would repeat the D-040
+    failure — an agent's act attributed to a chemist's Entra oid. Both fields, or neither is true.
+    """
+    from chemclaw.core.identity_context import (
+        reset_current_identity,
+        reset_current_specialist,
+        set_current_identity,
+        set_current_specialist,
+    )
+
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-sub", actor="unknown", sink=sink)
+
+    async def _ok_call() -> None:
+        return None
+
+    identity = set_current_identity("u-entra-oid", frozenset({"compute"}))
+    specialist = set_current_specialist("computation")
+    try:
+        _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok_call)
+    finally:
+        reset_current_specialist(specialist)
+        reset_current_identity(identity)
+
+    event = sink.events[0]
+    assert event.actor == "u-entra-oid", "the human authorization was lost"
+    assert event.agent == "computation", "the specialist that ran the call was lost"
+
+
+def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -> None:
+    """Outside a subgraph the field is empty — and every other audited field is untouched.
+
+    Empty is the honest record for the turn's own agent, not a gap. The second half is the one that
+    matters for the trail already in the database: widening the event must not perturb what a call
+    with no specialist records, so the row a main-agent call produces is field-for-field what it was
+    before `agent` existed. `test_the_versioned_hash_reproduces_the_v2_bytes_exactly`
+    (`tests/test_audit_chain.py`) is the same claim at the level of the bytes that get hashed.
+    """
+    from chemclaw.core.identity_context import (
+        get_current_specialist,
+        reset_current_specialist,
+        set_current_specialist,
+    )
+
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
+
+    async def _ok_call() -> None:
+        return None
+
+    _drive_mw(mw, _ctx("find_notes", {"q": "x"}), _ok_call)
+
+    event = sink.events[0]
+    assert event.agent == ""
+    assert event.model_dump(exclude={"agent"}) == {
+        "correlation_id": "conv-main",
+        "session_id": "",
+        "purpose": "",
+        "actor": "alice@corp",
+        "tool": "find_notes",
+        "arguments": "{'q': 'x'}",
+        "outcome": "ok",
+        "detail": "",
+        "latency_ms": event.latency_ms,
+        "revision": settings.deployment_revision,
+    }
+    # And the binding is scoped to the subgraph, not leaked into the turn that followed it.
+    token = set_current_specialist("safety")
+    reset_current_specialist(token)
+    assert get_current_specialist() == ""
+
+
+def test_a_nested_specialist_restores_its_caller_rather_than_clearing_it() -> None:
+    """A specialist that delegates further leaves its own name behind, not an empty string.
+
+    `reset_current_specialist` restores the previous value precisely so a two-level delegation
+    attributes the outer specialist's own later calls to it — clearing instead would silently
+    re-attribute them to the main agent, which is a false record rather than a missing one.
+    """
+    from chemclaw.core.identity_context import (
+        get_current_specialist,
+        reset_current_specialist,
+        set_current_specialist,
+    )
+
+    outer = set_current_specialist("design")
+    inner = set_current_specialist("safety")
+    assert get_current_specialist() == "safety"
+    reset_current_specialist(inner)
+    assert get_current_specialist() == "design"
+    reset_current_specialist(outer)
+    assert get_current_specialist() == ""
+
+
 def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every recorded event carries the process's deployment revision (AG-14, GxP provenance)."""
     monkeypatch.setattr(settings, "deployment_revision", "sha-abc123")

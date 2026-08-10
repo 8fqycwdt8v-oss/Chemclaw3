@@ -200,11 +200,30 @@ never what a deployment gets.
 - [ ] `_resume` (mid-turn job resume) on the graph path — off by default, needs its own decision.
 
 ### M9 — agent teams
-- [ ] Five specialists (`evidence`, `computation`, `design`, `safety`, `reporting`) as profiles +
-      subgraphs; supervisor routing via `Command(goto=…, graph=Command.PARENT)`.
-- [ ] The four invariants of the subagent ADR, each as a test — attenuation-only, `require_actor`
-      inside subagents (**verify identity propagation first**; deepagents #569), audit records the
-      specialist beside the human, skills do not inherit.
+- [x] Five specialists as `data/profiles/*.yaml` — `evidence`, `computation`, `design`, `safety`,
+      `reporting`. A specialist is a profile plus a compiled subgraph and **not a new concept**,
+      which is why `agent/team.py` is short: delegation needed the existing security model enforced
+      one level down, not a new one.
+- [x] `agent/team.py` + `settings.agent_teams_enabled` (off by default, per the ADR).
+- [x] **Invariant 1 — attenuation only.** `team.reject_widening` compares *advertised* names of
+      parent and child. New code, and `test_the_check_that_already_existed_would_not_have_caught_it`
+      pins why: `_reject_unknown_tool_names` asks whether a name exists deployment-wide, so an
+      escalating specialist passed it cleanly.
+- [x] **Invariant 2 — `require_actor` inside a subagent.** Verified first, as the ADR demanded, and
+      the answer did not depend on deepagents #569 at all — see below.
+- [x] **Invariant 4 — skills do not inherit.** Falls out of building each specialist the ordinary
+      way; asserted by listing `safety`'s skill tree against the supervisor's.
+- [x] `safety` is **not attenuable away** — a team omitting it is refused at build time. The one
+      rule here that is not attenuation.
+- [x] `tests/test_agent_team.py` — 16 tests.
+- [ ] **Invariant 3 — the trail names the specialist beside the human.** In progress: needs the
+      `agent` column, `CHAIN_VERSION` 3 and a frozen v2 field set, or every historical row reports
+      itself tampered with.
+- [ ] Supervisor routing measured. `SubAgentMiddleware`'s `task` tool is the delegation path;
+      `Command(goto=…, graph=Command.PARENT)` and a routing *node* are the alternative the ADR
+      prefers for trace legibility, and choosing between them is an M12 measurement, not a guess.
+- [ ] Emitting `HandoffEvent` from the stream — the event exists and `graph_stream` already
+      attributes by subgraph namespace; nothing raises the handoff itself yet.
 
 ### M10 — `Send` fan-out
 - [ ] `gather_evidence` becomes real map-reduce, one branch per source into an `operator.add` field.
@@ -652,3 +671,50 @@ both engines drain the one contextvar rather than maintaining two mechanisms. `_
 job resume) is off by default and its graph equivalent is an `interrupt()` design decision, not a
 port. The third — the cross-repo event-contract sequence — is genuinely not started; both
 additions are defaulted and additive, so nothing downstream is broken meanwhile.
+
+**M9 (partial — the invariants hold; routing is unmeasured).** `make lint type test` green at 4163
+passed; the single failure in that run was `test_reizman.py` timing out under CPU contention from a
+second concurrent pytest session, and it passes in 50 s alone.
+
+**The substrate was already here, and that is the finding.** `AgentProfile` is an attenuate-only
+bundle discovered from `data/profiles/*.yaml`, so a specialist is a profile plus a compiled subgraph
+and not a new concept. Delegation needed the *existing* security model enforced one level down, not
+a new one — which is why `agent/team.py` is short and why three of the four invariants are a page of
+code rather than a subsystem.
+
+**Invariant 1 needed code, and the reason is worth keeping.** `_reject_unknown_tool_names` asks
+whether a profile names a tool the *deployment* provides. That catches a typo and says nothing about
+privilege: a specialist naming a tool its supervisor was narrowed out of passed it cleanly.
+`reject_widening` compares the two *advertised* surfaces, and
+`test_the_check_that_already_existed_would_not_have_caught_it` pins the distinction so nobody
+deletes it believing the older check covered it.
+
+**Invariant 2 needed none, and that is also a finding.** The ADR asked to verify identity
+propagation *before* building, because deepagents #569 questioned whether `runtime.config` reaches a
+subagent. The answer turned out not to depend on it: Chemclaw's actor never travels through graph
+state or through `RunnableConfig`. It is a contextvar bound around the whole turn, a subagent runs
+inside a parent tool call, and both LangGraph's executor and LangChain's sync-in-async bridge spawn
+with `copy_context()`. So `_EXCLUDED_STATE_KEYS` is irrelevant — there is nothing identity-shaped in
+state to filter — and the real question was whether execution ever leaves the turn's context. It
+does not, and propagation is strictly downward, which is the polarity that makes it safe.
+
+**The one that would have been silent.** `mypy` objected that `_AttributedSpecialist` is not a
+`Runnable`. Reading that complaint instead of casting it away found the hole: `SubAgentMiddleware`
+binds each subagent's config with `with_config` and invokes *the result*. Forwarded through
+`__getattr__`, that call returns the bare inner runnable — so every specialist's tool calls would
+have landed in the audit trail attributed to the supervisor, with nothing failing, nothing logged
+and no test noticing. There is no observable symptom, which is exactly why it has a test.
+
+**And a latent bug in the chain versioning, found while implementing invariant 3.** The switch in
+`audit_store.chain_hash` was `if version < CHAIN_VERSION: payload = select(_V1_FIELDS)` — correct
+while exactly one superseded shape existed, and silently wrong the moment a second appeared. Bumping
+to 3 with that code would have hashed every **v2** row under v1's eight fields and reported the whole
+middle of the trail as tampered with. It is now a version→shape table, so adding v4 is one row.
+
+**What is not done.** Supervisor *routing quality* is unmeasured, and that is the whole reason the
+team ships disabled: a supervisor that mis-routes is worse than the single agent it replaces, and no
+unit test can establish which a deployment gets. `HandoffEvent` exists and `graph_stream` already
+attributes by subgraph namespace, but nothing raises the handoff itself yet. Whether delegation
+stays `SubAgentMiddleware`'s `task` tool or becomes a routing *node* with
+`Command(goto=…, graph=Command.PARENT)` — which the ADR prefers for trace legibility — is an M12
+measurement rather than a guess to make now.

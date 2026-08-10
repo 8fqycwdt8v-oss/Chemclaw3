@@ -46,6 +46,17 @@ class AgentSettings(BaseSettings):
     # branch are deleted together once the rebuild is proven live (no dead path kept "for later").
     agent_engine: Literal["maf", "langgraph"] = "maf"
 
+    # Route turns through a supervisor and five specialists rather than one agent (M9,
+    # `docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md`).
+    #
+    # **Off by default, and this is not caution about the code.** A single agent holding sixty
+    # tools chooses badly among them and pays for the whole surface in every prompt, which is the
+    # case for a team; but a supervisor that mis-routes is *worse* than the agent it replaces, and
+    # no unit test can establish which of those a deployment gets. M12 measures routing accuracy
+    # and per-specialist token cost against the single-agent baseline, and that measurement — not
+    # this flag — is what decides whether the default changes. LangGraph only.
+    agent_teams_enabled: bool = False
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from its own env var
     # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers

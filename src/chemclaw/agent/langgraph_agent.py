@@ -77,6 +77,7 @@ from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend, skill_read_tool
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import ChemclawState
+from chemclaw.agent.team import SPECIALISTS, build_team_middleware, team_enabled
 from chemclaw.agent.tool_authz import (
     lg_announce_tool_failures,
     lg_enforce_tool_authz,
@@ -167,6 +168,7 @@ def build_langgraph_agent(
         middleware=[
             *_harness_middleware(prof),
             _skills_middleware(backend),
+            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors),
             *_middleware(audit, prof),
         ],
         name="chemclaw",
@@ -241,6 +243,42 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     if not harness_enabled_for(profile):
         return []
     return [TodoListMiddleware(), lg_loop_cap]
+
+
+def _team_middleware(
+    profile: AgentProfile,
+    actor: str,
+    correlation_id: str | None,
+    audit_sink: AuditSink | None,
+    connectors: list[Any] | None,
+) -> list[Any]:
+    """The specialist team, when this deployment routes turns through one (M9).
+
+    Empty unless `agent_teams_enabled`, so the default agent is byte-identical to the one before
+    teams existed — a capability M12 has not yet shown to help is not something to switch on for
+    everybody (`agent/team.py` says why at length).
+
+    **A specialist is only ever built for a profile that is not itself a specialist**, which is what
+    stops the recursion: `build_team_middleware` builds each one through this same function, and a
+    specialist whose own profile enabled a team would build five more. The guard is the profile's
+    membership in `SPECIALISTS` rather than a depth counter, because "a specialist does not have a
+    team" is the rule, and a depth counter would merely bound how badly it was broken.
+
+    The turn's identity, sink and connectors are passed down so a specialist audits under the same
+    correlation id and reaches the same per-turn connector sessions as the supervisor. Its *tools*
+    are narrowed by its own profile, and `team.reject_widening` refuses any that would widen.
+    """
+    if not team_enabled() or profile.name in SPECIALISTS:
+        return []
+    return [
+        build_team_middleware(
+            profile,
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=audit_sink,
+            connectors=connectors,
+        )
+    ]
 
 
 def _skills_middleware(backend: CompositeBackend) -> Any:

@@ -1,0 +1,34 @@
+-- Record which specialist ran a tool call, beside the human who authorized the turn
+-- (D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor, invariant 3).
+--
+-- The conversation layer gains a supervisor and per-capability specialist subagents. A subagent is
+-- an attenuation of its caller's authority, not a new actor, so the trail has to answer two
+-- questions at once: which person authorized this, and which agent made the call. It could answer
+-- neither on its own — `audit_events` had one identity column, `actor`, holding the Entra oid, and
+-- a specialist's calls would have been indistinguishable from the main agent's.
+--
+-- **Why not reuse a column.** Writing the specialist into `actor` is the D-040 failure repeated:
+-- that incident recorded an agent's self-authorization under the chemist's identity, and an
+-- attributable-*looking* record with no human act behind it is worse than an unrecorded one.
+-- Writing it into `purpose` would spend the one column that is deliberately empty because nothing
+-- can fill it honestly yet. Attribution to "the agent" makes a GxP trail worthless; attribution of
+-- an agent's act to a person makes it wrong. Two questions, two columns.
+--
+-- '' is the main agent, and it is a complete answer rather than a missing one — which is why the
+-- column is `NOT NULL DEFAULT ''` and why no backfill is needed: every row written before this
+-- migration was in fact made by the single agent that existed then.
+--
+-- **Why the chain version moves again.** `agent/audit_store.chain_hash` hashes
+-- `{"prev": prev_hash, "event": event.model_dump()}`, so adding a field to `AuditEvent` changes the
+-- bytes hashed for every row — including the v1 and v2 rows already in the table. Migration 026 gave
+-- each row a `chain_version` for exactly this; this migration is the second use of it, and the first
+-- time more than one superseded shape exists. `chain_version = 3` covers the full event including
+-- `agent`; 2 stays frozen at the ten fields 026 defined; 1 stays frozen at its original eight. The
+-- verifier dumps per row according to that row's own version, so the whole history keeps verifying
+-- across a schema change — which is the property a hash chain is supposed to have and would
+-- otherwise have quietly lost, reporting the entire trail as tampered with on the first deploy.
+--
+-- No index: "which specialist ran this" is a filter on a reconstruction that is already scoped by
+-- `session_id` or `correlation_id`, both of which are indexed, and this table is the one nothing may
+-- prune, so an index earns its write cost only against a query someone actually runs.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS agent TEXT NOT NULL DEFAULT '';

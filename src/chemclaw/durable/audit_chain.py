@@ -142,7 +142,7 @@ def check_chain(rows: Iterable[ChainRow]) -> list[str]:
 # or repeat a row the way an offset can. The chain fold is order-dependent, which is exactly why the
 # cursor must be the primary key and the order must stay `ASC`.
 _SELECT_PAGE = """
-    SELECT id, correlation_id, session_id, purpose, actor, tool, arguments, outcome, detail,
+    SELECT id, correlation_id, session_id, purpose, actor, agent, tool, arguments, outcome, detail,
            latency_ms, revision, prev_hash, row_hash, chain_version
     FROM audit_events
     WHERE id > %s
@@ -155,21 +155,22 @@ def _chain_row(record: tuple[object, ...]) -> ChainRow:
     """Build one `ChainRow` from a `_SELECT_PAGE` row, in its column order."""
     return ChainRow(
         id=int(str(record[0])),
-        prev_hash=str(record[11]),
-        row_hash=str(record[12]),
+        prev_hash=str(record[12]),
+        row_hash=str(record[13]),
         event=AuditEvent(
             correlation_id=str(record[1]),
             session_id=str(record[2]),
             purpose=str(record[3]),
             actor=str(record[4]),
-            tool=str(record[5]),
-            arguments=str(record[6]),
-            outcome=str(record[7]),
-            detail=str(record[8]),
-            latency_ms=float(str(record[9])),
-            revision=str(record[10]),
+            agent=str(record[5]),
+            tool=str(record[6]),
+            arguments=str(record[7]),
+            outcome=str(record[8]),
+            detail=str(record[9]),
+            latency_ms=float(str(record[10])),
+            revision=str(record[11]),
         ),
-        chain_version=int(str(record[13])),
+        chain_version=int(str(record[14])),
     )
 
 
