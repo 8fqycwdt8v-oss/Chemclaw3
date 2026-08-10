@@ -203,6 +203,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "(M8, D-2026-08-10) — the front door's half of driving the other engine; retires with the "
         "`maf` rows when that branch is deleted"
     ),
+    ("chemclaw.retrieval", "langgraph"): (
+        "retrieval/fanout.py sweeps the evidence sources as a `Send` fan-out, one branch per "
+        "source (M10, D-2026-08-10) — the graph is an implementation detail of `gather_evidence` "
+        "and runs under either engine, so this row does not retire with the `maf` ones"
+    ),
     ("chemclaw.connectors", "langgraph"): (
         "the same adapter point for the other engine (M7, D-2026-08-10): connectors/transport.py "
         "holds each connector's MCP session open for a turn and registry.py turns what it "

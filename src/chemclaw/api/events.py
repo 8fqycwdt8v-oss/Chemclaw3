@@ -346,6 +346,30 @@ class ErrorEvent(BaseModel):
     correlation_id: str = ""
 
 
+class EvidenceSourceEvent(BaseModel):
+    """One retrieval source reported what it contributed to a sweep (M10).
+
+    `gather_evidence` asks every configured source at once and merges what comes back, and in the
+    merged list a source that returned nothing is indistinguishable from a source nobody asked.
+    That is not hypothetical: `D-2026-08-01-a-cap-that-starves-a-source` is a defect in which one
+    leg contributed **zero** surviving chunks while the sweep looked healthy in aggregate, it went
+    unnoticed until someone counted by hand, and both competing explanations for it turned out to
+    be wrong. This is the per-branch arithmetic, emitted while the sweep runs.
+
+    `chunks` is what the source *found*, before the cross-source cap — so a surface can tell "this
+    source had nothing to say" from "this source was crowded out of the budget", which are
+    different problems with different fixes.
+
+    Emitted only on the LangGraph engine, because it rides that engine's custom stream; the MAF
+    engine runs the same branches and records the same counter, it simply has no channel to say so.
+    A surface must therefore treat the absence of these as "not reported", never as "no sources".
+    """
+
+    type: Literal["evidence_source"] = "evidence_source"
+    source: str
+    chunks: int
+
+
 class HandoffEvent(BaseModel):
     """The turn was routed to a specialist, or handed back (M9).
 
@@ -383,6 +407,7 @@ Event = (
     | AnswerEvent
     | ToolFailedEvent
     | ToolResultEvent
+    | EvidenceSourceEvent
     | HandoffEvent
     | ErrorEvent
 )

@@ -153,6 +153,11 @@ function applyEvent(evt, answerEl) {
       // transcript showed a silent gap wherever a tool raised.
       add("trace", `${agentTag(evt)}✗ ${evt.tool} failed — ${evt.message}`);
       return answerEl;
+    case "evidence_source":
+      // Zero is the point of this line, not noise to filter: a source that found nothing is the
+      // failure D-2026-08-01 went looking for, and it is invisible in the merged evidence list.
+      add("trace", `⌕ ${evt.source}: ${evt.chunks} chunk(s)`);
+      return answerEl;
     case "handoff":
       // Its own line rather than a prefix on what follows: a reader needs to see *where* control
       // went, not only that the next tool call came from somewhere else.

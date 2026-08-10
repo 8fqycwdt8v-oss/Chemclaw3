@@ -128,11 +128,18 @@ class ShareDocumentRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return the share's best-matching document chunks for `query`, best first.
 
-        **Never raises.** `agent.research_tools.gather_evidence` fans the retrievers out through a
-        plain `asyncio.gather` with no `return_exceptions`, so one raising leg does not degrade a
-        question — it fails the whole thing. A database the share index lives in being briefly
-        unreachable must not take down answers the knowledge graph could have given on its own.
-        This is the call `WarehouseVectorRetriever` and `VendoredDatasetRetriever` both made.
+        **Never raises**, and it stays that way now that the sweep would survive it anyway. A
+        database the share index lives in being briefly unreachable must not take down answers the
+        knowledge graph could have given on its own — the call `WarehouseVectorRetriever` and
+        `VendoredDatasetRetriever` both made too.
+
+        The *reason* this docstring used to give has expired and is corrected rather than deleted:
+        `gather_evidence` fanned its retrievers out through a plain `asyncio.gather` with no
+        `return_exceptions`, so one raising leg failed the whole question. It now sweeps them as
+        graph branches that each degrade on their own (`chemclaw.retrieval.fanout`), so a raise
+        here would cost this source and not the sweep. Answering emptily is still right — a source
+        that knows why it found nothing can log it, where a caught exception one layer up cannot —
+        but it is no longer the only thing standing between one outage and a dead turn.
         """
         if not query.strip() or not self._entitled():
             return []

@@ -231,8 +231,28 @@ never what a deployment gets.
       attributes by subgraph namespace; nothing raises the handoff itself yet.
 
 ### M10 — `Send` fan-out
-- [ ] `gather_evidence` becomes real map-reduce, one branch per source into an `operator.add` field.
-- [ ] Re-measure the retrieval balance from `D-2026-08-01-a-cap-that-starves-a-source` per branch.
+- [x] `chemclaw/retrieval/fanout.py` — one `Send` branch per source into an `operator.add` field,
+      invoked by `gather_evidence`. Runs on **both** engines: a compiled graph always has a
+      runtime, so the branches execute identically under MAF and only the visibility differs.
+- [x] **The fan-in re-orders by source index**, because `operator.add` appends in completion order
+      and both merge modes read the lists positionally (RRF takes a note's representative chunk
+      from the first list that found it; the round-robin interleaves in list order). Completion
+      order would make one sweep's evidence differ from the next — a reproducibility defect.
+- [x] Each branch reports what it contributed: a labelled counter
+      (`chemclaw_evidence_source_chunks_total{source}`) and a per-branch stream event, translated
+      into the new `EvidenceSourceEvent` by `api/graph_stream`. **Zero is the signal**, and it was
+      previously unobservable.
+- [x] A branch that raises costs its own source, not the sweep — the connector-degradation trade,
+      one layer down. Two retrievers' docstrings corrected: both justified "never raises" by
+      `gather_evidence` having no `return_exceptions`, which stopped being the mechanism.
+- [x] **Re-measured**: 45 graph / 8 lexical / 7 dense against the 40-chunk cap now yields
+      **25 / 8 / 7**. The ADR recorded 38/0/2 under the flat union and 40/0/0 with the score sort
+      removed — both starved legs now contribute every hit they had.
+- [x] `tests/test_evidence_fanout.py` — seven tests, including the measurement and an end-to-end
+      one driving a real turn so the report has to cross both the tool and `Send` boundaries.
+- [ ] Solvent screens and conformer sweeps — the plan's other named fan-out candidates. Untouched;
+      unlike the evidence sweep they really do serialize, so they are the case where `Send` would
+      buy latency rather than visibility.
 
 ### M11 — long-term memory on `BaseStore`
 - [ ] Map `chemclaw/memory/` onto `BaseStore` over the deployed pgvector. `Store` is memory, not
@@ -723,3 +743,47 @@ attributes by subgraph namespace, but nothing raises the handoff itself yet. Whe
 stays `SubAgentMiddleware`'s `task` tool or becomes a routing *node* with
 `Command(goto=…, graph=Command.PARENT)` — which the ADR prefers for trace legibility — is an M12
 measurement rather than a guess to make now.
+
+**M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
+
+**The plan's stated reason for this phase was wrong, and finding that out is most of what M10
+taught.** It said `Send` would make the evidence sweep "real map-reduce" where the sources "today
+serialize". They do not: `gather_evidence` has gathered its retrievers with `asyncio.gather` since
+the sweep was written, its own comment explains why, and `test_gather_evidence_runs_its_sources_
+concurrently` has been asserting it. So the latency win did not exist to be won.
+
+What *was* missing is visibility, and that gap is not hypothetical — it is the whole of
+`D-2026-08-01-a-cap-that-starves-a-source`, where one retrieval leg contributed **zero** surviving
+chunks while the sweep looked healthy in aggregate, went unnoticed until someone counted by hand,
+and had two competing explanations that were both wrong. Nothing in the tree reported per-source
+contribution: no counter, no log line, no event. Two test assertions were the only place those
+numbers had ever existed.
+
+**The re-measurement, which is the phase's acceptance.** The ADR's mixed sweep — 45 graph hits at
+the notes' 0.8 confidence, 8 lexical at ts_rank 0.02–0.09, 7 dense at cosine 0.60–0.85, against the
+40-chunk cap — now yields **25 graph / 8 lexical / 7 dense**. The ADR recorded 38/0/2 under the flat
+union and 40/0/0 with the score sort removed. Both previously-starved legs now contribute every hit
+they had. The test asserts the *property* (every source with hits survives the cap) rather than the
+exact split, because the defect was never a ratio, it was a zero — and pinning 25/8/7 would freeze
+the round-robin's arithmetic against a corpus shape nobody promised.
+
+**The finding worth keeping.** `operator.add` fans in whichever branch finishes first, and both
+merge modes read the lists *positionally*: `reciprocal_rank_fusion` takes a note's representative
+chunk from "the first one encountered across the lists (stable input order)", and the round-robin
+interleaves in list order. A completion-ordered fan-in would therefore return different evidence
+for the same question on different runs — a reproducibility defect in a GxP system, not a
+nondeterminism nobody notices. Every branch carries its source index and the fan-in restores it.
+
+**Three defects found by review rather than by tests.** The two new counters were undeclared, and
+`record_metric` swallows the `KeyError`, so the phase's own measurement deliverable was silently
+recording nothing. The fingerprint source was labelled `fingerprint` while its chunks carry
+`reaction-fingerprint` — the same string `retrieval_source_weights` is keyed by — so the metric
+would have named a source appearing nowhere in the evidence, which is exactly the "starved leg
+looks like a missing one" confusion this phase exists to remove. And the per-branch stream event
+reached `graph_stream`, which dropped it: the "visible while it happens" claim was aspirational
+until `EvidenceSourceEvent` was added and wired.
+
+**And one process note.** The first full-suite run came back "0 failed" with **182 skipped against
+the usual 36** — Postgres had stopped mid-run, so 146 database-backed tests silently did not run. A
+green suite with a sixth of it skipped is not a green suite; the figure above is from the re-run
+with the database actually up.

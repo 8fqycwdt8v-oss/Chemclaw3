@@ -23,9 +23,11 @@ different branch and yields two-tuples instead):
   OpenAI-Responses case that announced ten `tool_call` events for one call).
 - `updates` carries `{node: state_update}` once a node completes, so a tool call arrives *whole*.
   That is where calls, results and the todo list are read.
-- `custom` is unused here and named so a reader knows it was considered: Chemclaw's out-of-band
-  signals still travel by contextvar (`core/turn_signals.py`), which both engines drain, and
-  M13 is where that becomes a stream write — see the note on `drain` below.
+- `custom` carries what a *node* chose to publish about itself. Today that is the evidence
+  fan-out's per-branch report (`chemclaw.retrieval.fanout`), which reaches here from inside a tool
+  call because a branch's writer surfaces under the `tools:<id>` namespace. Chemclaw's other
+  out-of-band signals still travel by contextvar (`core/turn_signals.py`), which both engines
+  drain; M13 is where that becomes a stream write too.
 
 **The ordering rule is the runner's, reproduced rather than re-derived**: a signal is drained
 before the content of the update it arrived with, because a tool that ran while the model was
@@ -39,7 +41,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessageChunk
 
-from chemclaw.api.events import Event, PlanEvent, TokenEvent
+from chemclaw.api.events import Event, EvidenceSourceEvent, PlanEvent, TokenEvent
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.core.turn_signals import Signal, drain
@@ -94,6 +96,10 @@ async def graph_events(
             text = _text_of(chunk)
             if text:
                 yield TokenEvent(text=text)
+        elif mode == "custom":
+            event = _custom_event(payload)
+            if event is not None:
+                yield event
         elif mode == "updates":
             async for event in _from_update(payload, namespace, trace, todos):
                 yield event
@@ -103,6 +109,23 @@ async def graph_events(
     for signal in drain():
         on_signal(signal)
         yield _signal_event(signal)
+
+
+def _custom_event(payload: Any) -> Event | None:
+    """One node's self-report as its event, or `None` for a payload nothing renders.
+
+    Matched on shape rather than on a type tag, because a writer payload is whatever the node
+    passed and there is no schema between them. Unknown payloads are dropped rather than guessed
+    at: a node that publishes something no surface understands is a node ahead of its consumers,
+    which is a normal state during a migration and not an error.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if "evidence_source" in payload:
+        return EvidenceSourceEvent(
+            source=str(payload["evidence_source"]), chunks=int(payload.get("chunks", 0))
+        )
+    return None
 
 
 async def _from_update(

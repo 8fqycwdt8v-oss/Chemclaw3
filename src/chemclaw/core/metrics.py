@@ -62,6 +62,12 @@ def _escape(value: str) -> str:
 # the exposition always carries HELP/TYPE lines (a scrape without them is much harder to read).
 _COUNTERS: dict[str, str] = {
     "chemclaw_turns_started_total": "Turns admitted and started.",
+    # Per-source evidence accounting (M10). A leg that returns nothing on one query is normal; a
+    # leg that returns nothing on *every* query is a broken deployment, and before this there was
+    # no way to tell those apart from outside — which is exactly the blind spot
+    # D-2026-08-01-a-cap-that-starves-a-source was found in, late and by hand.
+    "chemclaw_evidence_source_chunks_total": "Chunks each evidence source contributed to a sweep.",
+    "chemclaw_evidence_source_failures_total": "Evidence sources that raised during a sweep.",
     # "emitted", not "ended in": a turn stopped by the harness loop's iteration cap emits an error
     # event and then still delivers its partial answer, so it is counted here and, more precisely,
     # by `chemclaw_turn_loop_caps_total` below.
@@ -331,6 +337,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
     # profile) rather than anything a caller can name.
     "chemclaw_repeated_tool_calls_total": ("tool",),
+    # A retriever's own `name`, and the bound is the same kind as `connector`: a source is a
+    # registry entry a deployment activates, never a string a caller supplies. The shipped set is
+    # the knowledge graph, the lexical and dense indexes, and the fingerprint store.
+    "chemclaw_evidence_source_chunks_total": ("source",),
     # The tightest bound of any label here: a subsystem name is a string literal at a `degraded()`
     # call site, so the whole value set is enumerable from the source and `tests/test_degraded.py`
     # enumerates it — across both call spellings (`degraded(...)` and `<module>.degraded(...)`) and
