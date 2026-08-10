@@ -33,6 +33,19 @@ class AgentSettings(BaseSettings):
     # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
     framing_envelope_secret: str = ""
 
+    # Which framework assembles the conversation layer. `maf` is the Microsoft Agent Framework
+    # this system was built on; `langgraph` selects the LangGraph rebuild (a typed `StateGraph`,
+    # `interrupt()` for every human gate, a Postgres checkpointer for turn state, and the
+    # supervisor/specialist team). Both engines advertise the same tools, skills and audit
+    # middleware and emit the same `api/events.py` stream — that event contract is the
+    # conformance boundary between them, which is what makes running the eval suite twice a
+    # measurement rather than an argument.
+    #
+    # Defaults to `maf` for as long as both exist: the migration lands phase by phase behind this
+    # switch, so an unfinished engine is never the one a deployment gets. The switch and the MAF
+    # branch are deleted together once the rebuild is proven live (no dead path kept "for later").
+    agent_engine: Literal["maf", "langgraph"] = "maf"
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from its own env var
     # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers

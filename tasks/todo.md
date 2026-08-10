@@ -1,114 +1,137 @@
-# Giving a tool result somewhere to live
+# Rebuilding layer 1 on LangGraph
 
-Prompted by: a companion study of the frontend (`Chemclaw3_ui/docs/chemistry-aware-frontend.md`,
-§7 item 1) finding that the only thing about a tool call that reaches the browser is
-`ToolResultEvent.preview` — 200 raw characters, explicitly not JSON. So a `ScreenResult`'s cited
-hazard flags, a `ChargeTable`'s rows and a solvent ranking all arrive as prose the model wrote about
-them, and no frontend change can fix it. The full text already existed untruncated at emit time and
-was discarded.
+Prompted by: asking what it would cost to replace MAF with LangGraph. The answer is ~11–14 weeks,
+and the reason to do it is not capability but defect load — four workarounds in this tree exist for
+MAF bugs, two of which were silent (`agent_pool.py` for the 8/8 concurrent-turn failure, and the
+`require_per_service_call_history_persistence` fix for the streaming defect that meant harness mode
+*never worked* while every unit test passed).
+
+Decided in [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](../docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+(supersedes D-013/D-038/D-040/D-151, amends D-002's implementation) and
+[`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`](../docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md).
+Full phase detail in the approved plan; this file tracks state.
+
+**Not a port — a rebuild.** Five things that are hand-built today become framework features, each
+one deleting chemclaw code (≈1,300 LOC removed against ≈3,000 rewritten). Everything lands behind
+`CHEMCLAW_AGENT_ENGINE` (`maf` | `langgraph`) with both engines green, so an unfinished engine is
+never what a deployment gets.
+
+**Go/no-go is the end of M4.** M5 onward is the commitment.
 
 ## Plan
 
-- [x] `infra/sql/042_tool_result_store.sql` — content-addressed `tool_result_blobs` +
-      `tool_result_links`, modelled on `019_artifact_store.sql` (same two-table shape, same
-      `SET STORAGE EXTERNAL`, same load-bearing `ON DELETE CASCADE`).
-- [x] `api/tool_results.py` — the store, the `ResultSink` seam, and the failure policy (`""`, never
-      an exception: storing must not fail a turn), swallowed through `degraded()` so a run of lost
-      writes is one counter and not only a log flood.
-- [x] `ToolResultEvent.result_ref` + `stream_max_result_bytes` — over the cap a result is refused
-      whole, never trimmed, and the refusal is logged (`_capped_numbers`' rule, one field over).
-- [x] `runner_trace.feed` becomes a coroutine taking an injected sink, so the blob lands before the
-      event naming it is yielded; the runner builds the sink where the session and correlation id
-      exist. `tests.fakes.fed` keeps the forty synchronous call sites synchronous.
-- [x] `routes/results.py` — `GET /sessions/{id}/tool-results/{ref}`, gated by `resolve_session`.
-- [x] `routes/notes.py` — `GET /notes/{id}`, the same `NoteView` `expand_note` returns.
-- [x] Retention — `tool_result_blobs` joins `_PRUNABLE` by `created_at`; links cascade, so no orphan
-      pass. Window defaults to 0 like the others (see Review).
-- [x] Canonical SMILES echo — `ScreenResult.screened` / `AlertResult.screened`.
-- [x] Declarations that are test-enforced: `routes/README.md` table, `infra/sql/README.md` rows and
-      the foreign-key count, `grants/app_privileges.sql`, `.env.example`, the session-scope
-      inventory in `tests/test_service.py`, the `_PRUNABLE` set in `tests/test_retention.py`.
-- [x] `tests/test_tool_results.py` — store round trip, dedup, cross-session miss, a write that fails
-      costing the turn nothing, the producer's ref, the oversize refusal + its log line, the cap
-      being bytes rather than characters, and both routes.
-- [x] ADR `D-2026-08-09-a-preview-is-not-a-result` + ledger row.
+### M0 — decision record and dual-engine seam
+- [x] Two ADRs + their ledger rows in `docs/decisions/README.md`.
+- [x] `agent_engine: Literal["maf", "langgraph"] = "maf"` in `core/config/agent.py`, documented in
+      `.env.example` (`test_config.py`'s three env-example gates).
+- [x] Dependencies and the `_STACKS` rows **deferred to M1**, not skipped: `pyproject.toml` states
+      deps are added "only when a module actually imports them", and
+      `test_third_party_layering.py` pins rows in *both* directions
+      (`test_no_declared_module_stack_is_stale`), so an allow-list row cannot precede its import.
+- [x] `make lint type test` green; default engine `maf`; zero behavioural change.
+
+### M1 — state schema and graph skeleton
+- [ ] `agent/state.py` — typed state + reducers. Everything MAF kept in opaque `session.state`
+      becomes a named field: `messages` (`add_messages`), `todos`, `plan_hash`, `approvals`,
+      `evidence` (`operator.add`), `started_jobs`, `active_agent`, `degraded_capabilities`.
+- [ ] `agent/graph.py` — the `StateGraph` (`plan`/`model`/`tools`/`verify`/`answer`), compiled with
+      a checkpointer. Replaces `create_harness_agent`'s opaque loop with visible control flow.
+- [ ] Deps into `pyproject.toml` + `_STACKS` + the `(package, "langgraph")` allow-list rows, all
+      with the first importing module.
+- [ ] **Delete** `agent/harness_types.py` and `tests/test_harness_types.py` — they exist only to
+      shadow MAF private aliases.
+
+### M2 — LLM provider seam
+- [ ] `agent/llm_provider.py`: `ChatOpenAI(base_url=…)` / `ChatAnthropic` branch. Keep `-> Any`,
+      `model_routes`, the private-CA TLS bundle, the eager `ANTHROPIC_API_KEY` preflight.
+
+### M3 — tool middleware chain
+- [ ] Port six `@function_middleware` to `@wrap_tool_call`. Short-circuits (authz denial, dry-run
+      refusal, repeat refusal) return a `ToolMessage` instead of calling `handler`.
+- [ ] `agent/authz.py`, `audit_store.py`, `audit_anchor.py` are framework-free — do not touch.
+
+### M4 — skills · **go/no-go**
+- [ ] `deepagents.middleware.skills.SkillsMiddleware` over `skills/` + each connector bundle's own.
+- [ ] The three narrowings (`Enabled`/`ToolScoped`/`RoleScoped`) as a **custom backend** wrapping
+      `FilesystemBackend` — the middleware reaches skills only through backend APIs.
+- [ ] `skill_tool_names()` keeps reading names off the middleware's own constants (D-117).
+- [ ] **Stop here and reassess if narrowing cannot be expressed at the backend.** Role-gated skill
+      visibility is a security property, and this is the migration's load-bearing unknown.
+
+### M5 — one human gate
+- [ ] Collapse the harness plan gate, `interaction_tools.py` and the KG PR-gate onto `interrupt()`
+      / `Command(resume=…)`.
+- [ ] The `mode_set` retraction disappears: never expose the tool. Keep the plan-hash binding.
+- [ ] `TodoListMiddleware` replaces `TodoSessionStore`; promote `"awaiting-job:<id>"` to a real
+      state field.
+- [ ] Loop cap becomes an explicit counter (also fixes the `max_loop_iterations == 1` blind spot).
+
+### M6 — durable state on the checkpointer
+- [ ] `AsyncPostgresSaver`; `session_messages` demoted to a read-model projection.
+- [ ] Delete the rollback watermark, the mid-turn-resume wait loop, and `message_pairing.py`'s
+      orphan repair — **after** a kill-mid-turn test proves the checkpointer never half-writes.
+- [ ] Keep `SessionOwnerStore` / `SessionTurnClaims` (chemclaw policy, not framework concern).
+- [ ] `agent/message_migration.py` + a per-row shape version so both forms read during rollout.
+      *The one irreversible step.*
+- [ ] Check whether `agent_durable_compaction_enabled` collapses into the normal path; if so delete
+      it, its `.env.example` rows and D-151's `DEFERRED.md` row in the same commit.
+
+### M7 — connectors and per-turn tools
+- [ ] Re-base the degrading MCP connectors on `langchain-mcp-adapters`.
+- [ ] Compile the graph **per turn** — LangGraph binds tools at construction, and a connector
+      connection must belong to exactly one turn. Measure against MAF's ~90 ms baseline.
+- [ ] `durable/template_activities.py`: replay through the ported `wrap_tool_call` chain.
+- [ ] Delete `agent/agent_pool.py` + test + the D-123 `DEFERRED.md` row — gated on M12's probe.
+
+### M8 — streaming and the event contract
+- [ ] `graph.astream(stream_mode=["messages","updates","custom"], subgraphs=True)`.
+- [ ] **Delete `core/turn_signals.py`** — the contextvar side-channel exists only because MAF had no
+      custom stream.
+- [ ] `api/events.py` gains agent attribution + a `handoff` event. Sequence the cross-repo change
+      `Chemclaw3_mock` → `Chemclaw3` → `Chemclaw3_ui`.
+
+### M9 — agent teams
+- [ ] Five specialists (`evidence`, `computation`, `design`, `safety`, `reporting`) as profiles +
+      subgraphs; supervisor routing via `Command(goto=…, graph=Command.PARENT)`.
+- [ ] The four invariants of the subagent ADR, each as a test — attenuation-only, `require_actor`
+      inside subagents (**verify identity propagation first**; deepagents #569), audit records the
+      specialist beside the human, skills do not inherit.
+
+### M10 — `Send` fan-out
+- [ ] `gather_evidence` becomes real map-reduce, one branch per source into an `operator.add` field.
+- [ ] Re-measure the retrieval balance from `D-2026-08-01-a-cap-that-starves-a-source` per branch.
+
+### M11 — long-term memory on `BaseStore`
+- [ ] Map `chemclaw/memory/` onto `BaseStore` over the deployed pgvector. `Store` is memory, not
+      knowledge — the PR-gate still stands between an agent and layer 4.
+
+### M12 — live re-validation
+- [ ] Concurrency probe (8 turns × 3 configs) — gates the `agent_pool` deletion.
+- [ ] Durable-launcher probe — `CapabilityDegradedEvent` still precedes the first token.
+- [ ] Plan → approve → execute, live. *This is the one that historically silently did not work.*
+- [ ] Team routing accuracy + per-specialist token cost vs. the single-agent baseline.
+- [ ] `make eval-strict` scored against the MAF baseline.
+
+### M13 — remove MAF and update the documents
+- [ ] Drop `agent-framework-*`, the `maf` stack rows, and the `agent_engine` switch with its branch.
+- [ ] ~135 mentions across maintained docs; `docs/archive/` is not maintained — leave it. ADRs are
+      append-only.
+- [ ] Verify whether session affinity is still required at all.
 
 ## Review
 
-**Why a ref and not the payload.** `data: dict` on the event for a whitelist of small results is
-simpler and re-opens exactly the question the 200-character truncation closed: the stream fans out
-to every consumer, and a size whitelist is a promise a connector author can break without noticing.
-A ref costs one round trip and only for what somebody chose to look at.
+_(filled in as phases land)_
 
-**Why the route hangs off a session.** A ref is the SHA-256 of a result's own text — unguessable,
-not secret. Under `/sessions/{id}` it resolves through `resolve_session`, the ownership gate that
-already exists, and the store's read joins the link row for the same session on top of that. The
-bare `/tool-results/{ref}` alternative needed an auth story invented for it, and the story it would
-have got is "the ref is a bearer token".
+**M0.** Two ADRs, the config switch, this file. One thing changed from the approved plan: the
+dependency and `_STACKS` work moved to M1. Both `pyproject.toml`'s own comment ("only when a module
+actually imports them") and `test_no_declared_module_stack_is_stale` forbid declaring a stack before
+the import exists — the layering policy is pinned in both directions precisely so a row cannot sit
+there re-blessing an import nobody has written yet. Landing them with `agent/graph.py` is the
+sequencing those two rules already required.
 
-**Why `feed` became async.** The alternative kept it synchronous by buffering `(ref, tool, text)`
-for the runner to flush afterwards. That preserves forty test call sites and introduces a two-call
-protocol whose second half can be forgotten — and forgetting it ships refs pointing at nothing. The
-coroutine cannot be got wrong. Its cost is one shared test helper and one honest sentence in the
-module docstring, since "pure function of the provider objects" is no longer the whole truth.
-
-**The retention default is uniform, and that was a correction.** It shipped as 30 days first, on the
-argument that this table holds no record and therefore no policy to defer. Measured against the
-configuration that actually ships, the argument buys nothing: `retention_enabled` is off by default,
-so 30 and 0 delete equally much, and they differ only for a deployment that turned retention on
-without stating this window — which is the case `test_retention_is_off_until_a_policy_is_stated`
-exists to refuse. One rule for every window beats a default that changes nothing, and the cost
-(the highest-volume table in the set is unbounded until an operator says otherwise) is written in
-`infra/sql/README.md`'s Disposal column rather than implied away. Recorded in `tasks/lessons.md`.
-
-**The canonical echo is deliberately partial.** It landed on the two safety results because they are
-uncached, already parse the molecule, and carried *no* structure at all — a clean screen serialized
-to `{"flags": [], "verdict": …}`, naming nothing it had looked at, which for a result that must
-never read as a clearance is the wrong thing to be vague about. It did **not** land on the
-calculators: `PkaResult.smiles` is already canonical, and making `SolubilityResult.smiles` canonical
-would change the shape of rows already in `calculation_results` — a `CALCULATION_EPOCH` bump, i.e.
-cache-wide invalidation, for a cosmetic echo. Stated in the ADR rather than left to be rediscovered.
-
-**Not done, deliberately.** Nothing writes a `result_ref` into the persisted transcript
-(`TranscriptMessage.tool_calls` still carries a 400-char result), so a reloaded conversation cannot
-resolve the results of past turns — only the live stream can. That is a second, separable change
-against `api/schemas.py` and it is not in this one.
-
-## Verification
-
-`make ci`, on the branch, in the offline sandbox:
-
-| step | result |
-| --- | --- |
-| `lint` (ruff check + format) | pass |
-| `type` (`mypy --strict` over `src`, `examples`, `tests`) | pass, 613 files |
-| `cov` | 3903 passed, 175 skipped, **1 failed** — see below |
-| kg · eln · skill · connector · datasource · template · prose · safety validate | pass |
-| `eval-strict` | pass — 4 gated metrics fail *by design*, 0 regressions |
-| `helm-validate` | not run: `helm` is not installed here (`docs/guides/runbook.md`) |
-| `deps-audit` | no known vulnerabilities |
-
-**The one failure is pre-existing and unrelated.**
-`test_properties_core.py::test_a_note_survives_the_write_read_round_trip` is a Hypothesis property
-test that drew a lone surrogate (`'\ud800'`) as a note body; `render_note` → `Path.write_text` then
-raises `UnicodeEncodeError`. Checked out `main` and ran the same test: it fails identically, on the
-example Hypothesis had already saved. Two earlier full runs (one on this branch, one on `main`)
-passed it, because the draw is random — which is what it looks like when a property test finally
-finds its case. Left alone: it is neither this change's defect nor this change's area.
-
-**The coverage floor fails at 82.82%, and `main` measures 82.82% too.** Ran `pytest --cov` on `main`
-in the same sandbox before concluding anything: 19,698 statements / 3,020 missing / 82.82%. The
-branch: 19,787 / 3,033 / 82.82%. So this change is coverage-neutral to two decimal places, and the
-1.2-point gap to the 84.0% floor is the sandbox rather than the diff — 139 Postgres tests and 23
-Temporal tests skip here for want of a server, including the three that cover this store's SQL.
-
-**The store was measured against a real database anyway**, since a skip is not evidence. Ran a
-PostgreSQL 16 cluster locally, applied `042_tool_result_store.sql`, and drove `store_tool_result` /
-`load_tool_result` directly: byte-exact round trip; the same text stored three times from two
-sessions producing one blob row and two link rows with the link's `correlation_id` refreshed;
-a ref from another session reading as a miss; a multi-byte payload round-tripping with
-`byte_size` in bytes; the retention statement `retention.py` builds deleting the blob and the link
-cascading away with it; and a write against an unreachable DSN answering `""` with one `degraded`
-line rather than raising. The suite's own Postgres tests still could not be run — the shipped
-`pgvector` in this image is 0.6.0 and migration 012 needs `bit_jaccard_ops` (pgvector ≥ 0.7) — so
-they remain unproven *here* and will run in CI.
+The gate run also surfaced an unrelated pre-existing bug (confirmed against the clean tree, not
+introduced here): Hypothesis drew a note body of `"\ud800"` and `Path.write_text` raised
+`UnicodeEncodeError`. An unpaired surrogate is reachable — an agent-authored note arrives as JSON,
+which can carry one — and it breaks the PR-gate commit, the proposal store and the index refresh
+alike, so `Note` now refuses unencodable text at the schema boundary. Fixed in its own commit
+(`ca37353`) to keep this one clean. `make lint type test` green: 3913 passed, 0 failed.
