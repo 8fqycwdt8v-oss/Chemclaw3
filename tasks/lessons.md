@@ -1640,3 +1640,32 @@ Rules for myself:
 - When the honest answer is "uniform rule, and the cost is real", write the cost where an operator
   will meet it — here `infra/sql/README.md`'s Disposal column says this table is unbounded until
   someone sets a window — rather than in the config comment nobody reads twice.
+
+## Write over a file only after checking whether it already exists (2026-08-10)
+
+Adding the LangGraph engine's tests I called `Write` on `tests/test_graph.py` — a path that already
+held 23 tests for the NetworkX knowledge-graph indexer. They were gone, and **the suite still
+passed**: a deleted test file does not fail, it simply stops asserting. `make lint type test` was
+green across the destruction, twice.
+
+What caught it was arithmetic, not the gate. The run before the change reported 3913 passed and the
+run after reported 3897, while the change *added* six tests. A suite that shrinks when you add to it
+is the whole signal, and it is only visible if the count is read rather than the word "passed".
+
+The near-miss underneath it is worth as much as the mistake. `chemclaw.kg.graph` already exports
+`build_graph`, so `agent/graph.py::build_graph` would have put two unrelated builders one import
+apart — in a repository whose `ARCHITECTURE.md` exists largely to explain the name pairs that look
+like duplicates and are not. The filename collision was the visible symptom of a naming collision I
+had not thought about. Renamed to `agent/langgraph_agent.py::build_langgraph_agent`.
+
+Rules for myself:
+
+- **Before `Write`, check the path is new.** `Write` says "updated" rather than "created" when it
+  overwrites; that word is the warning, and I read past it. For anything that might exist, `ls` or
+  `git ls-files` first — one command against silently destroying reviewed work.
+- **Read the test *count*, not the exit status, when a change adds or moves test files.** Compare
+  `pytest --collect-only -q` across the change; `comm -23 before after` names anything lost. Green
+  proves the tests that ran passed, never that the ones that should have run did.
+- **A filename that is already taken is telling you the name is ambiguous.** In this tree "the
+  graph" means the knowledge graph. Check what a name already means here before claiming it, rather
+  than after the collision.

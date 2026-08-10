@@ -287,7 +287,7 @@ def build_agent(
     # The two harness dimensions resolve through `harness_mode`, which is where the plan gate reads
     # them too — one fallback rule, so "is the harness on" cannot be answered differently by the
     # builder and by the gate that governs what it may do.
-    instructions = prof.instructions if prof.instructions is not None else _INSTRUCTIONS
+    instructions = instructions_for(prof)
     client = chat_client if chat_client is not None else build_chat_client()
     # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
     # *about* tools, so which tools this profile advertises decides which judgment is worth
@@ -586,6 +586,19 @@ def history_provider() -> HistoryProvider:
 
         return PostgresHistoryProvider()
     return InMemoryHistoryProvider()
+
+
+def instructions_for(profile: AgentProfile) -> str:
+    """This profile's system prompt: its own override, or the module default.
+
+    One line, extracted rather than repeated, because repeating it has already cost once. The
+    harness builder re-derived the same fallback from the same rule instead of taking the resolved
+    value, so the prompt was resolved twice and the two could disagree — `_build_harness_agent`'s
+    signature comment records the fix. `build_graph` is the third caller, and a third copy of a
+    rule that has already drifted once is how the LangGraph engine would come to answer "what is
+    the agent told" differently from the MAF one.
+    """
+    return profile.instructions if profile.instructions is not None else _INSTRUCTIONS
 
 
 def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:

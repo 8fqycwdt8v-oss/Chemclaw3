@@ -93,6 +93,22 @@ _SRC_ROOT = _REPO_ROOT / "src" / "chemclaw"
 _STACKS: dict[str, str] = {
     "temporalio": "temporal",
     "agent_framework": "maf",
+    # The LangGraph rebuild of layer 1 (D-2026-08-10). Mapped the moment it entered the lockfile,
+    # as this module's docstring asks, and separately from `maf` on purpose: the two engines
+    # coexist until M13, so "which packages may import the conversation framework" has to be
+    # answerable per engine or the rows stop describing anything while both are live.
+    #
+    # `langchain_openai`/`langchain_anthropic` are deliberately **not** here: they are provider
+    # SDK wrappers, so they belong to the `llm` stack beside `openai` and `anthropic`, and giving
+    # them the framework's label would let any package holding the framework row build a model
+    # client. That is the distinction `agent/llm_provider.py` exists to keep.
+    "langchain": "langgraph",
+    "langchain_core": "langgraph",
+    "langgraph": "langgraph",
+    "langchain_mcp_adapters": "langgraph",
+    "deepagents": "langgraph",
+    "langchain_openai": "llm",
+    "langchain_anthropic": "llm",
     "fastapi": "http",
     "starlette": "http",
     "sse_starlette": "http",
@@ -147,6 +163,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.core", "rdkit"): "core/chem.py canonicalises SMILES for every layer",
     # agent: layer 1. "MAF — conversation orchestration" is the definition of the layer.
     ("chemclaw.agent", "maf"): "layer 1 IS the Microsoft Agent Framework",
+    ("chemclaw.agent", "langgraph"): (
+        "layer 1 is being rebuilt on LangGraph (D-2026-08-10); `agent/langgraph_agent.py` is the "
+        "engine `settings.agent_engine='langgraph'` selects, and this row retires with the `maf` "
+        "one when the MAF branch is deleted"
+    ),
     ("chemclaw.agent", "postgres"): "durable sessions, preferences and plan approvals (F3)",
     ("chemclaw.agent", "httpx"): "the workload-identity and OBO token exchanges are HTTP",
     # api: layer 1's front door (F2).
@@ -214,7 +235,11 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
     ("chemclaw.core", "llm"): (
         "core/embeddings builds the OpenAI-compatible client inside `_openai_client`, same reason"
     ),
-    ("chemclaw.agent", "llm"): "agent/llm_provider picks the OpenAI or Anthropic SDK at runtime",
+    ("chemclaw.agent", "llm"): (
+        "agent/llm_provider picks the OpenAI or Anthropic SDK at runtime — both engines' halves, "
+        "the raw SDKs for MAF and the `langchain_*` wrappers for LangGraph, which is why they "
+        "carry the `llm` label rather than the framework's"
+    ),
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
     ("chemclaw.evals", "llm"): "the judge client is built per run",
     ("chemclaw.ingest", "warehouse"): (

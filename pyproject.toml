@@ -13,12 +13,19 @@ dependencies = [
     # unconditionally (bofire.data_models.features.feature -> mordred); without it a
     # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
     "bofire[optimization,cheminfo]>=0.4.1",
+    "deepagents>=0.6.12",
     "drfp>=0.3.7",
     "fastapi>=0.139.2",
     # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp/agent-framework).
     "httpx>=0.28",
+    "langchain>=1.0",
+    "langchain-anthropic>=1.5.1",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-openai>=1.4.2",
+    "langgraph>=1.2.10",
+    "langgraph-checkpoint-postgres>=3.1.2",
     "mcp>=1.2.0",
     "networkx>=3.6.1",
     "numpy>=2.0",

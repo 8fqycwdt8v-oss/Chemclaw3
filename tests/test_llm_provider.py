@@ -138,3 +138,66 @@ def test_default_task_is_unchanged_without_routes(monkeypatch: pytest.MonkeyPatc
     captured = _fake_openai_client_capture(monkeypatch)
     provider.build_chat_client()  # default task, empty model_routes
     assert captured["model"] == "internal-model"
+
+
+# --- the LangGraph half of the seam (D-2026-08-10, phase M1) ------------------------------------
+#
+# These construct the *real* `ChatOpenAI`/`ChatAnthropic` rather than faking them through
+# `sys.modules` as the MAF tests above must. That is not a style difference: the MAF clients are
+# faked because asserting on them means asserting on constructor kwargs, while a LangChain chat
+# model exposes the same values as attributes — so the stronger assertion is available, and it
+# doubles as a live check of this module's "construction only, no network call" claim.
+
+
+def test_openai_compatible_model_carries_endpoint_and_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`build_chat_model` points ChatOpenAI at the internal endpoint and honours the task route."""
+    _use_settings(
+        monkeypatch,
+        llm_provider="openai_compatible",
+        llm_base_url="https://llm.internal/v1",
+        llm_model="internal-large",
+        llm_api_key="generic-key",
+        llm_timeout_seconds=12.0,
+        llm_max_retries=5,
+        model_routes={"verifier": "internal-small"},
+    )
+
+    default = provider.build_chat_model()
+    assert str(default.openai_api_base) == "https://llm.internal/v1"
+    assert default.model_name == "internal-large"
+    assert default.request_timeout == 12.0
+    assert default.max_retries == 5
+
+    # The route is the same dial both halves read, so a deployment cannot end up with the verifier
+    # on the cheap model under one engine and the expensive one under the other.
+    assert provider.build_chat_model("verifier").model_name == "internal-small"
+
+
+def test_keyless_endpoint_gets_placeholder_for_the_model_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A keyless internal endpoint still constructs — the placeholder applies to both halves."""
+    _use_settings(
+        monkeypatch,
+        llm_provider="openai_compatible",
+        llm_base_url="https://llm.internal/v1",
+        llm_model="internal-model",
+        llm_api_key="",
+    )
+    assert provider.build_chat_model().openai_api_key.get_secret_value()
+
+
+def test_anthropic_model_path_preflights_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The graph engine gets the same eager credential failure, for a sharper reason.
+
+    Under MAF a missing key surfaced before the turn began. Under the graph engine the model is
+    built inside `build_graph`, so without this preflight the failure would be an opaque 401 in the
+    middle of a stream that has already emitted events — a turn that looks like it started working
+    and then died. Same message, same `_require_anthropic_key`, shared by both halves.
+    """
+    _use_settings(monkeypatch, llm_provider="anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        provider.build_chat_model()

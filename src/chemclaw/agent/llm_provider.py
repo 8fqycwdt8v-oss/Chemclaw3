@@ -1,5 +1,12 @@
 """The one place a chat-client class is imported — the LLM provider seam (plan Phase F0).
 
+Two builders, one seam: `build_chat_client` for the MAF engine and `build_chat_model` for the
+LangGraph one. They are separate functions because they return different protocols, and identical
+in everything that is genuinely about the *provider* — endpoint, credential, per-task model route,
+and transport. That sharing is the point: F0's promise is that pointing Chemclaw at the internal
+endpoint is one config change, and a seam that forked per engine would drift on the one thing it
+exists to keep single.
+
 `build_chat_client` selects the agent's MAF chat client from config (`settings.llm_provider`), so
 pointing Chemclaw at the internal OpenAI-compatible ("OpenLLM-like") endpoint versus the Anthropic
 dev path is a single config change, never a code edit at a call site (KISS/DRY, mirroring the ELN
@@ -48,6 +55,94 @@ def build_chat_client(task: str = "agent") -> Any:
     return _anthropic_client(model)
 
 
+def build_chat_model(task: str = "agent") -> Any:
+    """Build the configured LangChain chat model — the LangGraph engine's half of this seam.
+
+    The twin of `build_chat_client`, and deliberately a second function rather than a branch inside
+    it. Both return `Any` so the types cannot tell them apart, but they return objects of different
+    protocols (a MAF chat client versus a LangChain `BaseChatModel`), and the caller always knows
+    which engine it is: `chemclaw_agent.build_agent` wants the first and
+    `langgraph_agent.build_langgraph_agent` the second. One name covering two protocols would make
+    every call site's intent unreadable at exactly the point where getting it wrong is an obscure
+    attribute error inside a model call.
+
+    What is shared is everything that is actually about *the provider*: which endpoint, which
+    credential, the per-task model route, and the transport (private-CA TLS, timeout, retry
+    budget). That is the property F0 asked for — pointing Chemclaw at the internal endpoint is a
+    config change — and it must not fork per engine, or the two would drift on the one thing this
+    module exists to keep single.
+
+    Args:
+        task: The routing key for per-task model selection (F10-E), exactly as
+            `build_chat_client` uses it.
+
+    Returns:
+        A LangChain `BaseChatModel` ready for `create_agent(model=...)`. Construction only, no
+        network call.
+
+    Raises:
+        RuntimeError: When the selected provider's credential is absent, naming what to set.
+    """
+    model = settings.model_routes.get(task)
+    if settings.llm_provider == "openai_compatible":
+        return _openai_compatible_model(model)
+    return _anthropic_model(model)
+
+
+def _openai_compatible_model(model: str | None = None) -> Any:
+    """`ChatOpenAI` against the internal endpoint — same base URL, credential and transport.
+
+    `http_async_client` is where the private-CA bundle goes: `ChatOpenAI` builds its own
+    `AsyncOpenAI` internally, so the bundle has to be handed in as a client rather than set on one
+    we construct. Passing `None` (no configured bundle) leaves the SDK's own default in place,
+    which is right for a publicly-trusted endpoint.
+    """
+    from langchain_openai import ChatOpenAI
+    from pydantic import SecretStr
+
+    return ChatOpenAI(
+        model=model or settings.llm_model,
+        base_url=settings.llm_base_url,
+        # `ChatOpenAI` takes the credential as a `SecretStr`, which is a real improvement over the
+        # raw string the MAF half passes: it keeps the key out of a repr and out of any log line
+        # that prints the model object.
+        api_key=SecretStr(settings.llm_api_key or _KEYLESS_PLACEHOLDER),
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        http_async_client=_tls_http_client(),
+    )
+
+
+def _anthropic_model(model: str | None = None) -> Any:
+    """`ChatAnthropic` on the dev path, with the same eager credential preflight.
+
+    The preflight is kept for the reason `_anthropic_client` gives: a missing key should fail here,
+    naming what to set, rather than as an opaque 401 on the first model call — which under the
+    graph engine would surface mid-stream, after the turn has already emitted events.
+    """
+    _require_anthropic_key()
+    from langchain_anthropic import ChatAnthropic
+
+    return ChatAnthropic(
+        model_name=model or settings.agent_model,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        stop=None,
+    )
+
+
+def _require_anthropic_key() -> None:
+    """Fail with the one message both Anthropic paths owe a misconfigured deployment."""
+    import os
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set — the Anthropic chat-client path needs it. "
+            "Export it, set CHEMCLAW_LLM_PROVIDER=openai_compatible for the internal endpoint, "
+            "or pass an explicit chat_client to build_agent (as the tests do)."
+        )
+
+
 def _openai_compatible_client(model: str | None = None) -> Any:
     """Point MAF's OpenAI client at the internal endpoint (base_url + generic credential).
 
@@ -90,14 +185,7 @@ def _anthropic_client(model: str | None = None) -> Any:
     two providers' model settings independent; `model` overrides it for per-task routing (F10-E),
     None keeps `agent_model`.
     """
-    import os
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set — the Anthropic chat-client path needs it. "
-            "Export it, set CHEMCLAW_LLM_PROVIDER=openai_compatible for the internal endpoint, "
-            "or pass an explicit chat_client to build_agent (as the tests do)."
-        )
+    _require_anthropic_key()
     from agent_framework.anthropic import AnthropicClient
     from anthropic import AsyncAnthropic
 

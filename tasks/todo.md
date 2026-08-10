@@ -30,20 +30,27 @@ never what a deployment gets.
       (`test_no_declared_module_stack_is_stale`), so an allow-list row cannot precede its import.
 - [x] `make lint type test` green; default engine `maf`; zero behavioural change.
 
-### M1 — state schema and graph skeleton
-- [ ] `agent/state.py` — typed state + reducers. Everything MAF kept in opaque `session.state`
-      becomes a named field: `messages` (`add_messages`), `todos`, `plan_hash`, `approvals`,
-      `evidence` (`operator.add`), `started_jobs`, `active_agent`, `degraded_capabilities`.
-- [ ] `agent/graph.py` — the `StateGraph` (`plan`/`model`/`tools`/`verify`/`answer`), compiled with
-      a checkpointer. Replaces `create_harness_agent`'s opaque loop with visible control flow.
-- [ ] Deps into `pyproject.toml` + `_STACKS` + the `(package, "langgraph")` allow-list rows, all
-      with the first importing module.
-- [ ] **Delete** `agent/harness_types.py` and `tests/test_harness_types.py` — they exist only to
-      shadow MAF private aliases.
-
-### M2 — LLM provider seam
-- [ ] `agent/llm_provider.py`: `ChatOpenAI(base_url=…)` / `ChatAnthropic` branch. Keep `-> Any`,
-      `model_routes`, the private-CA TLS bundle, the eager `ANTHROPIC_API_KEY` preflight.
+### M1 — the engine skeleton and the LLM seam (M2 merged in)
+- [x] `agent/langgraph_agent.py` — `build_langgraph_agent()` over `create_agent`, same
+      instructions/tools/profile narrowing as the MAF agent. **Not** `agent/graph.py`: in this
+      codebase *the graph* is the knowledge graph (`kg/graph.py`, whose own `build_graph` builds
+      the NetworkX index), and two unrelated `build_graph`s one import apart is exactly the name
+      collision `ARCHITECTURE.md` exists to prevent.
+- [x] `instructions_for(profile)` extracted in `chemclaw_agent.py` — third caller of a fallback
+      rule the file already records as having drifted once when duplicated.
+- [x] `llm_provider.build_chat_model()` beside `build_chat_client()` (M2, merged: a graph cannot
+      be built without a model). Shared endpoint/credential/route/transport, shared
+      `_require_anthropic_key`.
+- [x] Deps into `pyproject.toml` + `_STACKS` + the `("chemclaw.agent", "langgraph")` row.
+      `langchain_openai`/`langchain_anthropic` map to the **`llm`** stack, not the framework's —
+      they are provider SDK wrappers, and labelling them otherwise would let any package holding
+      the framework row build a model client.
+- [x] `tests/test_langgraph_agent.py` — the loop runs a tool call to a final answer, the surface
+      equals the registry, a profile strictly narrows.
+- [ ] `agent/state.py` — **deferred to M5**, the first phase with a field to put in it
+      (`plan_hash`, `approvals`). A state schema whose every field is unread is a stub.
+- [ ] `agent/harness_types.py` deletion — **moved to M13**. `loop_cap.py` and `plan_gate.py` still
+      import it, and those are the MAF path, which stays live until the branch is deleted.
 
 ### M3 — tool middleware chain
 - [ ] Port six `@function_middleware` to `@wrap_tool_call`. Short-circuits (authz denial, dry-run
@@ -135,3 +142,31 @@ introduced here): Hypothesis drew a note body of `"\ud800"` and `Path.write_text
 which can carry one — and it breaks the PR-gate commit, the proposal store and the index refresh
 alike, so `Note` now refuses unencodable text at the schema boundary. Fixed in its own commit
 (`ca37353`) to keep this one clean. `make lint type test` green: 3913 passed, 0 failed.
+
+**M1.** The engine builds and runs; `make lint type test` green at 3921 passed, 0 failed.
+Four things went differently from the plan, all of them discovered by doing it:
+
+- **M2 merged in.** A graph cannot be compiled without a model, so the LLM seam landed here.
+- **`state.py` deferred to M5, `harness_types.py` deletion moved to M13.** Both for the same
+  reason the M0 deps moved: a state schema with no field anyone reads is a stub, and
+  `harness_types.py` is still imported by `loop_cap.py`/`plan_gate.py` on the live MAF path.
+- **Named `langgraph_agent.py`, not `graph.py`.** See above — `build_graph` was already taken by
+  the knowledge graph.
+- **A real mistake worth recording:** `tests/test_graph.py` already existed (23 tests for the
+  NetworkX indexer) and was overwritten before the collision was noticed. Caught by comparing
+  collected-test counts across the change rather than by the suite, which passed either way —
+  a deleted test file cannot fail. Restored from `HEAD` and verified byte-identical; the new
+  tests live in `tests/test_langgraph_agent.py`. The lesson is in `tasks/lessons.md`.
+
+Measured while building, and both change later phases:
+
+- `deepagents.SkillsMiddleware` registers **no** skill tools. It puts skill *paths* in the system
+  prompt and expects the model to `read_file` them, so progressive disclosure depends on a
+  filesystem tool over the same backend. That makes M4's custom backend load-bearing twice: it
+  narrows what is *listed* and it bounds what can be *read*. An unscoped `FilesystemBackend` would
+  hand a GxP system a general file-read primitive — the opposite of what D-038 bought by disabling
+  MAF's file batteries. `skill_tool_names()` has no direct equivalent and must be re-derived.
+- `SkillsMiddleware.before_agent` caches `skills_metadata` in state and skips the load when it is
+  already present "from a prior turn or checkpointed session". With M6's checkpointer that means
+  role-scoped narrowing is computed once per session — a role change mid-session would read stale.
+  Needs an explicit answer in M4, not a discovery in M6.

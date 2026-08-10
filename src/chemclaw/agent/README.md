@@ -1,7 +1,16 @@
-# `chemclaw.agent` — MAF conversation layer
+# `chemclaw.agent` — the conversation layer
 
-**Responsibility:** conversation orchestration and short reasoning steps, built on
-the Microsoft Agent Framework. Agents advertise tools, load Skills on demand, and
+**Two engines, one layer, until M13.** `settings.agent_engine` selects between
+`chemclaw_agent.build_agent` (Microsoft Agent Framework, the default and the only
+complete one) and `langgraph_agent.build_langgraph_agent` (the LangGraph rebuild,
+landing phase by phase — see `tasks/todo.md` and
+`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`). Both
+advertise the same tools from the same registry and are meant to emit the same
+`api/events.py` stream; that event contract is the conformance boundary between
+them. Everything below describes the layer, not the framework, and holds for both.
+
+**Responsibility:** conversation orchestration and short reasoning steps. Agents
+advertise tools, load Skills on demand, and
 kick off durable work — but they hold **no durability themselves** (that is
 Temporal's job) and **no domain judgment** (that lives in `skills/`).
 
