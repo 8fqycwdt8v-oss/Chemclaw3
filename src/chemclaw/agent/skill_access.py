@@ -37,7 +37,7 @@ path (tests, the classic non-service caller) there are simply no roles, so only 
 """
 
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 from agent_framework import Skill, SkillsSource, SkillsSourceContext
 
@@ -51,6 +51,13 @@ class _NarrowingSkillsSource(SkillsSource):
     only *whether it is configured to narrow at all* (`_narrows`) and *which skills survive*
     (`_permits`), so a new narrowing is a predicate rather than another copy of this loop.
 
+    **`permits` is the whole decision, and it is deliberately separable from this class.** The
+    LangGraph engine reaches skills through a backend rather than a `SkillsSource`
+    (`chemclaw.agent.skill_backend`), so it needs the same three answers with none of this
+    plumbing. Both engines therefore call `permits`; only `get_skills` is MAF-shaped. A second
+    implementation of "may this caller see this skill" would be the one duplication a role gate
+    cannot survive — a skill hidden under one engine and offered under the other is not a gate.
+
     Args:
         inner: The wrapped source (e.g. a `FileSkillsSource`, or another narrowing source).
     """
@@ -62,9 +69,16 @@ class _NarrowingSkillsSource(SkillsSource):
     async def get_skills(self, context: SkillsSourceContext) -> list[Skill]:
         """The inner source's skills, minus the ones this narrowing rejects."""
         skills = await self._inner.get_skills(context)
-        if not self._narrows():
-            return skills
-        return [skill for skill in skills if self._permits(skill.frontmatter.name)]
+        return [skill for skill in skills if self.permits(skill.frontmatter.name)]
+
+    def permits(self, name: str) -> bool:
+        """Whether the skill named `name` survives this narrowing (framework-free).
+
+        The short-circuit lives here rather than in the caller because it is what keeps an
+        unconfigured decorator from paying for itself: an empty enable-list, an empty gate map and
+        an empty declaration map each mean "narrow nothing", which is the default this system ships.
+        """
+        return not self._narrows() or self._permits(name)
 
     @abstractmethod
     def _narrows(self) -> bool:
@@ -188,3 +202,63 @@ class RoleScopedSkillsSource(_NarrowingSkillsSource):
         """
         required = self._gates.get(name)
         return required is None or bool(get_current_roles() & required)
+
+
+def skill_permits(
+    *,
+    enabled: Iterable[str] | None,
+    declared: Mapping[str, frozenset[str]],
+    available: Iterable[str],
+    gates: Mapping[str, list[str]] | None,
+) -> Callable[[str], bool]:
+    """The three narrowings as one predicate over a skill name — the engine-neutral form.
+
+    `chemclaw_agent.skills_source` composes the same three as `SkillsSource` decorators, because
+    MAF reaches skills by asking a source for them. The LangGraph engine reaches them through a
+    backend (`chemclaw.agent.skill_backend`), which has no source to decorate and needs the answer
+    as a function. Both call the same three `permits` methods on the same three objects, so the
+    only thing that differs is which shape the caller wanted it in.
+
+    That sharing is not tidiness. Role scoping is the one narrowing with a security posture, and a
+    second implementation of "may this caller see this skill" is how a skill ends up hidden under
+    one engine and offered under the other — which is not a gate, it is a coin flip with a config
+    flag for a coin.
+
+    The order matches the request as it reads — what exists at all, then what this agent can do,
+    then who may see it — though all three only ever remove, so composing them in any order gives
+    the same answer.
+
+    Args:
+        enabled: The deployment's enable-list; empty means every discovered skill.
+        declared: `{skill name: declared tool names}` from `skill_manifest.declared_tools`.
+        available: The tool names this agent advertises, both halves of the surface.
+        gates: `{skill name: allowed roles}`; a skill absent from the map is ungated.
+
+    Returns:
+        A predicate answering "is this skill visible to the turn in flight". Evaluated per call,
+        never cached, because the role gate reads the turn's ambient identity and one agent serves
+        every concurrent turn.
+    """
+    narrowings = (
+        EnabledSkillsSource(_NOTHING, enabled),
+        ToolScopedSkillsSource(_NOTHING, declared, available),
+        RoleScopedSkillsSource(_NOTHING, gates),
+    )
+    return lambda name: all(narrowing.permits(name) for narrowing in narrowings)
+
+
+class _EmptySkillsSource(SkillsSource):
+    """A source with no skills, to satisfy the decorators when only their predicate is wanted.
+
+    The three narrowings are decorators because that is what MAF's loading model needs; their
+    *decision* takes no inner source at all. Rather than split each class in two to express that,
+    the predicate-only caller passes this — one object, never consulted, and the alternative was
+    six classes where three plus a sentinel do.
+    """
+
+    async def get_skills(self, context: SkillsSourceContext) -> list[Skill]:
+        """No skills — this source exists to be decorated, never to be read."""
+        return []
+
+
+_NOTHING = _EmptySkillsSource()

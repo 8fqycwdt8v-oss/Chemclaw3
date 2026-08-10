@@ -19,19 +19,23 @@ The claims under test:
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from agent_framework import SkillsSourceContext
+from agent_framework._agents import SupportsAgentRun
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 from chemclaw.agent.audit import AuditEvent, NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
-from chemclaw.agent.chemclaw_agent import _capability_tools
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.chemclaw_agent import _capability_tools, skills_source
+from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
+from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.skill_backend import REFUSED
+from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
@@ -333,3 +337,82 @@ def test_a_failing_tool_is_announced_and_recorded(monkeypatch: pytest.MonkeyPatc
     assert content == "Error: no note with id 'nope'"
     assert [type(s).__name__ for s in signals] == ["ToolFailureSignal"]
     assert [e.outcome for e in sink.events] == ["error"]
+
+
+# --- skills (M4) ---------------------------------------------------------------------------------
+
+
+def test_the_skills_middleware_is_attached_and_narrows_by_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role-gated skill is invisible *and* unreadable to a caller lacking the role.
+
+    Both halves in one assertion, because under this engine they are two different mechanisms and
+    only having both is a gate: `SkillsMiddleware` publishes skill paths into the system prompt, so
+    hiding a skill from the listing while leaving `/deep-research/SKILL.md` readable would be a
+    gate a model walks around by guessing a path it has seen the shape of.
+
+    The gated skill is chosen from the shipped tree rather than named, so this keeps testing the
+    real corpus as it grows.
+    """
+    gated = sorted(declared_tools([*settings.skills_dirs]))[0]
+    monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
+    backend = skills_backend(get_profile(None), _capability_tools())
+
+    denied = set_current_identity("u-1", frozenset({"reader"}))
+    try:
+        listed = _skill_names(backend)
+        refused = backend.read(f"/skills/{gated}/SKILL.md")
+    finally:
+        reset_current_identity(denied)
+
+    assert gated not in listed
+    assert refused.error == REFUSED
+
+    allowed = set_current_identity("u-2", frozenset({"process-chemist"}))
+    try:
+        assert gated in _skill_names(backend)
+        assert backend.read(f"/skills/{gated}/SKILL.md").error is None
+    finally:
+        reset_current_identity(allowed)
+
+
+def test_both_engines_narrow_skills_identically(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two engines answer "which skills are visible" the same way, by construction.
+
+    The property that matters is not which set either produces but that they produce the *same*
+    one: a skill hidden under `maf` and offered under `langgraph` is not a gate. Asserted against
+    `skills_source`'s own chain rather than against a written list, so the shipped corpus and the
+    shipped gates are what is compared.
+    """
+    gated = sorted(declared_tools([*settings.skills_dirs]))[0]
+    monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
+    profile, tools = get_profile(None), _capability_tools()
+
+    token = set_current_identity("u-1", frozenset({"reader"}))
+    try:
+        maf = {
+            skill.frontmatter.name
+            for skill in asyncio.run(
+                skills_source(profile, tools).get_skills(
+                    SkillsSourceContext(agent=cast(SupportsAgentRun, None))
+                )
+            )
+        }
+        graph = _skill_names(skills_backend(profile, tools))
+    finally:
+        reset_current_identity(token)
+
+    assert graph == maf
+    assert gated not in maf, "the fixture must actually gate something for this to mean anything"
+
+
+def _skill_names(backend: Any) -> set[str]:
+    """The skill names a backend lists, across every routed skills tree."""
+    names: set[str] = set()
+    for prefix in getattr(backend, "routes", {"/": backend}):
+        for entry in backend.ls(prefix).entries or []:
+            path = str(entry.get("path", "")).strip("/")
+            if entry.get("is_dir") and path:
+                names.add(path.rsplit("/", 1)[-1])
+    return names

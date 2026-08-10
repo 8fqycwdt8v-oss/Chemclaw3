@@ -40,8 +40,11 @@ engine does not have would read as coverage while proving nothing.
 """
 
 import uuid
+from pathlib import Path
 from typing import Any
 
+from deepagents.backends import CompositeBackend, StateBackend
+from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents import create_agent
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -50,10 +53,17 @@ from langchain.agents import create_agent
 # the `D-NNN` sequence. Three tests already import it across module boundaries; within one package
 # that is the established idiom here.
 from chemclaw.agent.audit import AuditSink, make_langgraph_audit_middleware
-from chemclaw.agent.chemclaw_agent import _capability_tools, instructions_for
+from chemclaw.agent.chemclaw_agent import (
+    _advertised_names,
+    _capability_tools,
+    instructions_for,
+)
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
+from chemclaw.agent.skill_access import skill_permits
+from chemclaw.agent.skill_backend import NarrowedSkillsBackend
+from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import (
     lg_announce_tool_failures,
     lg_enforce_tool_authz,
@@ -61,6 +71,8 @@ from chemclaw.agent.tool_authz import (
     lg_surface_authorization_denials,
     lg_surface_domain_errors,
 )
+from chemclaw.connectors.registry import skills_dirs
+from chemclaw.core.config import settings
 
 
 def build_langgraph_agent(
@@ -94,6 +106,10 @@ def build_langgraph_agent(
         `build_agent` promises.
     """
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
+    # *about* tools, so which tools this profile advertises decides which judgment is worth
+    # offering (`skills_middleware`).
+    tools = _capability_tools(prof)
     audit = make_langgraph_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
@@ -101,11 +117,90 @@ def build_langgraph_agent(
     )
     return create_agent(
         model=model if model is not None else build_chat_model(),
-        tools=list(_capability_tools(prof)),
+        tools=list(tools),
         system_prompt=instructions_for(prof),
-        middleware=_middleware(audit),
+        middleware=[skills_middleware(prof, tools), *_middleware(audit)],
         name="chemclaw",
     )
+
+
+def skills_middleware(profile: AgentProfile, tools: list[Any]) -> Any:
+    """Wrap `skills_backend` in deepagents' provider — the plumbing around the decision.
+
+    Split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split from
+    `_build_skills`: the backend is the part with behaviour and the middleware is somebody else's
+    object around it, which exposes no reader for the backend it was given. A test of what an agent
+    can reach would otherwise have to read a private attribute of a third-party class.
+    """
+    labelled = _labelled([*settings.skills_dirs, *skills_dirs()])
+    return SkillsMiddleware(
+        backend=skills_backend(profile, tools),
+        sources=[(f"/{label}", label) for label, _ in labelled],
+    )
+
+
+def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
+    """The skills backend for one profile — a backend that can only reach what it may.
+
+    The LangGraph twin of `chemclaw_agent.skills_source`, narrowed by the *same* three predicates
+    (`skill_access.skill_permits`) so a role-gated skill cannot be hidden under one engine and
+    offered under the other.
+
+    **The narrowing is on the backend, not on the advertised list, and that is the whole point.**
+    `SkillsMiddleware` publishes each skill's path into the system prompt and expects the model to
+    read the body with a filesystem tool over this same backend, so filtering only what is listed
+    would leave every hidden skill one guessed path away. `NarrowedSkillsBackend` closes `read`,
+    `glob` and `grep` as well as `ls`, refuses the write half outright, and runs in virtual mode so
+    `..` cannot leave the tree.
+
+    One backend per built agent, and the predicate is evaluated per reach rather than baked in:
+    the role gate reads the turn's ambient identity, and one agent serves every concurrent turn.
+
+    **Several trees, one backend, via `CompositeBackend`.** Skills come from the configured
+    `skills_dir` *and* from every enabled connector bundle's own `skills/` (D-118), while
+    `SkillsMiddleware` takes exactly one backend and virtual mode roots each `FilesystemBackend` at
+    a single directory. So each tree gets a virtual prefix routed to its own narrowed backend, and
+    an unrouted path reaches `StateBackend` — which is empty, holds no filesystem, and is therefore
+    the right thing for a path that matches no skills tree to find.
+    """
+    dirs = [*settings.skills_dirs, *skills_dirs()]
+    permits = skill_permits(
+        enabled=settings.skills_enabled_list,
+        declared=declared_tools(dirs),
+        available=_advertised_names(profile, tools),
+        gates=settings.skill_role_gates,
+    )
+    return CompositeBackend(
+        default=StateBackend(),
+        routes={
+            f"/{label}/": NarrowedSkillsBackend(directory, permits)
+            for label, directory in _labelled(dirs)
+        },
+    )
+
+
+def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
+    """`(label, directory)` per skills tree, with labels unique and stable.
+
+    The label is both the route prefix and what `SkillsMiddleware` shows a reader as the skill's
+    source, so it has to be unique: a bundle's tree is `connectors/<name>/skills`, and every one of
+    them has the leaf name `skills`. Naming a tree by its *parent* distinguishes the bundles and
+    leaves the configured root as itself; a numeric suffix settles anything still colliding, which
+    keeps the function total rather than correct-until-someone-nests-two-trees-alike.
+
+    Order follows `dirs`, so precedence is unchanged: `SkillsMiddleware` loads sources in order and
+    a later one wins, matching `FileSkillsSource`'s own first-wins rule once the list is read the
+    way each library reads it.
+    """
+    seen: dict[str, int] = {}
+    labelled: list[tuple[str, str]] = []
+    for directory in dirs:
+        path = Path(directory)
+        base = path.parent.name if path.name == "skills" and path.parent.name else path.name
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        labelled.append((base if not count else f"{base}-{count}", directory))
+    return labelled
 
 
 def _middleware(audit: Any) -> list[Any]:

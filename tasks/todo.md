@@ -68,13 +68,30 @@ never what a deployment gets.
 - [ ] `enforce_plan_approval` is the seventh and belongs to M5 — it reads plan/session state this
       engine does not have yet.
 
-### M4 — skills · **go/no-go**
-- [ ] `deepagents.middleware.skills.SkillsMiddleware` over `skills/` + each connector bundle's own.
-- [ ] The three narrowings (`Enabled`/`ToolScoped`/`RoleScoped`) as a **custom backend** wrapping
-      `FilesystemBackend` — the middleware reaches skills only through backend APIs.
-- [ ] `skill_tool_names()` keeps reading names off the middleware's own constants (D-117).
-- [ ] **Stop here and reassess if narrowing cannot be expressed at the backend.** Role-gated skill
-      visibility is a security property, and this is the migration's load-bearing unknown.
+### M4 — skills · **go/no-go: GO**
+- [x] **The load-bearing unknown is resolved.** Narrowing *is* expressible at the backend, and the
+      read half genuinely closes. `SkillsMiddleware` discovers via `backend.ls()` and bodies are
+      read via `backend.read()`, so one predicate bounds both.
+- [x] `agent/skill_backend.py::NarrowedSkillsBackend` — `ls`/`read`/`glob`/`grep` all gated, the
+      write half refused outright, `virtual_mode=True`.
+- [x] `skill_access.skill_permits()` — the three narrowings as one engine-neutral predicate; the
+      MAF `SkillsSource` decorators and this backend call the same three `permits` methods.
+- [x] `langgraph_agent.skills_backend()` / `skills_middleware()`, multi-root via `CompositeBackend`
+      (the configured tree *plus* every connector bundle's own, D-118).
+- [x] `tests/test_skill_backend.py` — eight tests, each asking "is it hidden" *and* "is it
+      unreachable"; plus a cross-engine test that both engines narrow identically.
+- [ ] **A read tool is still missing.** `SkillsMiddleware` publishes skill paths and expects the
+      model to read them with a filesystem tool, and none is attached — so skills are currently
+      advertised but not loadable on this engine. Needs one scoped `read` tool over
+      `skills_backend`, *not* deepagents' `FilesystemMiddleware` (which brings write/edit/glob and
+      would widen the surface `available_tool_names()`/`prose-validate` police).
+- [ ] **`skills_metadata` caching is unanswered.** `SkillsMiddleware.before_agent` skips the load
+      when state already holds it "from a prior turn or checkpointed session", so under M6's
+      checkpointer a role change mid-session would read a stale narrowing. The backend still gates
+      every *read* per turn, so this is a listing-staleness bug rather than a hole — but it must be
+      decided here, not discovered in M6.
+- [ ] `skill_tool_names()` has no direct equivalent and must be re-derived once the read tool
+      exists (D-117: an omitted name space fails every validator built on it).
 
 ### M5 — one human gate
 - [ ] Collapse the harness plan gate, `interaction_tools.py` and the KG PR-gate onto `interrupt()`
@@ -214,3 +231,32 @@ Also fixed while testing: `dry_run_refusal` reads the ambient flag, so asking it
 dry-run block returns `None` — correct answer, wrong question. And most of the side-effecting
 surface does not exist in the registry until something has assembled the toolset once, because
 that is when the generated connector-job and template launchers register.
+
+**M4 — go/no-go: GO, with two pieces still open.** `make lint type test` green at 3938 passed, 0
+failed, nothing lost.
+
+**The question M4 existed to answer.** Can the three narrowings — deployment enablement, capability
+scoping, role gating — be expressed against a backend rather than a `SkillsSource`? Yes.
+`SkillsMiddleware` discovers skills with `backend.ls(source)` and their bodies are read with
+`backend.read(...)`, so a single `permits(skill_name)` predicate bounds both halves.
+
+**And the reason it had to be the backend rather than the listing.** Under MAF, narrowing the
+advertised list *was* the gate — `SkillsProvider` was the only route to a body. deepagents puts
+each skill's *path* into the system prompt and expects an ordinary filesystem tool to fetch it, so
+a listing-only filter would hide a role-gated skill and then hand it over to anyone who guessed
+`/tree/<name>/SKILL.md` — a shape the prompt has already taught the model. Four reach paths (`ls`,
+`read`, `glob`, `grep`) plus their async twins had to be closed, not one.
+
+Three things measured rather than assumed:
+
+- **`virtual_mode=False` is deepagents' default and its own warning says it "allows absolute paths
+  and `'..'` to bypass `root_dir`".** In a GxP system that is a general file-read primitive handed
+  to a model. The backend sets `virtual_mode=True`; `test_path_traversal_is_refused` pins it.
+- **The async twins need no override** — `FilesystemBackend` implements them as
+  `asyncio.to_thread(self.read, ...)`, so they dispatch through the subclass. The gate depends on
+  that upstream detail completely, so it is a test rather than a comment.
+- **`test_every_reach_path_the_protocol_exposes_is_gated` probes the protocol rather than a written
+  list**, so a future release adding a reach path fails here instead of opening a quiet hole.
+
+The refusal deliberately does not distinguish a gated skill from a nonexistent one — otherwise the
+gate is an enumeration oracle.
