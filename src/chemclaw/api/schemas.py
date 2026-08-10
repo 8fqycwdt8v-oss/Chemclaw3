@@ -278,7 +278,21 @@ def _transcript(
                 # `or ""` rather than the raw attribute: MAF stores an absent result as the empty
                 # string, and that is also what `_result_text` treats as "nothing came back" and
                 # declines to store — so the two agree on which results have a ref.
-                text = getattr(content, "result", "") or ""
+                #
+                # Coerced with `str()` before anything reads it, for the same reason
+                # `_truncate_for_transcript` is defensive about the same value one line down. A
+                # `result` that is not a `str` is unreachable through the MAF this pins — every
+                # result goes through `Content.from_function_result`, which JSON-dumps a non-string
+                # — but a *stored row* is not written by the running version: `get_messages`
+                # rebuilds it with `Message.from_dict` from JSONB another version wrote, and a row
+                # carrying `"result": {…}` reached `content_address` as a `dict` and raised
+                # `AttributeError: 'dict' object has no attribute 'encode'`. That is one uncaught
+                # exception on `GET /sessions/{id}/messages`, which is a 500 that costs a chemist
+                # their entire conversation rather than one result card. `str()` and not `repr()`
+                # because `_result_text` coerces the producer's side the same way, and the ref only
+                # means anything if both sides hash the same bytes.
+                raw = getattr(content, "result", "") or ""
+                text = raw if isinstance(raw, str) else str(raw)
                 ref = content_address(text) if text else ""
                 results[content.call_id] = (
                     _truncate_for_transcript(text),

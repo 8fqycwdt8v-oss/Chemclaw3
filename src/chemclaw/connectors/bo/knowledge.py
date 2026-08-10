@@ -109,9 +109,20 @@ def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
     here, because between them they cover every shipped objective: a featurized categorical carries
     an explicit label → SMILES map (`CategoricalParameter.structures`), while a library campaign
     (`science.bo.objectives.molecule_library_problem`) makes the SMILES *itself* the category
-    label. Only the second needs RDKit, and only to answer "is this label a structure at all" —
-    the same arbiter, for the same reason, that `science.safety.notes.structures_in` applies to a
-    note body: a heuristic over label spellings would be a second, weaker answer to one question.
+    label. Only the second needs RDKit, and only to answer "is this label a structure at all" — a
+    heuristic over label spellings would be a second, weaker answer to a question RDKit answers.
+
+    **A bare, lenient `Chem.MolFromSmiles`, and deliberately not the hazard screen's strict gate**
+    (`core.chem.require_molecule`, which refuses a string RDKit reads only a prefix of). The two
+    predicates are not the same one and must not be, because they err in opposite directions and
+    only one of these two errors is safe. A `True` here wraps the value in backticks
+    (`_condition`), and a backticked value is precisely what the hazard gate reads out of a note
+    body (`science.safety.notes.structures_in`). So a level a campaign chose to name
+    `CN=[N+]=[N-] (2 equiv)` — free-form category labels being what they are — would, under the
+    strict gate, be written into the note as plain prose and never screened at all, while under
+    this one it is backticked, tokenized by `structures_in`, and its azide flagged. Erring towards
+    "this is a structure" costs a pair of backticks around something that is not one; erring the
+    other way costs the screen.
 
     `parameter` is optional because the caller looks it up by name from the recommended point: a
     result whose params do not line up with the problem still has to yield a readable note rather

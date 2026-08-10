@@ -19,7 +19,7 @@ import logging
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession, Message
+from agent_framework import AgentSession, Content, Message
 from fastapi.testclient import TestClient
 
 import chemclaw.api.runner_trace as runner_trace
@@ -132,9 +132,78 @@ def test_an_identical_result_stores_one_blob_and_keeps_one_link() -> None:
                 links = await cur.fetchone()
         assert blobs is not None and blobs[0] == 1
         assert links is not None and links[0] == 1
-        # The link is refreshed rather than left behind: the row names the most recent turn that
-        # produced these bytes, which is the correlation id worth having on a fetch.
-        assert links[1] == "corr-2"
+        # And the label the dedup cost is **empty**, not the last writer's. The row is one row for
+        # two turns, so no correlation id belongs to it; `SET correlation_id = EXCLUDED
+        # .correlation_id` made the fetch route answer with the right bytes under the wrong turn's
+        # id, which is the near-miss pairing this whole surface refuses on the read side.
+        assert links[1] == ""
+
+    asyncio.run(_run())
+
+
+def test_a_result_two_calls_produced_names_neither_of_them() -> None:
+    """The label is dropped rather than guessed, and the bytes are still exactly right.
+
+    This is not a corner case. `include_detailed_errors` is off (`agent/tool_authz.py` says why),
+    so *every* unexpected tool exception in the system returns the same byte string "Error:
+    Function failed." — one blob per session covering every failed call it ever makes. A fetch of
+    it under one arbitrary tool name and one arbitrary correlation id would be a mispairing served
+    with full confidence, and `StoredToolResult.correlation_id` is documented as "the join a GxP
+    reviewer asks for".
+
+    Asserted through `load_tool_result` rather than on the row, because what matters is what a
+    *reviewer* is handed: unknown where it is unknown, and the result text where it is not.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        failure = "Error: Function failed."
+
+        ref = await store_tool_result(
+            session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
+        )
+        await store_tool_result(
+            session_id="tr-ambiguous",
+            correlation_id="corr-2",
+            tool="screen_hazards",
+            text=failure,
+        )
+
+        stored = await load_tool_result("tr-ambiguous", ref)
+        assert stored is not None
+        assert (stored.tool, stored.correlation_id) == ("", "")
+        assert stored.text == failure
+
+        # A third disagreeing write must not un-collapse it: `''` disagrees with every value, so
+        # the column stays empty once it has been emptied.
+        await store_tool_result(
+            session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
+        )
+        again = await load_tool_result("tr-ambiguous", ref)
+        assert again is not None and (again.tool, again.correlation_id) == ("", "")
+
+    asyncio.run(_run())
+
+
+def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> None:
+    """The other half of the rule: only *disagreement* costs the labels.
+
+    A turn that re-runs the same tool with the same arguments — a retry after a transient failure,
+    the repeat guard letting one through — writes the same bytes under the same tool and the same
+    correlation id. There is nothing ambiguous about that row, and emptying it would throw away a
+    join that is correct, which is the opposite error.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        for _ in range(2):
+            ref = await store_tool_result(
+                session_id="tr-repeat", correlation_id="corr-9", tool="screen_hazards", text=_SCREEN
+            )
+
+        stored = await load_tool_result("tr-repeat", ref)
+        assert stored is not None
+        assert (stored.tool, stored.correlation_id) == ("screen_hazards", "corr-9")
 
     asyncio.run(_run())
 
@@ -407,37 +476,65 @@ def test_an_unmerged_note_is_a_404_carrying_its_reason(
 # --- the transcript ----------------------------------------------------------------------------
 
 
+# What a screening tool actually returns to MAF: a model object, dumped to a `dict`, never a
+# string. The coercion the whole ref identity rests on is the one MAF applies to *this*, so the
+# tests below start here rather than from a string literal — a literal is already coerced, and
+# feeding one to both sides proves only that `content_address` is a function.
+_SCREEN_RESULT: dict[str, Any] = {
+    "flags": [
+        {
+            "rule_id": "azide",
+            "severity": "high",
+            "explanation": "energetic",
+            "citation": "Bretherick 7th ed.",
+            "matched": "CCN=[N+]=[N-]",
+        }
+    ],
+    "screened": ["CCN=[N+]=[N-]"],
+}
+
+
+def _maf_turn(
+    result: object, *, call_id: str = "t1", tool: str = "screen_hazards"
+) -> list[Message]:
+    """One tool call and its result, built the way MAF itself builds them.
+
+    `Content.from_function_result` is the constructor every real result goes through, and it is
+    where the coercion happens: a non-string return value is JSON-dumped to `str` **once**, at the
+    content. That single coercion is what makes the producer's ref and the transcript's ref the
+    same string, so it has to be in the test rather than in front of it.
+    """
+    return [
+        Message(
+            role="assistant",
+            contents=[
+                Content.from_function_call(
+                    call_id=call_id, name=tool, arguments={"smiles": ["CCN=[N+]=[N-]"]}
+                )
+            ],
+        ),
+        Message(
+            role="tool", contents=[Content.from_function_result(call_id=call_id, result=result)]
+        ),
+    ]
+
+
+def _reloaded(messages: list[Message]) -> list[Message]:
+    """`messages` after the round trip a reload puts them through.
+
+    `PostgresHistoryProvider` writes `Message.to_dict()` into a JSONB column and rebuilds it with
+    `Message.from_dict`, so this is the transformation between "what the turn produced" and "what
+    `_transcript` reads". Doing it for real is what makes the identity below a property of MAF
+    rather than of this file.
+    """
+    return [Message.from_dict(message.to_dict()) for message in messages]
+
+
 def _stored_turn(
     result: str, *, call_id: str = "t1", tool: str = "screen_hazards"
 ) -> list[Message]:
-    """One tool call and its result, shaped as the durable history hands them back.
-
-    Built through `Message.from_dict` rather than `Content.from_function_result` because that is
-    literally what `PostgresHistoryProvider.get_messages` does with the JSONB column — so the
-    contents under test have been through the same round trip a reload puts them through, not a
-    shortcut around it.
-    """
-    return [
-        Message.from_dict(
-            {
-                "role": "assistant",
-                "contents": [
-                    {
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": tool,
-                        "arguments": {"smiles": ["CCN=[N+]=[N-]"]},
-                    }
-                ],
-            }
-        ),
-        Message.from_dict(
-            {
-                "role": "tool",
-                "contents": [{"type": "function_result", "call_id": call_id, "result": result}],
-            }
-        ),
-    ]
+    """A round-tripped turn whose result is already a string — the ordinary stored shape."""
+    return _reloaded(_maf_turn(result, call_id=call_id, tool=tool))
 
 
 def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() -> None:
@@ -453,9 +550,12 @@ def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() 
     Nothing pairs on `(session, tool, correlation_id, created_at)` — which could not tell two calls
     of one tool in one turn apart anyway — so there is no near-miss pairing available to get wrong.
 
-    Both halves run for real here, because a stub cannot disagree with itself: the ref on the left
-    comes from `ToolCallTrace` driving its sink, the one on the right from `_transcript` reading a
-    round-tripped MAF message, and the assertion is that two independent derivations agree.
+    **Both halves run against one MAF turn, from a `dict` the tool never stringified.** The
+    producer's ref comes from `ToolCallTrace` fed the real `Content` objects; the transcript's
+    comes from `_transcript` reading those same contents back through `to_dict`/`from_dict`. Handing
+    each side the same string literal instead — which this test did — asserts only that
+    `content_address` is deterministic, and would stay green through a MAF upgrade that changed the
+    coercion, which is the one event the ADR's identity claim depends on.
     """
     stored: dict[str, str] = {}
 
@@ -464,17 +564,66 @@ def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() 
         stored[ref] = text
         return ref
 
+    turn = _maf_turn(_SCREEN_RESULT)
     trace = runner_trace.ToolCallTrace(sink=_sink)
-    _issued(trace, "t1", "screen_hazards")
-    events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="t1", result=_SCREEN)]))
+    events = [
+        event
+        for message in turn
+        for event in fed(trace, FakeUpdate(contents=list(message.contents)))
+    ]
     (event,) = [e for e in events if e.type == "tool_result"]
 
-    [message] = [m for m in _transcript(_stored_turn(_SCREEN), fetchable=stored) if m.tool_calls]
+    [message] = [m for m in _transcript(_reloaded(turn), fetchable=stored) if m.tool_calls]
     [call] = message.tool_calls
 
     assert event.result_ref != ""  # the stream stored it
     assert call.result_ref == event.result_ref  # and the reload names the same bytes
     assert call.tool == "screen_hazards"
+    # And the bytes are MAF's JSON dump of the tool's object, not a `repr` of it: the store holds
+    # what a client will parse, and a coercion that changed shape would move every ref at once.
+    assert call.result is not None and call.result.startswith('{"flags":')
+
+
+def test_a_result_stored_as_something_other_than_a_string_does_not_500_the_reload() -> None:
+    """A row this MAF cannot write, but a stored row can hold — and a 500 here costs everything.
+
+    Every live result goes through `Content.from_function_result`, which coerces to `str`, so a
+    non-string `result` is unreachable *on this version*. A transcript is not read on the version
+    that wrote it: `get_messages` rebuilds whatever JSONB is in `session_messages`, and a row
+    carrying `"result": {…}` reached `content_address`, which calls `.encode`, and raised
+    `AttributeError` — an uncaught exception on `GET /sessions/{id}/messages`, which is the route a
+    chemist reloads a whole conversation through. Losing the conversation because one result card
+    cannot be addressed is the wrong trade by a wide margin, and the neighbouring
+    `_truncate_for_transcript` had been defensive about this exact value all along.
+
+    The coercion is pinned against the producer's, not merely against "does not raise": if the two
+    disagreed the transcript would advertise a ref that is not the one the store was written under,
+    which fails silently rather than loudly.
+    """
+    payload: dict[str, list[str]] = {"flags": [], "screened": []}
+    stored = [
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "contents": [{"type": "function_call", "call_id": "t1", "name": "screen_hazards"}],
+            }
+        ),
+        Message.from_dict(
+            {
+                "role": "tool",
+                "contents": [{"type": "function_result", "call_id": "t1", "result": payload}],
+            }
+        ),
+    ]
+    produced = runner_trace._result_text(stored[1].contents[0])
+    assert produced is not None
+    ref = content_address(produced)
+
+    [message] = [m for m in _transcript(stored, fetchable={ref}) if m.tool_calls]
+    [call] = message.tool_calls
+
+    assert call.result_ref == ref
+    assert call.result == produced
 
 
 def test_a_result_the_store_cannot_serve_is_advertised_as_unfetchable() -> None:

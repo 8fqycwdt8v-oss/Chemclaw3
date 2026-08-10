@@ -282,7 +282,7 @@ def parse_components(component_smiles: Sequence[str]) -> dict[str, Chem.Mol]:
 
 
 def require_screenable_size(component_smiles: list[str], *, what: str) -> None:
-    """Refuse a component list too large to screen, before any matching starts.
+    """Refuse a component list this package cannot honestly screen — too large, or empty.
 
     Both screens in this package check their pair rules as a *cross-product*: every component
     matching one side against every component matching the other. So the results grow with the
@@ -296,10 +296,24 @@ def require_screenable_size(component_smiles: list[str], *, what: str) -> None:
     looked at, and every tool description in this package says an empty result means no rule
     matched — never that something is safe.
 
+    **The empty list is refused by that same sentence, one step further on.** `screen_hazards([])`
+    answered `{"flags": [], "screened": [], "verdict": "No rule in the hazard table matched…"}` — a
+    clean screen of *nothing*, the shape a model is most likely to paraphrase as "I screened it and
+    it came back clear". This module's whole discipline is that an empty result must never read as
+    a clearance, and an empty result that is not even about a molecule is the version of that with
+    nothing in the payload to catch it: `screened` was added so a clean screen names what it looked
+    at, and here there is nothing for it to name.
+
     Raises:
-        SafetyRulesError: more than `safety_max_components` components were given.
+        SafetyRulesError: no components were given, or more than `safety_max_components` were.
     """
     limit = settings.safety_max_components
+    if not component_smiles:
+        raise SafetyRulesError(
+            f"{what} needs at least one structure, and none were given. An empty result from this "
+            "package means no rule matched the structures screened — with nothing screened there "
+            "is no such statement to make, and it must not be reported as one."
+        )
     if len(component_smiles) > limit:
         raise SafetyRulesError(
             f"{what} accepts at most {limit} components, got {len(component_smiles)}. "
@@ -352,8 +366,8 @@ def screen_reaction(component_smiles: list[str]) -> ScreenResult:
 
     Raises:
         SafetyRulesError: any component does not parse in full — the refusal names the component's
-            position in the list given — the rule table is missing/malformed, or more than
-            `safety_max_components` components were given.
+            position in the list given — the rule table is missing/malformed, or the list is empty
+            or longer than `safety_max_components`.
     """
     require_screenable_size(component_smiles, what="a hazard screen")
     table, patterns = _load_rules(settings.safety_rules_path)

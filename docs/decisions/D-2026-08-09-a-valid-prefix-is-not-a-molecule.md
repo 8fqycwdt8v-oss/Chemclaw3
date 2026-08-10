@@ -62,6 +62,13 @@ and it returns the *molecule*, which is what a caller like a SMARTS screen actua
 sent the screens looking for their own parse in the first place. `tests/test_ids.py` pins that the
 three agree on every input.
 
+One definition also means a case found later is added once and reaches every caller, which is what
+happened here: **non-ASCII characters are refused too.** RDKit skips a run of them at either *edge*
+of the string while failing on one between two atoms — measured on this build, `"°C"` is methane,
+`"CC°"` and `"°CC°"` are ethane, `"C°C"` is a parse error. That is the whitespace truncation
+wearing a different character, SMILES is written in printable ASCII, and decision 5 below is what
+surfaces it: a note body cut into tokens offers `°C` from `` `80 °C` `` as a candidate structure.
+
 **3. `InvalidSmilesError` is translated to `SafetyRulesError` at the package boundary.** The safety
 package promises a caller one exception type, and `science/safety/notes.py`, `evals/metrics.py` and
 `cli/validate_safety.py` each catch exactly that. Both are `ChemclawError`s, so either way the
@@ -74,12 +81,85 @@ caller wrote it rather than in the deduplicated mapping the screen works on. "On
 components is unusable" is not something a chemist can act on, and a tool error a model cannot act
 on is one it will retry unchanged.
 
-**5. `science/safety/notes.py::_is_structure` moves onto the same predicate, in the same change.**
-It decides which inline code spans in a knowledge note are structures, and it promises that a span
-which is not one "simply yields nothing". It asked a bare `Chem.MolFromSmiles`, so a span like
-`` `CCO at 80 °C` `` read as a structure — and would then have been handed to a screen that now
-refuses it, turning a span this gate is documented to ignore into a `kg-validate` failure on every
-note containing one. Two predicates for one question is what made that possible.
+**5. The PR-gate cuts a code span into tokens a SMILES could be, and asks the same predicate about
+each one.** `science/safety/notes.py::_is_structure` moves onto `parse_molecule` — two predicates
+for one question is what let a span like `` `CCO at 80 °C` `` pass a bare `Chem.MolFromSmiles`
+here and then be handed to a screen that refuses it, turning a span this gate is documented to
+ignore into a `kg-validate` failure on every note containing one. But moving it is only half a
+decision, and the first version of this ADR stopped there, which broke the gate in the other
+direction.
+
+**What the half-decision did.** `structures_in` uses `_is_structure` as a *filter*, so a span the
+strict predicate rejects is not screened narrowly — it is dropped and never screened at all.
+Measured on this build, on a body whose code span held `` `CN=[N+]=[N-] (2 equiv)` ``:
+`structures_in` returned `[]` and `hazard_problems` returned `[]`, where the lenient predicate
+returned the high-severity `organic-azide` problem, and `screen_structure("CN=[N+]=[N-]")` returns
+that flag on its own. An agent-authored `experiment-proposal` naming a reagent with its quantity is
+not an edge case; it is the input class this gate exists for. **A screen that narrows is the defect
+this ADR opens with. A gate that stops screening is worse, and it was introduced by the fix for
+it.**
+
+**The rule that resolves both.** A SMILES contains no whitespace and nothing outside printable
+ASCII — which is exactly what `require_molecule` refuses, decision 2 — so those characters inside a
+code span are prose by construction. They are the one separator that can be split on without a
+guess about spelling, and splitting on them first turns "this span is not a molecule" into "these
+are the molecules this span names, and these are the words around them". The strict predicate then
+classifies a *token*, where it is exactly right, instead of filtering a *span*, where its false
+answers cost a screen. RDKit stays the arbiter of what a structure is; the split only decides what
+to ask it about.
+
+The tokens are a **superset** of what the lenient predicate yielded — that parser stops at the
+first whitespace and skips a non-ASCII run at either end of what remains, so whatever it read is
+one of these tokens — and no note can therefore lose a flag relative to the behaviour before this
+ADR. `tests/test_safety.py` states that as a generated property, comparing against a
+re-implementation of the old extraction over spans built from structures and the prose a model puts
+beside them, rather than as a list of the shapes that occurred to whoever wrote the fix. It also
+strictly gains: `` `CCO CN=[N+]=[N-]` `` now screens both species where the lenient parse screened
+only the ethanol, `` `1.2 equiv of CN=[N+]=[N-]` `` is screened where the lenient parse read `1.2`
+and gave up, and `` `CN=[N+]=[N-]—the azide` `` keeps its azide where the lenient parse failed
+outright.
+
+**The split errs towards screening, and that direction is chosen rather than accepted.**
+`` `80 °C` `` yields the token `C`, which RDKit reads as methane, so the gate screens a molecule the
+note never named. There is no rule that avoids this and still recovers the azide from
+`` `CN=[N+]=[N-]°` ``, because the two strings have the same shape — an ASCII structure with a
+non-ASCII character stuck to it. This is not the "clean screen of a molecule nobody asked about"
+that opens this ADR: that one is a *tool result* a chemist reads, and this one is an input to a gate
+whose only output is "this note needs a `## Hazards` section". An extra molecule can add a flag,
+never remove one, and every rule in the table is a multi-atom motif no lone atom matches.
+
+**Three ways to fix this were on the table, and two were rejected.**
+
+- *Screen the parseable prefix.* Restores the old coverage and re-introduces the truncation this
+  ADR removes — and it still loses the second molecule of `` `CCO CN=[N+]=[N-]` ``, because a
+  prefix is one molecule by construction.
+- *Report an unreadable span as a gate problem* (printed, not raised, as `kg-validate` already does
+  with a broken rule table). Safe, and it fires on `` `CCO at 80 °C` `` — the exact spurious
+  failure this decision point was created to prevent. The gate's own scope rule is that it must
+  fire rarely enough that a firing means something.
+- *Screen the prefix **and** report the span as malformed.* The strongest of the three, and still
+  wrong, because it calls a correct reading an ambiguity. There is no property separating "prose
+  that happens to begin with a valid SMILES" from "a structure with a trailing annotation": both
+  spans above are a structure with an annotation, and `` `CCO at 80 °C` `` *does* name ethanol —
+  screening it is the right answer, not a truncation to apologize for. So the complaint would fire
+  on every annotated span, which is the previous option with an extra step. Tokenizing answers both
+  spans correctly, and once both answers are right there is nothing left to complain about.
+
+What tokenizing does not do is read a SMILES fused to *ASCII* punctuation: `` `CN=[N+]=[N-], 1.2
+eq` `` yields no structure, exactly as it did before, because `CN=[N+]=[N-],` is not a SMILES.
+Recovering it would mean deciding which *printable ASCII* characters this repository treats as
+prose — a judgement about spelling, and a second, weaker answer to the question RDKit answers,
+which is what this ADR is about. The cut is made where the character set draws the line and not one
+character further: outside printable ASCII nothing can be part of a SMILES, so nothing there is a
+guess.
+
+**6. A screen of nothing is refused, like a screen of too much.** `require_screenable_size` now
+rejects an empty component list as well as an over-long one. `screen_hazards([])` answered
+`{"flags": [], "screened": [], "verdict": "No rule in the hazard table matched…"}` — a clean screen
+of *nothing*, in the shape a model paraphrases as "I screened it and it came back clear", and the
+one case where `screened` (added so a clean result names its subject) has nothing to name. Same
+sentence as the truncation, one step further on: an empty result means no rule matched the
+structures screened, and with nothing screened there is no such statement to make.
 
 ## Consequences
 
@@ -102,4 +182,15 @@ note containing one. Two predicates for one question is what made that possible.
 - Everything else in `science/` was checked rather than assumed. Every calculator reaches RDKit
   through `require_canonical_smiles` at its cached-compute boundary, so
   `run_cached_solubility("CCO junk")` already raised before `predict_solubility` saw it;
-  `ingest/eln/validate.py` and `connectors/bo/knowledge.py` parse leniently by design and say so.
+  `ingest/eln/validate.py` parses leniently by design and says so.
+- **`connectors/bo/knowledge.py::_molecule_in` stays lenient, and its docstring now says why
+  instead of claiming to apply "the same arbiter" as the gate.** It did claim that, and the claim
+  was false the moment decision 5 was written — but unifying the two would have been the wrong
+  direction, not merely a rename. Its answer decides whether a recommended parameter value is
+  written into the note *in backticks*, and a backticked value is precisely what the gate reads. A
+  campaign level named `CN=[N+]=[N-] (2 equiv)` would, under the strict gate, be emitted as plain
+  prose and screened by nobody; under the lenient one it is backticked, tokenized, and its azide
+  flagged. Erring towards "this is a structure" costs a pair of backticks around something that is
+  not one, and erring the other way costs the screen — so the two predicates are deliberately
+  different, in the direction that keeps the gate's input as wide as possible and lets the gate's
+  own strict predicate do the classifying.

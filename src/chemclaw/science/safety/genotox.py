@@ -160,8 +160,8 @@ def screen_genotoxic_alerts(component_smiles: list[str]) -> AlertResult:
     Raises:
         SafetyRulesError: a component does not parse in full — the refusal names the component's
             position in the list given, since a route is a list and "one of these is unusable" is
-            not something a chemist can act on — the alert table is malformed, or more than
-            `safety_max_components` components were given.
+            not something a chemist can act on — the alert table is malformed, or the list is empty
+            or longer than `safety_max_components`.
     """
     require_screenable_size(component_smiles, what="a genotoxicity screen")
     table, patterns = _load_alerts()

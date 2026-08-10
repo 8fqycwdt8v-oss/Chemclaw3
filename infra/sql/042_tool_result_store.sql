@@ -45,8 +45,15 @@ CREATE TABLE IF NOT EXISTS tool_result_links (
     content_hash   TEXT NOT NULL REFERENCES tool_result_blobs (content_hash) ON DELETE CASCADE,
     tool           TEXT NOT NULL,         -- which tool answered, so a surface can label a fetch
     -- The turn's correlation id, so one fetched result joins the audit trail and the logs for the
-    -- turn that produced it. Not part of the key: two calls in one turn returning identical text
-    -- are one row, and that is the dedup working rather than a collision.
+    -- turn that produced it. Neither column is part of the key: two calls in one session returning
+    -- identical text are one row, and that is the dedup working rather than a collision.
+    --
+    -- What the dedup costs is these two *labels*, not the bytes, and the write says so instead of
+    -- guessing: `api/tool_results.py::_UPSERT_LINK` collapses either column to `''` the moment a
+    -- second call disagrees with the row already there, rather than overwriting it with the newest
+    -- writer's value. Empty therefore means "these bytes are not one call's, and the store will not
+    -- name one" — which is the state every failed call in a session lands in, since with
+    -- `include_detailed_errors` off they all return the byte string "Error: Function failed."
     correlation_id TEXT NOT NULL DEFAULT '',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (session_id, content_hash)

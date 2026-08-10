@@ -1690,3 +1690,35 @@ Rules for myself:
 - A derived ref still needs an existence check before it is advertised. Derivable is not fetchable —
   retention, an over-cap refusal and a failed write all produce an address nothing will serve, and a
   link that 404s is indistinguishable from a live one until a user clicks it.
+
+## A predicate used as a filter must be safe to be wrong (2026-08-09, review)
+
+Both defects above were fixed in one branch and the safety fix introduced a worse one, which the
+review caught and I had not. `science/safety/notes.py::_is_structure` was moved onto the strict
+parse — correct, and half a change. `structures_in` uses that predicate as a **filter**, so a code
+span it rejects is not screened narrowly; it is dropped and never screened at all. Measured: a note
+whose body held `` `CN=[N+]=[N-] (2 equiv)` `` produced no structures and no hazard problem, where
+the lenient predicate produced the high-severity `organic-azide` gate problem. I made the parse
+stricter and the *gate* weaker, on the one input class the gate exists for — a language model
+writing a procedure, where a SMILES with a quantity beside it is the normal shape.
+
+What I checked was that the new predicate was right about the strings I gave it. What I did not
+check was what the caller does with a `False`.
+
+Rules for myself:
+
+- Before tightening a predicate, find every caller and ask what a *rejection* costs there. A
+  classifier that returns "no" to a screen is a dropped screen; the same "no" to a validator is a
+  reported error. Same function, opposite risk, and only one of them is visible.
+- When a fix and the defect it fixes pull in opposite directions, the answer is usually a different
+  *question*, not a compromise between the two. Here: stop asking "is this whole span a molecule"
+  and ask "which tokens of this span are", which is right in both directions and needed no
+  heuristic — whitespace and non-ASCII cannot occur in a SMILES, so inside a span they are prose
+  by construction.
+- For a safety gate, write the regression test as a **comparison against the previous behaviour**
+  ("no note loses a flag the old predicate would have raised"), not as examples. Examples pin the
+  cases I thought of, and the case I did not think of is the one the review found.
+- A claim in a docstring that two modules "apply the same arbiter" stops being true the moment one
+  of them changes. `connectors/bo/knowledge.py` still said it, and the honest fix was not to unify
+  them but to write down which way each errs and why: leniency there feeds the gate, strictness
+  there would starve it.

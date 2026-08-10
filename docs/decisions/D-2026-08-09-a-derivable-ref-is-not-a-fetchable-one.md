@@ -28,7 +28,11 @@ answered only the easy half of the first one.
 result text; the ref is the SHA-256 of that text; that is the same string the producer hashed. The
 identity holds because MAF coerces a function result to `str` once, at the content
 (`Content.from_function_result` JSON-dumps a non-string), and the durable row is that content's JSON
-round trip — `PostgresHistoryProvider.get_messages` rebuilds it with `Message.from_dict`.
+round trip — `PostgresHistoryProvider.get_messages` rebuilds it with `Message.from_dict`. The
+transcript still coerces what it reads rather than trusting that sentence, because the row it reads
+was not written by the version reading it: a stored `"result": {…}` reached `content_address` as a
+`dict` and raised `AttributeError` inside `.encode`, which is a 500 on the rehydration route — a
+chemist's whole conversation lost to one unaddressable result card.
 
 The alternative was pairing through `tool_result_links`, which carries session, tool, correlation id
 and a timestamp. **Those four cannot separate two calls of one tool in one turn**: they share the
@@ -36,10 +40,41 @@ session, the tool and the correlation id, and the link's `created_at` is the las
 were produced by anything rather than a per-call clock. A join on them would be right most of the
 time, and its failure mode is a chemist opening a hazard screen and being shown a different
 molecule's flags with nothing in the payload saying so. A mispaired result is worse than an absent
-one. Content addressing means there is no pairing step available to get wrong.
+one, and the *bytes* content addressing returns cannot be the wrong bytes.
 
-Two calls that returned identical text do share one ref. That is the store's dedup working as
+**What content addressing does not dissolve is the label, and an earlier draft of this ADR claimed
+it did** ("there is no pairing step available to get wrong"). The pairing did not disappear; it
+moved into the write. `tool_result_links` is keyed `(session_id, content_hash)`, so two calls in one
+session that returned identical text are **one row**, and `_UPSERT_LINK`'s
+`DO UPDATE SET tool = EXCLUDED.tool, correlation_id = EXCLUDED.correlation_id` relabelled that row
+with whichever call wrote last. A fetch then served the right body under another call's tool name
+and another turn's correlation id — the id `StoredToolResult` calls "the join a GxP reviewer asks
+for" — with nothing in the payload saying so. That is precisely the near-miss pairing the paragraph
+above refuses, arrived at from the other side.
+
+It is also guaranteed rather than hypothetical. `include_detailed_errors` is off
+(`agent/tool_authz.py` records the reasoning), so **every** unexpected tool exception in the system
+returns the byte string `"Error: Function failed."` — one blob per session, covering every failed
+call it ever makes.
+
+So the write **collapses a disagreeing label to `''` instead of overwriting it**: `tool` and
+`correlation_id` keep their value while every call that produced these bytes agrees on it, and go
+empty the moment one does not. Empty means "the store will not name one call", which is the honest
+answer for a row that belongs to several, and it is monotone — `''` disagrees with every subsequent
+write, so a collapsed row cannot silently un-collapse. `created_at` still moves on a repeat, because
+it is the retention clock rather than a label.
+
+Rekeying the link on the *call* was the other candidate and does not solve this one. The id is
+reachable — `ToolCallTrace.feed` holds it while it builds the result event, so widening `ResultSink`
+from `(tool, text)` to carry it is a small change. What it cannot change is the *read*: the fetch
+route is `…/tool-results/{ref}` and a ref names bytes, so several call rows would match one
+`(session, ref)` and the route would be back to choosing one — with more rows, a primary-key
+migration, and the same ambiguity at the end of it. Naming no call is available
+without either.
+
+Two calls that returned identical text do share one ref, and that is the store's dedup working as
 designed (D-011 applied to bytes): the bytes are the same bytes, and either call resolves to them.
+What the dedup costs is the two labels, and the row now says so.
 
 **2. The address is *checked* against the store before it is advertised.** A computed address is not
 a promise. It is derivable for results the store never took — it is off (`stream_max_result_bytes`
@@ -86,15 +121,29 @@ query inside the projection would have ended that.
   `GET /sessions/{id}/tool-results/{ref}` changes** — `TranscriptToolCall.result_ref` is additive
   and is the same handle, resolved the same way.
 - `GET /sessions/{id}/messages` now makes one bounded database read per reload (`SELECT
-  content_hash FROM tool_result_links WHERE session_id = …`, served by the index migration 042
-  already creates). It is skipped entirely when `stream_max_result_bytes` is 0, since a store that
-  is off has nothing to be asked about.
+  content_hash FROM tool_result_links WHERE session_id = …`), served by the table's **primary key**
+  — `(session_id, content_hash)` holds both the predicate and the projection. Measured on 20,000
+  links over 200 sessions: `Index Only Scan using tool_result_links_pkey`, `Heap Fetches: 0`. Not by
+  `tool_result_links_session_idx`, which an earlier draft named: that index is
+  `(session_id, created_at DESC)` and carries no `content_hash`, so it answers a different question.
+  The read is skipped entirely when `stream_max_result_bytes` is 0, since a store that is off has
+  nothing to be asked about.
 - The identity between the producer's ref and the transcript's ref is a property of MAF's content
   handling rather than of a shared function, so it is pinned by a test that drives *both* real paths
-  — `ToolCallTrace` with a sink for one derivation, `_transcript` over a round-tripped MAF `Message`
-  for the other — and asserts they agree. A shared helper would have been the other way to get this,
-  and it would have put `api/runner_trace`'s duck-typed result reader into `api/schemas.py`'s import
-  graph to buy a guarantee the test already gives.
+  from one MAF turn — `ToolCallTrace` fed the real `Content` objects for one derivation,
+  `_transcript` reading those same contents back through `to_dict`/`from_dict` for the other — and
+  asserts they agree. The result under test is a `dict` the tool never stringified, so the coercion
+  the claim rests on actually happens inside the test; feeding both sides the same string literal
+  (which the first version did) asserts only that `content_address` is deterministic and would stay
+  green through the MAF upgrade this is meant to catch. A shared helper would have been the other
+  way to get this, and it would have put `api/runner_trace`'s duck-typed result reader into
+  `api/schemas.py`'s import graph to buy a guarantee the test already gives.
+- `StoredToolResult.tool` and `.correlation_id` are now **empty when the store cannot name one
+  call**, and a client must read an empty one as "unknown" rather than as a value. That is a
+  visible change to the fetch response, and it is a narrowing of a claim rather than a loss: the
+  field previously always held a name, and for a shared blob the name it held was one arbitrary
+  call's. `text`, `byte_size` and `ref` are never ambiguous — those are the bytes the ref addresses,
+  and every call that produced them produced exactly these.
 - What this deliberately does **not** do: persist anything new. Plan snapshots, attachment
   references and the answer's `confidence`/`review_required` are still turn-time events that nothing
   writes to `session_messages`, and recovering those remains a change to what a turn *stores* rather

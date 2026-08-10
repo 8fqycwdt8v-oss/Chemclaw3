@@ -240,7 +240,7 @@ def require_molecule(smiles: str) -> Chem.Mol:
     `screen_hazards("CCO junk")` returned a clean screen **of ethanol** and echoed `CCO` as the
     structure it had looked at.
 
-    Two inputs RDKit accepts and this rejects, each measured against this build:
+    Three inputs RDKit accepts and this rejects, each measured against this build:
 
     - **A string with embedded whitespace.** The parser treats any whitespace as the end of the
       structure and ignores the rest, so `"CCO junk"`, `"CCO 1"` and the tab-separated form are all
@@ -248,6 +248,16 @@ def require_molecule(smiles: str) -> Chem.Mol:
       not fail, it narrows to a *different, smaller molecule* than the caller submitted.
     - **The empty string**, which parses to a molecule with no atoms — a key for nothing, or a
       screen that matches nothing.
+    - **A string carrying a non-ASCII character at either end.** SMILES is written in printable
+      ASCII, and RDKit skips a run of non-ASCII bytes at the *edges* of the string while failing on
+      one between two atoms: `"°C"` is methane, `"CC°"` and `"°CC°"` are ethane, `"C°C"` is a parse
+      error. That is the whitespace truncation wearing a different character, and prose is what
+      produces it: a note body's code span reading `` `80 °C` `` offers `°C` as a candidate
+      structure, and a bare parse calls it methane. `science/safety/notes.py` cuts a span on the
+      same character class before it asks anything, so the rule is one statement made twice — a
+      refusal here, a separator there. Tested on the string rather than on the parsed molecule
+      because that is where the evidence is: once RDKit has skipped the character, nothing about
+      the molecule says it was ever there.
 
     Surrounding whitespace is stripped rather than refused: a leading newline is a copy-paste
     artifact, not a second molecule. The message quotes the caller's own string, not the stripped
@@ -256,6 +266,8 @@ def require_molecule(smiles: str) -> Chem.Mol:
     stripped = smiles.strip()
     if not stripped or any(ch.isspace() for ch in stripped):
         raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
+    if not stripped.isascii():
+        raise InvalidSmilesError(f"invalid SMILES (non-ASCII characters): {smiles!r}")
     mol = Chem.MolFromSmiles(stripped)
     if mol is None or mol.GetNumAtoms() == 0:
         raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")

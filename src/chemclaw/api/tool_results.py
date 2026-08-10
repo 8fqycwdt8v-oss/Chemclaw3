@@ -55,12 +55,37 @@ _INSERT_BLOB = """
 # from three weeks ago while two of its links are from this morning. The bytes are still stored
 # once; only the clock moves.
 
+# **`tool` and `correlation_id` collapse to `''` on disagreement rather than taking the last
+# writer's word**, and that is the one place a *label* can be wrong here. The row is keyed on
+# `(session_id, content_hash)`, so two calls in one session that returned identical text are one
+# row; `SET tool = EXCLUDED.tool` then relabelled that row with whichever call wrote last, and the
+# fetch route served the right bytes under a different call's tool name and correlation id — with
+# nothing in the payload saying so, which is exactly the near-miss pairing
+# `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one` refuses on the read side ("a mispaired
+# result is worse than an absent one").
+#
+# Guaranteed rather than hypothetical: `include_detailed_errors` is off (`agent/tool_authz.py`
+# documents why), so **every** unexpected tool exception in the system returns the same byte string
+# "Error: Function failed." — one blob per session for every failed call it ever makes, and the
+# `correlation_id` `StoredToolResult` calls "the join a GxP reviewer asks for" would name one
+# arbitrary turn among them.
+#
+# An empty column is the honest answer: these bytes are not one call's, so the store names no call.
+# It is a `CASE` rather than a read-modify-write because it must stay one statement on the turn
+# path, and it is monotone — once a value disagrees it is `''`, and `''` disagrees with every
+# subsequent write, so the collapse never silently un-collapses. `created_at` still moves, because
+# it is the retention clock (above) and not a label.
 _UPSERT_LINK = """
     INSERT INTO tool_result_links (session_id, content_hash, tool, correlation_id)
     VALUES (%s, %s, %s, %s)
     ON CONFLICT (session_id, content_hash) DO UPDATE SET
-        tool = EXCLUDED.tool,
-        correlation_id = EXCLUDED.correlation_id,
+        tool = CASE
+            WHEN tool_result_links.tool = EXCLUDED.tool THEN EXCLUDED.tool ELSE ''
+        END,
+        correlation_id = CASE
+            WHEN tool_result_links.correlation_id = EXCLUDED.correlation_id
+            THEN EXCLUDED.correlation_id ELSE ''
+        END,
         created_at = now()
 """
 
@@ -78,8 +103,15 @@ _SELECT_RESULT = """
 # Which of a session's results are fetchable *right now* — the transcript's question, asked once
 # per reload rather than once per tool call. Only the links are read: `ON DELETE CASCADE` (042)
 # means a link cannot outlive its blob, so the link's existence is the blob's existence, and
-# joining `tool_result_blobs` would re-derive a fact the foreign key already guarantees. Served by
-# `tool_result_links_session_idx`.
+# joining `tool_result_blobs` would re-derive a fact the foreign key already guarantees.
+#
+# Served by the table's **primary key**, `(session_id, content_hash)`: the predicate is its leading
+# column and the projection is its second, so the whole answer is inside the index. Measured on
+# 20,000 links over 200 sessions — `Index Only Scan using tool_result_links_pkey`, `Heap Fetches:
+# 0`. Not by `tool_result_links_session_idx`, which this comment used to name: that index is
+# `(session_id, created_at DESC)` and carries no `content_hash`, so it cannot answer this query
+# without going to the heap. It exists for a recency-ordered read of a session's links, which is a
+# different question and not one this module asks.
 _SELECT_SESSION_REFS = "SELECT content_hash FROM tool_result_links WHERE session_id = %s"
 
 
@@ -93,6 +125,16 @@ class StoredToolResult(BaseModel):
 
     `correlation_id` rides along so a fetched result joins the audit trail and the logs of the turn
     that produced it, which is the join a GxP reviewer asks for and the one a ref alone cannot make.
+
+    **Both `tool` and `correlation_id` are empty when the store cannot name one call**, and a
+    reader must treat an empty one as "unknown" rather than as a value. A ref names *bytes*: two
+    calls in one session that returned identical text share one blob and one link row by design
+    (D-011 applied to bytes), and there is then no single tool or turn the row belongs to. The
+    write collapses a disagreeing column to `''` rather than overwriting it with the newest call's
+    (see `_UPSERT_LINK`), because a label that is right most of the time is the failure mode this
+    whole surface is built to avoid — and "Error: Function failed." makes it a certainty, not an
+    edge case. What is never ambiguous is `text`: those are the bytes the ref addresses, and every
+    call that produced them produced exactly these.
     """
 
     ref: str

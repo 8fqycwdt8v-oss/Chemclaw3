@@ -179,3 +179,77 @@ result and an empty ref, which is distinguishable from `result is None` ("it ran
 how it ended") and instructs a surface identically to "never stored". Separating "swept" from
 "never stored" would mean a durable record per expired blob on the table that grows per tool call —
 a record of a rendering, which is the thing this store deliberately is not.
+
+---
+
+# Review of the two ADRs above (2026-08-09) — three findings, all fixed here
+
+Three blocking findings against the branch, plus three smaller ones. Both ADRs are unmerged, so
+each decision is corrected in the ADR itself rather than superseded.
+
+## 1 — the safety fix had weakened the hazard gate (BLOCKING)
+
+- [x] `science/safety/notes.py::structures_in` — cuts a code span on every character a SMILES
+      cannot contain (whitespace, control, anything outside printable ASCII) *before* asking the
+      strict predicate, so a span like `` `CN=[N+]=[N-] (2 equiv)` `` is classified rather than
+      dropped. `_is_structure` moving onto `parse_molecule` was half a change: `structures_in` uses
+      it as a **filter**, so the span was not screened narrowly, it was not screened at all.
+      Measured on the branch: `structures_in` `[]`, `hazard_problems` `[]`, against a high-severity
+      `organic-azide` problem before. No heuristic is added and RDKit stays the arbiter — the cut
+      is where the character set ends, which is also what `require_molecule` refuses. It errs
+      towards screening: `` `80 °C` `` yields `C`, i.e. methane, which is the price of keeping
+      `` `CN=[N+]=[N-]°` `` and `` `CN=[N+]=[N-]—the azide` `` screened.
+- [x] `core/chem.py::require_molecule` — non-ASCII refused too, since RDKit skips a non-ASCII run
+      at the *edges* of a string (`"°C"` is methane, `"CC°"` is ethane, `"C°C"` is an error). One
+      gate, so the case is added once for every caller; the note gate makes the same statement as a
+      separator rather than a refusal.
+- [x] `connectors/bo/knowledge.py::_molecule_in` — the docstring's "the same arbiter … that
+      `structures_in` applies" was false. Kept lenient and says why: its `True` is what puts a value
+      in backticks, and backticks are what the gate reads, so strictness there would hide an
+      annotated level from the screen entirely.
+- [x] `tests/test_safety.py` — the annotated-span test that would have caught it, six span shapes
+      parametrized, and the hard constraint as a **generated** property: no note loses a flag the
+      lenient predicate would have raised, over Hypothesis-built spans, checked against a
+      re-implementation of the old extraction. Verified to fail against the branch's version.
+
+## 2 — a one-line crash on the reload route (BLOCKING)
+
+- [x] `api/schemas.py::_transcript` — coerces a non-`str` `result` with `str()` before hashing it.
+      Unreachable through this MAF (`Content.from_function_result` coerces), reachable from a row
+      another version wrote — and it was an `AttributeError` inside `content_address`, i.e. a 500 on
+      `GET /sessions/{id}/messages` that costs a chemist the whole conversation. `str()` and not
+      `repr()`, because `runner_trace._result_text` coerces the producer's side that way and the ref
+      only means anything if both hash the same bytes. Test pins both.
+
+## 3 — the link row's labels were last-writer-wins (BLOCKING)
+
+- [x] `api/tool_results.py::_UPSERT_LINK` — `tool` and `correlation_id` collapse to `''` when a
+      second call disagrees, instead of being overwritten. The row is keyed
+      `(session_id, content_hash)`, so two calls returning identical text are one row; every failed
+      call in the system returns the same `"Error: Function failed."` (`include_detailed_errors` is
+      off), so the relabelling was guaranteed, not hypothetical. Verified against a real Postgres:
+      two calls → `('', '')` with the bytes intact, a third disagreeing write stays empty, and the
+      same call twice keeps its labels. Rekeying on the call id was rejected in the ADR: the fetch
+      route is `…/{ref}`, so several call rows would still match one read.
+- [x] `StoredToolResult` docstring, migration 042's column comment and the ADR now say what the
+      code does — empty means "the store will not name one call".
+
+## Also fixed
+
+- [x] `require_screenable_size` refuses an empty list: `screen_hazards([])` was a clean screen of
+      nothing, which is the thesis of the whole ADR inverted.
+- [x] `fetchable_refs`'s index comment named `tool_result_links_session_idx`, which is
+      `(session_id, created_at DESC)` and cannot serve the query. Measured on 20,000 links over 200
+      sessions: `Index Only Scan using tool_result_links_pkey`, `Heap Fetches: 0`.
+- [x] The producer/transcript identity test fed the same literal to both sides through a hand-rolled
+      double, so it only proved `content_address` is deterministic. It now builds one MAF turn from
+      a `dict` through `Content.from_function_result`, drives `ToolCallTrace` with the real contents
+      and `_transcript` with their `to_dict`/`from_dict` round trip — a MAF coercion change fails it.
+
+**Verification.** `make lint type test` green. The Postgres-backed tool-result tests, which skip in
+this sandbox, were run for real against a locally-initialized Postgres 16 (with the two pgvector
+0.7 indexes of migrations 002/003 removed from a scratch copy, the sandbox's shipped pgvector being
+0.6.0): 24 passed. Two failures on `main` are unrelated and unchanged —
+`tests/test_properties_core.py::test_a_note_survives_the_write_read_round_trip` (a Hypothesis
+lone-surrogate draw) and the 84% coverage floor, which `main` measures at 82.82% locally because the
+Postgres and Temporal suites skip here.
