@@ -72,12 +72,15 @@ BEGIN
     -- the sequence *is* the history (031), so an UPDATE would rewrite it.
     EXECUTE format('GRANT INSERT ON bo_suggestions TO %I', app_role);
 
-    -- Insert and delete, no update: `session_owners` upserts with `DO NOTHING` (first writer wins),
-    -- so it needs no UPDATE — but offboarding removes a departed person's ownership rows along with
-    -- the sessions they key (`chemclaw.agent.leaver`), so it does need DELETE. Kept on its own line
-    -- because that combination is unlike every other group here, and folding it into the full-DML
-    -- list below would silently hand it the UPDATE its writer deliberately does not use.
-    EXECUTE format('GRANT INSERT, DELETE ON session_owners TO %I', app_role);
+    -- Insert, delete, and now a narrow update. The row is still written once by its creator
+    -- (`ON CONFLICT DO NOTHING`, first writer wins), and offboarding removes a departed person's
+    -- ownership rows along with the sessions they key (`chemclaw.agent.leaver`), which is the
+    -- DELETE. The UPDATE is `set_title_if_absent`: a session is named after its opening question,
+    -- and that name is not known until the first turn arrives, so it cannot be part of the insert.
+    -- Guarded by `title IS NULL` in the statement itself, so the privilege is wider than the write
+    -- — SQL has no column-level "only while null" — which is the usual shape and the reason this
+    -- group is still spelled out on its own line rather than folded into the full-DML list below.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
 
     -- Full DML, because the application genuinely deletes from these: the retention sweep prunes
     -- conversation history and spent mailbox rows, artifact eviction reclaims cold blobs, a turn

@@ -236,11 +236,26 @@ def test_session_owner_records_and_reattaches() -> None:
     asyncio.run(_run())
 
 
-def test_session_owner_lists_only_its_own_sessions_newest_first() -> None:
-    """Listing is owner-scoped and newest-first — what `GET /sessions` renders as the sidebar.
+async def _spoke_in(session_id: str, text: str = "a turn") -> None:
+    """Give a session one stored message, which is what makes it a conversation rather than a row.
+
+    Through the real provider rather than a raw INSERT: the listing derives last-activity from
+    `session_messages.created_at`, so the two have to agree about what a turn writes.
+    """
+    await PostgresHistoryProvider().save_messages(
+        session_id, [Message(role="user", contents=[text])]
+    )
+
+
+def test_session_owner_lists_only_its_own_sessions_most_recently_used_first() -> None:
+    """Listing is owner-scoped and most-recently-used first — the sidebar `GET /sessions` renders.
 
     A dedicated owner string per test: the table is shared across this module's cases, so scoping
     to a real owner is also what keeps the assertion independent of the other rows in there.
+
+    Ordered by the last stored message, not by when the row was created. Those disagree for exactly
+    the conversation a chemist is most likely to want — an old one they have come back to — which
+    under the previous ordering was pinned to the bottom of the list forever.
     """
 
     async def _run() -> None:
@@ -249,14 +264,83 @@ def test_session_owner_lists_only_its_own_sessions_newest_first() -> None:
         await store.record("sess-list-a", "owner-list-test")
         await store.record("sess-list-b", "owner-list-test")
         await store.record("sess-list-other", "someone-else")
+        await _spoke_in("sess-list-a")
+        await _spoke_in("sess-list-b")
+        await _spoke_in("sess-list-other")
 
         listed = await store.list_for_owner("owner-list-test")
-        assert {session_id for session_id, _ in listed} == {"sess-list-a", "sess-list-b"}
-        # created_at defaults to now(), so newest-first is a descending sort on it.
-        assert [created for _, created in listed] == sorted(
-            (created for _, created in listed), reverse=True
-        )
+        assert [session_id for session_id, *_ in listed] == ["sess-list-b", "sess-list-a"]
+        assert [row[2] for row in listed] == sorted((row[2] for row in listed), reverse=True)
         assert await store.list_for_owner("owner-with-no-sessions") == []
+
+        # The older conversation, returned to, comes back to the top.
+        await _spoke_in("sess-list-a", "and one more thing")
+        listed = await store.list_for_owner("owner-list-test")
+        assert [session_id for session_id, *_ in listed] == ["sess-list-a", "sess-list-b"]
+
+    asyncio.run(_run())
+
+
+def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
+    """A created-but-unused session is not a conversation and is not listed as one.
+
+    The companion UI creates the session on the first keystroke so the first message costs one
+    round-trip instead of two, so every abandoned draft leaves an ownership row behind. The lateral
+    join that establishes last-activity is what drops them: no messages, no `max(created_at)`, no
+    row. Deriving the two facts in one query is why this needs no separate cleanup job.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-warmed-unused", "owner-warmed-test")
+        await store.record("sess-warmed-used", "owner-warmed-test")
+        await _spoke_in("sess-warmed-used")
+
+        listed = [session_id for session_id, *_ in await store.list_for_owner("owner-warmed-test")]
+        assert listed == ["sess-warmed-used"]
+
+    asyncio.run(_run())
+
+
+def test_session_owner_keeps_the_title_its_first_turn_gave_it() -> None:
+    """A conversation is named by how it started, and a later turn must not rename it.
+
+    The route calls this on every turn — it has no cheap way to know which one is first — so the
+    `title IS NULL` guard is what makes that safe. Without it a sidebar entry would change under a
+    chemist on every message, which is the one thing a navigation label must not do.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-title", "owner-title-test")
+        await _spoke_in("sess-title")
+
+        await store.set_title_if_absent("sess-title", "What is the pKa of acetic acid?")
+        await store.set_title_if_absent("sess-title", "And in DMSO?")
+
+        listed = await store.list_for_owner("owner-title-test")
+        assert [row[3] for row in listed] == ["What is the pKa of acetic acid?"]
+
+    asyncio.run(_run())
+
+
+def test_session_owner_lists_an_unnamed_session_rather_than_dropping_it() -> None:
+    """A session whose first turn predates the title column is listed with `title=None`.
+
+    Null is the honest value and the row still belongs in the list — hiding a conversation because
+    the service cannot name it would lose history to a schema change.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-untitled", "owner-untitled-test")
+        await _spoke_in("sess-untitled")
+
+        listed = await store.list_for_owner("owner-untitled-test")
+        assert [(row[0], row[3]) for row in listed] == [("sess-untitled", None)]
 
     asyncio.run(_run())
 
@@ -273,8 +357,9 @@ def test_session_owner_lists_the_null_owner_sessions() -> None:
         await migrated_db_or_skip()
         store = SessionOwnerStore()
         await store.record("sess-list-null", None)
+        await _spoke_in("sess-list-null")
         listed = await store.list_for_owner(None)
-        assert "sess-list-null" in {session_id for session_id, _ in listed}
+        assert "sess-list-null" in {session_id for session_id, *_ in listed}
 
     asyncio.run(_run())
 

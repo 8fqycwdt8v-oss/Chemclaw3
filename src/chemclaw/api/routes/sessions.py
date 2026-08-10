@@ -85,13 +85,20 @@ async def list_sessions(
     Empty under the in-memory session store: there is no durable registry to enumerate, and
     reporting the process's live LRU instead would answer a question about the deployment
     with a partial, eviction-dependent guess.
+
+    Ordered by last activity and carrying each session's name, because a list of ids and start
+    dates is not a conversation list — see `SessionSummary`. Sessions that were created and never
+    used are not listed at all; the query that establishes the last activity is the same one that
+    establishes there was any.
     """
     owners: SessionOwners | None = state(request).session_owners
     if owners is None:
         return []
     return [
-        SessionSummary(session_id=session_id, created_at=created_at)
-        for session_id, created_at in await owners.list_for_owner(principal.oid)
+        SessionSummary(
+            session_id=session_id, created_at=created_at, updated_at=updated_at, title=title
+        )
+        for session_id, created_at, updated_at, title in await owners.list_for_owner(principal.oid)
     ]
 
 

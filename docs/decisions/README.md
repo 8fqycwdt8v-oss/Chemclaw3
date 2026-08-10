@@ -315,3 +315,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-09-a-scope-that-matches-no-point](D-2026-08-09-a-scope-that-matches-no-point.md) | The group moved to the cutting and the scope stayed at the document |
 | [D-2026-08-09-a-twin-rule-is-one-string](D-2026-08-09-a-twin-rule-is-one-string.md) | A twin rule is one string, and a guard must be measured |
 | [D-2026-08-09-a-valid-prefix-is-not-a-molecule](D-2026-08-09-a-valid-prefix-is-not-a-molecule.md) | A valid prefix is not a molecule, so a hazard screen refuses it |
+| [D-2026-08-10-a-list-of-ids-is-not-a-conversation-list](D-2026-08-10-a-list-of-ids-is-not-a-conversation-list.md) | A list of ids is not a conversation list, so the service names and orders its own sessions |

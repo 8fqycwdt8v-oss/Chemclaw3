@@ -28,6 +28,11 @@ from chemclaw.kg.proposal import NoteProposal
 # sweep, and a reload must not ship one per call.
 _TRANSCRIPT_ARG_CHARS = 400
 
+# How much of the opening message becomes the session's name. Sized so a client can truncate to
+# whatever its sidebar is wide enough for — a server that pre-truncated to 40 would have thrown away
+# what a wider surface wanted, and nothing downstream can put it back.
+_TITLE_CHARS = 120
+
 
 class MessageIn(BaseModel):
     """One turn's user message posted to the messages endpoint."""
@@ -68,10 +73,24 @@ class SessionOut(BaseModel):
 
 
 class SessionSummary(BaseModel):
-    """One of the caller's sessions, for the conversation list."""
+    """One of the caller's sessions, for the conversation list.
+
+    `session_id` and `created_at` were the whole of this, and a sidebar cannot be built from them:
+    there is no name to show and no way to order by recency. The companion UI worked around it by
+    labelling every restored conversation with the same placeholder and renaming it only once the
+    chemist opened it and its transcript came back — so ten restored conversations were ten
+    identical rows until nine of them had been clicked.
+
+    `updated_at` is the last stored message, not this row's `created_at`, which is when the session
+    was *started* — the difference between "what have I been working on" and "what did I once open".
+    """
 
     session_id: str
     created_at: datetime
+    updated_at: datetime
+    # Null for a session whose first turn predates this field, so a client can tell "never named"
+    # from "named with an empty string" — only one of those is a bug worth reporting.
+    title: str | None = None
 
 
 class TranscriptToolCall(BaseModel):
@@ -238,6 +257,22 @@ class PlanStatusOut(BaseModel):
     mode: str
     approved: bool
     decided_by: str | None = None
+
+
+def session_title(message: str) -> str:
+    """A session's name, from the message that opened it.
+
+    Here, in the pure-projections half of this module, because that is what it is: the turn route
+    hands over the user's message as a plain string and gets back the string to store. Deriving it
+    from the *stored* message instead would mean reading the MAF payload out of `session_messages`,
+    which `infra/sql/008_sessions.sql` is explicit the store must not interpret.
+
+    Collapsed and bounded, not summarised. A title that paraphrases is a title that can be wrong,
+    and this one names a row a chemist navigates by. The cap is generous — enough that a surface can
+    truncate to its own width without the server having pre-truncated to a narrower one, which is
+    the mistake that cannot be undone downstream.
+    """
+    return " ".join(message.split())[:_TITLE_CHARS]
 
 
 def _transcript(
