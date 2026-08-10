@@ -6,13 +6,31 @@ against hand-written dicts. A hand-written fixture proves the converter agrees w
 the fixture; a real `Message.to_dict()` proves it agrees with the thing that wrote the rows.
 """
 
+import asyncio
 from typing import Any
 
 import pytest
 from agent_framework import Content, Message
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    messages_from_dict,
+)
+from psycopg.types.json import Jsonb
 
-from chemclaw.agent.message_migration import UnconvertibleMessage, to_langchain
+from chemclaw.agent.message_migration import (
+    LANGCHAIN_SHAPE,
+    MAF_SHAPE,
+    UnconvertibleMessage,
+    convert_stored_messages,
+    to_langchain,
+)
+from chemclaw.agent.session_store import PostgresHistoryProvider
+from chemclaw.core import db
+from chemclaw.core.config import settings
+from tests.pg import migrated_db_or_skip
 
 
 def _stored(role: str, *contents: Content) -> dict[str, Any]:
@@ -119,3 +137,136 @@ def test_a_tool_message_holding_no_result_is_refused() -> None:
     """The `tool` role with no `function_result` is not something to invent a body for."""
     with pytest.raises(UnconvertibleMessage, match="function_result"):
         to_langchain({"type": "message", "role": "tool", "contents": []})
+
+
+# --- the rehearsal, against a real table ---------------------------------------------------------
+#
+# The plan names this as the mitigation for the migration's one irreversible step, and it is a
+# different test from everything above: those prove the conversion is right about a payload, this
+# proves the *pass* is right about a table. Rows are seeded through `PostgresHistoryProvider` rather
+# than by INSERT, so what is converted is what the production writer actually stores — a hand-built
+# row would rehearse a shape nobody writes.
+
+
+def _run(coro: Any) -> Any:
+    return asyncio.run(coro)
+
+
+async def _seeded(session_id: str) -> PostgresHistoryProvider:
+    """A migrated database holding one realistic exchange written by the real provider."""
+    await migrated_db_or_skip()
+    provider = PostgresHistoryProvider()
+    await provider.save_messages(
+        session_id,
+        [
+            Message(role="user", contents=[Content.from_text("what is the pKa of phenol?")]),
+            Message(
+                role="assistant",
+                contents=[
+                    Content.from_text("computing"),
+                    Content.from_function_call(
+                        call_id="c1", name="predict_pka", arguments={"smiles": "Oc1ccccc1"}
+                    ),
+                ],
+            ),
+            Message(
+                role="tool",
+                contents=[Content.from_function_result(call_id="c1", result="pKa 9.95")],
+            ),
+            Message(role="assistant", contents=[Content.from_text("about 9.95")]),
+        ],
+    )
+    return provider
+
+
+def test_a_real_stored_conversation_converts_whole() -> None:
+    """Every row a real turn wrote converts, and the exchange survives readable.
+
+    The pairing is what is actually at risk: a conversion that dropped `tool_call_id` would leave a
+    transcript no provider accepts as a continuation, and nothing about a per-row conversion makes
+    that visible one row at a time.
+    """
+    session_id = "sess-m6-rehearsal"
+    _run(_seeded(session_id))
+
+    outcome = _run(convert_stored_messages())
+
+    assert outcome.converted >= 4
+
+    # Asserted per session rather than through `outcome.is_complete()`: the pass converts the whole
+    # table, so a refusal deliberately planted by another test in this file would make a global
+    # assertion depend on test order. What this test claims is about *its* conversation.
+    rows = _run(_rows_for(session_id))
+    shapes = {shape for _, shape in rows}
+    assert shapes == {LANGCHAIN_SHAPE}, f"unconverted rows left behind: {shapes}"
+
+    restored = [messages_from_dict([payload])[0] for payload, _ in rows]
+    assert [type(m).__name__ for m in restored] == [
+        "HumanMessage",
+        "AIMessage",
+        "ToolMessage",
+        "AIMessage",
+    ]
+    call_ids = {c["id"] for m in restored if isinstance(m, AIMessage) for c in m.tool_calls}
+    answered = {m.tool_call_id for m in restored if isinstance(m, ToolMessage)}
+    assert call_ids == answered, "the call/result pairing did not survive the conversion"
+
+
+def test_a_second_pass_converts_nothing() -> None:
+    """Resumability: the pass selects only rows still stamped `maf`, so re-running is a no-op.
+
+    That is what makes an interrupted conversion safe to simply run again — and it is worth an
+    assertion rather than an argument, because "idempotent" is the sort of claim that is true until
+    someone adds an `OR message_shape IS NULL`.
+    """
+    _run(_seeded("sess-m6-idempotent"))
+    _run(convert_stored_messages())
+
+    assert _run(convert_stored_messages()).converted == 0
+
+
+def test_a_row_the_converter_refuses_is_left_exactly_as_it_was() -> None:
+    """A refusal must not consume the row, or the evidence is gone and the pass cannot resume.
+
+    Aborting the whole pass instead was the alternative, and it is worse: one unreadable message
+    would block every row after it. Reporting the id and moving on is what lets an operator look at
+    the row while the rest of the table converts.
+    """
+    session_id = "sess-m6-refused"
+    _run(_seeded(session_id))
+    bad = _run(_insert_raw(session_id, {"type": "message", "role": "developer", "contents": []}))
+
+    outcome = _run(convert_stored_messages())
+
+    assert bad in outcome.refused
+    shapes = dict(_run(_shape_of(bad)))
+    assert shapes[bad] == MAF_SHAPE, "a refused row was stamped as converted"
+
+
+async def _rows_for(session_id: str) -> list[tuple[dict[str, Any], str]]:
+    """Every stored row for one session, as `(payload, shape)` in insertion order."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        )
+        return [(row[0], row[1]) for row in await cur.fetchall()]
+
+
+async def _insert_raw(session_id: str, payload: dict[str, Any]) -> int:
+    """Insert a row the provider would never write, to exercise the refusal path."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO session_messages (session_id, message) VALUES (%s, %s) RETURNING id",
+            (session_id, Jsonb(payload)),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+        return int(row[0])  # type: ignore[index]
+
+
+async def _shape_of(row_id: int) -> list[tuple[int, str]]:
+    """The stamp on one row."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT id, message_shape FROM session_messages WHERE id = %s", (row_id,))
+        return [(int(r[0]), r[1]) for r in await cur.fetchall()]

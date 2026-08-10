@@ -7,10 +7,14 @@ rather than a schema change, and it is also why the conversion has to live somew
 a real conversation history that chemists can still read, so they cannot simply be dropped when the
 engine changes.
 
-**This module is pure.** No database, no settings, no clock — a dict in, a dict out. The one
-irreversible step in the whole migration is rewriting rows, so the part that decides *what* each row
-becomes is kept where it can be exhaustively tested without a Postgres, and the part that decides
-*which* rows to rewrite is somewhere else entirely.
+**Two halves, and the split is the point.** `to_langchain` is pure — a dict in, a message out, no
+database, no settings, no clock — so the decision about *what* each row becomes can be tested
+exhaustively against payloads MAF itself produced, with no Postgres in reach.
+`convert_stored_messages` is the pass that decides *which* rows to rewrite, and it is resumable and
+refusal-tolerant precisely because rewriting rows is the one irreversible step. Keeping them in one
+module
+rather than two is deliberate: they are read together, and a converter whose caller lives elsewhere
+invites a second caller that converts differently.
 
 **Why a shape version rather than an in-place rewrite.** A row is stamped with the shape it holds,
 and both shapes read. Two reasons, and the second is the one that matters:
@@ -28,6 +32,8 @@ being silently coerced into text — a message that arrives at the model subtly 
 migration that stops and says which row it could not read.
 """
 
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import (
@@ -36,7 +42,18 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
     ToolMessage,
+    message_to_dict,
 )
+from psycopg.types.json import Jsonb
+
+# The store's own DSN resolver and pooled-connection helper, private but shared within the package
+# for the reason they exist at all: `_session_dsn` is "one resolver for all three classes so they
+# can never point at different databases". A conversion pass that resolved its own DSN could
+# rewrite a different database from the one the provider reads, which is the single worst thing
+# this module could do.
+from chemclaw.agent.session_store import _session_connection, _session_dsn
+
+logger = logging.getLogger(__name__)
 
 # The stamp that says which shape a row's `message` column holds. Absent means MAF, because every
 # row written before this migration has no stamp and rewriting them all to add one is the very
@@ -135,3 +152,80 @@ def _result_text(content: dict[str, Any]) -> str:
     items = content.get("items") or []
     rendered = "".join(item.get("text", "") for item in items if item.get("type") == "text")
     return rendered or str(result if result is not None else "")
+
+
+@dataclass(frozen=True, slots=True)
+class ConversionOutcome:
+    """What one conversion pass did, and what it refused.
+
+    `refused` carries row ids rather than a count alone: the whole reason this pass can refuse is
+    that a stored message has no example to check a guess against, and the only useful next step is
+    to go and look at the row.
+    """
+
+    converted: int
+    refused: tuple[int, ...]
+
+    def is_complete(self) -> bool:
+        """Whether every row this pass saw was converted."""
+        return not self.refused
+
+
+# One session's rows are read whole because the conversion is per row and order-free; the batch
+# bounds *memory*, not correctness, so a value that keeps a page of rows comfortably in hand is the
+# whole requirement. It is a parameter rather than a setting because nobody tunes a one-off.
+_BATCH = 500
+
+_SELECT_MAF = (
+    "SELECT id, message FROM session_messages "
+    f"WHERE message_shape = '{MAF_SHAPE}' ORDER BY id LIMIT %s"
+)
+_MARK_CONVERTED = (
+    f"UPDATE session_messages SET message = %s, message_shape = '{LANGCHAIN_SHAPE}' WHERE id = %s"
+)
+
+
+async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
+    """Rewrite every MAF-shaped row into LangChain shape, stamping each as it goes.
+
+    **Resumable by construction, which is what makes an irreversible step survivable.** The pass
+    selects only rows still stamped `maf`, so running it twice converts nothing twice and an
+    interrupted run simply continues where it stopped. Nothing is deleted and nothing is rewritten
+    in place without its stamp changing in the same statement, so there is no window in which a row
+    holds one shape and claims the other.
+
+    A row the converter refuses is **left exactly as it was**, stamp included, and reported. The
+    alternative — aborting the whole pass on the first refusal — would make one unreadable message
+    block the conversion of every row after it, which is the opposite of what a resumable pass is
+    for. The caller decides whether a refusal is worth stopping over; this reports it.
+
+    Args:
+        batch: How many rows to hold in memory at once. Bounds memory, not correctness.
+
+    Returns:
+        What was converted and which rows were refused.
+    """
+    converted = 0
+    refused: list[int] = []
+    async with _session_connection(_session_dsn()) as conn:
+        while True:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_MAF, (batch + len(refused),))
+                rows = [(int(row[0]), row[1]) for row in await cur.fetchall()]
+            pending = [(row_id, payload) for row_id, payload in rows if row_id not in set(refused)]
+            if not pending:
+                return ConversionOutcome(converted, tuple(refused))
+            updates = []
+            for row_id, payload in pending:
+                try:
+                    message = to_langchain(payload)
+                except UnconvertibleMessage:
+                    logger.warning("session_messages row %d could not be converted", row_id)
+                    refused.append(row_id)
+                    continue
+                updates.append((Jsonb(message_to_dict(message)), row_id))
+            if updates:
+                async with conn.cursor() as cur:
+                    await cur.executemany(_MARK_CONVERTED, updates)
+                await conn.commit()
+                converted += len(updates)

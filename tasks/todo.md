@@ -133,6 +133,14 @@ never what a deployment gets.
 - [x] `infra/sql/043_session_message_shape.sql` + the inventory row — a per-row `message_shape`
       stamp defaulting to `maf`, so a non-atomic rollout has no ambiguous rows and the original
       stays readable until the conversion is trusted on real data.
+- [x] `message_migration.convert_stored_messages()` — the resumable pass. Selects only rows still
+      stamped `maf`, so a second run converts nothing and an interrupted one continues; a refused
+      row is left untouched *with its stamp* and reported by id, because aborting the pass would let
+      one unreadable message block every row after it.
+- [x] **The rehearsal is done, against a real table.** Rows are seeded through
+      `PostgresHistoryProvider` rather than by `INSERT`, so what is converted is what the production
+      writer actually stores. Asserts the call/result *pairing* survives — the thing a per-row
+      conversion cannot show one row at a time — plus idempotence and the refusal path.
 - [ ] `AsyncPostgresSaver`; `session_messages` demoted to a read-model projection.
 - [ ] Delete the rollback watermark, the mid-turn-resume wait loop, and `message_pairing.py`'s
       orphan repair — **after** a kill-mid-turn test proves the checkpointer never half-writes.
@@ -456,3 +464,37 @@ migration rehearsal the plan names as the mitigation for the one irreversible st
 converter against a copy of a real `session_messages` — **cannot be performed in this session**.
 The pure conversion is exhaustively tested and the shape stamp makes a bad conversion recoverable,
 but the rehearsal is still owed before any deployment converts a row.
+
+## Running the tests with a real Postgres (no docker here)
+
+`make up` needs docker-compose and this environment has no docker daemon, so 139 tests — the whole
+`session_store` / `message_pairing` / `retention` / `concurrency_claims` surface — were skipping.
+They do not skip any more. The recipe, because the container is reclaimed on inactivity and the
+non-obvious step is easy to lose:
+
+```sh
+apt-get install -y --no-install-recommends postgresql postgresql-contrib postgresql-16-pgvector
+PGBIN=/usr/lib/postgresql/16/bin
+mkdir -p /var/lib/pgdata /var/run/postgresql && chown postgres: /var/lib/pgdata /var/run/postgresql
+su postgres -c "$PGBIN/initdb -D /var/lib/pgdata -A trust --encoding=UTF8"
+su postgres -c "$PGBIN/pg_ctl -D /var/lib/pgdata -l /tmp/pg.log -o '-c listen_addresses=127.0.0.1' start"
+su postgres -c "$PGBIN/psql -h 127.0.0.1 -c \"CREATE ROLE chemclaw LOGIN PASSWORD 'chemclaw' SUPERUSER\""
+su postgres -c "$PGBIN/createdb -h 127.0.0.1 -O chemclaw chemclaw"
+```
+
+**And then the step that is not optional.** apt ships pgvector **0.6.0**; this schema's HNSW indexes
+use `bit_jaccard_ops`, which arrived in **0.7**. With 0.6 every migrated-database test fails at
+`operator class "bit_jaccard_ops" does not exist for access method "hnsw"` — a failure that looks
+like a broken test suite rather than a stale extension. Build it:
+
+```sh
+apt-get update && apt-get install -y --no-install-recommends postgresql-server-dev-16
+git clone --depth 1 --branch v0.8.0 https://github.com/pgvector/pgvector.git /tmp/pgvector
+make -C /tmp/pgvector && make -C /tmp/pgvector install
+su postgres -c "$PGBIN/psql -h 127.0.0.1 -d chemclaw -c 'DROP EXTENSION IF EXISTS vector CASCADE; CREATE EXTENSION vector'"
+```
+
+Measured before and after: **3962 passed / 175 skipped** → **4101 passed / 36 skipped**. What still
+skips is the xtb and crest binaries and the Temporal test server, which needs an outbound download
+this proxy refuses. If this is worth keeping, its permanent home is `docs/guides/runbook.md` or a
+`SessionStart` hook rather than this file.
