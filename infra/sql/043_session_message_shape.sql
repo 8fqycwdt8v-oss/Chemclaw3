@@ -1,0 +1,33 @@
+-- Stamp each stored conversation message with the message *shape* it holds (M6, D-2026-08-10).
+--
+-- 008's DDL states the property this column exists to preserve: `message` holds the MAF
+-- `Message.to_dict()` payload verbatim, and "the store does not interpret it, so a MAF
+-- message-shape change is a value change, not a schema change". That held for as long as there was
+-- one framework. Layer 1 is being rebuilt on LangGraph
+-- (`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`), whose messages are
+-- a different shape entirely, and these rows are a real conversation history chemists can still
+-- read — so they are converted rather than dropped, and a converted row has to be distinguishable
+-- from an unconverted one.
+--
+-- **Why a stamp rather than an in-place rewrite of every row.** Two reasons, and the second is the
+-- one that decides it:
+--
+--   * a rollout is not atomic. While it runs, some rows hold one shape and some the other, and a
+--     reader that cannot tell them apart is a reader that mis-parses half the transcript.
+--   * an unversioned rewrite destroys the evidence. `chemclaw.agent.message_migration` refuses to
+--     guess at a content type this system has never written, but "refuses what it knows it cannot
+--     read" is not the same as "is correct about everything else" — and the way that is found out
+--     is a chemist reading a transcript that looks wrong. Keeping the original readable until the
+--     conversion has been trusted on real data is what makes this step reversible in practice,
+--     whatever the plan calls it.
+--
+-- **The default is `maf`, and it is a statement about history rather than about the future.** Every
+-- row written before this migration holds a MAF payload and carries no stamp; backfilling them all
+-- would be exactly the whole-table rewrite this column exists to avoid. So the absent value means
+-- the old shape, which is what it already means.
+--
+-- No index. The column is read alongside a row that has already been located by
+-- `(session_id, id)` — 008's index — so it narrows nothing that index has not narrowed already, and
+-- a second index on a two-valued column is a write cost with no read to pay for it.
+ALTER TABLE session_messages
+    ADD COLUMN IF NOT EXISTS message_shape TEXT NOT NULL DEFAULT 'maf';

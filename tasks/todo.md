@@ -127,6 +127,12 @@ never what a deployment gets.
       remaining "gate" is in-turn, so there is nothing left for it to unify here.
 
 ### M6 — durable state on the checkpointer
+- [x] `agent/message_migration.py` — the pure MAF-payload → LangChain conversion, tested against
+      payloads produced by MAF itself rather than hand-written dicts. Refuses an unknown role or a
+      result with no `call_id` instead of guessing.
+- [x] `infra/sql/043_session_message_shape.sql` + the inventory row — a per-row `message_shape`
+      stamp defaulting to `maf`, so a non-atomic rollout has no ambiguous rows and the original
+      stays readable until the conversion is trusted on real data.
 - [ ] `AsyncPostgresSaver`; `session_messages` demoted to a read-model projection.
 - [ ] Delete the rollback watermark, the mid-turn-resume wait loop, and `message_pairing.py`'s
       orphan repair — **after** a kill-mid-turn test proves the checkpointer never half-writes.
@@ -400,3 +406,53 @@ departure from "use the framework's machinery", written down where the next read
 
 It ends the run rather than raising, matching MAF: the partial answer still goes out and a surface
 marks it partial. Raising would discard work a chemist is entitled to see.
+
+**M6 (started).** The two pieces that need no database are in and green (3962 passed). The research
+behind the rest was done by three parallel subagents, and it moves M6 in ways the plan did not
+anticipate. Six findings, in descending order of how much they change the phase:
+
+**1. The checkpointer would open a GDPR hole.** `agent/leaver.py::_ERASE` deletes a departing
+person's `session_messages`, `session_events` and `session_turns`, scoped through `session_owners`,
+in a load-bearing order. `AsyncPostgresSaver.setup()` creates **four more tables** —
+`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` — holding the same
+conversation as graph state. Wiring the checkpointer without adding the first three to `_ERASE`
+would leave a departing person's turn state behind an erasure that reports success. This is now the
+first item of M6, not a detail of it, and it needs a test that derives the table list rather than
+restating it.
+
+**2. The blast radius is not `session_store.py`.** Four other places read `session_messages` in MAF
+shape: `durable/retention.py:235` (`Message.from_dict` + `droppable_rows`, inside a *data-destroying*
+nightly sweep), `api/schemas.py::_transcript` (the whole HTTP transcript projection, built on
+`function_call`/`function_result`/`call_id`), `cli/explain.py` (the GxP "why was this run" trail,
+joined on `correlation_id`), and `cli/live_storm.py:890` (`message::text like`). The plan's
+"demote to a read-model projection" has to keep all four working, and `explain.py`'s join means
+whatever writes the projection must keep writing `correlation_id`.
+
+**3. `setup()` cannot run on Chemclaw's pool.** Migrations 6–8 are `CREATE INDEX CONCURRENTLY`,
+which Postgres refuses inside a transaction block, and `core/db.py:142` builds pools without
+`autocommit`, so psycopg opens an implicit transaction on first execute. Needs a dedicated
+autocommit connection or a checkpointer-specific pool — `_pool_for` already keys by `(dsn, options)`,
+so a distinct pool costs nothing structurally.
+
+**4. One `asyncio.Lock` per saver serializes every checkpointer statement**, and `alist` yields
+*inside* both the lock and the borrowed connection. A paginated history read would hold a pooled
+connection for the whole iteration, on a pool shared with the calculation cache and the vector
+index. That is an argument for the separate pool in (3) on its own merits.
+
+**5. A rewind is not a delete, and it becomes the head.** `checkpoint_id` is a UUIDv6, so it sorts
+by time; `aupdate_state` on a historical checkpoint writes a *new* checkpoint into the **same
+thread**, which immediately becomes that thread's tip. So `rollback_to(session_id, watermark)` does
+not map onto "fork and carry on" as cleanly as the ADR implies — measured on a real graph. There is
+an `acopy_thread` for forking elsewhere, and the M6 design has to say which of the two a disconnect
+should do.
+
+**6. State must be msgpack-encodable.** The serde is `JsonPlusSerializer` over ormsgpack with a type
+allowlist, not JSON. `BaseMessage` round-trips exactly (verified, including `tool_calls` and `id`),
+and `ChemclawState`'s own fields are `list[str]`/`int`, so nothing is blocked — but a future state
+field holding a chemclaw model needs `with_allowlist` or it raises at write time.
+
+**And what this environment cannot do.** There is no Postgres and no docker daemon here, so the
+migration rehearsal the plan names as the mitigation for the one irreversible step — running the
+converter against a copy of a real `session_messages` — **cannot be performed in this session**.
+The pure conversion is exhaustively tested and the shape stamp makes a bad conversion recoverable,
+but the rehearsal is still owed before any deployment converts a row.
