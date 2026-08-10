@@ -38,11 +38,13 @@ from chemclaw.agent.audit import AuditEvent, NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
+    available_tool_names,
     build_agent,
     harness_tool_names,
     skills_source,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
+from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
@@ -162,9 +164,10 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
 
     advertised = _advertised(graph)
-    attached = {SKILL_READ_TOOL, *harness_tool_names()}
-    assert advertised == {tool.__name__ for tool in _capability_tools()} | attached
-    assert advertised == set(registered_tool_names()) | attached
+    # `read_file` only: the harness (and with it `write_todos`) is off by default, which the
+    # test below asserts separately rather than folding into this one.
+    assert advertised == {tool.__name__ for tool in _capability_tools()} | {SKILL_READ_TOOL}
+    assert advertised == set(registered_tool_names()) | {SKILL_READ_TOOL}
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:
@@ -189,7 +192,7 @@ def test_a_profile_narrows_the_graph_surface() -> None:
     # `read_file` survives every profile, and it must: it carries no authority of its own — every
     # read goes through the backend the three narrowings already bound — so taking it away would
     # not attenuate anything, it would only make the profile's remaining skills unreadable.
-    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL, *harness_tool_names()}
+    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL}
     assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 
@@ -615,3 +618,52 @@ def test_the_gate_is_absent_when_the_deployment_did_not_ask_for_it(
         reset_current_session_id(session)
 
     assert "has not been approved yet" not in content
+
+
+def test_the_harness_adds_its_plan_tool_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`write_todos` is the harness's, so it appears exactly when the harness does.
+
+    Matching MAF, where the classic agent has no todo list at all. Attaching it unconditionally
+    would be a difference between the engines while both are live — a harmless-looking one, which
+    is the kind that survives review.
+
+    `harness_tool_names()` is a deployment-wide question and therefore stays in
+    `available_tool_names()` either way: a validator must recognise `write_todos` whatever this
+    process happens to have configured.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", False)
+    assert not harness_tool_names() & _advertised(
+        build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
+    )
+
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    assert harness_tool_names() <= _advertised(
+        build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
+    )
+    assert harness_tool_names() <= available_tool_names()
+
+
+def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`loop_capped` reads the count the cap keeps, so a cap of 1 is visible.
+
+    This is the improvement over MAF rather than a port of it. There the cap lived inside
+    `create_harness_agent` with no hook, so its firing had to be inferred from the loop's last stop
+    decision — and at `harness_max_loop_iterations == 1` the predicate is never consulted, so a
+    capped turn recorded nothing and reported no cap. A limit of exactly 1 is therefore the case
+    worth testing: it is the one the inference could not see.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 1)
+    graph = build_langgraph_agent(
+        model=_ScriptedModel(messages=iter([AIMessage(content="done")] * 3)),
+        audit_sink=NullAuditSink(),
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "capped-1"}}
+
+    asyncio.run(graph.ainvoke({"messages": [("user", "go")]}, config=config))
+
+    assert loop_capped(graph.get_state(config).values)

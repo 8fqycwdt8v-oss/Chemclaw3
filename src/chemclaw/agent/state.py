@@ -33,3 +33,8 @@ class ChemclawState(PlanningState):
     # Durable job ids this turn is waiting on. Not todos: they are bookkeeping *about* work a human
     # already approved, so `plan_identity` must not see them (see the module docstring).
     awaiting_jobs: list[str]
+
+    # How many model calls this turn has made — the runaway guard's counter (`agent/loop_cap.py`).
+    # A field rather than a framework internal because the whole defect being fixed is that MAF's
+    # cap fired where nothing could observe it.
+    model_calls: int

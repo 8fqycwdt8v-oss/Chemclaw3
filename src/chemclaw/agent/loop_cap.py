@@ -32,12 +32,18 @@ is driven from a task of its own.
 """
 
 import inspect
-from collections.abc import Awaitable, Callable
+import logging
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from langchain.agents.middleware import before_model
+
 from chemclaw.agent.harness_types import ShouldContinueCallable, ShouldContinueResult
+from chemclaw.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -98,3 +104,55 @@ def observe_loop_cap(
         return decision
 
     return _should_continue
+
+
+@before_model
+def lg_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
+    """Count this turn's model calls and end the run when it reaches the cap.
+
+    **Why a counter here rather than `ModelCallLimitMiddleware`.** That middleware enforces exactly
+    this, and using it was the first attempt. It keeps two counts — `thread_model_call_count`, which
+    persists, and `run_model_call_count`, which does not — and the one that matches a *turn* is the
+    run count. Measured against a checkpointed session, the final state carries the thread count and
+    no run count at all, so "was this turn capped" was unanswerable from it. Enforcing with that
+    middleware and counting again here would have meant two counters for one number; enforcing here
+    means one number that is both the limit and the record.
+
+    That is the whole point. MAF's cap fired inside `create_harness_agent` where nothing could
+    observe it, so a capped turn was externally identical to a finished one and `loop_hit_cap` had
+    to *infer* it — an inference blind at a cap of 1, because the loop never consults the predicate
+    there. Here the count is a declared state field, so a cap of 1 leaves a count of 1.
+
+    Ending the run rather than raising, matching MAF: the answer the last iteration managed still
+    goes out, and a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`).
+    A raised error would discard work a chemist is entitled to see.
+    """
+    calls = int(state.get("model_calls", 0))
+    if calls >= settings.harness_max_loop_iterations:
+        logger.warning("the model loop hit its %d-iteration cap", calls)
+        return {"jump_to": "end"}
+    return {"model_calls": calls + 1}
+
+
+def loop_capped(state: Mapping[str, Any]) -> bool:
+    """Whether this turn's model loop was stopped by its cap — **read, not inferred**.
+
+    The LangGraph counterpart of `loop_hit_cap`, and a different kind of answer. MAF offers no hook
+    on its cap: `_evaluate_stop` short-circuits the predicate once the limit is reached, and the
+    middleware is constructed inside `create_harness_agent` rather than handed in, so the only
+    signal available was the shape of the *last decision the loop asked for* — "it wanted another
+    iteration, and something other than the predicate stopped it". That inference is sound and it
+    has a hole its own docstring records: at `harness_max_loop_iterations == 1` the loop never
+    consults the predicate at all, so nothing is recorded and a capped turn reports no cap.
+
+    `lg_loop_cap` keeps the count in a declared state field, so here the question is answered by
+    reading the number rather than by reasoning about a decision. The hole closes with it: a cap of
+    1 that fired leaves a count of 1, which is exactly what this compares.
+
+    Args:
+        state: The turn's final graph state.
+
+    Returns:
+        Whether the run reached the configured iteration cap.
+    """
+    return int(state.get("model_calls", 0)) >= settings.harness_max_loop_iterations

@@ -67,7 +67,9 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     instructions_for,
 )
+from chemclaw.agent.harness_mode import harness_enabled_for
 from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.loop_cap import lg_loop_cap
 from chemclaw.agent.plan_gate import gate_applies, lg_enforce_plan_approval
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
@@ -142,7 +144,7 @@ def build_langgraph_agent(
         system_prompt=instructions_for(prof),
         state_schema=ChemclawState,
         middleware=[
-            TodoListMiddleware(),
+            *_harness_middleware(prof),
             _skills_middleware(backend),
             *_middleware(audit, prof),
         ],
@@ -202,6 +204,22 @@ def _without_cached_skills(state: Any) -> Any:
     real would be a side effect on everything downstream rather than on one method's view.
     """
     return {key: value for key, value in state.items() if key != "skills_metadata"}
+
+
+def _harness_middleware(profile: AgentProfile) -> list[Any]:
+    """The plan/execute harness: the todo list the plan gate reads, and the runaway cap.
+
+    Both conditional on `harness_enabled_for`, matching MAF: the classic agent has no todo list and
+    no loop cap, so attaching either unconditionally would make this engine behave differently from
+    the other while both are live — a safer difference, but a difference.
+
+    `lg_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
+    record. One counter for one number — see its docstring for why the framework's own
+    `ModelCallLimitMiddleware` could not supply the observation half.
+    """
+    if not harness_enabled_for(profile):
+        return []
+    return [TodoListMiddleware(), lg_loop_cap]
 
 
 def _skills_middleware(backend: CompositeBackend) -> Any:

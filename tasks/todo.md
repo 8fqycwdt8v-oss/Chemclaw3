@@ -119,8 +119,12 @@ never what a deployment gets.
       `TodoListMiddleware().tools` rather than spelled out (D-117 again).
 - [x] The `mode_set` retraction is simply absent: the tool is never exposed, so there is nothing
       to retract. `harness_mode.py`'s subclass-and-mutate has no counterpart here.
-- [ ] Loop cap as an explicit counter — not started.
-- [ ] `interrupt()` — **the plan's framing needs correcting, see below.**
+- [x] **Loop cap as an explicit counter.** `ChemclawState.model_calls` + `lg_loop_cap`
+      (`@before_model`), which both enforces the cap and records it; `loop_cap.loop_capped` reads
+      the record. Fixes MAF's blind spot at `harness_max_loop_iterations == 1`, tested at exactly
+      that value and mutation-checked.
+- [x] `interrupt()` — **dropped from M5 with reasons; see the corrections below.** Neither
+      remaining "gate" is in-turn, so there is nothing left for it to unify here.
 
 ### M6 — durable state on the checkpointer
 - [ ] `AsyncPostgresSaver`; `session_messages` demoted to a read-model projection.
@@ -370,3 +374,29 @@ engine to *suspend* instead would be a behaviour change on one engine while both
 the divergence this migration's whole discipline is against. `interrupt()` becomes the mechanism
 when the front door can drive it (M8) and both engines can be cut over together — with its own
 decision record, because changing when a chemist is asked is a product change and not a port.
+
+**M5 done.** `make lint type test` green at 3950 passed, 0 failed; `prose-validate` and
+`skill-validate` pass; nothing lost.
+
+**The second correction, and it retires the phase's headline.** M5 was "collapse three gates onto
+one `interrupt()`". Reading the third one closed the question: `interaction_tools.py` starts an
+`InteractionApprovalWorkflow` — a *durable Temporal workflow* that holds a candidate until a click,
+built precisely so the turn does **not** wait. Its own docstring says "asynchronous". So of the
+three, only the plan gate is in-turn at all; the interaction approval and the KG PR-gate are both
+deliberately out-of-turn holds that outlive the turn that raised them.
+
+There is therefore nothing for `interrupt()` to unify. The estimate of ~350 LOC removed by "one
+human gate" was wrong, and it was wrong because the plan grouped three things by what they *sound*
+like — all three ask a human — rather than by lifecycle, which is the only property that decides
+whether a coroutine can be held open across them. The real shared code was the plan-approval
+decision itself, and that is extracted.
+
+**What the loop cap turned into.** `ModelCallLimitMiddleware` was the obvious answer and does not
+work here: it keeps `thread_model_call_count` (persisted, whole-session) and `run_model_call_count`
+(per-turn, *not* persisted), so a checkpointed session's final state carries the wrong one and "was
+this turn capped" is unanswerable from it — measured. Enforcing with it and counting again for the
+record would be two counters for one number, so `lg_loop_cap` does both. That is a deliberate
+departure from "use the framework's machinery", written down where the next reader will ask.
+
+It ends the run rather than raising, matching MAF: the partial answer still goes out and a surface
+marks it partial. Raising would discard work a chemist is entitled to see.
