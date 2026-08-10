@@ -53,9 +53,20 @@ never what a deployment gets.
       import it, and those are the MAF path, which stays live until the branch is deleted.
 
 ### M3 — tool middleware chain
-- [ ] Port six `@function_middleware` to `@wrap_tool_call`. Short-circuits (authz denial, dry-run
-      refusal, repeat refusal) return a `ToolMessage` instead of calling `handler`.
-- [ ] `agent/authz.py`, `audit_store.py`, `audit_anchor.py` are framework-free — do not touch.
+- [x] Six `@wrap_tool_call` wrappers, attached in the MAF chain's nesting order (converters
+      outermost → audit → authz → dry-run → repeat → announce innermost).
+- [x] **The decisions extracted first, the plumbing ported second.** `tool_authz.dry_run_refusal`,
+      `.denial_result`, `.domain_error_result`, `.failure_detail`; `repeat_guard.count_call`;
+      `audit._recording` (an `asynccontextmanager` holding the whole GxP trail — identity
+      precedence, span, latency, the three outcomes, the shielded cancelled-write). Both engines'
+      middlewares are wrappers over these and nothing else, so a refusal's wording, a repeat
+      threshold or an audit row cannot depend on `agent_engine`.
+- [x] `agent/authz.py`, `audit_store.py`, `audit_anchor.py` untouched — already framework-free.
+- [x] Tests drive real turns through the compiled graph and assert what the *model* is handed;
+      they deliberately do not restate the decisions, which are already pinned against the shared
+      functions in `test_tool_authz.py` / `test_repeat_guard.py` / `test_audit.py`.
+- [ ] `enforce_plan_approval` is the seventh and belongs to M5 — it reads plan/session state this
+      engine does not have yet.
 
 ### M4 — skills · **go/no-go**
 - [ ] `deepagents.middleware.skills.SkillsMiddleware` over `skills/` + each connector bundle's own.
@@ -170,3 +181,36 @@ Measured while building, and both change later phases:
   already present "from a prior turn or checkpointed session". With M6's checkpointer that means
   role-scoped narrowing is computed once per session — a role change mid-session would read stale.
   Needs an explicit answer in M4, not a discovery in M6.
+
+**M3.** Six middlewares on the graph engine; `make lint type test` green at 3926 passed, 0 failed,
+nothing lost (collected ids diffed again).
+
+The shape that mattered: **extract the decision, then port the plumbing.** Every one of these
+middlewares turned out to be one sentence of policy inside one framework's calling convention, and
+the sentences are all load-bearing — a dry-run refusal's wording is what tells a chemist nothing
+ran, the repeat threshold encodes a measured finding (7–8 identical calls, 128–142 s against
+16.9 s), and the audit trail's `cancelled` outcome exists because a subtle omission in it went
+unnoticed until D-130 measured it. Porting those by hand would have produced a second copy free to
+drift, and an audit trail that disagrees with itself depending on a config flag is not a trail.
+
+`audit._recording` is the one that justified the effort: ~90 lines of identity precedence, span,
+latency histogram, three outcomes and a shielded write that must survive a teardown. It is now an
+`asynccontextmanager` both engines wrap, and each engine supplies exactly three things — the tool's
+name, its arguments, and its result.
+
+Two differences worth recording rather than smoothing over:
+
+- **`lg_surface_authorization_denials` exists for a different reason than its MAF twin.** MAF
+  collapses every tool exception into "Function failed." with no text, so there the converter
+  *recovers* a message the framework discarded. LangChain does not do that, so here the converter
+  instead keeps a deliberately-worded refusal from being reported as a tool error the model might
+  retry. Same behaviour, different justification; the docstring says so rather than implying the
+  MAF rationale still applies.
+- **A LangChain gate must echo `tool_call_id`.** An assistant `tool_use` block with no matching
+  `tool_result` is a malformed exchange the provider rejects, so a refusal that forgot the id would
+  turn a blocked call into a dead turn. `_refusal_message` is the one place that is handled.
+
+Also fixed while testing: `dry_run_refusal` reads the ambient flag, so asking it *outside* the
+dry-run block returns `None` — correct answer, wrong question. And most of the side-effecting
+surface does not exist in the registry until something has assembled the toolset once, because
+that is when the generated connector-job and template launchers register.

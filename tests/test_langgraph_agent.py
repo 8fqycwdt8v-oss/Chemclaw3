@@ -21,13 +21,24 @@ The claims under test:
 import asyncio
 from typing import Any
 
+import pytest
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 
+from chemclaw.agent.audit import AuditEvent, NullAuditSink
+from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.tool_registry import registered_tool_names
+from chemclaw.core.turn_signals import begin_turn, drain, end_turn
+from chemclaw.kg.note import NoteError
 
 
 class _ScriptedModel(GenericFakeChatModel):
@@ -129,3 +140,196 @@ def test_a_profile_narrows_the_graph_surface() -> None:
 
     assert names(narrowed) == {kept}
     assert names(narrowed) < names(full), "a profile must attenuate, never widen or match"
+
+
+# --- the middleware chain (M3) -------------------------------------------------------------------
+#
+# The three tests above would pass with no middleware attached at all, so these are the ones that
+# prove the chain. Each drives a real turn through the compiled graph and asserts on what the
+# *model* is handed back, because that is where a middleware's behaviour is visible: a chain that
+# is attached but inert looks identical from the outside to one that is absent.
+#
+# What they deliberately do **not** re-assert is the decisions themselves — that a `reader` lacks a
+# gated tool, that the dry-run wording says "DRY RUN", that the third identical call is the one
+# refused. Those live in `test_tool_authz.py`, `test_repeat_guard.py` and `test_audit.py` against
+# the shared functions both engines call, and restating them here would create the second copy the
+# extraction exists to prevent. These prove the *wiring*: that this engine reaches those decisions,
+# in the right order, and relays what they return.
+
+
+class _CollectingSink:
+    """An `AuditSink` that keeps every event, to assert what reaches the trail."""
+
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        self.events.append(event)
+
+
+def _run(graph: Any) -> Any:
+    """Drive one turn to completion."""
+    return asyncio.run(graph.ainvoke({"messages": [("user", "help")]}))
+
+
+def _tool_result(result: Any) -> str:
+    """The content of the single `ToolMessage` in a completed turn."""
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert len(tool_messages) == 1, f"expected one tool result, got {len(tool_messages)}"
+    return str(tool_messages[0].content)
+
+
+def test_a_denied_call_reaches_the_model_as_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate blocks the body and the converter hands the model the reason, not a bare failure.
+
+    Two middlewares in one assertion on purpose, because either alone is useless:
+    `lg_enforce_tool_authz` raising only helps if `lg_surface_authorization_denials` turns it into
+    something the model can act on, and a denial the model reads as a generic tool error is one it
+    will retry.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_role_gates", {"ask_clarifying_question": ["chemist"]})
+    graph = build_langgraph_agent(
+        model=_scripted("ask_clarifying_question", {"question": "x"}),
+        audit_sink=NullAuditSink(),
+    )
+
+    token = set_current_identity("u-1", frozenset({"reader"}))
+    try:
+        content = _tool_result(_run(graph))
+    finally:
+        reset_current_identity(token)
+
+    assert content.startswith("Refused: ")
+    assert "ask_clarifying_question" in content
+
+
+def test_a_dry_run_refuses_a_side_effecting_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`dry_run` stops a write at the boundary every tool passes through.
+
+    The expected text comes from `dry_run_refusal` itself rather than being spelled out, so this
+    cannot become a second copy of the sentence — which is the drift the extraction prevents. The
+    tool is picked from the live intersection of the side-effecting set and the registry for the
+    same reason: naming one here would pin a set that is meant to grow.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    # `_capability_tools()` first, because it is what registers the generated connector-job and
+    # template launchers: most of the side-effecting surface does not exist in the registry until
+    # something has assembled the toolset once.
+    advertised = {t.__name__ for t in _capability_tools()}
+    write_tool = sorted(set(side_effecting_tools()) & advertised)[0]
+    graph = build_langgraph_agent(model=_scripted(write_tool, {}), audit_sink=NullAuditSink())
+
+    token = set_dry_run(True)
+    try:
+        content = _tool_result(_run(graph))
+        # Inside the dry run, because `dry_run_refusal` reads the ambient flag — asking it outside
+        # returns `None`, which is the correct answer to a different question.
+        expected = dry_run_refusal(write_tool)
+    finally:
+        reset_dry_run(token)
+
+    assert expected is not None
+    assert content == denial_result(expected)
+
+
+def test_a_repeated_call_is_refused_on_this_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The turn's repeat counter is reached from this engine and its refusal relayed.
+
+    Driven at a limit of 1 so a single turn shows both halves: the first call runs, the second is
+    refused. What is asserted is that the graph consulted the counter at all — the threshold's
+    value and its wording belong to `test_repeat_guard.py`.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "max_identical_tool_calls", 1)
+    args = {"question": "which solvent?"}
+    graph = build_langgraph_agent(
+        model=_ScriptedModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "ask_clarifying_question", "args": args, "id": "call-1"},
+                            {"name": "ask_clarifying_question", "args": args, "id": "call-2"},
+                        ],
+                    ),
+                    AIMessage(content="done"),
+                ]
+            )
+        ),
+        audit_sink=NullAuditSink(),
+    )
+
+    token = begin_call_watch()
+    try:
+        contents = [str(m.content) for m in _run(graph)["messages"] if isinstance(m, ToolMessage)]
+    finally:
+        end_call_watch(token)
+
+    assert len(contents) == 2
+    assert sum(c.startswith("Error: ") and "already called" in c for c in contents) == 1
+
+
+def test_the_audit_trail_records_a_call_on_this_engine() -> None:
+    """A tool call lands in the GxP trail with its identity, outcome and result.
+
+    `make_langgraph_audit_middleware` shares `_recording` with the MAF middleware, so what this
+    pins is that the adapter reaches it with the three fields only the engine knows: the tool's
+    name, its arguments, and its result as the `ok` detail.
+    """
+    sink = _CollectingSink()
+    graph = build_langgraph_agent(
+        model=_scripted("ask_clarifying_question", {"question": "which solvent?"}),
+        actor="tester",
+        correlation_id="cid-1",
+        audit_sink=sink,
+    )
+
+    _run(graph)
+
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert (event.tool, event.outcome) == ("ask_clarifying_question", "ok")
+    assert (event.actor, event.correlation_id) == ("tester", "cid-1")
+    assert "which solvent?" in event.arguments
+    assert event.detail, "the tool's result is the ok detail, and it was empty"
+
+
+def test_a_failing_tool_is_announced_and_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising tool reaches the chemist's stream, the trail, and the model — all three.
+
+    `lg_announce_tool_failures` is innermost precisely so it sees the raw exception even when a
+    converter turns it into a result, so one turn asserts every layer: the transcript gets a
+    failure signal, the trail gets an `error` row, and the model still gets a readable message
+    rather than a bare tool error.
+
+    The tool is substituted into the compiled `ToolNode` rather than registered, because
+    `core.tool_registry` is process-global module state and a test that writes to it would leak a
+    fake tool into every later test's advertised surface.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    sink = _CollectingSink()
+
+    async def _raises() -> str:
+        raise NoteError("no note with id 'nope'")
+
+    graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {}), audit_sink=sink)
+    monkeypatch.setitem(
+        graph.nodes["tools"].bound.tools_by_name,
+        "ask_clarifying_question",
+        StructuredTool.from_function(
+            coroutine=_raises, name="ask_clarifying_question", description="raises"
+        ),
+    )
+
+    turn = begin_turn()
+    try:
+        content = _tool_result(_run(graph))
+        signals = drain()
+    finally:
+        end_turn(turn)
+
+    assert content == "Error: no note with id 'nope'"
+    assert [type(s).__name__ for s in signals] == ["ToolFailureSignal"]
+    assert [e.outcome for e in sink.events] == ["error"]

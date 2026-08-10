@@ -31,10 +31,12 @@ contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail 
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from typing import Any, Protocol, runtime_checkable
 
 from agent_framework import FunctionInvocationContext, function_middleware
+from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
@@ -185,94 +187,177 @@ def make_audit_middleware(
         call_next: Callable[[], Awaitable[None]],
     ) -> None:
         """Record one audit event per tool invocation (observe-only)."""
-        name = context.function.name
-        args = _truncate(context.arguments)
-        # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
-        # `actor` bound at build time when there is none (tests, the non-service caller).
-        event_actor = get_current_actor() or actor
-        # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
-        event_cid = get_current_correlation_id() or correlation_id
-        # The conversation, read ambiently for the same reason the actor is: a tool has no request
-        # context, and an agent is cached per profile for the process's life, so anything bound at
-        # build time would be shared by every user on the pod. Empty off the request path.
-        event_session = get_current_session_id() or ""
-        start = time.perf_counter()
+        async with _recording(
+            context.function.name,
+            context.arguments,
+            actor=actor,
+            correlation_id=correlation_id,
+            sink=audit_sink,
+            revision=revision,
+        ) as recorded:
+            await call_next()
+            recorded.result = context.result
 
-        def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
-            """This call's record under `outcome` — the identity fields resolved once, above."""
-            return AuditEvent(
-                correlation_id=event_cid,
-                session_id=event_session,
-                actor=event_actor,
-                tool=name,
-                arguments=args,
-                outcome=outcome,
-                detail=detail,
-                latency_ms=elapsed_ms,
-                revision=revision,
-            )
+    return audit_tool_calls
 
-        try:
-            # One span per tool call, which with the turn span above it is the whole first-party
-            # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
-            # question an operator actually asks, and nothing could answer it. Deliberately not a
-            # span per loop iteration or per retriever — the finding was that the docs *overstate*
-            # the tracing, and answering that with more unread spans is the same mistake mirrored.
-            with start_span("chemclaw.tool", **{"tool.name": name}):
-                await call_next()
-        except asyncio.CancelledError:
-            # The turn was torn down while this tool was still running — a client disconnect or the
-            # front door's wall-clock deadline, which both deliver exactly this (D-130). Its own
-            # clause because `CancelledError` derives from `BaseException`, so the handler below
-            # never saw it and an interrupted attempt left no row in the trail at all.
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            _observe_tool_latency(elapsed_ms)
-            logger.warning(
-                "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
-                name,
-                elapsed_ms,
-                event_cid,
-                event_actor,
-                args,
-            )
-            await _emit_shielded(
-                audit_sink,
-                event_for(
-                    "cancelled",
-                    "the turn was torn down while this tool was running (client disconnect or "
-                    "turn deadline); whether its side effect completed is not known here",
-                    elapsed_ms,
-                ),
-            )
-            raise
-        except Exception as exc:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            _observe_tool_latency(elapsed_ms)
-            logger.warning(
-                "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
-                name,
-                elapsed_ms,
-                event_cid,
-                event_actor,
-                exc,
-                args,
-            )
-            await _emit(audit_sink, event_for("error", _truncate(exc), elapsed_ms))
-            raise
+
+def make_langgraph_audit_middleware(
+    *,
+    correlation_id: str,
+    actor: str,
+    sink: AuditSink | None = None,
+) -> AgentMiddleware[Any, Any]:
+    """The same trail, wired to the LangGraph engine — an adapter, not a second implementation.
+
+    Identical arguments and identical semantics to `make_audit_middleware`, because they share
+    `_recording`: what differs is only where the tool's name, arguments and result come from. The
+    audit trail is the one thing in this migration that must not be able to disagree with itself
+    between engines, so the difference is kept to three field reads.
+
+    The result recorded as the `ok` detail is the `ToolMessage`'s content rather than a raw return
+    value, which is what the model is actually handed — the same relationship `context.result` has
+    to the MAF path.
+    """
+    audit_sink: AuditSink = sink if sink is not None else default_audit_sink()
+    revision = settings.deployment_revision
+
+    @wrap_tool_call
+    async def audit_tool_calls(request: Any, handler: Callable[[Any], Any]) -> Any:
+        """Record one audit event per tool invocation (observe-only)."""
+        async with _recording(
+            request.tool_call["name"],
+            request.tool_call.get("args"),
+            actor=actor,
+            correlation_id=correlation_id,
+            sink=audit_sink,
+            revision=revision,
+        ) as recorded:
+            result = await handler(request)
+            recorded.result = getattr(result, "content", result)
+            return result
+
+    return audit_tool_calls
+
+
+class _Recorded:
+    """The one value the caller must hand back: what the tool returned, for the `ok` detail.
+
+    A mutable holder rather than a return value because `_recording` is a context manager, and the
+    result is only known inside the block. The MAF adapter reads it off `context.result` after
+    `call_next()`; the LangGraph adapter assigns what `handler` returned.
+    """
+
+    result: object | None = None
+
+
+@asynccontextmanager
+async def _recording(
+    name: str,
+    arguments: object,
+    *,
+    actor: str,
+    correlation_id: str,
+    sink: AuditSink,
+    revision: str,
+) -> AsyncIterator[_Recorded]:
+    """The GxP trail itself, with no framework in it — both engines' middlewares are wrappers.
+
+    Everything that makes this the *record* lives here: the identity precedence, the span, the
+    latency histogram, the three outcomes, and the shielded write that survives a teardown. A
+    second copy of it for the second engine would be the one duplication this system cannot
+    afford — an audit trail that disagrees with itself depending on a config flag is not a trail,
+    and the `cancelled` outcome exists precisely because a subtle omission here went unnoticed
+    until it was measured (D-130).
+
+    What each engine supplies is only the three things it alone knows: the tool's name, its
+    arguments, and — inside the block — its result.
+    """
+    args = _truncate(arguments)
+    # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
+    # `actor` bound at build time when there is none (tests, the non-service caller).
+    event_actor = get_current_actor() or actor
+    # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
+    event_cid = get_current_correlation_id() or correlation_id
+    # The conversation, read ambiently for the same reason the actor is: a tool has no request
+    # context, and an agent is cached per profile for the process's life, so anything bound at
+    # build time would be shared by every user on the pod. Empty off the request path.
+    event_session = get_current_session_id() or ""
+    start = time.perf_counter()
+
+    def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
+        """This call's record under `outcome` — the identity fields resolved once, above."""
+        return AuditEvent(
+            correlation_id=event_cid,
+            session_id=event_session,
+            actor=event_actor,
+            tool=name,
+            arguments=args,
+            outcome=outcome,
+            detail=detail,
+            latency_ms=elapsed_ms,
+            revision=revision,
+        )
+
+    recorded = _Recorded()
+    try:
+        # One span per tool call, which with the turn span above it is the whole first-party
+        # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
+        # question an operator actually asks, and nothing could answer it. Deliberately not a
+        # span per loop iteration or per retriever — the finding was that the docs *overstate*
+        # the tracing, and answering that with more unread spans is the same mistake mirrored.
+        with start_span("chemclaw.tool", **{"tool.name": name}):
+            yield recorded
+    except asyncio.CancelledError:
+        # The turn was torn down while this tool was still running — a client disconnect or the
+        # front door's wall-clock deadline, which both deliver exactly this (D-130). Its own
+        # clause because `CancelledError` derives from `BaseException`, so the handler below
+        # never saw it and an interrupted attempt left no row in the trail at all.
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         _observe_tool_latency(elapsed_ms)
-        detail = _truncate(context.result) if context.result is not None else ""
-        logger.info(
-            "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
+        logger.warning(
+            "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
             name,
             elapsed_ms,
             event_cid,
             event_actor,
             args,
         )
-        await _emit(audit_sink, event_for("ok", detail, elapsed_ms))
-
-    return audit_tool_calls
+        await _emit_shielded(
+            sink,
+            event_for(
+                "cancelled",
+                "the turn was torn down while this tool was running (client disconnect or "
+                "turn deadline); whether its side effect completed is not known here",
+                elapsed_ms,
+            ),
+        )
+        raise
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        _observe_tool_latency(elapsed_ms)
+        logger.warning(
+            "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
+            name,
+            elapsed_ms,
+            event_cid,
+            event_actor,
+            exc,
+            args,
+        )
+        await _emit(sink, event_for("error", _truncate(exc), elapsed_ms))
+        raise
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    _observe_tool_latency(elapsed_ms)
+    detail = _truncate(recorded.result) if recorded.result is not None else ""
+    logger.info(
+        "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
+        name,
+        elapsed_ms,
+        event_cid,
+        event_actor,
+        args,
+    )
+    await _emit(sink, event_for("ok", detail, elapsed_ms))
 
 
 async def _emit_shielded(sink: AuditSink, event: AuditEvent) -> None:
