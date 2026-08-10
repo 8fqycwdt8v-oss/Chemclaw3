@@ -74,6 +74,7 @@ from chemclaw.agent.skill_access import (
     RoleScopedSkillsSource,
     ToolScopedSkillsSource,
 )
+from chemclaw.agent.skill_backend import SKILL_READ_TOOL
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
@@ -647,15 +648,28 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
 
 
 def skill_tool_names() -> set[str]:
-    """The tools MAF's `SkillsProvider` registers on every agent it is attached to.
+    """The tools an agent gains by having skills attached — **both engines' names, unioned**.
 
-    Read off MAF's own class constants rather than spelled out here, so an upstream rename becomes
-    a changed value instead of a silently stale allow-list.
+    Read off each library's own constant rather than spelled out here, so an upstream rename
+    becomes a changed value instead of a silently stale allow-list.
+
+    The union rather than a branch on `settings.agent_engine`, and the reason is what this function
+    is *for*: its four callers are validators — the skill validator, the template validator, the
+    prose contract, and the test that checks the instructions — and every one of them asks a
+    deployment-wide question ("does anything provide this name?"), never a per-turn one. Branching
+    would make `make prose-validate` pass or fail depending on which engine happened to be
+    configured when it ran, so a skill referencing `read_file` would be rejected on a MAF box and
+    accepted on a LangGraph one. Both names are real while both engines exist; the MAF three go
+    with the MAF branch in M13.
+
+    D-117 is why this is worth the care: three validators once unioned only two of the four name
+    spaces, so a correct reference to a real tool failed validation.
     """
     return {
         SkillsProvider.LOAD_SKILL_TOOL_NAME,
         SkillsProvider.READ_SKILL_RESOURCE_TOOL_NAME,
         SkillsProvider.RUN_SKILL_SCRIPT_TOOL_NAME,
+        SKILL_READ_TOOL,
     }
 
 

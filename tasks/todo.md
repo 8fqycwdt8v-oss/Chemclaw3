@@ -80,18 +80,26 @@ never what a deployment gets.
       (the configured tree *plus* every connector bundle's own, D-118).
 - [x] `tests/test_skill_backend.py` — eight tests, each asking "is it hidden" *and* "is it
       unreachable"; plus a cross-engine test that both engines narrow identically.
-- [ ] **A read tool is still missing.** `SkillsMiddleware` publishes skill paths and expects the
-      model to read them with a filesystem tool, and none is attached — so skills are currently
-      advertised but not loadable on this engine. Needs one scoped `read` tool over
-      `skills_backend`, *not* deepagents' `FilesystemMiddleware` (which brings write/edit/glob and
-      would widen the surface `available_tool_names()`/`prose-validate` police).
-- [ ] **`skills_metadata` caching is unanswered.** `SkillsMiddleware.before_agent` skips the load
-      when state already holds it "from a prior turn or checkpointed session", so under M6's
-      checkpointer a role change mid-session would read a stale narrowing. The backend still gates
-      every *read* per turn, so this is a listing-staleness bug rather than a hole — but it must be
-      decided here, not discovered in M6.
-- [ ] `skill_tool_names()` has no direct equivalent and must be re-derived once the read tool
-      exists (D-117: an omitted name space fails every validator built on it).
+- [x] **The read tool.** One hand-written `read_file` bound to the profile's narrowed backend, not
+      deepagents' `FilesystemMiddleware` — that would have registered write/edit/glob/grep/execute,
+      a general filesystem capability acquired as a side effect of wanting to read a `SKILL.md`,
+      every name of which `available_tool_names()`, the prose contract, `tool_role_gates` and the
+      safety rubric would then have to answer for. Progressive disclosure needs one verb.
+- [x] **The name is pinned to deepagents' own prompt**, not chosen: `SKILLS_SYSTEM_PROMPT` tells
+      the model to "use `read_file` on the path shown", so any other name leaves every skill
+      advertised and unloadable — a failure indistinguishable from a model declining to use skills.
+- [x] **`skills_metadata` staleness fixed** by `reload_skills_each_turn`, a `before_agent` hook
+      ordered ahead of `SkillsMiddleware`. Proven with a real `InMemorySaver` across two turns of
+      one `thread_id`, and proven to be *load-bearing* by deleting the hook and watching the test
+      fail. This is what makes the engine match MAF, where `RoleScopedSkillsSource._permits` is
+      consulted on every `get_skills`.
+- [x] `skill_tool_names()` returns **both engines' names unioned**, not a branch on
+      `agent_engine`: its four callers are validators asking a deployment-wide question, so a
+      branch would make `make prose-validate` pass or fail depending on which engine happened to be
+      configured (D-117 is the precedent — three validators once unioned two of four name spaces).
+- [x] `build_langgraph_agent(checkpointer=...)` accepted early, because the behaviour under test
+      only exists once state survives a turn. A fix whose proof waits for a later phase is a fix
+      nobody has checked.
 
 ### M5 — one human gate
 - [ ] Collapse the harness plan gate, `interaction_tools.py` and the KG PR-gate onto `interrupt()`
@@ -260,3 +268,22 @@ Three things measured rather than assumed:
 
 The refusal deliberately does not distinguish a gated skill from a nonexistent one — otherwise the
 gate is an enumeration oracle.
+
+**M4 closed.** `make lint type test` green at 3942 passed, 0 failed; `make prose-validate` and
+`make skill-validate` both pass. Nothing lost.
+
+The read tool turned out to be the more interesting of the two. The obvious move —
+`FilesystemMiddleware`, which exists precisely to give a model filesystem tools — is the wrong one
+here: it registers a write/edit/glob/grep/execute surface, and in this system every tool name has
+four other obligations (the prose contract, `available_tool_names`, `tool_role_gates`, the safety
+rubric). Acquiring a general filesystem capability as a side effect of wanting to read one Markdown
+file is exactly what D-038 refused when it disabled MAF's batteries. One verb, bound to the
+narrowed backend, carrying no authority of its own.
+
+Its *name* is not a design choice at all, which is easy to miss: deepagents' skills prompt names
+`read_file` explicitly, so the tool is only correct if it matches. Pinned against the prompt.
+
+The staleness fix was verified the way this file keeps insisting on: the hook was deleted and the
+test watched to fail. Without that check it would have been a test that passes because the caching
+never engaged under `ainvoke` without a checkpointer — which is precisely the shape of a green test
+that proves nothing.

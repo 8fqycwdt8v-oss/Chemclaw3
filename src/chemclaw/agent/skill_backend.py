@@ -40,7 +40,14 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from deepagents.backends import FilesystemBackend
-from deepagents.backends.protocol import GlobResult, GrepResult, LsResult, ReadResult
+from deepagents.backends.protocol import (
+    BackendProtocol,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
+)
+from langchain_core.tools import BaseTool, StructuredTool
 
 # What a refused read returns. A result rather than an exception, because these are model-facing
 # tool results: a refusal the model can read keeps the turn going, where a raised error surfaces as
@@ -133,3 +140,62 @@ def _path_of(hit: Any) -> str:
     if isinstance(hit, dict):
         return str(hit.get("path", ""))
     return str(getattr(hit, "path", ""))
+
+
+# The tool the skills prompt tells the model to call. It is *not* a free choice: deepagents'
+# `SKILLS_SYSTEM_PROMPT` publishes each skill's path and instructs the model to "use `read_file` on
+# the path shown", so a differently-named tool would leave every skill advertised and unloadable.
+# Pinned against the prompt by `tests/test_skill_backend.py` rather than trusted, for the reason
+# D-117 gives: a name space that drifts silently is one every validator built on it then gets wrong.
+SKILL_READ_TOOL = "read_file"
+
+# What the prompt asks for, and the reason it does: SKILL.md bodies are long, and deepagents' own
+# instruction is to "pass limit=1000 since the default of 100 lines is too small for most skill
+# files". The default lives here rather than in the model's hands so a skill is not silently
+# truncated when the model forgets.
+_SKILL_READ_LIMIT = 1000
+
+
+def skill_read_tool(backend: BackendProtocol) -> BaseTool:
+    """The single read tool the skills middleware needs, bound to one narrowed backend.
+
+    **One tool, hand-written, rather than deepagents' `FilesystemMiddleware`.** That middleware is
+    the natural-looking answer and the wrong one: it registers a write/edit/glob/grep/execute
+    surface, and every one of those names would then have to be answered for by
+    `chemclaw_agent.available_tool_names` and the prose contract, gated by `tool_role_gates`, and
+    justified in the safety rubric — a general filesystem capability acquired as a side effect of
+    wanting to read a `SKILL.md`. D-038 disabled MAF's equivalent batteries for the same reason.
+    Progressive disclosure needs exactly one verb, so exactly one is offered.
+
+    The tool carries no authority of its own. Every read goes through the backend it is bound to,
+    which is where the three narrowings are enforced, so a caller cannot reach a skill through this
+    tool that they could not see in the listing.
+
+    Args:
+        backend: The turn's narrowed skills backend (`build_langgraph_agent` binds the one it built
+            for this profile).
+
+    Returns:
+        A `read_file` tool, named to match what the skills prompt tells the model to call.
+    """
+
+    async def read_file(file_path: str, offset: int = 0, limit: int = _SKILL_READ_LIMIT) -> str:
+        """Read a skill file. Use the path shown in the skill list, e.g. `/skills/<name>/SKILL.md`.
+
+        Args:
+            file_path: The skill file to read, as published in the skills list.
+            offset: First line to read; 0 reads from the start.
+            limit: How many lines to read.
+
+        Returns:
+            The file's text, or a short refusal when the path is not one this caller may read.
+        """
+        result = await backend.aread(file_path, offset, limit)
+        if result.error:
+            return result.error
+        file_data = result.file_data
+        return str(file_data["content"]) if file_data else ""
+
+    return StructuredTool.from_function(
+        coroutine=read_file, name=SKILL_READ_TOOL, description=read_file.__doc__
+    )

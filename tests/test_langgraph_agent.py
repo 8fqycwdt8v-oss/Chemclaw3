@@ -27,6 +27,7 @@ from agent_framework._agents import SupportsAgentRun
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.checkpoint.memory import InMemorySaver
 
 from chemclaw.agent.audit import AuditEvent, NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
@@ -34,7 +35,7 @@ from chemclaw.agent.chemclaw_agent import _capability_tools, skills_source
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
-from chemclaw.agent.skill_backend import REFUSED
+from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
@@ -62,6 +63,26 @@ class _ScriptedModel(GenericFakeChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         """Accept the binding and keep replaying the script."""
         return self
+
+
+class _Recording(_ScriptedModel):
+    """A scripted model that also records the system prompt each call was given.
+
+    The skills listing reaches the model in its system prompt, and `create_agent`'s *output* schema
+    carries only `messages` — so what the model was told is both the thing under test and the only
+    place it is observable.
+    """
+
+    prompts: list[str] = []
+
+    def _generate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
+        self.prompts.append("\n".join(str(m.content) for m in messages))
+        return super()._generate(messages, *args, **kwargs)
+
+
+def _advertised(graph: Any) -> set[str]:
+    """The tool names a compiled graph offers the model."""
+    return {t.name for t in graph.nodes["tools"].bound.tools_by_name.values()}
 
 
 def _scripted(tool_name: str, tool_args: dict[str, Any]) -> Any:
@@ -115,9 +136,9 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     """
     graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
 
-    advertised = {t.name for t in graph.nodes["tools"].bound.tools_by_name.values()}
-    assert advertised == {tool.__name__ for tool in _capability_tools()}
-    assert advertised == set(registered_tool_names())
+    advertised = _advertised(graph)
+    assert advertised == {tool.__name__ for tool in _capability_tools()} | {SKILL_READ_TOOL}
+    assert advertised == set(registered_tool_names()) | {SKILL_READ_TOOL}
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:
@@ -139,11 +160,11 @@ def test_a_profile_narrows_the_graph_surface() -> None:
         profile=AgentProfile(name="narrow", tool_names=frozenset({kept})),
     )
 
-    def names(graph: Any) -> set[str]:
-        return {t.name for t in graph.nodes["tools"].bound.tools_by_name.values()}
-
-    assert names(narrowed) == {kept}
-    assert names(narrowed) < names(full), "a profile must attenuate, never widen or match"
+    # `read_file` survives every profile, and it must: it carries no authority of its own — every
+    # read goes through the backend the three narrowings already bound — so taking it away would
+    # not attenuate anything, it would only make the profile's remaining skills unreadable.
+    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL}
+    assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 
 # --- the middleware chain (M3) -------------------------------------------------------------------
@@ -416,3 +437,45 @@ def _skill_names(backend: Any) -> set[str]:
             if entry.get("is_dir") and path:
                 names.add(path.rsplit("/", 1)[-1])
     return names
+
+
+def test_a_role_change_mid_session_renarrows_the_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cached skill listing does not outlive the roles it was computed for.
+
+    `SkillsMiddleware.before_agent` skips its load whenever `skills_metadata` is already in state —
+    "from a prior turn or checkpointed session". That is a fine cache for a fixed skills tree and
+    wrong for a narrowed one: with M6's checkpointer, state *does* survive the turn, so a listing
+    computed for one caller would be served to the next. `reload_skills_each_turn` clears it, which
+    is what makes this engine match MAF, where the role gate is consulted on every `get_skills`.
+
+    Driven by handing the second turn the first turn's state, which is exactly what a checkpointer
+    will do — so this fails today if the hook is removed, rather than only once M6 lands.
+    """
+    gated = sorted(declared_tools([*settings.skills_dirs]))[0]
+    monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
+    monkeypatch.setattr(settings, "entra_required", False)
+    model = _Recording(messages=iter([AIMessage(content="done")] * 2))
+    prompts = model.prompts
+    graph = build_langgraph_agent(
+        model=model,
+        audit_sink=NullAuditSink(),
+        checkpointer=InMemorySaver(),
+    )
+    session = {"configurable": {"thread_id": "s-1"}}
+
+    holder = set_current_identity("u-1", frozenset({"process-chemist"}))
+    try:
+        asyncio.run(graph.ainvoke({"messages": [("user", "hi")]}, config=session))
+    finally:
+        reset_current_identity(holder)
+    assert gated in prompts[0], "the fixture must show the gated skill to a role-holder"
+
+    # The same session — same `thread_id`, so the checkpointer restores the state the first turn
+    # left, including its cached listing — continued by a caller without the role.
+    reader = set_current_identity("u-2", frozenset({"reader"}))
+    try:
+        asyncio.run(graph.ainvoke({"messages": [("user", "again")]}, config=session))
+    finally:
+        reset_current_identity(reader)
+
+    assert gated not in prompts[1], "a cached listing outlived the roles it was computed for"

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend
+from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, skill_read_tool
 
 _SKILLS = ("alpha", "beta", "gamma")
 
@@ -159,3 +159,37 @@ def _p(hit: Any) -> str:
     if isinstance(hit, dict):
         return str(hit.get("path", ""))
     return str(getattr(hit, "path", hit))
+
+
+# --- the read tool -------------------------------------------------------------------------------
+
+
+def test_the_read_tool_is_named_what_the_skills_prompt_tells_the_model_to_call() -> None:
+    """`SKILL_READ_TOOL` must match deepagents' own prompt, or skills are unloadable.
+
+    `SkillsMiddleware` publishes each skill's path and instructs the model to "use `read_file` on
+    the path shown". A tool named anything else leaves every skill advertised and unreadable —
+    a failure that would look exactly like a model declining to load skills, so it is pinned
+    against the prompt rather than trusted to stay in step.
+    """
+    from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
+
+    from chemclaw.agent.skill_backend import SKILL_READ_TOOL
+
+    assert f"`{SKILL_READ_TOOL}`" in SKILLS_SYSTEM_PROMPT
+
+
+def test_the_read_tool_reads_a_permitted_skill(tree: str) -> None:
+    """The tool returns the body, so progressive disclosure actually completes."""
+    tool = skill_read_tool(_backend(tree, _only_alpha))
+    assert "body of alpha" in asyncio.run(tool.ainvoke({"file_path": "/alpha/SKILL.md"}))
+
+
+def test_the_read_tool_carries_no_authority_of_its_own(tree: str) -> None:
+    """It reads through the narrowed backend, so it cannot reach what the listing hid.
+
+    The tool is the model's only route to a skill body, so this is the assertion that the gate
+    survives being given a way in: a refused skill stays refused when asked for by name.
+    """
+    tool = skill_read_tool(_backend(tree, _only_alpha))
+    assert asyncio.run(tool.ainvoke({"file_path": "/beta/SKILL.md"})) == REFUSED

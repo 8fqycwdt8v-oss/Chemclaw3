@@ -46,6 +46,7 @@ from typing import Any
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents import create_agent
+from langchain.agents.middleware import before_agent
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
 # D-075, D-086 among them) and merged ADRs are never edited, so renaming it to mark this second
@@ -62,7 +63,7 @@ from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
 from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_backend import NarrowedSkillsBackend
+from chemclaw.agent.skill_backend import NarrowedSkillsBackend, skill_read_tool
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import (
     lg_announce_tool_failures,
@@ -82,6 +83,7 @@ def build_langgraph_agent(
     actor: str = "",
     correlation_id: str | None = None,
     audit_sink: AuditSink | None = None,
+    checkpointer: Any | None = None,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -100,6 +102,11 @@ def build_langgraph_agent(
         correlation_id: Fallback correlation id, same precedence.
         audit_sink: The durable trail. `None` means `default_audit_sink()`; pass `NullAuditSink()`
             to opt out explicitly, never by forgetting.
+        checkpointer: Where turn state is persisted between turns. `None` keeps state in the
+            invocation, which is every caller today; M6 is what supplies a real one. Accepted now
+            because the behaviour that depends on it exists now — `reload_skills_each_turn` is
+            answering a staleness question that only a persisted session can pose, and a fix whose
+            proof waits for a later phase is a fix nobody has checked.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -115,16 +122,55 @@ def build_langgraph_agent(
         actor=actor,
         sink=audit_sink,
     )
+    backend = skills_backend(prof, tools)
     return create_agent(
         model=model if model is not None else build_chat_model(),
-        tools=list(tools),
+        # The skills read tool is agent-scoped rather than a `@tool` in the process registry,
+        # because it is bound to *this* profile's narrowed backend — a registry entry would have
+        # to be bound to none, which is the one thing it must not be.
+        tools=[*tools, skill_read_tool(backend)],
         system_prompt=instructions_for(prof),
-        middleware=[skills_middleware(prof, tools), *_middleware(audit)],
+        middleware=[
+            reload_skills_each_turn,
+            skills_middleware(prof, tools, backend),
+            *_middleware(audit),
+        ],
         name="chemclaw",
+        checkpointer=checkpointer,
     )
 
 
-def skills_middleware(profile: AgentProfile, tools: list[Any]) -> Any:
+@before_agent
+def reload_skills_each_turn(state: Any, runtime: Any) -> dict[str, Any] | None:
+    """Drop the cached skill listing so every turn re-narrows it against the caller's roles.
+
+    `SkillsMiddleware.before_agent` loads skills once and then skips the load whenever
+    `skills_metadata` is already in state — "from a prior turn or checkpointed session", as its own
+    docstring puts it. That is a sensible cache for a fixed skills tree and wrong for a *narrowed*
+    one: the role gate reads the turn's ambient identity, so a listing computed for one caller
+    would be served to the next one on the same session, and under M6's checkpointer a mid-session
+    role change would keep showing skills the caller no longer holds.
+
+    The MAF path never had this problem — `RoleScopedSkillsSource._permits` is consulted on every
+    `get_skills`, per turn — so clearing the cache is what makes the two engines agree rather than
+    an optimisation given up.
+
+    **This is a staleness fix, not the gate.** `NarrowedSkillsBackend` refuses the *read* on every
+    call regardless, so a stale listing could at worst advertise a skill whose body then comes back
+    refused. Fixing the listing keeps the two consistent, which is what a caller reading "these are
+    your skills" is entitled to.
+
+    Ordered before `SkillsMiddleware` in the middleware list, because `before_agent` hooks run in
+    ascending order and this one has to clear the slot before that one reads it.
+    """
+    if "skills_metadata" not in state:
+        return None
+    return {"skills_metadata": None}
+
+
+def skills_middleware(
+    profile: AgentProfile, tools: list[Any], backend: CompositeBackend | None = None
+) -> Any:
     """Wrap `skills_backend` in deepagents' provider — the plumbing around the decision.
 
     Split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split from
@@ -134,7 +180,7 @@ def skills_middleware(profile: AgentProfile, tools: list[Any]) -> Any:
     """
     labelled = _labelled([*settings.skills_dirs, *skills_dirs()])
     return SkillsMiddleware(
-        backend=skills_backend(profile, tools),
+        backend=backend if backend is not None else skills_backend(profile, tools),
         sources=[(f"/{label}", label) for label, _ in labelled],
     )
 
