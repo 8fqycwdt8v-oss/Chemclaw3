@@ -216,9 +216,14 @@ never what a deployment gets.
 - [x] `safety` is **not attenuable away** — a team omitting it is refused at build time. The one
       rule here that is not attenuation.
 - [x] `tests/test_agent_team.py` — 16 tests.
-- [ ] **Invariant 3 — the trail names the specialist beside the human.** In progress: needs the
-      `agent` column, `CHAIN_VERSION` 3 and a frozen v2 field set, or every historical row reports
-      itself tampered with.
+- [x] **Invariant 3 — the trail names the specialist beside the human.** `AuditEvent.agent`, a
+      `current_specialist` contextvar, `infra/sql/044_audit_agent.sql`, `CHAIN_VERSION` 3. Not
+      `actor` (the human's oid — overloading it is D-040 repeated) and not `purpose` (reserved and
+      deliberately empty): two questions, two columns.
+- [x] The chain-version switch became a **version→shape table**. `version < CHAIN_VERSION` was
+      correct while exactly one superseded shape existed; bumping to 3 with it would have hashed
+      every v2 row under v1's eight fields and reported the middle of the trail as tampered with.
+      Falsified by removing the v2 row from the map and watching exactly the five v2 tests fail.
 - [ ] Supervisor routing measured. `SubAgentMiddleware`'s `task` tool is the delegation path;
       `Command(goto=…, graph=Command.PARENT)` and a routing *node* are the alternative the ADR
       prefers for trace legibility, and choosing between them is an M12 measurement, not a guess.
