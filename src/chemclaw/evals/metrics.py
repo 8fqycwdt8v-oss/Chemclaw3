@@ -13,7 +13,7 @@ come from the config, never the code (G3). Importing this module registers them.
 from typing import Any
 
 from chemclaw.core.config import settings
-from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
+from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
 from chemclaw.science.safety.screen import SafetyRulesError, screen_structure
 
 
@@ -62,7 +62,7 @@ def _positive_scalar(raw: Any, field: str) -> float:
     return value
 
 
-@metric("e_factor")
+@metric("e_factor", Direction.LOWER_IS_BETTER)
 def e_factor(case: EvalCase) -> MetricResult:
     """Green-chemistry E-factor: kg waste per kg product (Sheldon).
 
@@ -84,7 +84,7 @@ def e_factor(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("pmi")
+@metric("pmi", Direction.LOWER_IS_BETTER)
 def process_mass_intensity(case: EvalCase) -> MetricResult:
     """Process Mass Intensity: total input mass per kg product (PMI = E-factor + 1).
 
@@ -106,7 +106,7 @@ def process_mass_intensity(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("prediction_error")
+@metric("prediction_error", Direction.LOWER_IS_BETTER)
 def prediction_error(case: EvalCase) -> MetricResult:
     """Absolute error of a predicted value against a held-out reference.
 
@@ -131,7 +131,7 @@ def prediction_error(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("bo_regret")
+@metric("bo_regret", Direction.LOWER_IS_BETTER)
 def bo_regret(case: EvalCase) -> MetricResult:
     """Optimization regret: distance from the best value found to the known optimum.
 
@@ -214,7 +214,7 @@ def precision_recall_f1(predicted: set[str], expected: set[str]) -> tuple[float,
     return precision, recall, f1
 
 
-@metric("precision")
+@metric("precision", Direction.HIGHER_IS_BETTER)
 def precision(case: EvalCase) -> MetricResult:
     """Retrieval/extraction precision: fraction of predicted note ids that were expected (F10-F1).
 
@@ -235,7 +235,7 @@ def precision(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("recall")
+@metric("recall", Direction.HIGHER_IS_BETTER)
 def recall(case: EvalCase) -> MetricResult:
     """Retrieval/extraction recall: fraction of expected note ids that were predicted (F10-F1).
 
@@ -256,7 +256,7 @@ def recall(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("f1")
+@metric("f1", Direction.HIGHER_IS_BETTER)
 def f1(case: EvalCase) -> MetricResult:
     """Retrieval/extraction F1: the harmonic mean of precision and recall (F10-F1).
 
@@ -290,7 +290,7 @@ def _scalar(raw: Any, field: str) -> float:
         raise MetricError(f"{field} must be a number, got {raw!r}") from exc
 
 
-@metric("hazard_flag_recall")
+@metric("hazard_flag_recall", Direction.HIGHER_IS_BETTER)
 def hazard_flag_recall(case: EvalCase) -> MetricResult:
     """Fraction of the pinned hazard rules that still fire on their reference molecules (D-080).
 

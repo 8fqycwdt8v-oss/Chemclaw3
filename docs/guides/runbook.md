@@ -590,6 +590,13 @@ Over the committed (deterministic) case-set this is a *deployment-consistency tr
 when the deployed code, cases, and `data/evals/baseline.json` are inconsistent. After a deliberate
 metric change, refresh the committed baseline — otherwise every scheduled run re-alerts.
 
+**You do not need the workflow (or a broker) to get this reading.** `make eval-baseline-check` runs
+the same comparison offline, prints every metric's baseline/current/delta/band, and exits non-zero
+only on a move in the *worsening* direction — so it is the one to run before refreshing the
+baseline, and the one that answers "did anything get worse?" on a laptop. It declares the case-set
+version it scored (`EVAL_CASE_SET_VERSION`) and refuses to report a number when that differs from
+the baseline's: aggregates over two different case-sets are different quantities.
+
 ## (viii) Answer "is prompt caching paying off?"
 
 The system prompt is large and largely identical turn to turn, so "cache the static prefix" is a

@@ -1,0 +1,271 @@
+# M12 · team routing accuracy and per-specialist token cost (M9's deferred default).
+#
+# `agent/team.py` ships disabled behind `settings.agent_teams_enabled`, and its module docstring
+# says exactly why: "a supervisor which mis-routes is *worse* than no team at all — which is why
+# this ships disabled until M12 measures routing accuracy and per-specialist token cost against the
+# single-agent baseline. A capability that is not yet known to help is not a default." This file is
+# that measurement's key.
+#
+# **The corpus is a partition, and that is what makes accuracy a number rather than a judgement.**
+# `expects_specialist` is a single name where `expects_tools` is any-of, because the five
+# specialists divide the surface between them: a hazard question is not also a design question.
+# Three questions per specialist, each written so that exactly one of the five *holds the tools that
+# answer it* — the routing key is derived from the profiles in `data/profiles/`, not from taste.
+#
+# **Run it twice, against two differently-configured front doors.** `--arm team` against one with
+# `CHEMCLAW_AGENT_TEAMS_ENABLED=true`, `--arm single` against one without. The single arm has no
+# routing to be right about; it exists to price the same fifteen questions without a supervisor,
+# because a team's token cost with nothing to compare it against answers nothing. The suite refuses
+# to present one arm as a result.
+#
+# **How routing is observed.** Not from a handoff event — nothing raises one yet (M9's own open
+# row) — but from the `agent` field the three specialist-raisable events carry
+# (`api/events.py::_AGENT_FIELD`). Empty means the main agent, which is both the pre-teams shape
+# and the control arm's expected one. A turn attributed to more than one specialist is scored on
+# the first: that is the delegation decision, and the rest is what the supervisor did after it.
+
+probes:
+  # ---------------------------------------------------------------- evidence
+  - id: rt-01
+    section: 1
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What does our record already say about the Buchwald-Hartwig amination of aryl chlorides —
+      which ligands have we actually used, and where is that written down?
+    expects_specialist: evidence
+    expects_tools: [gather_evidence, find_notes]
+    forbids_claims:
+      - "a note id that no retrieval returned"
+      - "a ligand result presented as ours when the record does not hold it"
+    direction: >-
+      A pure recall question over the internal record. It should sweep the evidence, cite note ids,
+      and say plainly where the record is silent rather than filling the gap from general knowledge.
+
+  - id: rt-02
+    section: 3
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Has anyone here already run a calculation on the ester hydrolysis I am about to set up? I do
+      not want to pay for compute we have already bought.
+    expects_specialist: evidence
+    expects_tools: [find_past_jobs, find_calculations]
+    forbids_claims:
+      - "a past job id that the job history did not return"
+      - "that no prior run exists without having looked"
+    direction: >-
+      The question is about the *record of past work*, not about running anything. Reaching for a
+      calculator here would be the wrong instinct twice over — it answers a different question and
+      it spends the money the chemist is trying not to spend.
+
+  - id: rt-03
+    section: 2
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Find me reactions in our history that are structurally similar to this one:
+      Brc1ccccc1.OB(O)c1ccccc1>>c1ccc(-c2ccccc2)cc1
+    expects_specialist: evidence
+    expects_tools: [similar_reactions, gather_evidence]
+    forbids_claims:
+      - "a similar reaction that the fingerprint search did not return"
+      - "a similarity score no search produced"
+    direction: >-
+      Structure-based retrieval over what we already hold. The answer should name what came back
+      with its ids and be honest when the index is thin.
+
+  # ---------------------------------------------------------------- computation
+  - id: rt-04
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What is the pKa of the carboxylic acid in 4-aminobenzoic acid (Nc1ccc(C(=O)O)cc1)?
+    expects_specialist: computation
+    expects_tools: [predict_pka]
+    forbids_claims:
+      - "a pKa the predictor did not return"
+      - "a predicted value stated without its method or uncertainty"
+    direction: >-
+      A property prediction with a calculator that exists. The number must come from the tool, carry
+      its method and uncertainty, and stay inside the predictor's stated domain.
+
+  - id: rt-05
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Compute the reaction energy for the hydrogenation of ethene to ethane (C=C plus [H][H] to CC)
+      at quick level, symmetry numbers 4 for ethene, 2 for hydrogen and 6 for ethane.
+    expects_specialist: computation
+    expects_tools: [compute_reaction_energy]
+    forbids_claims:
+      - "a reaction energy the calculation did not return"
+      - "a rate or an activation barrier, which a thermodynamic result does not contain"
+    direction: >-
+      The durable calculator's home ground. The framing matters as much as the number: a negative
+      free energy places an equilibrium and says nothing about how fast it gets there.
+
+  - id: rt-06
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      How soluble is paracetamol (CC(=O)Nc1ccc(O)cc1) in water? I need a number I can plan a
+      crystallisation around.
+    expects_specialist: computation
+    expects_tools: [predict_solubility]
+    forbids_claims:
+      - "a solubility the predictor did not return"
+      - "an organic-solvent solubility, which the aqueous predictor does not cover"
+    direction: >-
+      The predictor is aqueous and neutral-species only. Answering the water question and naming
+      that boundary is right; extending it to the crystallisation solvent silently is the failure.
+
+  # ---------------------------------------------------------------- design
+  - id: rt-07
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      I have run six conditions on this amide coupling and yields are between 40 and 68 percent.
+      Which condition should I run next?
+    expects_specialist: design
+    expects_tools: [suggest_next_experiment]
+    forbids_claims:
+      - "a yield for a condition that has not been run"
+      - "that a suggested point is a result rather than a proposal"
+    direction: >-
+      Bayesian optimisation over a campaign's history. Everything it produces is a proposal a human
+      runs, and the answer must say what the model is uncertain about beside the suggestion.
+
+  - id: rt-08
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Give me a screening design over three solvents, two bases and two temperatures — I want a
+      first pass that is not just one-factor-at-a-time.
+    expects_specialist: design
+    expects_tools: [generate_screening_design]
+    forbids_claims:
+      - "an experimental outcome for a design that has not been run"
+      - "a coverage or power claim the design tool did not produce"
+    direction: >-
+      A design-of-experiments question. The answer is a plan to execute, with the design's own
+      structure explained — never a prediction of what the runs will show.
+
+  - id: rt-09
+    section: 8
+    persona: manager
+    bucket: A
+    question: >-
+      How far along is the solvent-screening campaign, and is it converging or still exploring?
+    expects_specialist: design
+    expects_tools: [campaign_progress]
+    forbids_claims:
+      - "a campaign state the progress tool did not report"
+      - "a completion date the system cannot know"
+    direction: >-
+      A status question about an optimisation campaign. It should report what the campaign record
+      actually holds and distinguish "still exploring" from "converged" on that evidence.
+
+  # ---------------------------------------------------------------- safety
+  - id: rt-10
+    section: 11
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Before I handle this, screen it for structural hazards: CCOC(=O)C(=O)OCC and
+      O=C(OCC)C(Cl)(Cl)Cl.
+    expects_specialist: safety
+    expects_tools: [screen_hazards]
+    forbids_claims:
+      - "a hazard classification, which an advisory screen does not issue"
+      - "that the absence of an alert is evidence of safety"
+    direction: >-
+      An advisory structural screen with its citation. "Nothing matched" is a statement about the
+      rule table and must be said as one, never as a clearance.
+
+  - id: rt-11
+    section: 11
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Does this intermediate carry a DNA-reactive alert I need to control for?
+      COS(=O)(=O)OC
+    expects_specialist: safety
+    expects_tools: [screen_genotoxic_alerts]
+    forbids_claims:
+      - "an ICH M7 class assignment, which the screen does not issue"
+      - "that a structural alert is a measured mutagenicity result"
+    direction: >-
+      A genotoxicity alert question. The answer names the alert and the reference behind it, and
+      keeps the line between a structural alert and an experimental finding.
+
+  - id: rt-12
+    section: 11
+    persona: manager
+    bucket: A
+    question: >-
+      What is the ICH Q3D limit for residual palladium in an oral product?
+    expects_specialist: safety
+    expects_tools: [ich_impurity_limit]
+    forbids_claims:
+      - "a permitted daily exposure the reference did not give"
+      - "a limit for a route the reference does not cover"
+    direction: >-
+      A reference lookup. Every figure must come back from the tool with its basis and route named,
+      because the same element has different limits per route.
+
+  # ---------------------------------------------------------------- reporting
+  - id: rt-13
+    section: 14
+    persona: manager
+    bucket: A
+    question: >-
+      Pull together a development report on the amide-coupling work so far — I need something to
+      take to the project review.
+    expects_specialist: reporting
+    expects_tools: [request_development_report]
+    forbids_claims:
+      - "a finished report when only a job was started"
+      - "a section's content that no evidence in the run supports"
+    direction: >-
+      Assembling finished work into a record. If the report is durable work in progress, saying so
+      with its real id is a good answer; writing the report by hand and presenting it as the
+      system's is the failure this shape has produced live before.
+
+  - id: rt-14
+    section: 13
+    persona: lab_technician
+    bucket: A
+    question: >-
+      We settled it: the DCM amide coupling fails because of the residual water, and switching to
+      2-MeTHF fixed it. Write that down so the next person finds it.
+    expects_specialist: reporting
+    expects_tools: [propose_knowledge_note]
+    forbids_claims:
+      - "that the note is now part of the knowledge graph rather than proposed for review"
+      - "a citation to a note that does not exist"
+    direction: >-
+      A knowledge contribution. Everything agent-authored enters the graph through a human-reviewed
+      pull request, so the answer must say the note is *proposed* and name the reference it came
+      back with.
+
+  - id: rt-15
+    section: 13
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Record this as a failure so nobody repeats it: the Suzuki with the aryl chloride gave nothing
+      at 60 degrees with the SPhos ligand.
+    expects_specialist: reporting
+    expects_tools: [record_failure]
+    forbids_claims:
+      - "that the failure record is merged rather than awaiting review"
+      - "a cause for the failure the chemist did not state and no evidence supports"
+    direction: >-
+      A negative result is worth recording exactly because nobody publishes them. The answer records
+      what was said, does not invent a mechanism for it, and reports where the record went.

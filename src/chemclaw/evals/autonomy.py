@@ -28,7 +28,7 @@ from pydantic import TypeAdapter, ValidationError
 from chemclaw.api.events import ErrorEvent, Event, PlanEvent
 from chemclaw.core.config import settings
 from chemclaw.evals.ab import TaskScores, compare_tool_utility
-from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
+from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
 from chemclaw.evals.metrics import precision_recall_f1
 
 # Error codes that mean the turn was cut off rather than finished: it ran out of wall clock, out
@@ -69,7 +69,7 @@ def _plan_steps(plan: PlanEvent) -> list[str]:
     return [step[4:] if step[:4] in ("[ ] ", "[x] ") else step for step in plan.todos]
 
 
-@metric("plan_quality")
+@metric("plan_quality", Direction.HIGHER_IS_BETTER)
 def plan_quality(case: EvalCase) -> MetricResult:
     """F1 of the plan the turn ended with against the steps the case says it needed.
 
@@ -117,7 +117,7 @@ def plan_quality(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("runaway_rate")
+@metric("runaway_rate", Direction.LOWER_IS_BETTER)
 def runaway_rate(case: EvalCase) -> MetricResult:
     """Share of the case's turns that a guard cut off instead of letting them finish.
 
@@ -167,7 +167,7 @@ def runaway_rate(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("plan_execute_utility")
+@metric("plan_execute_utility", Direction.HIGHER_IS_BETTER)
 def plan_execute_utility(case: EvalCase) -> MetricResult:
     """Share of tasks the planning path helped, against the single-shot baseline.
 

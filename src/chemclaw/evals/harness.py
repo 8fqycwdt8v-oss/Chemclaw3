@@ -19,6 +19,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.evals.baseline import (
+    CaseSetMismatchError,
+    compare_to_baseline,
+    load_baseline,
+    render_comparison,
+)
 from chemclaw.evals.metric import EvalCase, get_metric
 
 
@@ -198,10 +204,27 @@ def render_report(report: EvalReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _baseline_check(report: EvalReport) -> int:
+    """Score `report` against the committed baseline and print the per-metric numbers.
+
+    Returns the process exit code — non-zero when a metric worsened past the noise band, or when
+    the two sides scored different case-sets (see `compare_to_baseline`).
+    """
+    baseline = load_baseline(settings.eval_baseline_path)
+    try:
+        comparison = compare_to_baseline(report, baseline, settings.eval_drift_epsilon)
+    except CaseSetMismatchError as exc:
+        print(exc)
+        return 1
+    print(render_comparison(comparison), end="")
+    return 1 if comparison.worsened() else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: score the versioned case-set and print the citable report.
 
-    Run as `python -m chemclaw.evals.harness [case_dir] [version] [--strict]`.
+    Run as `python -m chemclaw.evals.harness [case_dir] [--case-set-version V] [--strict]
+    [--baseline]`.
 
     **Two modes, because there are two audiences.** By default this reports for humans and returns
     zero whenever the case-set loaded, so a demonstration case that is *expected* to fail its gate
@@ -217,29 +240,58 @@ def main(argv: list[str] | None = None) -> int:
     coverage and the command stays green, which is the failure the strict mode exists to prevent
     read from the other direction.
 
+    **`--baseline` answers a third question: "did anything get *worse* than last time?"** The gates
+    `--strict` reads are absolute lines — they cannot see an `f1` sliding from 0.95 to 0.70 as long
+    as both clear the floor. The committed `data/evals/baseline.json` is what can, and until now the
+    only code that read it was `durable/eval_drift.py`, a Temporal workflow that is off by default —
+    so the recorded baseline could not be scored against without a broker. `--baseline` runs exactly
+    that comparison as an ordinary offline command and prints the numbers (see
+    `baseline.render_comparison`). It exits non-zero only on a move in the *worsening* direction,
+    because a command that failed on an improvement is a command people learn to re-run.
+
+    The two flags compose: with both, `--strict` decides the exit code first (a hard gate failure
+    outranks a drift), and the comparison is still printed so one run yields both readings.
+
     Returns non-zero when the case-set cannot be loaded or scored (missing, empty, or broken — G4)
-    in either mode, so a vacuous or unscorable run never exits green.
+    in any mode, so a vacuous or unscorable run never exits green.
     """
     parser = argparse.ArgumentParser(
         prog="chemclaw.evals.harness", description="Score the versioned eval case-set."
     )
     parser.add_argument("case_dir", nargs="?", default=settings.eval_case_dir)
-    parser.add_argument("version", nargs="?", default="unversioned")
+    # An option rather than a second positional (which it used to be): `--baseline` needs the
+    # version and *not* the case directory, and a positional cannot be skipped — the caller would
+    # have had to restate `eval_case_dir`, silently defeating its `CHEMCLAW_EVAL_CASE_DIR` override.
+    parser.add_argument(
+        "--case-set-version",
+        default="unversioned",
+        help="the case-set version this run scored (must match the baseline's under `--baseline`)",
+    )
     parser.add_argument(
         "--strict",
         action="store_true",
         help="exit non-zero when a gated metric fails (what a CI quality gate needs)",
     )
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help=(
+            "compare the run's aggregates against the committed baseline and exit non-zero when a "
+            "metric worsened past the drift band (requires `version` to name the baseline's "
+            "case-set)"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        report = run_eval(load_eval_cases(args.case_dir), args.version)
+        report = run_eval(load_eval_cases(args.case_dir), args.case_set_version)
     except EvalCaseError as exc:
         print(exc)
         return 1
     print(render_report(report), end="")
+    baseline_code = _baseline_check(report) if args.baseline else 0
     if args.strict and (report.regressions() or report.inert_demonstrations()):
         return 1
-    return 0
+    return baseline_code
 
 
 if __name__ == "__main__":

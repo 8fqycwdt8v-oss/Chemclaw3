@@ -269,12 +269,26 @@ never what a deployment gets.
 - [x] `create_agent(store=…)` stays unset in `agent/langgraph_agent.py` — now a decision with a
       reason rather than an omission.
 
-### M12 — live re-validation
-- [ ] Concurrency probe (8 turns × 3 configs) — gates the `agent_pool` deletion.
-- [ ] Durable-launcher probe — `CapabilityDegradedEvent` still precedes the first token.
-- [ ] Plan → approve → execute, live. *This is the one that historically silently did not work.*
-- [ ] Team routing accuracy + per-specialist token cost vs. the single-agent baseline.
-- [ ] `make eval-strict` scored against the MAF baseline.
+### M12 — live re-validation · **harnesses built, three runs owed a credential**
+- [x] `make eval-strict` — runs offline, exit 0, 25 metrics, 0 regressions.
+- [x] **`make eval-baseline-check`** — the gap nobody had noticed: `--strict` gates on
+      `regressions()` and `inert_demonstrations()` and **never reads `baseline.json`**, which only a
+      Temporal workflow disabled by default consumed. Now a command. Measured: 0 of 13 metrics
+      worsened; a case-set mismatch refuses to compare at all and exits 1.
+- [x] **Metrics gained a `Direction`**, which is what made "worse" definable. Half of them are
+      ungated (`passed is None`), so the pass threshold — the only other place a direction is
+      implied — does not exist for them, and 0.9 is a good `f1` and a bad `prediction_error`.
+- [x] Probe harnesses built for plan→approve→execute (multi-turn `Turn`/`Intervention`, including
+      the DARK-1 re-gate), `CapabilityDegradedEvent` ordering, and team routing accuracy +
+      per-specialist token cost. Kept in `data/evals/probes/m12/` — a subdirectory, because
+      `load_probes` globs one level, so the 190-question corpus run is unchanged.
+- [x] **D-123's mechanism verified absent from the replacement** by reading: five instance-state
+      sites in `agent_framework_anthropic` against **zero** `self.<attr> =` assignments in
+      `langchain_anthropic/chat_models.py`.
+- [ ] **Not run: the concurrency probe, plan→approve→execute, and team routing.** All three need a
+      live model and this environment has no `ANTHROPIC_API_KEY`. Nothing is reported as passing.
+- [ ] `agent_pool.py`'s deletion stays gated on the concurrency probe *being run*, not on the
+      reading above — a structural argument is not a measurement.
 
 ### M13 — remove MAF and update the documents
 - [ ] Drop `agent-framework-*`, the `maf` stack rows, and the `agent_engine` switch with its branch.
@@ -838,3 +852,29 @@ probe runs the moment a credential exists; none of them is reported as having pa
       `ainvoke` never reaches `_astream`, so there is no stream parser to exercise — and D-123 *is*
       a stream-parser defect. Sharing a fake's iterator across turns fails for reasons unrelated to
       the bug. A probe that cannot see the defect it is named after is worse than no probe.
+
+**M12 — what was measured, and what is still owed.** `make lint type test` green at 4221 passed,
+36 skipped. Three tests failed the first full run and none was a regression: `test_third_party_
+layering` passes in isolation, and `test_reizman`/`test_xtb_thermo` are wall-clock caps that pytest
+itself labels "not assertion failures" — `test_reizman` passes in 55 s once my own leftover
+background pytest processes are killed, against 26 minutes of contention.
+
+**The real find was in probe 5, and it was not the probe.** "Scored against the MAF baseline" turned
+out not to be runnable at all: `make eval-strict` gates on regressions and inert demonstrations and
+never opens `baseline.json`. The only reader was `durable/eval_drift.py`, a Temporal workflow
+`eval_drift_enabled=False` keeps off. So the phase's fifth bullet described a comparison nobody
+could perform. It is now `make eval-baseline-check`, and closing it needed something absent from the
+metric registry: a **direction**. Half the metrics are ungated, so the pass threshold — the only
+other place "better" is implied — does not exist for them, and without a sign a comparison cannot
+tell an improvement from a regression.
+
+**On the three probes that were not run.** They are built so that a credentialed environment runs
+them unchanged, and none of them is reported as having passed. That is the same posture M6 took with
+the migration rehearsal: the harness is the deliverable, the run is owed.
+
+**And a probe I built and threw away.** An offline concurrency probe looked like a way to close #1
+without a key. It cannot be: with a fake model `ainvoke` never reaches `_astream`, so there is no
+stream parser — and D-123 *is* a stream-parser defect. My first version even reported "8/8 turns
+consistent" while making zero tool calls, because `all(...)` over an empty list is true. The guard I
+added caught it. A probe that cannot see the defect it is named after is worse than no probe,
+because its green is quoted later.

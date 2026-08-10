@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from chemclaw.core.config import NOTE_INDEX_SOURCES, settings
-from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
+from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
 from chemclaw.kg.graph import scan_notes_dir
 from chemclaw.retrieval.retrievers import GraphRetriever
 
@@ -182,7 +182,7 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     return list(ids)
 
 
-@metric("retrieval_recall")
+@metric("retrieval_recall", Direction.HIGHER_IS_BETTER)
 def retrieval_recall(case: EvalCase) -> MetricResult:
     """Fraction of the gold expected sources that retrieval actually surfaced (KM-13).
 
@@ -204,7 +204,7 @@ def retrieval_recall(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("retrieval_precision")
+@metric("retrieval_precision", Direction.HIGHER_IS_BETTER)
 def retrieval_precision(case: EvalCase) -> MetricResult:
     """Fraction of retrieved notes that are gold-relevant — a diagnostic, not gated (KM-13).
 
