@@ -243,10 +243,12 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
 # Function-scope-only exceptions: a stack this package must not depend on at *import* time. The
 # asymmetry with the dict above is the point — each row is a deliberate lazy import.
 _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
-    ("chemclaw.core", "maf"): (
-        "core/logging.configure_telemetry calls MAF's OTel setup inside the function so the "
-        "kernel — which every entrypoint imports first — does not pull MAF in at import time"
-    ),
+    # `("chemclaw.core", "maf")` was here — the kernel's one MAF import, `configure_telemetry`
+    # calling `agent_framework.observability.configure_otel_providers` inside the function. That
+    # bootstrap is now written out against the OTel SDK directly, so the kernel names no
+    # conversation framework at any scope, and the row goes with the import: this file's own rule
+    # is that a declared row must still be observed in the tree, or it re-blesses the edge for the
+    # next author.
     ("chemclaw.core", "llm"): (
         "core/embeddings builds the OpenAI-compatible client inside `_openai_client`, same reason"
     ),

@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 import chemclaw.agent.llm_provider as provider
-from chemclaw.core.config import Settings
+from chemclaw.core.config import Settings, settings
 
 
 def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Settings:
@@ -201,3 +201,40 @@ def test_anthropic_model_path_preflights_missing_key(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         provider.build_chat_model()
+
+
+def test_the_openai_compatible_model_asks_the_endpoint_for_token_usage() -> None:
+    """Without this the cost ledger reads zero, and nothing else notices.
+
+    `ChatOpenAI` default-enables `stream_usage` only when *no* custom base URL and *no* custom HTTP
+    client are configured. `_openai_compatible_model` sets both — the internal endpoint and the
+    private-CA bundle — so upstream turns it off, the endpoint is never asked to report usage, no
+    usage chunk arrives, and `runner_usage.graph_usage_tokens` correctly reads nothing.
+
+    Measured before the fix: 15 turns through the graph engine wrote `turn_costs` rows totalling
+    **0** tokens against 2,040 per session on the other engine. That is the same failure
+    `usage_tokens`'s docstring records from the other direction, and it disarms the runaway-cost
+    guard rather than making it conservative.
+
+    Asserted on the built model rather than on a live stream, because the defect is a construction
+    argument — and a test needing a real endpoint is a test that would not have run.
+    """
+    from chemclaw.agent.llm_provider import _openai_compatible_model
+
+    assert _openai_compatible_model("m").stream_usage is True
+
+
+def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch is a setting, because upstream's caution is about real endpoints.
+
+    LangChain disables the default on the stated grounds that "many non-OpenAI endpoints do not
+    support streaming token usage". A deployment whose endpoint rejects `stream_options` needs a
+    way out that is not a code change — and the ledger reading zero is then a stated consequence
+    rather than a silent one.
+    """
+    from chemclaw.agent.llm_provider import _openai_compatible_model
+
+    monkeypatch.setattr(settings, "llm_stream_usage", False)
+    assert _openai_compatible_model("m").stream_usage is False

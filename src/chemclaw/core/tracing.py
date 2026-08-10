@@ -1,7 +1,7 @@
 """First-party spans, and the propagation that makes them join up across a process boundary.
 
-`configure_telemetry` calls MAF's `configure_otel_providers` and that was the whole tracing story:
-the LLM client's own spans, and nothing else. So a trace showed model calls floating with no parent
+`configure_telemetry` installs the tracer provider and that was once the whole tracing story: the
+LLM client's own spans, and nothing else. So a trace showed model calls floating with no parent
 — no turn to hang them from, no tool call around them, and nothing at all from a connector, because
 each connector process started its own unrelated trace. Meanwhile `deploy/README.md` claimed "spans
 cover a turn and a job" and that dashboards track loop iterations, which described a system nobody

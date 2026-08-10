@@ -41,6 +41,16 @@ class LlmSettings(BaseSettings):
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
+
+    # Ask an OpenAI-compatible endpoint to report token usage while streaming.
+    #
+    # **On by default because the alternative failed silently.** `ChatOpenAI` only default-enables
+    # this when no custom base URL and no custom HTTP client are configured, and Chemclaw sets
+    # both — so the endpoint was never asked, no usage chunk arrived, and every turn on the graph
+    # engine metered zero while the budget guard went on admitting the next one. A setting rather
+    # than a hardcoded `True` because upstream's caution is real: an endpoint that rejects
+    # `stream_options` needs a way out that is not a code change.
+    llm_stream_usage: bool = True
     # Unset by default, and that default is load-bearing: current frontier models (the shipped
     # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
     # `400 invalid_request_error: temperature is deprecated for this model` — so a config that

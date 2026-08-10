@@ -64,17 +64,26 @@ class ObservabilitySettings(BaseSettings):
     # production does. `tests/test_deploy_chart.py` pins the wiring; the image job runs the built
     # image and compares the value, because only that can prove it arrived.
     deployment_revision: str = "unknown"
-    # OpenTelemetry export (off by default). When enabled,
-    # `chemclaw.logging.configure_telemetry` calls MAF's `configure_otel_providers`, which reads
-    # the standard `OTEL_EXPORTER_OTLP_*` environment variables for the collector endpoint.
-    # Requires the OpenTelemetry SDK + OTLP exporter extras to be installed;
-    # `enable_sensitive_data` controls whether prompts/results are attached to spans (keep off
-    # unless a trusted collector needs them).
+    # OpenTelemetry *span* export (off by default). When enabled,
+    # `chemclaw.core.logging.configure_telemetry` builds the tracer provider itself and lets the
+    # exporter read the standard `OTEL_EXPORTER_OTLP_*` environment variables. Requires the
+    # OpenTelemetry SDK + OTLP exporter extras.
+    #
+    # **Traces only, and that is a change rather than a simplification.** The bootstrap used to be
+    # one call into the agent framework, which also installed a `MeterProvider` and recorded the
+    # `gen_ai.client.token.usage` histogram — per-model token attribution that no replacement in
+    # this stack emits. It is gone; `chemclaw_*_tokens_total` and the `turn_costs` table are where
+    # spend is answered now (`docs/guides/runbook.md` says so where an operator looks).
+    #
+    # `otel_include_sensitive_data` had exactly one consumer — that framework's instrumentation —
+    # so it governs nothing today and `configure_telemetry` warns when it is set. Kept rather than
+    # deleted because a deployment may still have it in its values file, and a silently-ignored
+    # knob is worse than one that says so.
     otel_enabled: bool = False
     otel_include_sensitive_data: bool = False
-    # The OTLP collector endpoint (plan F6-T5). Exported as `OTEL_EXPORTER_OTLP_ENDPOINT` for
-    # MAF's `configure_otel_providers` when set; empty in dev (no collector). Config, so the
-    # in-cluster collector address is one value like every other endpoint.
+    # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
+    # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
+    # the in-cluster collector address is one value like every other endpoint.
     otel_endpoint: str = ""
     # Where a *worker* process serves `/healthz`, `/readyz` and `/metrics`
     # (`chemclaw.core.worker_http`). The front door has `service_port`; every other process had no

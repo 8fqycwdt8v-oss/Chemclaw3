@@ -130,8 +130,37 @@ def lg_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None
     calls = int(state.get("model_calls", 0))
     if calls >= settings.harness_max_loop_iterations:
         logger.warning("the model loop hit its %d-iteration cap", calls)
+        record_loop_cap()
         return {"jump_to": "end"}
     return {"model_calls": calls + 1}
+
+
+def record_loop_cap() -> None:
+    """Tell this turn's watch the cap fired, so **one** reader answers for both engines.
+
+    Without this the count was kept where nothing on the turn path read it. `chemclaw.api.runner`
+    decides whether to emit `loop_cap_reached` and increment `chemclaw_turn_loop_caps_total` by
+    calling `loop_hit_cap()`, which reads the ambient watch — and only `observe_loop_cap`, the MAF
+    half, ever wrote it. `loop_capped(state)` answers the same question from graph state and has no
+    caller in the runner, because a compiled graph's final state is not something the streaming
+    driver hands back.
+
+    So a capped turn on the graph engine was externally identical to a finished one: no error
+    event, no counter, nothing for a surface to mark the answer partial with. That is precisely the
+    defect `lg_loop_cap` exists to fix — "MAF's cap fired inside `create_harness_agent` where
+    nothing could observe it" — reintroduced one layer up by wiring the runner to the wrong reader.
+
+    Marking the watch rather than branching in the runner is what keeps it one number: the count
+    still lives in `model_calls` and `loop_capped` still reads it, and this records only the *fact*
+    the runner asks about. A second branch there would be a second place for the two engines to
+    disagree about whether a turn was cut off.
+    """
+    watch = _watch.get()
+    if watch is not None:
+        # `wants_more` means "the loop asked to continue and something else stopped it", which is
+        # exactly what a cap is. Mutated rather than rebound for the reason the module docstring
+        # gives: the runner must see it even when the stream is driven from a task of its own.
+        watch.wants_more = True
 
 
 def loop_capped(state: Mapping[str, Any]) -> bool:

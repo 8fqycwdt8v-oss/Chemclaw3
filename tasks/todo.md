@@ -289,8 +289,21 @@ never what a deployment gets.
       with Temporal deliberately stopped and the local mock LLM: `capability_degraded
       ['durable-jobs (Temporal)']` at event 1, first token at event 3, the launcher reached. Zero
       LLM calls. The ordering assertion is measured, not merely built.
-- [ ] **A second M8 defect, found by reading rather than by a test: the loop cap is unobservable
-      on the graph engine.** `run_turn` decides whether to emit `loop_cap_reached` and increment
+- [x] **FIXED — the loop cap now reaches the runner.** `loop_cap.record_loop_cap()` marks the
+      ambient watch when `lg_loop_cap` caps, so `loop_hit_cap()` — the one reader `run_turn`
+      already calls on both paths — answers for both engines. Marking the watch rather than adding
+      a branch in the runner is what keeps it one number: the count still lives in `model_calls`.
+      Pinned at a cap of 1, the value MAF's inference was blind at, asserting **both** records.
+- [ ] **OPEN, and found while testing the above: the cap may not fire end to end.** Driving
+      `run_turn` with `harness_max_loop_iterations=1` and a scripted model, the loop made at least
+      four model calls and never capped — the turn died on `StopIteration` when the script ran out,
+      not on the cap. `lg_loop_cap.before_model` caps correctly when called directly (the test
+      above), so the gap is between the middleware and the compiled loop: either `model_calls` is
+      not accumulating across `before_model` invocations, or `{"jump_to": "end"}` is not honoured
+      from that hook. **Not resolved**, and it is a runaway guard, so it should be next.
+      Repro: `harness_enabled=True`, `harness_max_loop_iterations=1`, a `ScriptedChatModel` of four
+      tool calls, through `run_turn` with `agent_engine=langgraph`.
+- [ ] ~~A second M8 defect: the loop cap is unobservable on the graph engine.~~ `run_turn` decides whether to emit `loop_cap_reached` and increment
       `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`, which reads the `_watch`
       contextvar — written *only* by `observe_loop_cap`, the MAF half. The graph engine's
       `lg_loop_cap` instead records `model_calls` in graph state, and nothing reads it back:
@@ -299,7 +312,14 @@ never what a deployment gets.
       docstring says it was written to fix — "MAF's cap fired inside `create_harness_agent` where
       nothing could observe it" — reintroduced one layer up by wiring the runner to the wrong
       reader. Fix with the metering defect, before the default flips.
-- [ ] **A defect the probe found in M8, and it is the serious kind.** The team arm's 15 turns wrote
+- [x] **FIXED — token metering on the graph engine.** Root cause: `ChatOpenAI` default-enables
+      `stream_usage` only when *no* custom base URL **and** no custom HTTP client are set, and
+      `_openai_compatible_model` sets both (the internal endpoint, and a client for the private-CA
+      bundle). So the endpoint was never asked to report usage and `graph_usage_tokens` correctly
+      read nothing. Now passed explicitly from `settings.llm_stream_usage` (default on; a setting
+      because upstream's caution is real — some endpoints reject `stream_options`). Pinned by a
+      test on the built model, since the defect is a construction argument.
+- [ ] ~~The probe's original finding.~~ The team arm's 15 turns wrote
       `turn_costs` rows with **zero** tokens while the MAF arm wrote 2040 per session — so
       `runner_usage.graph_usage_tokens` read nothing from the `openai_compatible` endpoint. LangChain
       reports `usage_metadata` on the *final* aggregated message, and the mock may report it in a

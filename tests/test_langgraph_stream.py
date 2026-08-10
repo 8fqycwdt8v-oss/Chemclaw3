@@ -15,7 +15,7 @@ which is exactly the failure `docs/archive/live-grounded-2026-08-03.md` records.
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -252,3 +252,45 @@ def test_the_runner_serves_a_whole_turn_on_the_graph_engine(
     answer = events[-1]
     assert answer.text == "the assembled answer"
     assert "token" in kinds
+
+
+def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
+    """One reader answers for both engines — the wiring that was missing.
+
+    `chemclaw.api.runner` decides whether to emit `loop_cap_reached` and increment
+    `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`, which reads the ambient watch.
+    Only `observe_loop_cap` — the MAF half — ever wrote it, while the graph engine kept its count
+    in `model_calls`, which the runner never reads back. So a capped turn on this engine was
+    externally identical to a finished one: the exact defect `lg_loop_cap` was written to fix,
+    reintroduced one layer up.
+
+    Driven at a cap of 1 because that is the value MAF's inference was blind at, and asserted on
+    **both** records: the state count `loop_capped` reads, and the watch the runner reads. Before
+    the fix the first held and the second did not, which is precisely how the defect hid.
+    """
+    from chemclaw.agent.loop_cap import (
+        begin_loop_watch,
+        end_loop_watch,
+        lg_loop_cap,
+        loop_capped,
+        loop_hit_cap,
+    )
+    from chemclaw.core.config import settings
+
+    original = settings.harness_max_loop_iterations
+    settings.harness_max_loop_iterations = 1
+    token = begin_loop_watch()
+    try:
+        assert not loop_hit_cap(), "the watch starts unmarked"
+        # `@before_model` wraps it in a middleware object, so the hook is what runs per call.
+        first = lg_loop_cap.before_model(cast(Any, {"model_calls": 0}), cast(Any, None))
+        assert first == {"model_calls": 1}, "the first model call is not a cap"
+        assert not loop_hit_cap(), "counting is not capping"
+
+        capped = lg_loop_cap.before_model(cast(Any, {"model_calls": 1}), cast(Any, None))
+        assert capped == {"jump_to": "end"}, capped
+        assert loop_capped({"model_calls": 1}), "the state record missed the cap"
+        assert loop_hit_cap(), "the cap fired but the runner's own reader never saw it"
+    finally:
+        end_loop_watch(token)
+        settings.harness_max_loop_iterations = original

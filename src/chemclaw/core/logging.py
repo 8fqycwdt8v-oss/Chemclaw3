@@ -35,12 +35,19 @@ import logging
 import os
 import re
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
+
+if TYPE_CHECKING:
+    # Annotations only. The SDK is imported *inside* `configure_telemetry` at runtime, because this
+    # module is what every entrypoint imports first and telemetry is off by default — and because
+    # "the extras are missing" has to be catchable there rather than at import of the kernel.
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SpanExporter
 
 
 def configure_logging() -> None:
@@ -153,34 +160,145 @@ def _install_noop_meter_provider() -> None:
     _NOOP_METERS_INSTALLED = True
 
 
-def configure_telemetry() -> None:
-    """Enable OpenTelemetry export if configured; install a no-op provider when it is not.
+# The `service.name` every span is attributed to when the deployment does not say otherwise.
+#
+# Not a `Settings` field, and that is the one place this module does not follow "config, never a
+# literal": OpenTelemetry already owns this value under the standard `OTEL_SERVICE_NAME`, which
+# `_build_tracer_provider` honours, and a `CHEMCLAW_OTEL_SERVICE_NAME` beside it would be a second
+# spelling of one thing — two answers to "which service is this trace from". A deployment
+# that wants the front door and each worker to appear as separate services sets `OTEL_SERVICE_NAME`
+# per Deployment; unset, every Chemclaw process reports as one service, which is what the previous
+# bootstrap did too (it reported them all as `agent_framework`).
+_DEFAULT_SERVICE_NAME = "chemclaw"
 
-    Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, it calls MAF's `configure_otel_providers`
-    exactly once, which reads the standard `OTEL_EXPORTER_OTLP_*` environment variables for the
-    collector endpoint. That call needs the OpenTelemetry SDK + OTLP exporter extras installed;
-    if they are missing we re-raise with a clear message naming the missing dependency, so an
-    admin who flips the flag without the extras gets a directive error rather than a cryptic one.
-    Called once per process at each worker's entrypoint, after `configure_logging`.
+# Set once per process, for the same reason `_NOOP_METERS_INSTALLED` is: `trace.set_tracer_provider`
+# refuses a second call and warns, and — worse — building a second provider would start a second
+# `BatchSpanProcessor` export thread and a second gRPC channel that the API then silently discards.
+# A flag rather than asking the API what is installed, because `get_tracer_provider()` has the side
+# effect of resolving and caching one.
+_TRACING_INSTALLED = False
 
-    **Off is not "do nothing"** — see `_install_noop_meter_provider`. Returning early was the
-    default path in every deployment, and it is what leaked.
+
+def _build_tracer_provider(exporter: "SpanExporter") -> "TracerProvider":
+    """Assemble the span pipeline: a resource that names the service, batching, then `exporter`.
+
+    Separate from `configure_telemetry` because installing a provider is a once-per-process global
+    act while *building* one is an ordinary object graph — so this half can be driven by a test
+    against a real in-memory exporter, which is the only way to prove that a span emitted through
+    the provider reaches the exporter carrying the resource attributes a collector groups by.
+
+    `BatchSpanProcessor` rather than `SimpleSpanProcessor` for the reason the previous bootstrap
+    also chose it: a synchronous export sits on the caller's thread, and this pipeline is fed from
+    the event loop that serves every SSE stream.
     """
+    from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    resource = Resource.create(
+        {
+            # The standard variable wins when a deployment sets it; passed explicitly rather than
+            # left to `Resource.create`'s own env detection so the two halves of "what names this
+            # service" are in one expression instead of split across a `setdefault` elsewhere.
+            SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME") or _DEFAULT_SERVICE_NAME,
+            # The Git SHA the pod was built from (`CHEMCLAW_DEPLOYMENT_REVISION`), the same value
+            # every audit record is stamped with — so a trace and the GxP record of the same turn
+            # name the same build.
+            SERVICE_VERSION: settings.deployment_revision,
+        }
+    )
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    return provider
+
+
+def configure_telemetry() -> None:
+    """Install the process's OpenTelemetry span pipeline; install no-op meters when it is off.
+
+    Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, this builds a `TracerProvider` with an OTLP
+    span exporter behind a `BatchSpanProcessor` and installs it as the global provider, so the
+    first-party spans in `core/tracing.py` — the turn, the tool call, and the `traceparent` that
+    joins a connector's work to the turn that asked for it — are actually exported. Called once
+    per process at each worker's entrypoint, after `configure_logging`.
+
+    **This used to be one line into MAF** (`agent_framework.observability.configure_otel_providers`)
+    and that is why it is written out here: the OTel SDK and the OTLP exporter are declared
+    dependencies *of this module*, but the code that turned them into a live pipeline belonged to a
+    package the LangGraph rebuild removes. Nothing in `langchain`, `langgraph` or `langsmith`
+    replaces it, and — the part that makes this the phase's sharpest edge — **no test would have
+    failed** if tracing had simply stopped: every span helper degrades silently to a no-op by
+    design, which is right for a turn and wrong for a deployment. The tests beside this function
+    exist to make the silence audible.
+
+    **What is genuinely lost with MAF, and is not faked here.** MAF's chat-client instrumentation
+    recorded `gen_ai.client.token.usage` — an OTel *metric*, a histogram, despite the name reading
+    like a span attribute — labelled by request model, response model, provider and token type.
+    Measured across the installed venv it is emitted by exactly one module, MAF's own
+    `observability`; nothing in `langchain`, `langgraph` or `langsmith` emits it. So per-model
+    token attribution goes, in two steps: it stops being *exported* here (this bootstrap installs a
+    span pipeline and no metric pipeline, see below), and it stops being *produced* when the package
+    is removed. Nothing here fabricates a replacement. What remains is `core/metrics.py`'s
+    Prometheus token counters, which carry `profile` rather than model.
+    `docs/guides/runbook.md` says the same where an operator would look.
+
+    **Traces only, deliberately, and the other two signals have homes.** Metrics are
+    `core/metrics.py`'s Prometheus text surface, scraped per pod, because a trace is sampled and
+    per-request and cannot answer "what is p95 right now" for an alert; logs are JSON on stdout
+    (`JsonFormatter`), collected by the cluster's log stack. Installing OTLP pipelines for either
+    would be a second, unread copy of a signal that already has a collector.
+
+    **So "on" also installs the no-op meter provider**, not just "off" — see
+    `_install_noop_meter_provider`. With no meter provider set, the OTel *API* proxies every
+    instrument and retains the proxy forever, so a process that exports traces and never installs a
+    meter provider leaks exactly as the disabled path did. One line covers both.
+
+    **Idempotent.** The front door, the workers and the CLI each call this at their entrypoint, and
+    tests call it repeatedly; a second call must not start a second export thread and a second gRPC
+    channel that the API would then discard. The flag makes the second call a no-op.
+
+    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` had exactly one consumer — MAF's own instrumentation,
+    which attached prompts and results to its spans — and it goes with MAF. Nothing first-party puts
+    content on a span (`core/tracing.py`: "identifiers and counts, never a question, an argument or
+    an answer"), so the flag now buys nothing and says so out loud rather than reading as an
+    enabled-but-ineffective privacy switch.
+
+    Raises:
+        RuntimeError: `CHEMCLAW_OTEL_ENABLED=true` but the OpenTelemetry SDK / OTLP exporter is not
+            installed — a directive message rather than the import error, for the admin who flips
+            the flag on an install without the extras.
+    """
+    global _TRACING_INSTALLED
     if not settings.otel_enabled:
         _install_noop_meter_provider()
         return
-    # Bridge our one config value to the standard OTLP env var MAF/OTel read (F6-T5), so the
+    if _TRACING_INSTALLED:
+        return
+    # Bridge our one config value to the standard OTLP variable the exporter reads (F6-T5), so the
     # collector endpoint stays a single `CHEMCLAW_OTEL_ENDPOINT` like every other endpoint.
+    # `setdefault`, so a deployment that sets the standard variable directly — or the per-signal
+    # `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — keeps winning, exactly as before.
     if settings.otel_endpoint:
         os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", settings.otel_endpoint)
-    from agent_framework.observability import configure_otel_providers
-
     try:
-        configure_otel_providers(enable_sensitive_data=settings.otel_include_sensitive_data)
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
     except ImportError as exc:  # SDK/exporter extras not installed
         raise RuntimeError(
             "CHEMCLAW_OTEL_ENABLED=true but the OpenTelemetry SDK/OTLP exporter is not installed"
         ) from exc
+
+    # No endpoint argument: the exporter resolves it from the standard variables itself, which is
+    # what keeps `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, the headers and the protocol settings working
+    # without this module re-implementing OTel's own configuration precedence.
+    trace.set_tracer_provider(_build_tracer_provider(OTLPSpanExporter()))
+    _TRACING_INSTALLED = True
+    _install_noop_meter_provider()
+    if settings.otel_include_sensitive_data:
+        logging.getLogger(__name__).warning(
+            "CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is set but has no effect: the only "
+            "instrumentation that attached prompts and results to spans was the agent framework's, "
+            "and no first-party span carries turn content"
+        )
 
 
 # The settings whose *values* must never appear in a log line. Redaction works by matching the

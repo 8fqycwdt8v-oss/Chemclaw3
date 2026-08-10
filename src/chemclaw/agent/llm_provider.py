@@ -96,6 +96,25 @@ def _openai_compatible_model(model: str | None = None) -> Any:
     `AsyncOpenAI` internally, so the bundle has to be handed in as a client rather than set on one
     we construct. Passing `None` (no configured bundle) leaves the SDK's own default in place,
     which is right for a publicly-trusted endpoint.
+
+    **`stream_usage` is passed explicitly, and leaving it to the default metered every turn at
+    zero.** `ChatOpenAI` default-enables it only when *all* of `stream_usage`, `openai_proxy`, the
+    four client fields, `http_client` and `http_async_client` are unset **and** no custom base URL
+    is configured — upstream turns it off otherwise, on the stated grounds that "many non-OpenAI
+    endpoints do not support streaming token usage". This function trips that check twice over: it
+    sets a base URL *and* hands in a client for the CA bundle. So the endpoint was never asked to
+    report usage, no usage chunk ever arrived, and `runner_usage.graph_usage_tokens` correctly read
+    nothing from it.
+
+    Measured against the local mock: 15 turns on the graph engine wrote `turn_costs` rows totalling
+    **0** tokens while the same traffic on the other engine wrote 2,040 per session. That is the
+    failure `usage_tokens`'s own docstring records — 50 turns of 15,000 real tokens booked as zero
+    while the budget guard went on allowing the next one — reached by a different route. A
+    runaway-cost guard that meters zero is not conservative, it is disarmed.
+
+    It is a *setting* rather than a hardcoded `True` because upstream's caution is about real
+    endpoints: an OpenAI-compatible server that rejects `stream_options` needs a way out that is not
+    a code change. The default is on, because metering silently at zero is the worse failure.
     """
     from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
@@ -110,6 +129,7 @@ def _openai_compatible_model(model: str | None = None) -> Any:
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         http_async_client=_tls_http_client(),
+        stream_usage=settings.llm_stream_usage,
     )
 
 

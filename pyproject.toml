@@ -29,13 +29,19 @@ dependencies = [
     "mcp>=1.2.0",
     "networkx>=3.6.1",
     "numpy>=2.0",
-    # The OpenTelemetry SDK + OTLP exporter that `chemclaw.logging.configure_telemetry` needs.
+    # The OpenTelemetry SDK + OTLP exporter that `chemclaw.core.logging.configure_telemetry` needs.
     # Not speculative and not optional: the shipped Helm chart sets `CHEMCLAW_OTEL_ENABLED: "true"`
     # (`deploy/helm/chemclaw/values.yaml`), and without these the front door and every Temporal
-    # worker raise at startup and CrashLoopBackOff. Only `opentelemetry-api` came in transitively
-    # via agent-framework, which is the import that resolves — the SDK and the exporter are what
-    # `configure_otel_providers` actually loads. gRPC (4317) matches the endpoint the chart
+    # worker raise at startup and CrashLoopBackOff. gRPC (4317) matches the endpoint the chart
     # configures and the port its NetworkPolicy already opens.
+    #
+    # These two lines used to explain themselves by what agent-framework did or did not resolve, and
+    # that reading is now void in both directions: `configure_telemetry` builds the `TracerProvider`,
+    # the `BatchSpanProcessor` and the OTLP span exporter itself (no framework bootstrap left to
+    # load them), and `opentelemetry-api` — which arrived transitively through agent-framework — is
+    # a hard requirement of `opentelemetry-sdk`, so it survives that package's removal. Every
+    # `opentelemetry.*` import in `src/` is covered by these two distributions plus their own
+    # closure; nothing in the OTel dependency set reaches back into the agent framework.
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
     "pandas>=2.2",

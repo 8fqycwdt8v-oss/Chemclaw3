@@ -31,8 +31,28 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   <host>: <cause>` (password redacted). It is a retryable infra fault, so Temporal retries the
   activity; fix the DSN/host and it recovers.
 - **OpenTelemetry (optional):** set `CHEMCLAW_OTEL_ENABLED=true` and point
-  `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector. Requires the OpenTelemetry SDK + OTLP exporter
+  `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector (or set `CHEMCLAW_OTEL_ENDPOINT`, which
+  `core/logging.py` bridges to it). Requires the OpenTelemetry SDK + OTLP exporter
   extras installed; enabling without them raises a directive error.
+  - **What the process installs**, since `configure_telemetry` stopped being one line into the
+    agent framework: a `TracerProvider` whose spans go through a `BatchSpanProcessor` to the OTLP
+    **span** exporter, tagged `service.name=chemclaw` and `service.version=<deployment revision>`.
+    Set the standard `OTEL_SERVICE_NAME` per Deployment if you want the front door and each worker
+    to appear as separate services — unset, they are one. Traces only, on purpose: metrics are
+    `/metrics` (Prometheus, scraped per pod) and logs are JSON on stdout, and neither needs a
+    second copy over OTLP.
+  - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` no longer does anything** and the process says so at
+    WARNING if you set it. Its only consumer was the agent framework's own instrumentation, which
+    attached prompts and results to *its* spans; no first-party span carries turn content.
+  - **A real regression, named rather than papered over: per-model token attribution is gone.**
+    The agent framework's chat-client instrumentation recorded `gen_ai.client.token.usage` — an
+    OTel *metric* (a histogram), despite a name that reads like a span attribute — labelled by
+    request model, response model, provider and token type. Measured across the installed venv,
+    exactly one module emits it — the agent framework's own observability module; nothing in
+    `langchain`, `langgraph` or `langsmith` does. It goes in two steps and neither is faked: it
+    stops being exported now (this is a span pipeline, and there is no metric pipeline), and it
+    stops being produced when the package is removed. What remains is `/metrics`'s token counters,
+    which carry `profile` rather than model; §(viii) is the place that reads them.
 
 ## Exposing the front door (the two settings that decide whether it boots)
 
