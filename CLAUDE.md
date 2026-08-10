@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 Phases 0–5b of the plan are **implemented and CHECKMATE-reviewed**: toolchain + config,
-the MAF+Temporal spine, fast calculators (xTB/pKa/solubility) with the Postgres
+the agent+Temporal spine, fast calculators (xTB/pKa/solubility) with the Postgres
 calculation cache, BoFire BO campaigns, the knowledge graph + PR-gate, the eval/metric
 layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
 harness.
@@ -14,7 +14,7 @@ The **foundation build F0–F7** (the real target stack: OpenShift + HPC/Nextflo
 OpenAI-compatible LLM, Entra identity system-wide) is **implemented for everything verifiable
 offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test`:
 
-- **F0** LLM provider seam (generic credential, not Entra) · **F1** MAF harness (plan/execute) ·
+- **F0** LLM provider seam (generic credential, not Entra) · **F1** the plan/execute harness ·
   **F2** FastAPI+SSE front door · **F3** durable Postgres sessions + job→session push-back.
 - **F4** Entra identity/RBAC: front-door OIDC, one authorization gate, `require_actor` reject-if-absent
   core rule, workload identity federation, OBO (dormant), Temporal-mTLS + HPC identity bridges.
@@ -32,6 +32,25 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
   *mounted* rather than called (no client, no credential, no egress), its documents are indexed as
   cited evidence rather than PR-gated notes, and its AD group becomes an entitlement in the one role
   set every gate already reads.
+
+**Layer 1 was then rebuilt on LangGraph** (D-2026-08-10, phases M0–M13), replacing the Microsoft
+Agent Framework everything above was first built on. The case was never capability — it was that
+four pieces of this tree existed only to work around framework defects, and two of those defects
+were *silent*: one agent leased per concurrent turn, because the Anthropic client kept streaming
+tool-call identity on the client instance (8/8 concurrent turns failed on a shared client, 0/8 on
+per-turn ones), and a history-persistence flag whose consequence was that **harness mode never
+worked** while every unit test passed. What stands in their place: `agent/langgraph_agent.py`
+builds a compiled graph over `create_agent` — per turn, because LangGraph binds tools at
+construction and a connector session belongs to exactly one turn; turn state lives in a Postgres
+checkpointer (`agent/checkpointer.py`) on its own autocommit pool instead of being hand-built;
+the tool chain is six `@wrap_tool_call` middlewares in the old nesting order over the *same*
+extracted decision functions, so an authorization refusal or an audit row cannot depend on which
+engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
+three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
+publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
+gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is a counted state
+field rather than an inference (`agent/loop_cap.py`); and a specialist team (`agent/team.py`) is
+available but off by default until its routing is measured.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See
@@ -83,7 +102,8 @@ Three rules the tree is arranged around, each enforced by a test rather than ask
 
 Four layers, each with a single responsibility. **Never merge their concerns.**
 
-1. **MAF** (Microsoft Agent Framework) — conversation orchestration + short reasoning steps.
+1. **LangGraph** — conversation orchestration + short reasoning steps, as one compiled graph per
+   turn with a Postgres checkpointer under it.
 2. **Temporal** — durable execution of long/expensive jobs. Fast local compute (xTB/GFN2, ML
    predictors) + BoFire BO, and **HPC/DFT execution is built** (F5, D-048: the real Nextflow
    launcher behind the QM activities) — what it waits on is a cluster, not code
@@ -98,10 +118,12 @@ Four layers, each with a single responsibility. **Never merge their concerns.**
 3. **Agent Skills** (`SKILL.md`) — "how do I do X" (judgment), loaded on demand.
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data + relations).
 
-Durability lives **only** in Temporal, never in MAF. Skills hold judgment; **connectors** hold
-capability (deterministic tools) — MCP is the protocol a connector speaks, not the thing that holds
-the capability (D-110/D-118). Anything agent-generated enters the graph via a **PR-gate**
-(human validates before merge) — this is the GxP "AI proposes, human signs off" line, reused
+Durability lives **only** in Temporal, never in the conversation layer's own ad-hoc stores — the
+rule is D-002's and it got *stricter* when layer 1 gained a checkpointer, because the checkpointer
+holds turn state and every long or expensive job is still Temporal's (D-2026-08-10 §3). Skills hold
+judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
+speaks, not the thing that holds the capability (D-110/D-118). Anything agent-generated enters the
+graph via a **PR-gate** (human validates before merge) — this is the GxP "AI proposes, human signs off" line, reused
 everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
 
 ## Commands

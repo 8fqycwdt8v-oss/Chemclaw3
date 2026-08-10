@@ -1,333 +1,336 @@
-# Konzept: MAF Agent Harness als Planungs-/Ausführungs-Rückgrat
+# Konzept: Der Plan-/Ausführungs-Harness (LangGraph)
 
-> Status: **Entwurf / zur Diskussion.** Dieses Dokument schlägt einen dritten MAF-Baustein
-> (den *Agent Harness*) als Rückgrat für autonome, dynamische Workflows vor. Es ist eine
+> Status: **gebaut und in Betrieb hinter `harness_enabled`** (Default `false`). Dieses Dokument
+> beschreibt, was der Harness *heute ist* — nicht mehr, was er einmal werden sollte. Es ist eine
 > Ergänzung zu [`architektur.md`](./architektur.md) §1, **keine** Revision der Vier-Schichten-
 > Trennung. Abschnittsverweise ohne Doku-Namen beziehen sich auf `architektur.md`.
+>
+> Der Harness wurde ursprünglich auf dem Microsoft Agent Framework entworfen und gebaut
+> (D-038/D-040). Schicht 1 läuft seit
+> [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](../decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+> auf LangGraph; §10 hält fest, was dieser Wechsel am Harness konkret geändert hat, weil zwei der
+> damaligen Entwurfsentscheidungen ausschließlich Framework-Eigenheiten kompensiert haben.
 
 ---
 
 ## 0. Kernidee in einem Satz
 
-Der MAF-Agent bekommt eine **eigene, selbst-generierte Aufgabenliste** (`TodoProvider`) plus
-einen expliziten **Plan-/Execute-Modus** (`AgentModeProvider`): er zerlegt eine komplexe
-Chemiker-Anfrage zuerst in nachvollziehbare Teilschritte, lässt den Plan (bei teuren Läufen)
-vom Menschen freigeben und arbeitet ihn dann eigenständig ab — **ohne** dass wir dafür einen
-zweiten Orchestrator oder ein zweites Durability-System bauen. Die schwere, lange Ausführung
-bleibt exakt wie bisher bei Temporal (D-002); der Harness plant und sequenziert nur die
-*kurzen Reasoning-Schritte*, die MAF ohnehin verantwortet.
+Der Agent bekommt eine **eigene, selbst-generierte Aufgabenliste** (`TodoListMiddleware`, Tool
+`write_todos`) plus ein **Freigabe-Gate vor jeder zustandsändernden Ausführung**
+(`agent/plan_gate.py`): er zerlegt eine komplexe Chemiker-Anfrage zuerst in nachvollziehbare
+Teilschritte, lässt den Plan vom Menschen freigeben und arbeitet ihn dann eigenständig ab —
+**ohne** dass wir dafür einen zweiten Orchestrator oder ein zweites Durability-System bauen. Die
+schwere, lange Ausführung bleibt exakt bei Temporal (D-002); der Harness plant und sequenziert nur
+die *kurzen Reasoning-Schritte*, die Schicht 1 ohnehin verantwortet.
 
 ## 1. Motivation & Abgrenzung
 
-**Heute (§1):** Die Reasoning-Schicht nutzt zwei MAF-Bausteine — `Agent` (LLM-Einheit mit
-Tools/Skills) und **Graph-based Workflows** (ein vom Entwickler *vorab* verdrahteter Graph aus
-Executors mit typisiertem Routing). Der Graph ist statisch: „dynamisch" heißt dort nur
-*bedingte Kantenwahl* zur Laufzeit, nicht *der Agent erfindet seine eigenen Schritte*. Für
-feste Abläufe (z. B. der `development-report`-Graph, Plan 5b.5) ist das genau richtig.
+**Die Lücke, die er schließt.** Für *offene, mehrstufige* Anfragen — „Kläre die Regioselektivität
+von X, prüf, ob wir Ähnliches hatten, und rechne nur nach, wo nötig" — braucht es einen
+Mechanismus, in dem der Agent selbst einen **überprüfbaren Plan** aufstellt, ihn dem Chemiker
+zeigt und ihn dann Schritt für Schritt abarbeitet. Ohne ihn kann der Agent zwar Tools aufrufen,
+seine Mehrschritt-Absicht ist aber nur implizit im Chatverlauf, nicht als sichtbare,
+zustandsbehaftete Liste — und was nicht sichtbar ist, kann niemand vor der Ausführung korrigieren.
 
-**Die Lücke:** Für *offene, mehrstufige* Anfragen — „Kläre die Regioselektivität von X, prüf,
-ob wir Ähnliches hatten, und rechne nur nach, wo nötig" — gibt es heute keinen Mechanismus, in
-dem der Agent selbst einen **überprüfbaren Plan** aufstellt, ihn dem Chemiker zeigt und ihn
-dann Schritt für Schritt (mit Zwischenstand) abarbeitet. Der Agent kann Tools aufrufen, aber
-seine Mehrschritt-Absicht ist nur implizit im Chatverlauf, nicht als sichtbare, zustandsbehaftete
-Liste. Genau das liefert der Harness.
+**Ziele:**
+1. **Sichtbare Planung** — der Chemiker sieht *vorab*, welche (ggf. teuren) Schritte anstehen, und
+   kann korrigieren, bevor Rechenzeit verbraucht wird.
+2. **Dynamische Zerlegung** — der Agent bestimmt Schrittzahl und Reihenfolge selbst, statt dass
+   jeder Ablauf vorverdrahtet wird.
+3. **Autonome Abarbeitung mit Zwischenstand** — mehrstufige Untersuchungen laufen ohne ständiges
+   Nachfragen durch, melden aber Fortschritt und halten am PR-Gate an.
 
-**Was wir wollen (Ziele):**
-1. **Sichtbare Planung** — der Chemiker sieht *vorab*, welche (ggf. teuren) Schritte der Agent
-   vorhat, und kann korrigieren, bevor Rechenzeit verbraucht wird.
-2. **Dynamische Zerlegung** — der Agent bestimmt Schrittzahl und Reihenfolge selbst
-   (agenten-geplant), statt dass wir jeden Ablauf als Graph vorverdrahten.
-3. **Autonome Abarbeitung mit Zwischenstand** — mehrstufige Untersuchungen laufen ohne
-   ständiges Nachfragen durch, melden aber Fortschritt und halten am PR-Gate an.
-
-**Was wir ausdrücklich NICHT wollen (Nicht-Ziele):**
-- **Kein zweites Durability-System.** Der Harness ist *keine* Ausführungs-Engine für lange
-  Jobs. Die „4 D's" der MAF Durable Extension bleiben bewusst ungenutzt (§1); Temporal bleibt
-  der *einzige* Ort für durable, langlaufende Arbeit (D-002, D-006).
-- **Kein Ersatz der Graph-Workflows.** Feste, wiederkehrende Abläufe bleiben Graph-Workflows.
-  Der Harness ist für das *offene* Terrain, nicht für alles.
+**Nicht-Ziele:**
+- **Kein zweites Durability-System.** Der Harness ist keine Ausführungs-Engine für lange Jobs.
+  Temporal bleibt der *einzige* Ort für durable, langlaufende Arbeit (D-002, D-006). Der
+  Checkpointer unter dem Graphen hält Turn-Zustand — und nichts, was ein Job wäre
+  (D-2026-08-10 §3).
+- **Kein Ersatz der festen Pipelines.** Der Report-Pfad (5b, D-020) bleibt ein deterministischer
+  Temporal-Fluss; der Harness ist für das *offene* Terrain (§11).
 - **Keine Aufweichung des PR-Gates.** Mehr Autonomie heißt *mehr*, nicht weniger menschliche
-  Freigabe (siehe §6).
+  Freigabe (§6).
 
-## 2. Was der MAF-Harness liefert (die Bausteine)
+## 2. Woraus der Harness besteht
 
-Der Harness ist ein von Microsoft angekündigter (Build 2026), noch **`[Experimental]`**
-markierter Zusatz im `microsoft/agent-framework`. Er bündelt mehrere `ContextProvider`/
-Middleware-Teile — für uns relevant sind zwei:
+Er ist kein Framework-Baustein, den man einschaltet, sondern **vier Teile**, die
+`langgraph_agent._harness_middleware` und `langgraph_agent._middleware` an den kompilierten Graphen
+hängen — beide nur, wenn `harness_enabled_for(profile)` wahr ist, damit der klassische Agent
+unverändert der ist, der er ohne Harness war.
 
-| Baustein | Was er tut | Analogie |
-|---|---|---|
-| **`TodoProvider`** | Stellt dem LLM Tools bereit, um Todo-Items **anzulegen, abzuhaken, zu entfernen und abzufragen**. Der Zustand (`TodoState`/`TodoItem`) liegt im Session-State (`TodoSessionStore`), getrennt vom Chatverlauf. | Wie die Todo-/Task-Liste, die ein Coding-Agent für sich führt. |
-| **`AgentModeProvider`** | Implementiert ein explizites **Zwei-Phasen-Muster**: **Plan-Modus** (interaktiv: Fragen stellen, Todos anlegen, Freigabe holen) → **Execute-Modus** (autonom: Todos abarbeiten). | ReAct/Plan-and-Solve, aber als First-Class-Middleware. |
+| Baustein | Was er tut |
+|---|---|
+| **`TodoListMiddleware`** (LangChain) | Stellt dem Modell `write_todos` bereit und besitzt das Feld `todos` im Graph-State. Ein `Todo` ist `{content, status}` — **ohne** Beschreibungsfeld, was in §4 wichtig wird. |
+| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um genau zwei Felder: `awaiting_jobs` (laufende durable Jobs) und `model_calls` (der Zähler der Runaway-Bremse). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. |
+| **`lg_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Zahl zurück. |
+| **`lg_enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
 
-Ergänzend liefert der Harness eine **Completion-Loop** (`TodoCompletionLoopEvaluator` in .NET
-bzw. ein `todos_remaining()`-Helfer in Python), die den Agenten so lange erneut aufruft, wie
-noch offene Todos existieren, sowie Tool-Approval- und Kontext-Kompaktierungs-Middleware. Der
-Einstiegspunkt ist ein `HarnessAgent` / `create_harness_agent(...)`.
-
-> **Quellen (bei Implementierung gegenprüfen — API ist experimentell):**
-> `agent_framework._harness._todo.TodoProvider` (Python-Quelle), `python/samples/02-agents/harness/`
-> (Plan/Execute-README), Build-2026-Devblog. Reifegrad-Vorbehalt siehe §9.
+**Warum der Deckel ein eigener Zähler ist und nicht `ModelCallLimitMiddleware`.** Die
+Framework-Middleware erzwingt genau diese Grenze, und sie war der erste Versuch. Sie führt zwei
+Zählstände — einen, der über den Thread persistiert, und einen, der es nicht tut —, und der, der
+zu einem *Turn* passt, ist der zweite. Gegen eine gecheckpointete Session gemessen trägt der
+Endzustand den Thread-Zähler und **gar keinen** Run-Zähler: „wurde dieser Turn gedeckelt" war
+daraus nicht beantwortbar. Erzwingen dort und nochmal zählen hier wären zwei Zähler für eine Zahl
+gewesen; erzwingen hier ist eine Zahl, die zugleich Grenze und Protokoll ist.
 
 ## 3. Einordnung in die Vier-Schichten-Architektur
 
-Der Harness ist eine **reine Reasoning-Schicht-Erweiterung** — er lebt vollständig innerhalb
-der MAF-Schicht und respektiert D-002:
+Der Harness ist eine **reine Reasoning-Schicht-Erweiterung** und respektiert D-002:
 
 ```
-┌─ Reasoning-Schicht (MAF) ─────────────────────────────────────────────┐
+┌─ Reasoning-Schicht (LangGraph) ───────────────────────────────────────┐
 │                                                                        │
-│   HarnessAgent = Agent  +  TodoProvider  +  AgentModeProvider          │
-│        │            │            │                │                     │
-│        │            │            │                └─ Plan → (Freigabe) → Execute
-│        │            │            └─ selbst-generierte Todo-Liste (Session-State)
-│        │            └─ dieselben Tools + Skills wie heute (agents/*.py, skills/)
+│   create_agent(state_schema=ChemclawState, middleware=[…])             │
+│        │            │                │                                 │
+│        │            │                └─ lg_enforce_plan_approval → Freigabe vor Wirkung
+│        │            └─ TodoListMiddleware  → write_todos, State-Feld `todos`
+│        │            └─ lg_loop_cap         → `model_calls`, harte Obergrenze
 │        │                                                                │
-│        └─ ruft pro Todo-Schritt vorhandene Tools auf:                   │
+│        └─ ruft pro Schritt vorhandene Tools auf:                        │
 │             • inline (xTB, Löslichkeit, pKa, Graph-Query) — synchron    │
-│             • fire-and-forget (submit_qm_job / submit_calculation) ─────┼──► Temporal
+│             • fire-and-forget (durable Launcher) ──────────────────────┼──► Temporal
 │                                                                        │        (Durability,
 └────────────────────────────────────────────────────────────────────────┘         D-002/§2)
 ```
 
-**Schichtreinheit (G6):** Der Harness-Zustand (Todo-Liste, Plan/Execute-Modus) ist
-Konversationszustand und bleibt **leichtgewichtig** in der MAF-Session (§1: „Session-State in
-Redis/Postgres reicht meist"). Er sickert **nicht** in Temporal-Workflows, Skills oder den
-Wissensgraphen. Umgekehrt bleibt jeder teure/lange Schritt ein normaler Fire-and-Forget-Aufruf
-an Temporal — der Harness ändert daran nichts, er *sequenziert* nur, wann der Aufruf passiert.
+**Schichtreinheit (G6):** Der Harness-Zustand (Plan, Wartestand, Zählerstand) ist
+Konversationszustand und lebt im Graph-State, den der Postgres-Checkpointer
+(`agent/checkpointer.py`) zwischen Turns hält. Er sickert **nicht** in Temporal-Workflows, Skills
+oder den Wissensgraphen. Umgekehrt bleibt jeder teure/lange Schritt ein normaler
+Fire-and-Forget-Aufruf an Temporal — der Harness ändert daran nichts, er *sequenziert* nur, wann
+der Aufruf passiert.
 
-**Blast-Radius im Code:** minimal. Betroffen ist im Kern `src/chemclaw/agent/chemclaw_agent.py`
-(`build_agent` konstruiert künftig optional einen `HarnessAgent` statt eines nackten `Agent`);
-die Tools (`agents/*.py`) und Skills bleiben unverändert, weil der Harness dieselbe Tool-/Skill-
+**Blast-Radius im Code:** klein und an einer Stelle. `_harness_middleware` entscheidet, ob die
+Todo-Liste und der Deckel überhaupt hängen; `_middleware` schiebt das Freigabe-Gate ein, wenn
+`gate_applies(profile)`. Tools und Skills bleiben unverändert, weil der Harness dieselbe
 Registrierung nutzt.
 
-## 4. Das zentrale Spannungsfeld: Execute-Loop vs. Fire-and-Forget
+## 4. Execute-Loop vs. Fire-and-Forget
 
-Das ist der Teil, der bewusst entworfen werden muss — die Stelle, an der der Harness und die
-bestehende Async-Job-Mechanik aufeinandertreffen.
+Das ist die Stelle, an der der Harness und die bestehende Async-Job-Mechanik aufeinandertreffen.
 
-**Problem:** Die Harness-Completion-Loop will „arbeite Todos ab, bis keine mehr offen sind".
-Unsere teuren Schritte sind aber **nicht-blockierend** (D-002): `submit_qm_job` gibt sofort eine
-`job_id` zurück, das Ergebnis kommt Stunden später via `notify_agent`-Callback (Plan 1.7). Ein
-naives „Loop bis fertig" würde entweder (a) blockieren/busy-warten (verbietet die Architektur)
-oder (b) das Todo fälschlich als erledigt abhaken, obwohl der Job noch läuft.
+**Problem:** Die Abarbeitung will „arbeite Todos ab, bis keine mehr offen sind". Unsere teuren
+Schritte sind aber **nicht-blockierend** (D-002): ein durable Launcher gibt sofort eine `job_id`
+zurück, das Ergebnis kommt später über den Push-Back in die Session. Ein naives „Loop bis fertig"
+würde entweder blockieren (verbietet die Architektur) oder das Todo fälschlich abhaken, obwohl der
+Job noch läuft.
 
-**Lösung — drei Todo-Zustände, entkoppelt über den vorhandenen Callback:**
-1. Ein Todo, dessen Schritt einen Temporal-Job auslöst, wird nicht „completed", sondern
-   **`awaiting`** (Zwischenzustand): Feld enthält die `job_id`. Der Agent formuliert den
-   Zwischenstand („DFT-Validierung gestartet, ID qm-8f2a") und die Execute-Loop **gibt die
-   Kontrolle ab**, statt zu warten — die Session pausiert.
-2. Der bestehende `notify_agent`-Callback (Plan 1.7) **weckt** die Session bei Job-Abschluss und
-   markiert das `awaiting`-Todo als `completed` (Ergebnis angehängt).
-3. Die Completion-Loop läuft weiter mit den nun freigeschalteten Folge-Todos.
+**Lösung: `awaiting_jobs` ist ein eigenes State-Feld.** Ein Schritt, der einen Temporal-Job
+auslöst, hinterlässt die `job_id` dort — *nicht* im Plan. Der Agent formuliert den Zwischenstand
+(„DFT-Validierung gestartet, ID qm-8f2a"), der Turn gibt die Kontrolle ab, und der zurückgemeldete
+Abschluss bringt die Folgeschritte wieder in Gang.
+
+**Warum das mehr ist als Aufräumen.** Vorher wurde ein wartendes Todo dadurch markiert, dass sein
+Beschreibungsfeld mit `awaiting-job:` präfigiert wurde — eine Konvention, die es nur gab, weil das
+Todo-Objekt kein Feld dafür hatte. Der Plan-Identitätshash musste diese Einträge dann wieder
+herausfiltern, sonst hätte ein freigegebener Plan seine eigene Freigabe in dem Moment widerrufen,
+in dem er den ersten Job startet. Heute sind es schlicht **nicht dieselben Felder**: die
+Ausnahme, die das Gate braucht, ist strukturell statt geparst — und `Todo` hat kein
+Beschreibungsfeld mehr, in das die Konvention zurückkriechen könnte.
 
 **Durability-Grenze — was einen Absturz überlebt:**
-- **Der Job**: immer — er lebt in Temporal (Event-Replay, §2). Unabhängig vom Harness.
-- **Die Todo-Liste/der Plan**: nur so weit wie der MAF-Session-State (Redis/Postgres). Das ist
-  bewusst *keine* harte Durability — ein verlorener Plan wird schlimmstenfalls **neu geplant**
-  (billig, ein LLM-Aufruf), während der teure Job nie verloren geht. Damit bleibt die Regel
-  „schwere Durability nur in Temporal" (D-002) intakt; der Harness fügt **keine** neue
-  Durability-Anforderung hinzu.
-- **Konsequenz:** Wir brauchen die MAF Durable Extension weiterhin **nicht** (Deferred-Tabelle
-  bleibt gültig). Der einzige Grenzfall — sehr lange Konversationspausen — wird durch den
-  `awaiting`-Zustand + Temporal-Callback ohnehin abgedeckt, nicht durch Harness-Durability.
+- **Der Job**: immer — er lebt in Temporal (Event-Replay, §2), unabhängig vom Harness.
+- **Plan, Wartestand und Zählerstand**: soweit der Checkpointer reicht, also über einen
+  Pod-Neustart hinweg. Das ist eine echte Verbesserung gegenüber „im schlimmsten Fall neu planen"
+  und trotzdem **keine** neue Durability-Anforderung: es ist derselbe Turn-Zustand, nur an einem
+  Ort, den ein Prozessende überlebt.
 
 ## 5. Konkrete Workflows, die das ermöglicht
 
-**(a) Mehrstufige Untersuchung (der Leitfaden-Testfall, §5).** Statt eines vorverdrahteten
-Graphen plant der Agent selbst:
+**(a) Mehrstufige Untersuchung (der Leitfaden-Testfall, §5).** Der Agent plant selbst:
 ```
 Plan:  1. Graph nach Verbindung X + ähnlichen Substraten durchsuchen  [find_notes/expand_note]
        2. Schnellen xTB/ML-Screen der Regioselektivität rechnen        [compute_xtb_energy]
-       3. NUR bei niedriger Konfidenz DFT eskalieren                    [submit_qm_job → awaiting]
+       3. NUR bei niedriger Konfidenz DFT eskalieren                    [durable QM-Job → awaiting]
        4. Ergebnis als Note vorschlagen                                 [propose_knowledge_note → PR]
-Execute: arbeitet 1→2 ab; entscheidet an 2 datengetrieben, ob 3 nötig ist; pausiert an 3;
-         nimmt nach Callback 4 auf.
 ```
-Schritt 3 ist *bedingt und agenten-entschieden* — genau die Dynamik, die ein statischer Graph
+Schritt 3 ist *bedingt und agenten-entschieden* — genau die Dynamik, die ein vorverdrahteter Fluss
 nicht ausdrückt. Das Tiering-Prinzip (§2: schnell zuerst, DFT nur bei Bedarf) wird damit vom
 Skill-Urteil zur **sichtbaren, überprüfbaren Plan-Entscheidung**.
 
-**(b) BO-Kampagnen-Supervision (Phase 1d).** Eine mehrrundige Optimierung als Todo-Sequenz
-(„propose → evaluate → tell → prüfe Konvergenz → wiederhole oder stoppe"), wobei die eigentliche
-durable Kampagne weiter der Temporal-Workflow ist — der Harness plant nur die *Betreuung*
-(wann stoppen, wann Kandidaten dem Chemiker vorlegen).
+**(b) BO-Kampagnen-Supervision.** Eine mehrrundige Optimierung als Todo-Sequenz („propose →
+evaluate → tell → prüfe Konvergenz → wiederhole oder stoppe"), wobei die eigentliche durable
+Kampagne weiter der Temporal-Workflow ist — der Harness plant nur die *Betreuung*.
 
-**(c) Deep-Research-/Report-Harness (Phase 5b).** Das dortige `decompose → fan-out → verify →
-cite → synthesize` ist wörtlich ein Plan/Execute-Muster. Der MAF-Harness ist der natürliche
-Träger für den `decompose`-Schritt; der lange Lauf bleibt Temporal-`background-jobs` (5b.6). Der
-Harness ersetzt hier nichts, er macht die Zerlegung explizit und überprüfbar.
+**(c) Deep Research.** `decompose → fan-out → verify → cite → synthesize` ist wörtlich ein
+Plan/Execute-Muster. Der Harness ist der natürliche Träger für `decompose`; der lange Lauf bleibt
+Temporal. Die Fan-out-Stufe selbst ist inzwischen echte Parallelität im Graphen
+(`retrieval/fanout.py`, ein `Send`-Zweig pro Quelle), was den Beitrag jeder einzelnen Quelle
+sichtbar macht — vorher war eine Quelle mit null Treffern nicht von einer nicht befragten zu
+unterscheiden.
 
-**(d) Plan-Modus als Human-in-the-Loop-Punkt (GxP).** Der Plan-Modus ist die natürliche Stelle,
-an der „AI schlägt vor, Mensch zeichnet ab" *vor* der Ausführung greift — komplementär zum
-PR-Gate, das *nach* der Wissensproduktion greift (siehe §6).
+**(d) Plan-Modus als Human-in-the-Loop-Punkt (GxP).** Der Plan-Modus ist die natürliche Stelle, an
+der „AI schlägt vor, Mensch zeichnet ab" *vor* der Ausführung greift — komplementär zum PR-Gate,
+das *nach* der Wissensproduktion greift (§6).
 
 ## 6. Governance-Verzahnung (mehr Autonomie ⇒ mehr Gates, nicht weniger)
 
-- **PR-Gate bleibt terminal (D-005).** Egal wie autonom die Execute-Loop läuft: jede
-  `created_by: agent`-Note (Job-Ergebnis, Kampagne, Report-Entwurf) geht weiterhin über
-  Branch → PR → menschliche Freigabe. Autonomie erzeugt *Vorschläge*, keine gemergte Wahrheit.
-- **Neuer Gate: Plan-Freigabe vor teurer Ausführung.** Bevor die Execute-Loop Schritte auslöst,
-  die Rechenbudget verbrauchen (`submit_qm_job`, `submit_calculation`, später HPC/DFT), muss der
-  Plan im Plan-Modus **bestätigt** werden. Welche Tools eine Freigabe erzwingen, steht in der
-  Config (`plan_mode_required_for`, §8) — nicht im Code.
-- **RBAC (Phase 6) wird wichtiger, nicht optional.** Ein autonom planender Agent, der teure
-  Pfade selbst auslösen kann, verschärft die Autorisierungsfrage. Die fachliche Prüfung „darf
-  *dieser* Nutzer *diesen* Job auslösen" bleibt im MCP-Server (§8 der Architektur), *vor* dem
-  Todo-Ausführungsschritt — der Harness umgeht das nicht.
-- **Audit-Trail pro Todo-Aktion.** Der Entra-ID-`oid`/`upn` des Nutzers (Plan 1.9) wird nicht
-  nur am Job, sondern an jeder auslösenden Todo-Aktion mitgeführt, damit der Audit-Trail
-  „wer hat welchen Schritt veranlasst" auch bei autonomer Abarbeitung vollständig bleibt.
+- **PR-Gate bleibt terminal (D-005).** Egal wie autonom abgearbeitet wird: jede
+  `created_by: agent`-Note geht über Branch → PR → menschliche Freigabe. Autonomie erzeugt
+  *Vorschläge*, keine gemergte Wahrheit.
+- **Die Freigabe gilt dem Akt, nicht der Sitzung.** `lg_enforce_plan_approval` hängt am
+  Tool-Aufruf-Rand, weil die Einheit, die eine Freigabe autorisiert, eine *Handlung* ist — dieselbe
+  Begründung, die `agent/tool_authz.py` für die Per-Tool-RBAC führt. Eine Prüfung beim Turn-Start
+  sieht plausibel aus und ist die Stelle, an der der naheliegende Fix falsch wird: der Plan wird
+  *danach* umgeschrieben, eine Prüfung davor läse also den alten, freigegebenen Plan und winkte
+  alles Folgende durch. Genau das war DARK-1: nach einer Freigabe wurde eine völlig andere Frage
+  gestellt, und der Turn führte autonom eine Rechnung und einen Graph-Schreibvorschlag aus.
+- **Der Plan wird aus dem Graph-State gelesen**, nicht aus einem umgebenden Sitzungsobjekt. Damit
+  fragt das Gate den Plan *so, wie er in diesem Augenblick steht* — die Eigenschaft, die vorher
+  eigens hergestellt werden musste.
+- **Lesen bleibt offen.** Ein Gate über *alle* Tools machte `plan_only` unbenutzbar — der Agent
+  könnte nichts nachschlagen, um den Plan zu bauen, den er freigegeben braucht —, und die
+  Deployments mit der strengsten Haltung würden es abschalten. Die Linie liegt bei der
+  Zustandsänderung (`agent/authz.py`, plus jeder durable Launcher): eine nicht freigegebene Session
+  darf recherchieren und vorschlagen, und sonst nichts.
+- **RBAC bleibt davor.** Die fachliche Prüfung „darf *dieser* Nutzer *diesen* Job auslösen" liegt
+  in der einen Autorisierungs-Middleware, die *innerhalb* des Audit-Rings und *vor* dem
+  Tool-Körper läuft — der Harness umgeht das nicht.
+- **Audit-Trail pro Aktion.** Der Entra-`oid` des Nutzers wird nicht nur am Job, sondern an jedem
+  auslösenden Tool-Aufruf mitgeführt; läuft ein Spezialist (§7), nennt die Zeile ihn **neben** dem
+  Menschen, in einer eigenen Spalte — „der Agent" als Verursacher wäre in einem regulierten System
+  ein wertloser Trail.
 
 ## 7. Interaktion mit den bestehenden Schichten
 
-- **Skills (§3).** Unverändert nutzbar: Der Harness lädt bei der Planung dieselben Skills
-  (`calculation-selection`, `reaction-search`, …) als *Urteil*, welche Schritte in den Plan
-  gehören. Progressive Disclosure bleibt; Skills werden zur Planungshilfe, nicht nur zur
-  Ausführungshilfe.
-- **Berechnungs-Store (Phase 1b, D-011).** Ein Todo, dessen Ergebnis bereits im Store liegt,
-  wird zum **Cache-Hit** — die Execute-Loop rechnet nicht doppelt. „Nie zweimal rechnen" gilt
-  unverändert; der Plan macht nur sichtbar, *dass* geprüft wird.
-- **Eval-/Metrik-Schicht (Phase 2b, D-009).** Autonomie muss ihren Nutzen **belegen** (die
-  Schicht ist genau dafür da). Neue registrierte Metriken: Plan-Qualität (nötige vs. geplante
-  Schritte), „hat die Loop geholfen" (A/B Plan/Execute vs. Einzelaufruf pro Aufgabentyp),
-  Abbruch-/Runaway-Rate. Regression = Testfehler (2b.5).
-- **Gedächtnis (Phase 5).** Ein abgeschlossener, vom Chemiker bestätigter Plan ist selbst eine
-  **episodische `interaction`-Note** (Plan 5.5) — dieselbe Note, dasselbe Gate. Das System lernt
-  aus seinen eigenen erfolgreichen Plänen, ohne neuen Mechanismus.
+- **Skills (§3).** Unverändert nutzbar: bei der Planung werden dieselben Skills
+  (`calculation-selection`, `reaction-search`, …) als *Urteil* geladen, welche Schritte in den Plan
+  gehören. Progressive Disclosure bleibt — sie läuft jetzt über `deepagents.SkillsMiddleware`, die
+  jedem Skill seinen *Pfad* in den System-Prompt schreibt und erwartet, dass das Modell den Körper
+  liest. Deshalb ist die Verengung am **Backend** verankert (`agent/skill_backend.py`) und nicht an
+  der angezeigten Liste: ein reiner Listen-Filter verbärge einen rollen-gegateten Skill und
+  händigte ihn jedem aus, der den Pfad errät, den der Prompt ohnehin schon beigebracht hat.
+- **Berechnungs-Store (D-011).** Ein Schritt, dessen Ergebnis bereits im Store liegt, wird zum
+  **Cache-Hit** — es wird nicht doppelt gerechnet. Der Plan macht nur sichtbar, *dass* geprüft wird.
+- **Eval-/Metrik-Schicht (D-009).** Autonomie muss ihren Nutzen **belegen**. `evals/autonomy.py`
+  bewertet u. a. die Runaway-Rate; seit der Deckel ein gelesener Zähler statt einer Schlussfolgerung
+  ist, kann diese Metrik „abgebrochener Schritt" von „korrekt an einen durable Job übergeben"
+  unterscheiden, was sie aus Residuen allein nie konnte.
+- **Spezialisten-Team (`agent/team.py`).** Ein Supervisor mit fünf Spezialisten ist gebaut und per
+  Default **aus**, bis Routing-Genauigkeit und Token-Kosten gegen den Einzelagenten gemessen sind:
+  ein Supervisor, der falsch routet, ist schlechter als gar kein Team. Für den Harness ändert das
+  nichts an den Regeln — ein Spezialist ist ein Profil plus ein kompilierter Subgraph, seine
+  Werkzeugmenge ist eine *Abschwächung* der des Aufrufers, und `safety` lässt sich nicht
+  wegnarrowen.
+- **Gedächtnis.** Ein abgeschlossener, vom Chemiker bestätigter Plan ist selbst eine episodische
+  `interaction`-Note — dieselbe Note, dasselbe Gate. Das System lernt aus seinen eigenen
+  erfolgreichen Plänen, ohne neuen Mechanismus.
 
 ## 8. Config & Leitplanken (keine Magic Numbers, G3)
 
 Alles über **eine** `pydantic-settings`-Quelle (`src/chemclaw/core/config/`), ENV-überschreibbar.
-**Implementiert** sind bewusst nur die *tatsächlich konsumierten* Felder (config.py-Disziplin:
-keine „für später"-Settings):
+Implementiert sind bewusst nur die *tatsächlich konsumierten* Felder:
 
 | Setting | Zweck | Default |
 |---|---|---|
-| `harness_enabled` | Master-Schalter (Fallback: klassischer `Agent`) | `false` |
-| `harness_autonomy` | `plan_only` (interaktiv) \| `execute` (Loop im Execute-Modus) | `plan_only` |
-| `harness_max_loop_iterations` | Runaway-Loop-Bremse; als `loop_max_iterations` unbedingt gesetzt (nicht nur im `execute`-Modus) | `25` |
+| `harness_enabled` | Master-Schalter (Fallback: klassischer Agent ohne Todo-Liste und ohne Deckel) | `false` |
+| `harness_autonomy` | `plan_only` (Freigabe-Gate aktiv) \| `execute` | `plan_only` |
+| `harness_max_loop_iterations` | Runaway-Bremse; als Modellaufruf-Zähler in `ChemclawState` geführt | `25` |
+| `agent_teams_enabled` | Supervisor + fünf Spezialisten statt eines Agenten (§7) | `false` |
 
-**Bewusst (noch) nicht als Config verdrahtet** — jeweils mit Grund, statt spekulativem Feld:
-- *`max_todos`*: Der `TodoProvider` nimmt keine Obergrenze entgegen; eine künstliche Kappung
-  bräuchte einen eigenen Store-Wrapper (Rule of Three nicht erfüllt) → ausgelassen.
-- *`token_budget`*: Bindet an die Kompaktierungs-Strategie (braucht Tokenizer/Kontextfenster);
-  Kompaktierung ist hier bewusst aus (v1). Kommt, wenn ein realer Kostendruck es misst.
-- *`plan_mode_required_for` (harte Tool-Sperre)*: Die *fachliche Autorisierung* „darf dieser
-  Nutzer diesen teuren Pfad auslösen" gehört laut Architektur an **eine** Stelle — den
-  MCP-Server (§8) — nicht parallel in den Agenten. Bleibt Phase 6, wird hier nicht dupliziert.
+Beide Harness-Dimensionen sind **pro Profil überschreibbar**, und beide werden über *einen*
+Resolver gelesen (`harness_mode.harness_enabled_for` / `.autonomy_for`). Das ist kein Stilpunkt:
+die Regel war einmal an drei Stellen ausgeschrieben, und ein Profil mit `plan_only` unter einem
+globalen `execute` bekam das Gate angehängt, ohne dass seine Freigabe je verbraucht wurde — eine
+Entscheidung autorisierte damit jeden weiteren Turn.
 
-**Kill-Switch & Beobachtbarkeit:** `harness_enabled=false` fällt sofort auf das heutige
-Verhalten zurück (der Harness-Agent degradiert zur klassischen `Agent`-Konstruktion). Die
-`execute`-Loop ist zusätzlich durch `harness_max_loop_iterations` hart begrenzt
-(`AgentLoopMiddleware.max_iterations`). **Der Deckel ist sichtbar**: MAF stoppt zwar lautlos, aber
-`chemclaw.agent.loop_cap` liest die letzte Loop-Entscheidung mit (der Deckel greift genau dann,
-wenn das Prädikat zuletzt „weiter" sagte), `run_turn` sendet daraufhin
-`ErrorEvent(code="loop_cap_reached")` vor der — dann unvollständigen — Antwort und zählt
-`chemclaw_turn_loop_caps_total`. Weitere Loop-/Plan-Metriken für Schicht 2b sind Folgearbeit
-(Backlog).
+**Kill-Switch & Beobachtbarkeit.** `harness_enabled=false` fällt sofort auf das heutige Verhalten
+zurück. Der Deckel ist **abgelesen, nicht erschlossen**: `lg_loop_cap` beendet den Lauf und
+hinterlässt die Zahl in `model_calls`, `loop_capped(state)` liest sie, und damit ist auch der Fall
+`harness_max_loop_iterations == 1` beantwortbar — die frühere Schlussfolgerung war dort blind, weil
+die Schleife bei einem Deckel von 1 nie nach ihrer Fortsetzung gefragt wurde. **Offen** ist die
+Verdrahtung dieser Lesung in den Turn-Runner: `chemclaw.api.runner` sendet
+`ErrorEvent(code="loop_cap_reached")` und zählt `chemclaw_turn_loop_caps_total` noch aus dem alten
+Contextvar-Signal, das der Graph-Pfad nicht setzt (§13).
 
-**Governance-Härtung (implementiert):** Der Harness aktiviert per Default generische
-File-Memory-, File-Access-, Shell- und Web-Search-Werkzeuge — diese sind in `build_agent`
-**abgeschaltet** (`disable_file_memory/…access/…web_search=True`, kein `shell_executor`, keine
-`background_agents`). Chemclaws Fähigkeit ist ihr *expliziter* Tool-/Skill-Satz, kein generischer
-Datei-/Shell-Zugriff (§6, G6). Übrig bleiben genau `TodoProvider` + `AgentModeProvider` über den
-bestehenden Tools/Skills.
+**Governance-Härtung.** Generische Batterien — File Memory, File Access, Shell, Web Search — sind
+**nicht** angeschlossen, aus demselben Grund, aus dem sie beim Vorgänger-Framework abgeschaltet
+waren: Chemclaws Fähigkeit ist ihr *expliziter* Tool-/Skill-Satz, kein generischer Datei- oder
+Shell-Zugriff (§6, G6). Das kostet genau eine Handvoll Zeilen: statt deepagents'
+`FilesystemMiddleware` (die `read`, `write`, `edit`, `glob`, `grep` und `execute` mitbrächte, für
+die dann die Prompt-Verträge, die Rollen-Gates und die Sicherheits-Rubrik geradestehen müssten)
+hängt genau **ein** handgeschriebenes `read_file` am verengten Skills-Backend. Progressive
+Disclosure braucht ein Verb.
 
-## 9. Reifegrad & Risiken (Caveats, im Stil §15)
+## 9. Risiken
 
-- **`[Experimental]`-API** — direkter Konflikt mit dem Projektprinzip „off-the-shelf, mature,
-  defer until measured" (D, DEFERRED). Deshalb: **Spike zuerst** (§10, H0), harte Kapselung
-  hinter `build_agent`, und ein **funktionierender Fallback** (klassischer `Agent` + explizite,
-  tool-getriebene Schrittfolge), falls sich die Harness-API als instabil erweist.
-- **Determinismus** — die Execute-Loop ist LLM-getrieben und nicht deterministisch. Sie darf
+- **Determinismus** — die Abarbeitung ist LLM-getrieben und nicht deterministisch. Sie darf
   deshalb **nie** in einen Temporal-Workflow eingebettet werden (Determinismus-Regeln, §2). Der
-  Harness bleibt strikt in der MAF-Schicht; Temporal sieht nur fertige Tool-Aufrufe.
+  Harness bleibt strikt in Schicht 1; Temporal sieht nur fertige Tool-Aufrufe.
 - **Runaway-Kosten** — ein Agent, der sich selbst Todos gibt, kann teure Schritte multiplizieren.
-  Gegenmittel: `max_loop_iterations`, `token_budget`, `plan_mode_required_for` + RBAC (§6/§8).
-- **Kontext-Kompaktierung** — die Harness-Kompaktierungs-Middleware darf die Provenienz-Trennung
-  (episodisch vs. semantisch, §9 der Architektur) nicht verwischen; bei Report-Läufen (5b) sind
-  Zitate/Belege von der Kompaktierung auszunehmen.
+  Gegenmittel: der Modellaufruf-Deckel, das Freigabe-Gate vor jeder Zustandsänderung, die
+  Wiederholungs-Bremse (identische Aufrufe werden nach einer gemessenen Schwelle abgelehnt) und
+  RBAC davor.
+- **Junges Framework** — der Wechsel tauscht die Fehlerlast des einen jungen Frameworks gegen die
+  eines anderen. LangChain 1.x hat offene Punkte bei dynamischem Tool-Hinzufügen und kennt keinen
+  rein beobachtenden `before_tool`/`after_tool`-Hook. Das ist ein realer Preis, und die
+  Live-Revalidierung ist das, was ihn von einer Annahme in eine Messung verwandelt.
+- **Kontext-Kompaktierung** — sie darf die Provenienz-Trennung (episodisch vs. semantisch, §9 der
+  Architektur) nicht verwischen; bei Report-Läufen sind Zitate/Belege auszunehmen.
 
-## 10. Stufenweiser Einbau (Phasen mit Quality-Gate)
+## 10. Was der Wechsel auf LangGraph am Harness geändert hat
 
-Analog zum `implementation-plan.md`: kleine, einzeln abnehmbare Schritte, jeder mit CHECKMATE
-(G1–G7) und grünem `make lint type test`.
+Historisch, aber nicht folgenlos: zwei der ursprünglichen Entwurfsentscheidungen existierten nur,
+um Eigenheiten des alten Frameworks zu kompensieren, und sind mit ihm verschwunden.
 
-- **H0 — Spike (Risiko zuerst). ✅ erledigt.** Verifiziert gegen die *installierte*
-  `agent-framework-core 1.11`: `create_harness_agent` konstruiert **ohne** LLM-Aufruf mit einem
-  Dummy-Client; die Provider sind bei abgeschalteten Batterien exakt `TodoProvider` +
-  `AgentModeProvider` (+ History); die Default-Modi heißen `plan`/`execute`; `todos_remaining(
-  looping_modes=["execute"])` bindet die Loop nativ an den Execute-Modus. API real und stabil
-  genug → weiter (kein „verworfen").
-- **H1 — Planung sichtbar (Backbone verdrahtet). ✅ erledigt.** `build_agent` baut hinter
-  `harness_enabled` den Harness-Agenten über *dieselben* Tools/Skills; Batterien abgeschaltet;
-  klassischer Fallback bleibt Default. Getestet (`tests/test_agent.py`): Backbone-Auswahl,
-  Provider-Set, gleiche Domain-Tools, keine File/Shell-Batterien. *Offen:* echte read-only-Sicht
-  (nebenwirkungsfreie Teilmenge) im Live-Chat beobachten.
-- **H2 — Plan-Modus mit menschlicher Freigabe. (teilweise)** `AgentModeProvider` ist aktiv
-  (`plan`→Freigabe→`execute` ist der Provider-Default-Fluss); `harness_autonomy=plan_only`
-  hält die Loop interaktiv. *Offen:* Live-Erprobung des Freigabe-Übergangs mit echtem Modell.
-- **H3 — Gebundene Execute-Loop mit `awaiting`-Muster. (Loop erledigt, `awaiting` offen)** Die
-  Execute-Loop ist verdrahtet und hart begrenzt (`harness_max_loop_iterations`, getestet). Die
-  Drei-Zustands-Kopplung (§4) ist **Folgearbeit** — der natürliche Anschluss ist inzwischen die
-  durable Approval-/Resume-Mechanik (D-032/D-035) statt eines Callback-Stubs. Heute bleibt das
-  Fire-and-Forget-Verhalten wie gehabt (der Agent meldet die `job_id` und fährt fort), der
-  durable Job liegt ohnehin sicher in Temporal.
-- **H4 — Autonomie hinter RBAC (mit/nach Phase 6). (offen)** Feinere Autonomiestufen + harte
-  Auslöse-Autorisierung landen im MCP-Server (§6/§8), nicht im Agenten. *Abnahme:* unberechtigter
-  Nutzer kann teure Pfade auch autonom nicht auslösen; `oid` im Trail vollständig.
+- **Der Harness lief in der Streaming-Praxis überhaupt nicht.** Das Framework aktivierte
+  History-Persistenz pro Service-Aufruf *und* installierte eine Middleware, die die Antwort im
+  Streaming-Pfad neu zusammensetzte und dabei die Sentinel-`conversation_id` verlor. Der Loop
+  schickte den Transkript erneut, während die History unabhängig davon re-injiziert wurde — ein
+  `user`-Block zwischen `tool_use` und `tool_result`, HTTP 400 bei **100 %** der Tool-Aufrufe, in
+  beiden Autonomiestufen. Jeder Unit-Test war dabei grün. Das ist der Grund, warum die Abnahme
+  eines Harness-Pfades eine Live-Prüfung verlangt und keine Testsuite.
+- **Der Deckel war unsichtbar.** Er griff an einer Stelle, an der ihn nichts beobachten konnte, und
+  ein gedeckelter Turn sah von außen aus wie ein fertiger. Die Rekonstruktion („die Schleife wollte
+  zuletzt weitermachen, also hat sie etwas anderes gestoppt") war korrekt und hatte ein Loch bei
+  einem Deckel von 1. Heute ist es ein Zählerstand (§2).
+- **`mode_set` musste zurückgenommen werden.** Das alte Framework injizierte ein Tool, mit dem sich
+  das *Modell* selbst in den Execute-Modus versetzen konnte; die Härtung bestand darin, den
+  Provider zu unterklassen und das Tool wieder zu entfernen. Hier wird es schlicht nie exponiert —
+  es gibt nichts zurückzunehmen.
+- **Ein Client pro gleichzeitigem Turn** war nötig, weil der Anthropic-Client die Identität eines
+  im Streaming geparsten Tool-Aufrufs auf der *Client-Instanz* hielt: 8 von 8 gleichzeitigen Turns
+  scheiterten auf einem geteilten Client, 0 von 8 auf eigenen. Der Ersatz-Client hält diesen
+  Zustand nicht.
 
-> **CHECKMATE H** (G1–G7 + Autonomie-Spike): Ist der Harness **eine** gekapselte Erweiterung in
-> `build_agent` (kein Framework-Bau, G1)? Bleibt der teure/lange Pfad **ausschließlich** bei
-> Temporal (D-002, G6)? Fügt der Harness **keine** neue Durability-Anforderung hinzu (§4)?
-> Sind Loop-Grenzen/Budgets/Freigabe-Tools **konfigurierbar** (G3)? Belegt die Metrik-Schicht
-> (2b) mindestens einen Fall, in dem Plan/Execute real hilft — und einen, in dem es *nicht*
-> hilft (selektiver Einsatz, nicht universell)?
+Was **nicht** verschwunden ist und auch nicht sollte: die Freigabe-Semantik. Beide Engines haben
+denselben Plan-Hash über dieselben Todo-Texte gebildet und dieselbe durable Zeile gelesen — die
+eine Divergenz, die *rückwirkend* gewesen wäre, weil sie Entscheidungen entwertet hätte, die ein
+Chemiker bereits getroffen hat.
 
-## 11. Ersetzt der Harness die graph-basierten Ansätze? — Nein.
+## 11. Ersetzt der Harness die festen Abläufe? — Nein.
 
-Kurzantwort: **Der Agent-Harness ersetzt weder Temporal noch die graph-/pipeline-basierten
-Abläufe — er ist ein dritter, komplementärer Baustein.** Wichtig für die Einordnung: Im Repo
-existiert **kein** MAF-Graph-Workflow-Code. Alles unter `workflows/` sind **Temporal**-Workflows
-(`qm_job`, `bo_campaign`, `eln_sync`, `memory_jobs`, `report_workflow`, …). Der Phase-5b-Report
-(„Report-Harness", D-020 — nicht zu verwechseln mit diesem *Agent*-Harness) wurde als
-quellen-agnostischer **Pure-Function-Kern + Temporal-Workflow** gebaut, nicht als MAF-Graph.
-Es wird also *nichts* im Code ersetzt.
+**Der Harness ersetzt weder Temporal noch die deterministische Report-Pipeline — er ist ein
+dritter, komplementärer Baustein.**
 
-| Ansatz | Zweck | Verhältnis zum Agent-Harness |
+| Ansatz | Zweck | Verhältnis zum Harness |
 |---|---|---|
-| **Temporal-Workflows** (gebaut) | Durable, lang laufende, deterministisch wiederholbare Ausführung | **Bleibt.** Der Harness ist MAF-intern und *nicht* durable (D-002). Teure/lange Schritte gehen unverändert fire-and-forget an Temporal. Keine Überschneidung. |
-| **Report-Pipeline** (gebaut, 5b — D-020) | *Fester*, deterministischer Synthese-Fluss (decompose → retrieve → verify → cite) mit erzwungener Zitat-Treue | **Bleibt.** Die Pipeline garantiert reproduzierbare Struktur und Belegpflicht (GxP-relevant); der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan erzwingt die Provenienz-/Zitatstruktur nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
-| **MAF-Graph-Workflows** (nicht gebaut) | *Feste*, vorverdrahtete, typisierte Kontrollflüsse | Nie gebaut — die Rolle „fester Fluss" übernahm die Report-Pipeline. Bleibt eine Option, kein Bestand, der ersetzt werden könnte. |
+| **Temporal-Workflows** | Durable, lang laufende, deterministisch wiederholbare Ausführung | **Bleibt.** Teure/lange Schritte gehen unverändert fire-and-forget dorthin. Keine Überschneidung. |
+| **Report-Pipeline** (D-020) | *Fester*, deterministischer Synthese-Fluss (decompose → retrieve → verify → cite) mit erzwungener Zitat-Treue | **Bleibt.** Die Pipeline garantiert reproduzierbare Struktur und Belegpflicht (GxP-relevant); der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan erzwingt die Provenienz-/Zitatstruktur nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
+| **Spezialisten-Team** (§7) | Aufteilung *einer* Anfrage auf mehrere schmal geschnittene Agenten | Orthogonal: das Team ändert, *wer* einen Schritt ausführt, nicht *ob* geplant und freigegeben wird. Beide Gates gelten eine Ebene tiefer unverändert. |
 
-**Empfehlung:** Die **Pipeline für die feste Berichts-/Provenienz-Struktur** behalten und den
-**Agent-Harness für die offene Recherche** nutzen — sauber getrennt, nicht das eine durch das
-andere ersetzen. Für *offene* Mehrschritt-Anfragen (§5 (a)) ist der Harness der richtige Träger;
-dort gab es ohnehin nie einen Graphen.
+**Empfehlung:** Die Pipeline für die feste Berichts-/Provenienz-Struktur behalten und den Harness
+für die offene Recherche nutzen — sauber getrennt, nicht das eine durch das andere ersetzen.
 
-Fazit der drei Reasoning-/Ausführungs-Formen nebeneinander: **Temporal** = durable Ausführung ·
-**Graph-Workflow** = feste, deterministische Reasoning-Flüsse · **Harness** = offene, dynamische
-Mehrschritt-Planung. Drei Verantwortlichkeiten, keine Verdrängung.
+## 12. Auswirkung auf DECISIONS
 
-## 12. Auswirkung auf DECISIONS / DEFERRED
+- **D-038 und D-040** (Harness als dritter Reasoning-Baustein; autonomer Plan/Execute-Pfad) sind
+  durch `D-2026-08-10-langgraph-rebuild-of-the-conversation-layer` **abgelöst**. Beide bleiben als
+  gemergte ADRs stehen, wie es sich für gemergte ADRs gehört; ihre *Absicht* ist unverändert
+  gültig, ihre Mechanik nicht mehr.
+- **D-137/D-167** (menschliche Freigabe, Bindung an den Plan statt an die Sitzung) gelten weiter
+  und sind der Grund, warum §6 so und nicht anders geschnitten ist.
+- **D-002** ist unverändert. Was sich verschoben hat, ist keine Regel, sondern eine
+  Implementierungsfolge: der Turn-Zustand liegt jetzt im Checkpointer statt in handgebautem SQL
+  der Konversationsschicht (D-2026-08-10 §3).
 
-- **ADR D-038 (gesetzt):** „MAF Agent Harness (TodoProvider + AgentModeProvider) als dritter
-  Reasoning-Baustein für offene Mehrschritt-Anfragen; strikt MAF-intern, keine neue Durability,
-  generische Batterien aus, Fallback auf klassische `Agent`-Konstruktion." — verfeinert D-002
-  (Reasoning-Orchestrierung wird *dynamisch*), überstimmt es **nicht** (Durability-Grenze
-  unverändert). Siehe `docs/decisions/`.
-- **DEFERRED-Zeile „MAF Durable Extension for jobs"** bleibt gültig — der Harness ändert die
-  Begründung nicht; §4 zeigt, dass wir sie weiterhin nicht brauchen.
+## 13. Offene Punkte
 
-## 13. Offene Fragen (für den Backlog)
-
-1. `awaiting`-Muster (§4/H3): Kopplung an die inzwischen vorhandene durable Approval-/Resume-
-   Mechanik (D-032/D-035) statt des früheren Callback-Stubs. Wo lebt der MAF-Session-State
-   (Redis vs. Postgres) und wie lang halten pausierte Sessions? (*keine* harte
-   Durability-Anforderung).
-2. Plan-/Loop-Metriken für Schicht 2b (D-009): Plan-Qualität, „hat die Loop geholfen" (A/B),
-   Runaway-Rate registrieren.
-3. Plan-Modus-Freigabe + feinere Autonomie hinter RBAC (Phase 6), Autorisierung im MCP-Server.
-4. Verhältnis Agent-Harness ↔ Report-Pipeline (5b, D-020) konkret ausbauen: offene Recherche je
-   Abschnitt durch den Harness, feste Synthese-/Zitatstruktur durch die Pipeline (siehe §11).
+1. **`loop_cap_reached` auf dem Graph-Pfad.** `loop_capped(state)` ist die richtige Lesung, aber
+   der Turn-Runner liest noch das alte Contextvar-Signal — auf dem Graph-Pfad wird das Ereignis
+   damit nicht gesendet und `chemclaw_turn_loop_caps_total` nicht gezählt (§8).
+2. **Mid-Turn-Resume** eines Turns, der auf einen durable Job wartet, ist auf dem Graph-Pfad noch
+   nicht scharf geschaltet und braucht eine eigene Entscheidung.
+3. **Plan-/Loop-Metriken** für die Eval-Schicht ausbauen: Plan-Qualität (nötige vs. geplante
+   Schritte) und ein A/B „hat die Loop geholfen" je Aufgabentyp.
+4. **Team-Routing messen** (Genauigkeit, Token-Kosten pro Spezialist), bevor `agent_teams_enabled`
+   irgendwo der Default wird.

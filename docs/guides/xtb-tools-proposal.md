@@ -167,7 +167,7 @@ against them.
 2. **Compute once, never twice (D-011).** Everything goes through `CalculationKey` + `run_cached`,
    versioned so an engine upgrade is a miss and not a stale hit.
 3. **Durability lives only in Temporal (D-002).** Fast work runs inline; long work is a durable job
-   with a pushed-back completion event. MAF holds no durable state.
+   with a pushed-back completion event. The conversation layer holds no job state.
 4. **Fail fast over a meaningless number (G4).** Existing precedent: we reject charge mismatches and
    open-shell species rather than returning a converged-but-wrong energy.
 5. **Config, never magic numbers.** Methods, solvents, thresholds, timeouts, budgets — all
@@ -362,7 +362,7 @@ Already shown in §4.2. Two consequences worth stating explicitly:
 
 Tools are named after the **question**, not the program option. `--ohess` is not a chemistry
 question; "what is the free energy of this species" is. Nine tools, each with a docstring the model
-reads as its contract (MAF derives the schema from the signature + docstring, so the docstring is
+reads as its contract (LangChain derives the schema from the signature + docstring, so the docstring is
 load-bearing product surface, not a comment).
 
 | Tool | Question it answers | Task(s) | Typical cost |

@@ -285,16 +285,98 @@ never what a deployment gets.
 - [x] **D-123's mechanism verified absent from the replacement** by reading: five instance-state
       sites in `agent_framework_anthropic` against **zero** `self.<attr> =` assignments in
       `langchain_anthropic/chat_models.py`.
+- [x] **The degradation probe was actually executed** — 3/3, exit 0, against a real front door
+      with Temporal deliberately stopped and the local mock LLM: `capability_degraded
+      ['durable-jobs (Temporal)']` at event 1, first token at event 3, the launcher reached. Zero
+      LLM calls. The ordering assertion is measured, not merely built.
+- [ ] **A second M8 defect, found by reading rather than by a test: the loop cap is unobservable
+      on the graph engine.** `run_turn` decides whether to emit `loop_cap_reached` and increment
+      `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`, which reads the `_watch`
+      contextvar — written *only* by `observe_loop_cap`, the MAF half. The graph engine's
+      `lg_loop_cap` instead records `model_calls` in graph state, and nothing reads it back:
+      `loop_capped(state)` has no caller on the turn path. So a capped turn on the graph engine is
+      externally identical to a finished one. That is precisely the defect `lg_loop_cap`'s own
+      docstring says it was written to fix — "MAF's cap fired inside `create_harness_agent` where
+      nothing could observe it" — reintroduced one layer up by wiring the runner to the wrong
+      reader. Fix with the metering defect, before the default flips.
+- [ ] **A defect the probe found in M8, and it is the serious kind.** The team arm's 15 turns wrote
+      `turn_costs` rows with **zero** tokens while the MAF arm wrote 2040 per session — so
+      `runner_usage.graph_usage_tokens` read nothing from the `openai_compatible` endpoint. LangChain
+      reports `usage_metadata` on the *final* aggregated message, and the mock may report it in a
+      shape that reader misses. **Token metering is therefore unverified on the graph engine**, which
+      is precisely the failure `usage_tokens`'s own docstring records: 50 turns of 15,000 real tokens
+      booked as zero while the budget guard went on allowing the next one. Fix before M13 flips the
+      default — a runaway-cost guard that meters zero is disarmed.
 - [ ] **Not run: the concurrency probe, plan→approve→execute, and team routing.** All three need a
-      live model and this environment has no `ANTHROPIC_API_KEY`. Nothing is reported as passing.
+      live model and this environment has no `ANTHROPIC_API_KEY`. Their harnesses ran end to end
+      against the mock, which proves the *plumbing* and measures nothing: the plan-gate suite scored
+      0/5 because the mock produces no todos, so the hash was `EMPTY_PLAN_HASH` and the decision was
+      correctly refused 409; the team arm delegated nothing because the mock never calls the `task`
+      tool. **Neither the gate nor routing accuracy has been measured**, and no number from those
+      runs should be cited as if they had.
 - [ ] `agent_pool.py`'s deletion stays gated on the concurrency probe *being run*, not on the
       reading above — a structural argument is not a measurement.
 
-### M13 — remove MAF and update the documents
-- [ ] Drop `agent-framework-*`, the `maf` stack rows, and the `agent_engine` switch with its branch.
-- [ ] ~135 mentions across maintained docs; `docs/archive/` is not maintained — leave it. ADRs are
-      append-only.
-- [ ] Verify whether session affinity is still required at all.
+### M13 — remove MAF and update the documents · **scoped and started, not finished**
+- [x] **Session affinity verified — and the plan's hypothesis is false.** Both Helm comments
+      justified affinity partly by "the harness todo list lives in MAF `session.state`". Of the
+      three things they named, two were framework state and are gone; the third — a conversation's
+      uploaded **attachments** — is session-scoped and in memory *by design*, with no table
+      anywhere in `infra/sql`. It never had anything to do with the framework. Affinity stays; the
+      way to remove it is to give attachments a durable home.
+- [x] Scoped exhaustively: **25 `agent_framework` import sites across 16 modules**, ~50 test files,
+      **~166** doc mentions (the plan's "~135" was low, and the miss is concentrated in the two
+      files that need real rewrites). Ordered demolition plan below.
+- [ ] Steps 0–10 below. **Three of them are new code, not deletion**, which the plan did not say.
+
+**Two plan assumptions that are wrong, found by scoping:**
+
+- **`core/turn_signals.py` is not a MAF module and cannot simply be deleted.** This file said it
+  dies "with the MAF branch it still serves". It has a *live LangGraph consumer*:
+  `api/graph_stream.py` imports `drain` and calls it twice per turn. So M13's job is a **port** —
+  eight writer call sites become `get_stream_writer()` — and only then can the contextvar go.
+- **`agent_pool.py`'s probe gate is moot.** M12 left it "gated on the concurrency probe being run".
+  But D-123's defect is in `agent_framework_anthropic`'s streaming parser, and once the dependency
+  is uninstalled that parser is not in the tree. The pool's factory is `build_agent`, which is
+  deleted regardless. It cannot survive the branch, probe or no probe.
+
+**And one risk nobody had listed.** `core/logging.py` uses MAF's `configure_otel_providers`, and
+`pyproject.toml` says the OTel SDK is a direct dependency *because* "via agent-framework … is the
+import that resolves". Removing MAF removes the tracing bootstrap **for the whole process**, and no
+test would notice. It needs a hand-written replacement, and it is isolated into its own step for
+exactly that reason.
+
+**The ordered demolition, and what sets the order.** `test_third_party_layering.py`'s ratchet is
+bidirectional — a declared row with no import fails, and an import with no row fails — so
+`_STACKS["agent_framework"]` and the last import must die in the *same* commit. Everything else is
+arranged to keep that commit small and the suite green at each step.
+
+- [ ] **Step 0 — flip the default** (2 files). `agent_engine = "langgraph"`. **This is the real
+      proof gate**, and M12 left three probes unrun: say so rather than let the demolition imply
+      they passed.
+- [ ] **Step 1 — `harness_types.py`** (6 files). Not free: its importers are the MAF halves of
+      `loop_cap` and `plan_gate`, so it lands with them.
+- [ ] **Step 2 — port `turn_signals` to the stream writer** (~18 files). Before the runner, so both
+      engines stay green.
+- [ ] **Step 3 — the switch and the runner's MAF branch** (~8 files). The checkpoint that proves
+      the graph engine carries production alone.
+- [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, `_resume`,
+      durable compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
+- [ ] **Step 5 — the harness surface** (~12 files), including a **rewrite of `api/routes/plan.py`
+      onto graph state** — new code.
+- [ ] **Step 6 — `template_activities.py` onto `wrap_tool_call`** (~3 files). Two workarounds go
+      away free: `skip_parsing=True` and most of `_serializable`.
+- [ ] **Step 7 — the middleware MAF halves and the test re-point** (~50 files) — **budget more than
+      the other nine combined.** ~315–420 tests move to `tests/fakes_langgraph.py`, and the
+      `lg_*` wrappers need direct coverage that today exists only through whole-turn tests.
+- [ ] **Step 8 — OTel** (~4 files). Isolated: the only item that can break observability in
+      production with no test noticing.
+- [ ] **Step 9 — the dependency and the layering rows** (3 files, atomic per the ratchet). Verify
+      by uninstalling `agent-framework-core` and running the suite green.
+- [ ] **Step 10 — docs** (~15 files). `docs/reference/architektur.md` (48 mentions) is a full
+      rewrite — MAF is its thesis, not a mention. **`docs/guides/harness-konzept.md` needs a human
+      decision**: it is a *proposal document for a MAF feature that was built and has since been
+      replaced*, so archiving is the honest answer rather than rewriting it.
 
 ## Review
 

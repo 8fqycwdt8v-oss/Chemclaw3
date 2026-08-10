@@ -629,17 +629,25 @@ Two caveats that make the saving smaller than a naive prefix measurement suggest
 cost this review a wrong estimate:
 
 - **Measure the provider you actually run.** The ~14.6 k-token prefix figure that started REV-9 was
-  measured on the Anthropic dev path. Production is `openai_compatible`, where
-  `agent_framework_openai` contains **zero** occurrences of `cache_control` — the mechanism is not
-  reachable from there at all, so the fix is upstream work, not a config change here.
-- **The system half is not cacheable through `Agent` as it stands.** `SkillsProvider` merges the
-  skills manifest into the instructions with an f-string, which would `repr()` a structured block
-  list into a string. Marking that half cacheable needs a change in `agent_framework`, not in
-  Chemclaw.
+  measured on the Anthropic dev path. Production is `openai_compatible`, where `langchain_openai`
+  contains **zero** occurrences of `cache_control` — the mechanism is not reachable from there at
+  all, so the fix is upstream work, not a config change here. This survived the rebuild of layer 1
+  unchanged, and it was re-measured rather than assumed to: the previous framework's OpenAI client
+  had the same zero, and `langchain_anthropic` has 74 occurrences, which is why the dev path can
+  do what the production path cannot.
+- **The system half is not cacheable as the prompt is assembled.** `deepagents.SkillsMiddleware`
+  renders the skills manifest into a string with `system_prompt_template.format(...)` and appends
+  it to the system message, so the half that changes least is welded to the half that changes most.
+  Marking it cacheable needs a change upstream, not in Chemclaw — the same conclusion the previous
+  framework's `SkillsProvider` f-string forced, reached again for the same structural reason.
 
-Per-model attribution for the same spend is on the OTel side, not here: MAF emits
-`gen_ai.client.token.usage` labelled by request model, response model, provider and token type, and
-the shipped chart turns OTel on. These counters carry `profile`, which OTel has never heard of.
+Per-model attribution for the same spend **is not currently available**, and that is a regression
+worth naming rather than a gap that was always there: the old framework's own instrumentation
+emitted `gen_ai.client.token.usage` labelled by request model, response model, provider and token
+type, and it went out with the framework. Measured across the installed stack, the only package
+that emits that metric is the one that was removed — nothing in `langchain`, `langgraph` or
+`langsmith` does. So these counters are the whole picture today, and they carry `profile`, which
+OTel has never heard of.
 
 ## (ix) Work the PR-gate review queue
 
