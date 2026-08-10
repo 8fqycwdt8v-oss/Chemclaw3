@@ -254,9 +254,20 @@ never what a deployment gets.
       unlike the evidence sweep they really do serialize, so they are the case where `Send` would
       buy latency rather than visibility.
 
-### M11 — long-term memory on `BaseStore`
-- [ ] Map `chemclaw/memory/` onto `BaseStore` over the deployed pgvector. `Store` is memory, not
-      knowledge — the PR-gate still stands between an agent and layer 4.
+### M11 — long-term memory on `BaseStore` · **not adopted**
+- [x] Investigated, and **closed having built nothing** — see
+      [`D-2026-08-10-basestore-is-not-where-this-systems-memory-lives`](../docs/decisions/D-2026-08-10-basestore-is-not-where-this-systems-memory-lives.md).
+      The phase's premise did not survive contact with the package: `chemclaw/memory/` is fourteen
+      modules of which **one** touches a database, and the other thirteen emit Markdown notes that
+      go to Git through the PR-gate. There is no cross-session-recall plumbing to replace.
+- [x] The decisive finding is a **false green**, not a missing feature. `store`'s columns are
+      `prefix, key, value, created_at, updated_at, expires_at, ttl_minutes` — none of them an actor
+      column — so `tests/test_leaver.py`'s *derived* GDPR check would pass while a departing
+      person's memories stayed. M6 hit this trap with the checkpointer and caught it because
+      `checkpoints` at least had `thread_id` to join through. A safety net that returns a false
+      green is worse than none, because it is trusted.
+- [x] `create_agent(store=…)` stays unset in `agent/langgraph_agent.py` — now a decision with a
+      reason rather than an omission.
 
 ### M12 — live re-validation
 - [ ] Concurrency probe (8 turns × 3 configs) — gates the `agent_pool` deletion.
@@ -787,3 +798,43 @@ until `EvidenceSourceEvent` was added and wired.
 the usual 36** — Postgres had stopped mid-run, so 146 database-backed tests silently did not run. A
 green suite with a sixth of it skipped is not a green suite; the figure above is from the re-run
 with the database actually up.
+
+**M11 — not adopted, and that is the deliverable.**
+
+The plan said this phase would map `chemclaw/memory/` onto `BaseStore` so that "cross-session
+recall stops being chemclaw-specific plumbing". That sentence is where the error is: it assumes the
+package *is* recall plumbing. Fourteen modules, thirteen of them pure functions that read reactions
+and emit Markdown notes for a human to merge; the package README says it in one line — "Nothing here
+writes to the graph directly." A key-value store has nothing to hold there.
+
+Four things `BaseStore` cannot express, each enforced somewhere today: the PR-gate (there is no
+`put` that means *proposal*); bi-temporal retirement (`valid_to` versus overwrite-or-destroy);
+the `observations_evidence_is_merged_notes` CHECK, which becomes an agent-writable `jsonb` field;
+and — the one easiest to miss — **the audit trail**, because Chemclaw's six `wrap_tool_call`
+wrappers key on tool names and *a store write is not a tool call*. A memory surface the GxP trail
+cannot see is not one this system can have.
+
+And it would duplicate the retrieval stack badly: `store_vectors` has no lexical half, no fusion and
+no `embedding_key`, which is exactly the defect `039_note_index_embedding_key.sql` closed after a
+model swap left every stored vector byte-identical and a query scored its exact match at 0.0000.
+
+**One thing genuinely is missing** — a cross-session scratchpad outside the PR-gate. That absence is
+deliberate, and filling it is a product decision about whether agents may write ungated durable
+memory, not a step in porting a framework. The ADR lists what would have to ship with it.
+
+### M12 — live re-validation · **three probes blocked on a credential**
+Recorded here because the blocker is environmental, not a decision: this sandbox has Postgres but
+**no Anthropic API key**, so nothing that needs a live model was run. Harnesses are built so each
+probe runs the moment a credential exists; none of them is reported as having passed.
+
+- [x] **`make eval-strict` runs offline** — verified: exit 0, 25 metrics scored, 0 regressions.
+- [x] **D-123's mechanism does not exist in the replacement**, verified by reading rather than
+      assumed. MAF's `agent_framework_anthropic` keeps `self._last_call_id_name` on the *client
+      instance* and reads it mid-stream (five sites); `langchain_anthropic/chat_models.py` has
+      **zero** `self.<attr> =` assignments in the entire module, and a streamed call carries its id
+      and name on the event itself. This substantially de-risks deleting `agent_pool.py` — it does
+      not replace the live probe, because a structural argument is not a measurement.
+- [x] **An offline concurrency probe was attempted and deliberately discarded.** With a fake model
+      `ainvoke` never reaches `_astream`, so there is no stream parser to exercise — and D-123 *is*
+      a stream-parser defect. Sharing a fake's iterator across turns fails for reasons unrelated to
+      the bug. A probe that cannot see the defect it is named after is worse than no probe.
