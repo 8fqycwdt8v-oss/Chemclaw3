@@ -158,10 +158,20 @@ never what a deployment gets.
       `agent_durable_compaction_enabled`. **All moved to M8/M13 — see the correction below.**
 
 ### M7 — connectors and per-turn tools
-- [ ] Re-base the degrading MCP connectors on `langchain-mcp-adapters`.
-- [ ] Compile the graph **per turn** — LangGraph binds tools at construction, and a connector
-      connection must belong to exactly one turn. Measure against MAF's ~90 ms baseline.
-- [ ] `durable/template_activities.py`: replay through the ported `wrap_tool_call` chain.
+- [x] Re-based on `langchain-mcp-adapters`. `ConnectorSpec` + `HeldConnectorSession` in
+      `connectors/transport.py`, `mcp_connections()`/`open_connector_specs()` in
+      `connectors/registry.py`, `chemclaw_agent.connector_specs(profile)` as the narrowed twin of
+      `connector_tools(profile)`.
+- [x] **The decision extracted first**, as in M3: `transport.absorb_connect_failure` is the whole
+      degrade-unless-really-cancelled policy, and both engines' plumbing calls it. A dead connector
+      cannot cost the turn on one engine and only its tools on the other.
+- [x] **Each session is held on its own task**, and this is the phase's real finding — see below.
+- [x] Compiled **per turn**, measured at **60 ms** against MAF's ~90 ms agent build: the thing that
+      replaces a process-lived agent is cheaper than the agent was.
+- [x] `tests/test_langgraph_connectors.py` — seven tests against a live uvicorn MCP server, the
+      task-affinity one mutation-verified (the naive shape raises, the test catches it).
+- [ ] `durable/template_activities.py`: replay through the ported `wrap_tool_call` chain —
+      **moved to M8**, which is where the engine branch it must dispatch on comes into existence.
 - [ ] Delete `agent/agent_pool.py` + test + the D-123 `DEFERRED.md` row — gated on M12's probe.
 
 ### M8 — streaming and the event contract
@@ -538,3 +548,42 @@ test asserted nothing while passing (`applied=False`, 13 rows reported and none 
 checkpointer pool is bound to the loop it was opened in, so a test that spans several `asyncio.run`
 calls closes a pool from the wrong loop — production has one loop per process, so the tests now use
 one too.
+
+**M7 done.** `make lint type test` green at 4117 passed, 0 failed; collected ids diffed — nothing
+lost, exactly seven tests added (plus the two `test_docstring_paths` parameters two new modules
+bring with them).
+
+**The finding that shaped the phase, and it was not in the plan.** The plan said "re-base the
+connectors on `langchain-mcp-adapters`", implying a translation: swap the tool class, keep the
+shape. The shape does not survive. MAF hands out an *unconnected tool object* that is connected
+later, so `open_reachable` can gather `AsyncExitStack.enter_async_context` over six of them.
+`langchain-mcp-adapters` has no such object — `load_mcp_tools` needs a **live session**, so a
+connector's tools do not exist until it is open — and worse, an MCP session is an `anyio` cancel
+scope, which anyio pins to the task that entered it. Gathering the enters puts each scope on a
+child task and the exits on the caller's, which raises
+
+    RuntimeError: Attempted to exit cancel scope in a different task than it was entered in
+
+Measured directly, and the sequential form of the same code passes — which is what identifies the
+cause as task affinity rather than the session. MAF never met this because it runs each
+connector's lifecycle on its own task *internally*; `HeldConnectorSession` does the same thing
+where a reader can see it. Concurrency is kept, and it is not optional: a dark fleet otherwise
+costs the sum of its connect timeouts before the model is called at all.
+
+The test for this was then mutation-verified rather than trusted — the naive shape was put back and
+watched to raise. That matters because the test would have passed against a single connector
+however it was written; it needs three, opened together, to see the bug.
+
+**One thing the library gives back.** `DegradingHttpConnector.close` exists because neither MAF nor
+the MCP SDK closes a caller-supplied `httpx.AsyncClient` — six leaked clients per turn, the D-119
+leak class. The adapter's `httpx_client_factory` seam lets `connector_http_client` cross unchanged
+(so the redirect refusal, the identity hook, `auth_for` and the split connect/read timeout all
+survive), and `_create_streamable_http_session` enters the client it builds with `async with
+client`. So the leak cannot arise on this engine and the ownership workaround has no counterpart.
+
+**Two items moved rather than done.** `durable/template_activities.py`'s hand-built
+`FunctionInvocationContext` replay goes to M8: it has to *dispatch* on the engine, and the engine
+branch does not exist until M8 makes `build_agent` able to return a graph. Doing it here would mean
+writing a branch on a condition that is still unreachable. `agent_pool.py`'s deletion stays gated on
+M12's concurrency probe, as planned — the D-123 defect is `agent_framework_anthropic`-specific and
+almost certainly absent here, but "almost certainly" is what the probe is for.

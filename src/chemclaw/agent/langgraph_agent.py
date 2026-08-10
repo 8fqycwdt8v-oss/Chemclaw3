@@ -96,6 +96,7 @@ def build_langgraph_agent(
     correlation_id: str | None = None,
     audit_sink: AuditSink | None = None,
     checkpointer: Any | None = None,
+    connectors: list[Any] | None = None,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -119,10 +120,25 @@ def build_langgraph_agent(
             caller supplies rather than this function building: it is an async factory that
             migrates on first use, and `build_langgraph_agent` is synchronous and resource-free by
             the same promise `build_agent` makes.
+        connectors: This turn's already-open connector tools
+            (`chemclaw.connectors.registry.open_connector_specs`), or `None` for an agent with no
+            out-of-process capability.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
         `build_agent` promises.
+
+    **Compiled per turn, because LangGraph binds tools at construction.** MAF appends run-scoped
+    tools with `agent.run(tools=…)`, so one process-lived `Agent` served every turn and took that
+    turn's connectors as an argument. A compiled graph's `ToolNode` is built from the tool list it
+    was given, and `wrap_model_call`'s `request.override(tools=…)` narrows only what the *model
+    sees*, never what the executor can run — so a connector tool absent at compile time cannot be
+    called at all. A connector's session must belong to exactly one turn (measured: two concurrent
+    turns over one MCP tool object deadlock, and the second turn's calls travel over the first
+    turn's connection, misattributing them in the connector's own log), so the graph's lifetime is
+    pinned to its connectors' — one turn. `chemclaw_agent.connector_tools` records the rule; this
+    is what the rule costs on this engine, measured in `tests/test_langgraph_connectors.py`
+    against the ~90 ms MAF agent build D-123 recorded.
     """
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
@@ -140,7 +156,12 @@ def build_langgraph_agent(
         # The skills read tool is agent-scoped rather than a `@tool` in the process registry,
         # because it is bound to *this* profile's narrowed backend — a registry entry would have
         # to be bound to none, which is the one thing it must not be.
-        tools=[*tools, skill_read_tool(backend)],
+        #
+        # The connectors are already narrowed by the profile and already open: `connector_specs`
+        # applies `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
+        # `open_connector_specs` returns only what a reachable server actually advertised. An
+        # unreachable one contributes nothing here, which is the degradation the turn survives.
+        tools=[*tools, *(connectors or []), skill_read_tool(backend)],
         system_prompt=instructions_for(prof),
         state_schema=ChemclawState,
         middleware=[

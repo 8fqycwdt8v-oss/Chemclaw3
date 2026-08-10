@@ -14,6 +14,7 @@ here.
 """
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from agent_framework import (
@@ -88,9 +89,11 @@ from chemclaw.connectors.registry import (
     connector_tool_names,
     endpoint_tool_names,
     job_tools,
+    mcp_connections,
     mcp_tools,
     skills_dirs,
 )
+from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.templates.registry import template_tool_names, template_tools
@@ -805,6 +808,56 @@ def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
     if prof.tool_names is not None:
         tools = _narrow_allowed_tools(tools, prof.tool_names)
     return tools
+
+
+def connector_specs(profile: str | AgentProfile | None = None) -> list[ConnectorSpec]:
+    """This turn's connector connection specs, narrowed by the profile — the LangGraph twin.
+
+    Identical policy to `connector_tools`, over the other engine's connector representation: both
+    profile dials apply, `mcp_server_names` selects whole bundles and `tool_names` narrows each
+    surviving bundle's allow-list, and a bundle left with no named tool is dropped rather than
+    attached with an empty surface. Sharing the *decision* matters more here than the shape does —
+    a profile that attenuates differently per engine would be a different security posture under
+    one config value, which is exactly the drift this migration forbids.
+
+    Built fresh per call for the same reason its twin is: a connection belongs to exactly one turn.
+
+    Args:
+        profile: The profile to narrow by (a name, an `AgentProfile`, or `None` for the default,
+            which advertises every enabled connector's full allow-list).
+
+    Returns:
+        Unopened connection specs. The caller opens them for the turn
+        (`chemclaw.connectors.registry.open_connector_specs`).
+    """
+    prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    specs: list[ConnectorSpec] = list(mcp_connections())
+    if prof.mcp_server_names is not None:
+        specs = _narrow(specs, prof.mcp_server_names, prof.name, "connector")
+    if prof.tool_names is not None:
+        specs = _narrow_allowed_specs(specs, prof.tool_names)
+    return specs
+
+
+def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> list[ConnectorSpec]:
+    """Restrict each spec's allow-list to `keep`, dropping connectors left with nothing.
+
+    `dataclasses.replace` rather than the in-place mutation `_narrow_allowed_tools` uses: a
+    `ConnectorSpec` is frozen, and the mutation was only ever safe because those objects are
+    per-turn. Rebuilding is the same policy without needing that argument to hold.
+
+    A spec whose manifest declared *no* allow-list (`allowed_tools is None`, meaning "everything
+    this server offers") becomes bounded by `keep` here — a profile narrowing by tool name must
+    reach a connector that declined to enumerate its own surface, or the narrowing would be a
+    no-op on exactly the bundles with the widest surface.
+    """
+    narrowed = []
+    for spec in specs:
+        allowed = sorted(set(spec.allowed_tools) & keep) if spec.allowed_tools else sorted(keep)
+        if not allowed:
+            continue
+        narrowed.append(replace(spec, allowed_tools=tuple(allowed)))
+    return narrowed
 
 
 def _narrow_allowed_tools(tools: list[Any], keep: frozenset[str]) -> list[Any]:

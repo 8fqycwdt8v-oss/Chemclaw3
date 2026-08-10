@@ -35,6 +35,8 @@ from typing import Any, assert_never
 
 import httpx
 import yaml
+from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.sessions import StdioConnection, StreamableHttpConnection
 from pydantic import ValidationError
 
 from chemclaw.connectors.identity import auth_for, turn_identity_hook
@@ -46,7 +48,12 @@ from chemclaw.connectors.manifest import (
     JobSpec,
     StdioEndpoint,
 )
-from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
+from chemclaw.connectors.transport import (
+    ConnectorSpec,
+    DegradingHttpConnector,
+    DegradingStdioConnector,
+    HeldConnectorSession,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
@@ -368,6 +375,121 @@ def mcp_tools() -> list[Any]:
         for manifest in enabled()
         if manifest.endpoint is not None
     ]
+
+
+def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:
+    """Describe one connector endpoint for the LangGraph engine (M7).
+
+    The twin of `_mcp_tool`, dispatching on the same union for the same reason: the transports
+    differ only in how the server is *reached*, and everything bounding what the agent may do with
+    it is identical on both.
+
+    **The HTTP client is still ours, and that is what keeps four security properties alive.**
+    `httpx_client_factory` is the seam `langchain-mcp-adapters` exposes, so `connector_http_client`
+    crosses unchanged and with it the refusal to follow redirects (a connector answering `302`
+    would otherwise harvest the caller's Entra oid and role set), `turn_identity_hook`, `auth_for`,
+    and the split connect/read timeout. The library's own `timeout`/`auth`/`headers` arguments are
+    deliberately *not* passed on the connection: the factory ignores what it is handed, and the
+    honest way to ignore an argument is to never let a caller supply one. Unlike MAF, the adapter
+    closes the client it builds through the factory — `_create_streamable_http_session` enters it
+    with `async with client` — so the D-119-class leak `DegradingHttpConnector.close` exists to
+    prevent cannot arise here.
+    """
+    if isinstance(endpoint, HttpEndpoint):
+        return ConnectorSpec(
+            name=manifest.name,
+            connection=StreamableHttpConnection(
+                transport="streamable_http",
+                url=_endpoint_url(manifest.name, endpoint),
+                httpx_client_factory=_connector_client_factory(manifest.name, endpoint),
+            ),
+            allowed_tools=tuple(endpoint.tools) if endpoint.tools else None,
+        )
+    if isinstance(endpoint, StdioEndpoint):
+        # No identity headers, for the same reason as `_mcp_tool`: a subprocess of our own process,
+        # under our own identity, with no request to attach them to (`connectors.identity`).
+        return ConnectorSpec(
+            name=manifest.name,
+            connection=StdioConnection(
+                transport="stdio",
+                command=endpoint.command,
+                args=list(endpoint.args),
+            ),
+            allowed_tools=tuple(endpoint.tools) if endpoint.tools else None,
+        )
+    assert_never(endpoint)  # exhaustive over the union — a new transport without a branch is a bug
+
+
+def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
+    """An `httpx_client_factory` that returns *our* client, ignoring what the library offers.
+
+    The library calls this with `headers`, `timeout` and `auth` drawn from the connection mapping.
+    `_mcp_connection` sets none of them, so all three arrive empty and there is nothing to drop —
+    the signature exists to satisfy the caller, not to carry configuration. Every one of those
+    concerns is already decided inside `connector_http_client`, which is the one place they may be
+    decided.
+    """
+
+    def factory(**_ignored: Any) -> httpx.AsyncClient:
+        return connector_http_client(connector, endpoint)
+
+    return factory
+
+
+def mcp_connections() -> list[ConnectorSpec]:
+    """One connection spec per enabled connector that declares an endpoint (unopened).
+
+    The LangGraph twin of `mcp_tools()`, and named to pair with it: this half is the deployment's
+    whole surface, and `chemclaw.agent.chemclaw_agent.connector_specs` is the profile-narrowed
+    half, exactly as `mcp_tools`/`connector_tools` divide the same work on the MAF engine.
+    """
+    return [
+        _mcp_connection(manifest, manifest.endpoint)
+        for manifest in enabled()
+        if manifest.endpoint is not None
+    ]
+
+
+async def open_connector_specs(
+    stack: AsyncExitStack, specs: Iterable[ConnectorSpec]
+) -> tuple[list[BaseTool], list[str]]:
+    """Open every connector for this turn; return the tools that came up and the names that did not.
+
+    The LangGraph twin of `open_reachable`, and it returns the tools as well as the casualties
+    because on this engine a connector's tools do not exist until its session is open —
+    `load_mcp_tools` needs a live session. That is the whole structural difference between the two
+    engines' connector paths, and it is why this cannot simply be `open_reachable` with a different
+    element type.
+
+    Concurrent for the same reason, and safe to be: each `HeldConnectorSession` confines its
+    `anyio` cancel scope to a task of its own, so entering them together does not exit them from
+    the wrong task (see `chemclaw.connectors.transport.HeldConnectorSession`). The degradation is
+    announced here rather than left to the caller, matching `open_reachable` — a new caller must
+    not be able to reintroduce the silence by forgetting to read a return value.
+
+    Args:
+        stack: The caller's exit stack, which owns tearing the sessions down.
+        specs: This turn's connector specs
+            (`chemclaw.agent.chemclaw_agent.connector_specs`).
+
+    Returns:
+        The tools every reachable connector advertises, and the names of those that did not come up.
+    """
+    held = [HeldConnectorSession(spec) for spec in specs]
+    opened = await asyncio.gather(*(stack.enter_async_context(session) for session in held))
+    unreachable = [session.name for session in held if not session.connected]
+    if unreachable:
+        # WARNING rather than ERROR, and the counter is what makes it alertable — the same posture
+        # and the same metric as `open_reachable`, because it is the same operational fact.
+        logger.warning(
+            "%d connector(s) did not come up for this scope and contribute no tools: %s",
+            len(unreachable),
+            ", ".join(unreachable),
+        )
+        record_metric(
+            lambda m: m.increment("chemclaw_connectors_unreachable_total", len(unreachable))
+        )
+    return [tool for tools in opened for tool in tools], unreachable
 
 
 def profiles_dirs() -> list[str]:

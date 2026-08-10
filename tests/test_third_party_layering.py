@@ -198,6 +198,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "connectors/transport.py builds the MAF tool objects the agent consumes — the one adapter "
         "point where a connector is handed to layer 1"
     ),
+    ("chemclaw.connectors", "langgraph"): (
+        "the same adapter point for the other engine (M7, D-2026-08-10): connectors/transport.py "
+        "holds each connector's MCP session open for a turn and registry.py turns what it "
+        "advertises into LangChain tools; retires with the `maf` row when that branch is deleted"
+    ),
     ("chemclaw.connectors", "rdkit"): "bundle tools validate and depict structures",
     # science: pure computation. Its README forbids Temporal/MCP/FastAPI and permits the rest.
     ("chemclaw.science", "rdkit"): "the cheminformatics toolkit is the engine",
