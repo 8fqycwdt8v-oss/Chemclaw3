@@ -1640,3 +1640,85 @@ Rules for myself:
 - When the honest answer is "uniform rule, and the cost is real", write the cost where an operator
   will meet it — here `infra/sql/README.md`'s Disposal column says this table is unbounded until
   someone sets a window — rather than in the config comment nobody reads twice.
+
+## Making a defect visible is not fixing it (2026-08-09)
+
+`ScreenResult.screened` was added an hour earlier in the same branch, and its own docstring said
+what it was for: a clean screen used to name nothing it had looked at. What I did not do was ask the
+next question — *is what it names the thing the caller asked about?* It was not.
+`screen_hazards("CCO junk")` returned no flags and `screened=["CCO"]`, and the new field was
+faithfully reporting a screen of the wrong molecule.
+
+The mechanism was one line: the screens called `Chem.MolFromSmiles` directly while every calculator
+in the tree went through `core.chem.require_canonical_smiles`, whose docstring already spelled out
+that RDKit truncates `"CCO junk"` at whitespace and keys a different molecule. The knowledge was
+written down, one import away, in a function the screens did not call. The defect was not a missing
+insight, it was a missing *reuse*.
+
+Rules for myself:
+
+- A field that echoes what a function operated on is a **question**, not an answer. The moment I add
+  one, run the tool on malformed input and read what it echoes. If the echo differs from the input
+  in a way nobody asked for, the fix is upstream of the field.
+- When one module reaches a shared dependency directly and every sibling reaches it through a
+  guarded helper, that is not a style difference — it is the guard not applying. Grep for the raw
+  call before assuming the helper is universal (`grep -rn MolFromSmiles src/` was the whole audit,
+  and it also found the one remaining instance, now a `BACKLOG.md` row with its measurement).
+- Refusing beats narrowing on any path whose empty result reads as reassurance. The screens already
+  refuse an over-long component list for exactly this reason and say so in `require_screenable_size`
+  — the argument was written, it just had not been applied to the parse.
+
+## A join that is right most of the time is worse than no join (2026-08-09)
+
+Carrying `result_ref` into the transcript, the obvious implementation was to pair a stored tool call
+to its blob through `tool_result_links`, which carries session, tool, correlation id and a
+timestamp. It reads like enough. It is not: two calls of one tool in one turn share all four, so the
+pairing would be a *nearest-timestamp* guess, and its failure mode is a chemist opening a hazard
+screen and being shown a different molecule's flags — with no signal that anything went wrong.
+
+The escape was already in the design and I nearly walked past it. The store is content-addressed, so
+the ref is a function of the result text, and the transcript is holding that text. There is no
+pairing step to get wrong.
+
+Rules for myself:
+
+- When a link's correctness depends on "these rows are usually unique together", write down the case
+  where they are not before writing the query. If that case produces a confidently wrong answer
+  rather than a visible failure, the design is wrong, not the query.
+- Prefer a key derived from the payload over a key assembled from context. Content addressing
+  answers "is this the same thing" without a clock, a sequence or an assumption about concurrency.
+- A derived ref still needs an existence check before it is advertised. Derivable is not fetchable —
+  retention, an over-cap refusal and a failed write all produce an address nothing will serve, and a
+  link that 404s is indistinguishable from a live one until a user clicks it.
+
+## A predicate used as a filter must be safe to be wrong (2026-08-09, review)
+
+Both defects above were fixed in one branch and the safety fix introduced a worse one, which the
+review caught and I had not. `science/safety/notes.py::_is_structure` was moved onto the strict
+parse — correct, and half a change. `structures_in` uses that predicate as a **filter**, so a code
+span it rejects is not screened narrowly; it is dropped and never screened at all. Measured: a note
+whose body held `` `CN=[N+]=[N-] (2 equiv)` `` produced no structures and no hazard problem, where
+the lenient predicate produced the high-severity `organic-azide` gate problem. I made the parse
+stricter and the *gate* weaker, on the one input class the gate exists for — a language model
+writing a procedure, where a SMILES with a quantity beside it is the normal shape.
+
+What I checked was that the new predicate was right about the strings I gave it. What I did not
+check was what the caller does with a `False`.
+
+Rules for myself:
+
+- Before tightening a predicate, find every caller and ask what a *rejection* costs there. A
+  classifier that returns "no" to a screen is a dropped screen; the same "no" to a validator is a
+  reported error. Same function, opposite risk, and only one of them is visible.
+- When a fix and the defect it fixes pull in opposite directions, the answer is usually a different
+  *question*, not a compromise between the two. Here: stop asking "is this whole span a molecule"
+  and ask "which tokens of this span are", which is right in both directions and needed no
+  heuristic — whitespace and non-ASCII cannot occur in a SMILES, so inside a span they are prose
+  by construction.
+- For a safety gate, write the regression test as a **comparison against the previous behaviour**
+  ("no note loses a flag the old predicate would have raised"), not as examples. Examples pin the
+  cases I thought of, and the case I did not think of is the one the review found.
+- A claim in a docstring that two modules "apply the same arbiter" stops being true the moment one
+  of them changes. `connectors/bo/knowledge.py` still said it, and the honest fix was not to unify
+  them but to write down which way each errs and why: leniency there feeds the gate, strictness
+  there would starve it.

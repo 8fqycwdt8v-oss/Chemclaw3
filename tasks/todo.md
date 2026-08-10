@@ -112,3 +112,144 @@ cascading away with it; and a write against an unreachable DSN answering `""` wi
 line rather than raising. The suite's own Postgres tests still could not be run — the shipped
 `pgvector` in this image is 0.6.0 and migration 012 needs `bit_jaccard_ops` (pgvector ≥ 0.7) — so
 they remain unproven *here* and will run in CI.
+
+---
+
+# Two defects left by the tool-result surface (2026-08-09)
+
+Both against `D-2026-08-09-a-preview-is-not-a-result`, which is now merged: the screens it made
+*visible* were still narrowing their input, and the ref it added never reached the one route a
+chemist uses on every reload. Two decisions, so two ADRs — the merged one is not edited.
+
+## Defect 1 — a screen of `"CCO junk"` silently screened ethanol
+
+ADR: `D-2026-08-09-a-valid-prefix-is-not-a-molecule`.
+
+- [x] `core/chem.py::require_molecule` — the "RDKit read this string, all of it" gate factored out
+      of `require_canonical_smiles`, which is where it already lived and where the screens were not
+      looking. `require_standard_smiles` moves onto it too, so the three strict helpers cannot
+      drift on what "parses" means (`tests/test_ids.py` pins that they agree).
+- [x] `science/safety/screen.py::parse_molecule` — refuses what it cannot parse whole, translating
+      `InvalidSmilesError` to `SafetyRulesError` so the package keeps one exception type and the
+      refusal still reaches the model as a worded `ValueError` rather than an internal-error notice.
+- [x] `parse_components` — shared by both screens, and the reason it exists is the message: a
+      reaction refusal names *which* component ("component 2 of 3"), counted in the list as the
+      caller wrote it rather than in the deduplicated mapping.
+- [x] `science/safety/notes.py::_is_structure` — moved onto the same predicate. The PR-gate promises
+      to ignore a code span that is not a structure; `` `CCO at 80 °C` `` passed a bare parse and
+      would have failed the screen it was then handed, turning an ignored span into a gate failure.
+
+**Measured before and after**, because the defect is invisible from the outside: `screen_structure`
+of `"CCO CN=[N+]=[N-]"` — an organic azide sitting in the tail RDKit discards — returned
+`flags=[]`, `screened=["CCO"]` and the verdict "No rule in the hazard table matched"; the
+genotoxicity screen dropped a nitroarene from `"CCO O=[N+]([O-])c1ccccc1"` the same way. Both now
+refuse. `tests/test_safety.py` pins the refusal *and* the absence of a clean result, since a test
+that only expected the exception would pass against a version still returning `flags=[]`.
+
+**The rest of `science/` was checked rather than assumed.** Every calculator reaches RDKit through
+`require_canonical_smiles` at its cached-compute boundary, so `run_cached_solubility("CCO junk")`
+already raised before `predict_solubility` saw it. The one live instance left is
+`fingerprints/molfp/fingerprint.py::_parse` — measured, `ecfp_bitstring("CCO junk")` equals
+`ecfp_bitstring("CCO")` — and it is a `BACKLOG.md` row rather than a silent omission: a wrong search
+result, not a false clearance, and `_parse` also indexes ELN labels where refusing is a different
+trade.
+
+## Defect 2 — a reloaded conversation could not resolve past results
+
+ADR: `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one`.
+
+- [x] `TranscriptToolCall.result_ref` — the same handle the live stream carries, resolved through
+      the same route. Additive; nothing about `ToolResultEvent` or
+      `GET /sessions/{id}/tool-results/{ref}` changes.
+- [x] `tool_results.fetchable_refs` — the session's stored refs, read once per transcript, so an
+      advertised ref means *fetchable* and not merely computable. Skipped when the store is off;
+      an unreachable store degrades to an empty set rather than failing the reload.
+- [x] `_transcript(stored, *, fetchable=…)` — stays a pure projection; the route does the one read.
+
+**The pairing question was the real one, and content addressing dissolves it.** `tool_result_links`
+carries session, tool, correlation id and a timestamp, and those four cannot separate two calls of
+one tool in one turn — a join on them would be right most of the time, which is the worst thing a
+hazard-screen link can be. The transcript instead hashes the result text it is already holding, and
+that is the same string the producer hashed (MAF coerces a function result to `str` once, at the
+content; the durable row is that content's JSON round trip). `tests/test_tool_results.py` drives
+both real paths and asserts the two derivations agree, rather than asserting it in a comment.
+
+**Retention gets a third state rather than a tombstone.** A swept blob leaves the transcript with a
+result and an empty ref, which is distinguishable from `result is None` ("it ran and nobody knows
+how it ended") and instructs a surface identically to "never stored". Separating "swept" from
+"never stored" would mean a durable record per expired blob on the table that grows per tool call —
+a record of a rendering, which is the thing this store deliberately is not.
+
+---
+
+# Review of the two ADRs above (2026-08-09) — three findings, all fixed here
+
+Three blocking findings against the branch, plus three smaller ones. Both ADRs are unmerged, so
+each decision is corrected in the ADR itself rather than superseded.
+
+## 1 — the safety fix had weakened the hazard gate (BLOCKING)
+
+- [x] `science/safety/notes.py::structures_in` — cuts a code span on every character a SMILES
+      cannot contain (whitespace, control, anything outside printable ASCII) *before* asking the
+      strict predicate, so a span like `` `CN=[N+]=[N-] (2 equiv)` `` is classified rather than
+      dropped. `_is_structure` moving onto `parse_molecule` was half a change: `structures_in` uses
+      it as a **filter**, so the span was not screened narrowly, it was not screened at all.
+      Measured on the branch: `structures_in` `[]`, `hazard_problems` `[]`, against a high-severity
+      `organic-azide` problem before. No heuristic is added and RDKit stays the arbiter — the cut
+      is where the character set ends, which is also what `require_molecule` refuses. It errs
+      towards screening: `` `80 °C` `` yields `C`, i.e. methane, which is the price of keeping
+      `` `CN=[N+]=[N-]°` `` and `` `CN=[N+]=[N-]—the azide` `` screened.
+- [x] `core/chem.py::require_molecule` — non-ASCII refused too, since RDKit skips a non-ASCII run
+      at the *edges* of a string (`"°C"` is methane, `"CC°"` is ethane, `"C°C"` is an error). One
+      gate, so the case is added once for every caller; the note gate makes the same statement as a
+      separator rather than a refusal.
+- [x] `connectors/bo/knowledge.py::_molecule_in` — the docstring's "the same arbiter … that
+      `structures_in` applies" was false. Kept lenient and says why: its `True` is what puts a value
+      in backticks, and backticks are what the gate reads, so strictness there would hide an
+      annotated level from the screen entirely.
+- [x] `tests/test_safety.py` — the annotated-span test that would have caught it, six span shapes
+      parametrized, and the hard constraint as a **generated** property: no note loses a flag the
+      lenient predicate would have raised, over Hypothesis-built spans, checked against a
+      re-implementation of the old extraction. Verified to fail against the branch's version.
+
+## 2 — a one-line crash on the reload route (BLOCKING)
+
+- [x] `api/schemas.py::_transcript` — coerces a non-`str` `result` with `str()` before hashing it.
+      Unreachable through this MAF (`Content.from_function_result` coerces), reachable from a row
+      another version wrote — and it was an `AttributeError` inside `content_address`, i.e. a 500 on
+      `GET /sessions/{id}/messages` that costs a chemist the whole conversation. `str()` and not
+      `repr()`, because `runner_trace._result_text` coerces the producer's side that way and the ref
+      only means anything if both hash the same bytes. Test pins both.
+
+## 3 — the link row's labels were last-writer-wins (BLOCKING)
+
+- [x] `api/tool_results.py::_UPSERT_LINK` — `tool` and `correlation_id` collapse to `''` when a
+      second call disagrees, instead of being overwritten. The row is keyed
+      `(session_id, content_hash)`, so two calls returning identical text are one row; every failed
+      call in the system returns the same `"Error: Function failed."` (`include_detailed_errors` is
+      off), so the relabelling was guaranteed, not hypothetical. Verified against a real Postgres:
+      two calls → `('', '')` with the bytes intact, a third disagreeing write stays empty, and the
+      same call twice keeps its labels. Rekeying on the call id was rejected in the ADR: the fetch
+      route is `…/{ref}`, so several call rows would still match one read.
+- [x] `StoredToolResult` docstring, migration 042's column comment and the ADR now say what the
+      code does — empty means "the store will not name one call".
+
+## Also fixed
+
+- [x] `require_screenable_size` refuses an empty list: `screen_hazards([])` was a clean screen of
+      nothing, which is the thesis of the whole ADR inverted.
+- [x] `fetchable_refs`'s index comment named `tool_result_links_session_idx`, which is
+      `(session_id, created_at DESC)` and cannot serve the query. Measured on 20,000 links over 200
+      sessions: `Index Only Scan using tool_result_links_pkey`, `Heap Fetches: 0`.
+- [x] The producer/transcript identity test fed the same literal to both sides through a hand-rolled
+      double, so it only proved `content_address` is deterministic. It now builds one MAF turn from
+      a `dict` through `Content.from_function_result`, drives `ToolCallTrace` with the real contents
+      and `_transcript` with their `to_dict`/`from_dict` round trip — a MAF coercion change fails it.
+
+**Verification.** `make lint type test` green. The Postgres-backed tool-result tests, which skip in
+this sandbox, were run for real against a locally-initialized Postgres 16 (with the two pgvector
+0.7 indexes of migrations 002/003 removed from a scratch copy, the sandbox's shipped pgvector being
+0.6.0): 24 passed. Two failures on `main` are unrelated and unchanged —
+`tests/test_properties_core.py::test_a_note_survives_the_write_read_round_trip` (a Hypothesis
+lone-surrogate draw) and the 84% coverage floor, which `main` measures at 82.82% locally because the
+Postgres and Temporal suites skip here.

@@ -55,12 +55,37 @@ _INSERT_BLOB = """
 # from three weeks ago while two of its links are from this morning. The bytes are still stored
 # once; only the clock moves.
 
+# **`tool` and `correlation_id` collapse to `''` on disagreement rather than taking the last
+# writer's word**, and that is the one place a *label* can be wrong here. The row is keyed on
+# `(session_id, content_hash)`, so two calls in one session that returned identical text are one
+# row; `SET tool = EXCLUDED.tool` then relabelled that row with whichever call wrote last, and the
+# fetch route served the right bytes under a different call's tool name and correlation id — with
+# nothing in the payload saying so, which is exactly the near-miss pairing
+# `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one` refuses on the read side ("a mispaired
+# result is worse than an absent one").
+#
+# Guaranteed rather than hypothetical: `include_detailed_errors` is off (`agent/tool_authz.py`
+# documents why), so **every** unexpected tool exception in the system returns the same byte string
+# "Error: Function failed." — one blob per session for every failed call it ever makes, and the
+# `correlation_id` `StoredToolResult` calls "the join a GxP reviewer asks for" would name one
+# arbitrary turn among them.
+#
+# An empty column is the honest answer: these bytes are not one call's, so the store names no call.
+# It is a `CASE` rather than a read-modify-write because it must stay one statement on the turn
+# path, and it is monotone — once a value disagrees it is `''`, and `''` disagrees with every
+# subsequent write, so the collapse never silently un-collapses. `created_at` still moves, because
+# it is the retention clock (above) and not a label.
 _UPSERT_LINK = """
     INSERT INTO tool_result_links (session_id, content_hash, tool, correlation_id)
     VALUES (%s, %s, %s, %s)
     ON CONFLICT (session_id, content_hash) DO UPDATE SET
-        tool = EXCLUDED.tool,
-        correlation_id = EXCLUDED.correlation_id,
+        tool = CASE
+            WHEN tool_result_links.tool = EXCLUDED.tool THEN EXCLUDED.tool ELSE ''
+        END,
+        correlation_id = CASE
+            WHEN tool_result_links.correlation_id = EXCLUDED.correlation_id
+            THEN EXCLUDED.correlation_id ELSE ''
+        END,
         created_at = now()
 """
 
@@ -75,6 +100,20 @@ _SELECT_RESULT = """
     WHERE l.session_id = %s AND l.content_hash = %s
 """
 
+# Which of a session's results are fetchable *right now* — the transcript's question, asked once
+# per reload rather than once per tool call. Only the links are read: `ON DELETE CASCADE` (042)
+# means a link cannot outlive its blob, so the link's existence is the blob's existence, and
+# joining `tool_result_blobs` would re-derive a fact the foreign key already guarantees.
+#
+# Served by the table's **primary key**, `(session_id, content_hash)`: the predicate is its leading
+# column and the projection is its second, so the whole answer is inside the index. Measured on
+# 20,000 links over 200 sessions — `Index Only Scan using tool_result_links_pkey`, `Heap Fetches:
+# 0`. Not by `tool_result_links_session_idx`, which this comment used to name: that index is
+# `(session_id, created_at DESC)` and carries no `content_hash`, so it cannot answer this query
+# without going to the heap. It exists for a recency-ordered read of a session's links, which is a
+# different question and not one this module asks.
+_SELECT_SESSION_REFS = "SELECT content_hash FROM tool_result_links WHERE session_id = %s"
+
 
 class StoredToolResult(BaseModel):
     """One stored tool result, as the fetch route returns it.
@@ -86,6 +125,16 @@ class StoredToolResult(BaseModel):
 
     `correlation_id` rides along so a fetched result joins the audit trail and the logs of the turn
     that produced it, which is the join a GxP reviewer asks for and the one a ref alone cannot make.
+
+    **Both `tool` and `correlation_id` are empty when the store cannot name one call**, and a
+    reader must treat an empty one as "unknown" rather than as a value. A ref names *bytes*: two
+    calls in one session that returned identical text share one blob and one link row by design
+    (D-011 applied to bytes), and there is then no single tool or turn the row belongs to. The
+    write collapses a disagreeing column to `''` rather than overwriting it with the newest call's
+    (see `_UPSERT_LINK`), because a label that is right most of the time is the failure mode this
+    whole surface is built to avoid — and "Error: Function failed." makes it a certainty, not an
+    edge case. What is never ambiguous is `text`: those are the bytes the ref addresses, and every
+    call that produced them produced exactly these.
     """
 
     ref: str
@@ -150,6 +199,57 @@ async def load_tool_result(session_id: str, ref: str) -> StoredToolResult | None
         # psycopg may hand BYTEA back as a memoryview.
         text=bytes(data).decode("utf-8"),
     )
+
+
+async def fetchable_refs(session_id: str) -> frozenset[str]:
+    """Every ref `session_id` can currently fetch — what the transcript needs to advertise one.
+
+    **Why the transcript needs this at all, when the ref is derivable from the bytes.** A stored
+    tool call is paired to its blob by *content address*: the transcript holds the result text, and
+    the SHA-256 of that text is the address the store wrote it under. That pairing is exact by
+    construction — no timestamp window, no "the nearest link row with the same tool", nothing that
+    is right most of the time — and it is why `tool_result_links` is not consulted as a *join key*.
+    What the address cannot say is whether those bytes are still there: `result_ref` on the live
+    event means "stored", and a transcript that computed an address for every past result would
+    hand a client refs for results the store never took (the store is off, the result was over the
+    cap, the write failed) and for results retention has since swept. This turns the derivable
+    address into a checked one, so an empty `TranscriptToolCall.result_ref` keeps the one meaning
+    it has on the stream: not fetchable.
+
+    Returned frozen because it is a lookup table the projection only reads, and it crosses from a
+    route into a pure function that must not be able to change it.
+
+    **A failure is an empty set, not an error**, for the reason `session_sink` swallows its write:
+    a fetchable full result is a rendering, and a transcript a chemist is reloading must not fail
+    because the blob store is unreachable — they still get every message, every tool call and the
+    400-character result. The swallow goes through `degraded()` under the same subsystem name as
+    the write side, because from an operator's seat "the tool-result store is not answering" is one
+    condition whether it was noticed writing or reading.
+
+    Skipped entirely when `stream_max_result_bytes` is 0, which is the store's documented off
+    switch: nothing was written, so there is nothing to ask about and no reason to open a
+    connection to ask.
+    """
+    if settings.stream_max_result_bytes <= 0:
+        return frozenset()
+    try:
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_SESSION_REFS, (session_id,))
+                rows = await cur.fetchall()
+    except Exception as exc:  # noqa: BLE001 - a rendering must never cost a chemist their history
+        degraded(
+            logger,
+            "tool_result_store",
+            "could not list the stored results of session %s (%s); its transcript will carry no "
+            "result refs and a client will fall back to the truncated result text",
+            session_id,
+            exc,
+            level=logging.WARNING,
+            exc_info=False,
+        )
+        return frozenset()
+    return frozenset(str(row[0]) for row in rows)
 
 
 def session_sink(session_id: str, correlation_id: str) -> ResultSink:

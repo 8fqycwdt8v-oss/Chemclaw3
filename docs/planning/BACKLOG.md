@@ -5,19 +5,6 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
-- [ ] **A reloaded conversation cannot resolve the results of its past turns** — [M].
-      `ToolResultEvent.result_ref` reaches a surface on the live SSE stream only.
-      `TranscriptMessage.tool_calls` (`api/schemas.py`) carries `tool`, `arguments` and a
-      400-character `result` per call and no ref, so `GET /sessions/{id}/messages` — the route a
-      client uses to rehydrate a conversation — hands back the same truncated string the preview
-      was, for turns whose full results are sitting in `tool_result_blobs`. The store is keyed on
-      `(session_id, content_hash)` and the transcript is rebuilt from `session_messages`, so the
-      join needs the *ref*, which means the transcript builder computing `content_address` over the
-      result text it already holds. Cheap, and deliberately not in the first change: it touches the
-      transcript contract, which has its own consumers.
-      **Trigger**: the frontend building typed result cards and finding they vanish on reload —
-      which is the first thing a chemist will do.
-
 - [ ] **`tool_result_blobs` has no bound on a deployment that has not stated one** — [S].
       Its retention window defaults to 0 like every other, for a reason that is written down (see
       the ADR and `tasks/lessons.md`), and it is the highest-volume table in the schema at up to a
@@ -25,6 +12,23 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       the metrics surface so an operator meets the growth before the disk does, rather than a
       default that `retention_enabled=false` makes inert anyway.
       **Trigger**: the first deployment that turns the store on in anger, or any disk alert.
+
+- [ ] **A similarity search still narrows a query RDKit only half-parses** — [S].
+      The safety screens now refuse a SMILES they cannot read in full
+      (`core/chem.py::require_molecule`, `D-2026-08-09-a-valid-prefix-is-not-a-molecule`), because
+      RDKit's parser accepts a valid prefix and drops whatever follows a space.
+      `science/fingerprints/molfp/fingerprint.py::_parse` is the last first-party parse of
+      *caller-supplied* structure text that does not: measured, `ecfp_bitstring("CCO junk")` and
+      `ecfp_bitstring("CCO")` are the same bitstring, so
+      `find_similar_molecules("CCO junk")` answers about ethanol's neighbours under the caller's
+      own label. Not folded into the screen fix on purpose — the failure is a wrong *search result*
+      rather than a clean hazard screen of a molecule nobody asked about, and `_parse` also indexes
+      ELN labels, where refusing is a different trade (an odd label must not abort ingestion) that
+      wants its own look. Everything else in `science/` is already covered: every calculator goes
+      through `require_canonical_smiles` at its cached-compute boundary, and
+      `ingest/eln/validate.py` and `connectors/bo/knowledge.py` parse leniently by design.
+      **Trigger**: a similarity search that returns confident neighbours for a query the chemist
+      knows is malformed, or the next edit to the fingerprint index's definition string.
 
 ## Open — Left by the deep-review fix batch (2026-08-09)
 

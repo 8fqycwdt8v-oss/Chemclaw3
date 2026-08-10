@@ -19,6 +19,7 @@ from chemclaw.agent.attachments import (
 )
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
+from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
 from chemclaw.api.schemas import (
     SessionIn,
@@ -113,9 +114,19 @@ async def get_messages(
     Each message carries the tools invoked alongside it, so a reload renders what the agent
     *did* and not only what it said. See `TranscriptMessage` for what that recovers and
     `_transcript` for what it cannot.
+
+    **The second read is what makes a past tool call resolvable.** `TranscriptToolCall.result` is
+    400 characters, so a reloaded conversation could show that `screen_hazards` ran and never what
+    it found, while the full text sat in `tool_result_blobs` — the one path on which the ref
+    `D-2026-08-09-a-preview-is-not-a-result` added never reached a surface. `fetchable_refs` is the
+    set of refs this session can still be served, read once for the whole transcript rather than
+    once per call, and it is what lets an advertised ref mean "fetchable" rather than merely
+    "computable": a store that is off, unreachable, or has swept these blobs yields an empty set,
+    and every `result_ref` is then `""` — the same value with the same meaning the live stream
+    gives a result it did not store. See `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one`.
     """
     stored = await state(request).history.get_messages(session_id, state=live.session.state)
-    return _transcript(stored)
+    return _transcript(stored, fetchable=await front_door.fetchable_refs(session_id))
 
 
 async def upload_attachment(
