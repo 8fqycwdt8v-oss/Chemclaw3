@@ -76,7 +76,7 @@ never what a deployment gets.
       write half refused outright, `virtual_mode=True`.
 - [x] `skill_access.skill_permits()` — the three narrowings as one engine-neutral predicate; the
       MAF `SkillsSource` decorators and this backend call the same three `permits` methods.
-- [x] `langgraph_agent.skills_backend()` / `skills_middleware()`, multi-root via `CompositeBackend`
+- [x] `langgraph_agent.skills_backend()` / `_skills_middleware()`, multi-root via `CompositeBackend`
       (the configured tree *plus* every connector bundle's own, D-118).
 - [x] `tests/test_skill_backend.py` — eight tests, each asking "is it hidden" *and* "is it
       unreachable"; plus a cross-engine test that both engines narrow identically.
@@ -88,11 +88,12 @@ never what a deployment gets.
 - [x] **The name is pinned to deepagents' own prompt**, not chosen: `SKILLS_SYSTEM_PROMPT` tells
       the model to "use `read_file` on the path shown", so any other name leaves every skill
       advertised and unloadable — a failure indistinguishable from a model declining to use skills.
-- [x] **`skills_metadata` staleness fixed** by `reload_skills_each_turn`, a `before_agent` hook
-      ordered ahead of `SkillsMiddleware`. Proven with a real `InMemorySaver` across two turns of
-      one `thread_id`, and proven to be *load-bearing* by deleting the hook and watching the test
-      fail. This is what makes the engine match MAF, where `RoleScopedSkillsSource._permits` is
-      consulted on every `get_skills`.
+- [x] **`skills_metadata` staleness fixed** by `ReloadingSkillsMiddleware`, which hides the cached
+      key from the state upstream's `before_agent` reads. (The first attempt — a hook returning
+      `{"skills_metadata": None}` — left the *key* present and rendered an empty list from turn two
+      on; see the review section.) Proven with a real `InMemorySaver` across two turns of one
+      `thread_id`, and proven load-bearing by mutation. This is what makes the engine match MAF,
+      where `RoleScopedSkillsSource._permits` is consulted on every `get_skills`.
 - [x] `skill_tool_names()` returns **both engines' names unioned**, not a branch on
       `agent_engine`: its four callers are validators asking a deployment-wide question, so a
       branch would make `make prose-validate` pass or fail depending on which engine happened to be
