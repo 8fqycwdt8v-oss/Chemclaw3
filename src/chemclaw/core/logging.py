@@ -363,6 +363,16 @@ def _trace_config(trace_config: Any) -> Any:
     The list is written out rather than derived from the dataclass's fields, because deriving it
     would silently adopt whatever a future version adds — including a field whose default is the
     permissive one. A new hide flag upstream should require a decision here, not inherit one.
+
+    Args:
+        trace_config: The `TraceConfig` class. Taken as an argument rather than imported here
+            because the import is lazy in `_instrument_llm_calls` — the caller has already resolved
+            it, and importing again would put a second `ImportError` site in the module for one
+            dependency. It also leaves this a pure function of (settings, class), which is what lets
+            `tests/test_llm_spans.py` check the flag set without building a tracer provider.
+
+    Returns:
+        The configuration to hand the instrumentor.
     """
     if settings.otel_include_sensitive_data:
         return trace_config()
