@@ -526,8 +526,23 @@ arranged to keep that commit small and the suite green at each step.
       it: `tests/test_capability_degradation.py`'s dark-connector announcement and degrade-not-fail
       pair now build the dark connector per engine (`_dark_connector`), the graph half pointing at
       a closed port so the failure is the real open path rather than a stub reporting itself
-      unreachable. The third stays marked — `_SpyMcpTool`'s `entered`/`exited` count is MAF's
-      context-manager protocol, and `HeldConnectorSession` has no counterpart to spy on.
+      unreachable. The third stays marked, with its reason rewritten — it said the graph path was
+      "called from nowhere in `src/`", which this step made false — because `_SpyMcpTool` counts
+      its *own* `__aenter__`/`__aexit__` and the graph engine has no per-turn context manager of
+      ours to count; the once-per-turn property is pinned in `tests/test_langgraph_connectors.py`
+      instead.
+
+      Both suites on the finished tree: `pytest -q` **4233 passed / 37 skipped / 0 failed** (7:12)
+      and `CHEMCLAW_AGENT_ENGINE=langgraph pytest -q` **4223 passed / 47 skipped / 0 failed**
+      (7:20). Against Step 7a's 4232/37 and 4220/49 the arithmetic is exact: collected 4269 → 4270
+      (the one new test), flipped skips 49 → 47 (the two re-pointed), flipped passes +3.
+
+      **A run reporting 4087 passed / 183 skipped came first, and it was the environment, not the
+      code.** This container's clone had rolled back and the `chemclaw` role and database did not
+      exist, so every Postgres-dependent test skipped itself by design — `psql` said `FATAL:
+      password authentication failed for user "chemclaw"`. Provisioning the role and database and
+      running `make db-migrate` (44 migrations) produced the numbers above from the same tree.
+      Recorded because the failure looks exactly like a green suite: exit 0, nothing failed.
 - [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, durable
       compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
 

@@ -281,9 +281,11 @@ def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
 
 
 @maf_engine_only(
-    "the `open_reachable` connector lifecycle. The graph engine's connector path is "
-    "`connector_specs` + `open_connector_specs`, and nothing in `src/` calls either from a turn — "
-    "so this cannot be re-pointed, it is a wiring gap recorded in `tasks/todo.md` under M13"
+    "`_SpyMcpTool`'s own `__aenter__`/`__aexit__` count, which is MAF's connector protocol. Both "
+    "engines now open their turn's connectors (`registry.open_turn_connectors`), but the graph "
+    "engine's unit is a `HeldConnectorSession` around an MCP session — there is no per-turn "
+    "context manager of ours for a spy to count, and the once-per-turn property it pins is covered "
+    "there by `tests/test_langgraph_connectors.py`"
 )
 def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
     """Create a session, post a message, stream the turn; the turn's connector opens once."""
