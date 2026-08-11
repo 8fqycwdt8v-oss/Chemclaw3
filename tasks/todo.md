@@ -459,7 +459,7 @@ arranged to keep that commit small and the suite green at each step.
       the drain-first rule both engines implement.
 
       Two findings, both recorded against the steps they belong to (3a and 4 below).
-- [ ] **Step 1 — `harness_types.py`** (6 files). Not free: its importers are the MAF halves of
+- [x] **Step 1 — `harness_types.py`** (done 2026-08-11, with Steps 5/7) (6 files). Not free: its importers are the MAF halves of
       `loop_cap` and `plan_gate`, so it lands with them.
 - [x] **Step 2 — port `turn_signals` to the stream writer** (done 2026-08-11). Its stated ordering
       — "before the runner, so both engines stay green" — was wrong, measured 2026-08-11: the
@@ -783,18 +783,41 @@ arranged to keep that commit small and the suite green at each step.
       Covered by `test_the_graph_resume_never_reaches_for_the_turns_agent`, which drives the
       production shape (`agent=None`) and reproduces the exact `AttributeError` when the runner
       change is reverted.
-- [ ] **Step 5 — the harness surface** (~12 files), including a **rewrite of `api/routes/plan.py`
+- [x] **Step 5 — the harness surface** (done 2026-08-11) (~12 files), including a **rewrite of `api/routes/plan.py`
       onto graph state** — new code.
-- [ ] **Step 6 — `template_activities.py` onto `wrap_tool_call`** (~3 files). Two workarounds go
+- [x] **Step 6 — `template_activities.py` onto `wrap_tool_call`** (done 2026-08-11) (~3 files). Two workarounds go
       away free: `skip_parsing=True` and most of `_serializable`.
-- [ ] **Step 7 — the middleware MAF halves** (~50 files). **The turn-level test re-point is done —
+- [x] **Step 7 — the middleware MAF halves** (done 2026-08-11) (~50 files). **The turn-level test re-point is done —
       it is Step 7a above, and it moved before Step 0 rather than after Step 3.** What is left here
       is the middlewares' own MAF halves and the direct `lg_*` coverage that today exists only
       through whole-turn tests. The ~315–420 estimate covered both halves; 67 of them were the
       turn-level ones and they are green on both engines now.
 - [ ] **Step 8 — OTel** (~4 files). Isolated: the only item that can break observability in
       production with no test noticing.
-- [ ] **Step 9 — the dependency and the layering rows** (3 files, atomic per the ratchet). Verify
+- [ ] **Step 9 — the dependency and the layering rows.** **Blocked on one port, scoped
+      2026-08-11.** After Steps 1/5/6/7 exactly **two** modules in `src/` still import
+      `agent_framework`, and both for the same reason: `agent/message_pairing.py` and
+      `durable/retention.py` read *legacy* `session_messages` rows with `Message.from_dict` so the
+      nightly sweep can refuse to strand half a tool-call pair (`droppable_rows`, D-145).
+
+      They cannot simply be flipped to LangChain messages, because the rows they read are
+      whichever shape the migration has reached — that is what the `message_shape` stamp is for.
+      The port is: read a row through `session_store._message_from_row` (which already handles
+      both) and re-express `droppable_rows` over LangChain `tool_calls`/`tool_call_id`.
+
+      **Not rushed on purpose.** This is the pairing rule for a *data-destroying* nightly job, and
+      D-145 exists because getting it wrong strands a pairing silently — no exception, no failed
+      activity, conversations that stop rendering days later. It wants its own commit and its own
+      mutation check, not the tail of a large one.
+
+      Everything else in Step 9 is ready: drop `agent-framework-*` from `pyproject.toml`, refresh
+      `uv.lock`, delete the `maf` stack from `_STACKS` and the last two `_ALLOWED_MODULE_STACKS`
+      rows (`chemclaw.agent`, `chemclaw.durable`) — the `chemclaw.api` and `chemclaw.connectors`
+      rows already went, caught by the ratchet's stale-row half. Verify by uninstalling
+      `agent-framework-core` and running the suite green. The remaining ~30 `agent_framework`
+      mentions in `src/` are prose in docstrings, which is Step 10's.
+
+      (superseded scope below) (3 files, atomic per the ratchet). Verify
       by uninstalling `agent-framework-core` and running the suite green.
 - [ ] **Step 10 — docs** (~15 files). `docs/reference/architektur.md` (48 mentions) is a full
       rewrite — MAF is its thesis, not a mention.
