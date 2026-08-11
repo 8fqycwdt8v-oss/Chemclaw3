@@ -384,9 +384,12 @@ bidirectional — a declared row with no import fails, and an import with no row
 `_STACKS["agent_framework"]` and the last import must die in the *same* commit. Everything else is
 arranged to keep that commit small and the suite green at each step.
 
-- [ ] **Step 0 — flip the default** (2 files). `agent_engine = "langgraph"`. **This is the real
-      proof gate**, and M12 left three probes unrun: say so rather than let the demolition imply
-      they passed. **Attempted 2026-08-11 with Step 3 and stopped without a line of either landing:
+- [x] **Step 0 — flip the default** (done 2026-08-11). `agent_engine = "langgraph"`, verified at
+      **4223 passed / 47 skipped / 0 failed** — byte-identical to the explicit
+      `CHEMCLAW_AGENT_ENGINE=langgraph` run, with the `maf` override still green over the eight
+      turn-level files (155 passed / 1 skipped). **This was the real proof gate**, and M12 left
+      three probes unrun: the config comment says so rather than letting the demolition imply they
+      passed. Step 3 then deleted the switch outright. **Attempted 2026-08-11 with Step 3 and stopped without a line of either landing:
       it is not a 2-file change, and what blocks it is Step 7.** The switch itself is trivial —
       `settings.agent_engine` is read nowhere in `src/` but `graph_engine_selected`, and
       `.env.example` parity is two lines. What is not trivial is that **the MAF `agent` argument is
@@ -475,9 +478,41 @@ arranged to keep that commit small and the suite green at each step.
       removes three of the four. Doing it first would mean tools writing to *both* channels for the
       duration of the dual-engine window — a second copy of one decision, which is the exact
       duplication this migration's discipline forbids.
-- [ ] **Step 3 — the switch and the runner's MAF branch** (~8 files). The checkpoint that proves
-      the graph engine carries production alone. Two things verified while it was attempted with
-      Step 0, both of which survive the re-ordering:
+- [x] **Step 3 — the switch and the runner's MAF branch** (done 2026-08-11). The checkpoint that
+      proves the graph engine carries production alone.
+
+      **Result: 4213 passed / 36 skipped / 0 failed**, and the `maf_engine_only` category is gone
+      — every remaining skip is an environment limit (Temporal's test server, the xtb/crest
+      binaries). Collected ids 4270 → 4249, and the −21 is accounted for id by id rather than
+      inferred: 7 from `test_agent_pool.py`, the 11 marked tests, the engine-switch test, the
+      renamed resume test (removed and re-added), and 2 parametrized `test_docstring_paths` cases,
+      one per deleted `.py`. 22 removed, 1 added.
+
+      What went, beyond the switch and `graph_engine_selected`: `run_turn`'s MAF stream branch,
+      `_resume` and the `agent` parameter; the route's agent lease; `FrontDoor.turn_agent` and
+      `.agent_pool`; `agent/agent_pool.py` and its test; the Step 3a scaffolding, collapsing to
+      `connector_specs` + `open_connector_specs` exactly as written; the 11 marked tests, the mark,
+      `ScriptedTurn.run` and `_maf_update`; and the leak probe's `agent_exit_callbacks` series,
+      which counted pooled agents' exit-stack callbacks and could only ever report zero.
+
+      **D-123's defect has no surface left, which is why the lease could go rather than being
+      ported.** Two turns sharing one chat client interleaved its tool-call bookkeeping and emitted
+      a `tool_use` block with an empty name — 20 % of turns in a live 50-user run. A graph is
+      compiled per turn around that turn's own connectors, so there is no shared object to lease.
+
+      **`mypy --strict` was structurally blind to the three failures this step produced.** Every
+      call-site change was type-checked; all three failures were
+      `monkeypatch.setattr(settings, "agent_engine", …)`, which takes the attribute name as a
+      *string*. Types confirmed the demolition and only the suite could confirm the tests — worth
+      remembering for Steps 4–7, which delete far more settings than this one did.
+
+      One test was kept rather than deleted with its subject:
+      `test_the_graph_resume_never_reaches_for_the_turns_agent` pinned that the resume did not call
+      `.run` on the `None` the front door passed. That slot no longer exists, so the defect has no
+      surface; the behaviour it protected does, and it is now
+      `test_the_resume_continues_the_same_graph_with_the_job_results`.
+
+      Two things verified while this was attempted with Step 0, both of which survived:
 
       - **`graph_engine_selected`'s "exactly two branch points" invariant still holds.**
         `settings.agent_engine` is read nowhere in `src/` except that one predicate, and the
