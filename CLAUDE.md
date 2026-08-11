@@ -52,6 +52,20 @@ gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap 
 field rather than an inference (`agent/loop_cap.py`); and a specialist team (`agent/team.py`) is
 available but off by default until its routing is measured.
 
+An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
+then found five of six sound and each narrowing already argued for — and the sixth, *context
+management*, gone. D-025's compaction lived in the removed framework, and what survived it was the
+appearance of the policy: three settings with no reader, a config comment in the present tense, and
+a sentence in the system prompt telling the model its context was compacted while the whole thread
+was replayed every turn. `agent/compaction.py` is that policy again (upstream's `ClearToolUsesEdit`
+for tool results, a first-party conversation window, both non-destructive inside `wrap_model_call`),
+and `chemclaw_context_compactions_total` is what makes it checkable rather than believed. The same
+sweep put the LangGraph checkpoint tables into `durable/retention.py` — pruned by *thread*, because
+`parent_checkpoint_id` chains them — and gave the CLI the checkpointer two of its docstrings already
+described. **LangSmith is declined** (D-2026-08-11-the-observability-gap…): it is proprietary with no
+OSS self-host, and its core value is prompt/response content in a third-party service, which four
+merged decisions forbid; the gaps behind the ask are in-house work plus one eval-lane spike.
+
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
 readers that only knew the *old* stored message shape — `chemclaw.cli.explain` was rendering every

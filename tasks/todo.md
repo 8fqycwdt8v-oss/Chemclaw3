@@ -1516,3 +1516,78 @@ true after it, which is a better argument for renaming than brevity.
 **Still owed, unchanged from M12 and now a BACKLOG row of its own:** the concurrency probe, the live
 plan→approve→execute round trip, and team routing accuracy. Each needs a credential or a tenant this
 environment does not have. `agent_teams_enabled` stays off by default for the third of them.
+
+---
+
+# Deep-agents audit + the LangSmith question (2026-08-11)
+
+Prompted by: are the deep-agents patterns properly implemented, and is LangSmith implemented — if
+not, is it (or something comparable) worth adding? Audited against LangChain's own four pillars for
+Deep Agents plus the middleware `create_deep_agent` composes by default.
+
+Decided in [`D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has`](../docs/decisions/D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has.md)
+and [`D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape`](../docs/decisions/D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape.md).
+
+**The finding.** Five of six pillars are sound and each narrowing is already argued for in the tree.
+The sixth — context management — does not exist, and everything that *describes* it survived the
+framework removal: three settings with no reader, a config comment in the present tense, three
+`.env.example` rows, and a sentence in the system prompt telling the model its context is compacted.
+
+## Steps
+
+- [x] **Restore D-025's policy** as `agent/compaction.py`: upstream's `ClearToolUsesEdit` for the
+      tool-result half, first-party `KeepLastConversationGroupsEdit` for the conversation window,
+      both inside `wrap_model_call` (non-destructive), attached unconditionally.
+- [x] **Two counters** so the policy is checkable rather than believed —
+      `chemclaw_context_compactions_total`, `chemclaw_context_reclaimed_tokens_total`, incremented by
+      an observer nested inside the editor so it sees both the full thread and the edited request.
+- [x] **Prune the checkpoint tables by thread** (`retention_checkpoints_days`), all three in one
+      transaction, absent tables skipped rather than raised on.
+- [x] **`core.db.existing_tables`** — extracted from `agent/leaver.py` at its second caller.
+- [x] **Delete `ChemclawState.awaiting_jobs`** and rewrite the three docstrings that described it as
+      live.
+- [x] **Give the CLI the checkpointer it documents** (`cli_checkpointer`), handed to both the graph
+      and `_plan_command`.
+- [x] **Fix the stale prose**: `langgraph_agent`'s "not here yet" list, `infra/sql/README.md`'s
+      `session_messages` row, and the four checkpoint tables that inventory structurally cannot list.
+- [x] **Two ADRs + ledger rows + two BACKLOG rows** (the model-call span, the eval-lane spike).
+
+## Review
+
+**What the numbers say.** A thread of realistic turns (one 20,000-character evidence sweep each —
+the largest real result `api/tool_results.py` measured) under the shipped defaults, recorded off a
+fake model inside a real compiled graph. Below the budget the model gets the whole thread; above it
+the sent size stops tracking the thread size:
+
+| turns | thread tokens | sent to the model |
+|------:|--------------:|------------------:|
+| 10 | 51,610 | 51,616 |
+| 20 | 103,230 | **13,740** |
+| 80 | 412,950 | **25,140** |
+| 160 | 825,910 | **40,340** |
+
+`message_pairing.calls_without_adjacent_results` is empty on every one of those, asserted rather
+than reasoned about — a reduction that strands a tool call is rejected by the API outright and
+replayed on every later turn.
+
+**What the first failing test was worth.** The end-to-end test originally asserted a cleared
+placeholder *and* a shortened list in one run, and failed: with a two-group window the cleared
+results were themselves dropped, so both edits were working exactly as specified while the assertion
+was wrong. Split into two tests, one per edit, with the other edit's knob set out of range. The
+lesson is the file's own: an assertion that spans two mechanisms cannot tell you which one moved.
+
+**What could not be verified here.** This sandbox's pgvector is 0.6.0 and the full migration set
+needs 0.7+ (`bit_jaccard_ops`), so every Postgres-backed test skips locally and runs in CI. Rather
+than assert the checkpoint prune from the code, it was run against a live Postgres 16 with the
+checkpointer's own DDL: an expired thread left 0 rows in all three tables, a thread inside its window
+kept all 3, `_prune_checkpoints` reported per-table counts, and a schema with no checkpoint tables
+reported them skipped while `session_events` was still pruned.
+
+**What was declined and why it is a decision rather than a deferral.** LangSmith is proprietary —
+client SDKs open, backend/UI/storage closed, self-host Enterprise-only and sales-gated — so the one
+deployment shape this tree accepts is not on offer. Its core value is prompt/response content in a
+third-party service, which four merged decisions forbid (`core/tracing.py`, `core/logging.py`,
+`SECURITY.md`, D-049's self-hosted-Temporal argument). The gaps being used to argue for it split
+cleanly: per-model attribution, model-call spans and dashboards are in-house work through the
+collector the chart already runs, and the eval/experiment gap (AG-13) is a scoped spike on the eval
+lane where a *self-hostable* tool — Phoenix or Langfuse — is the candidate, not LangSmith.

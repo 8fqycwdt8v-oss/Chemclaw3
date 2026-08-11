@@ -265,7 +265,12 @@ Disclosure braucht ein Verb.
   rein beobachtenden `before_tool`/`after_tool`-Hook. Das ist ein realer Preis, und die
   Live-Revalidierung ist das, was ihn von einer Annahme in eine Messung verwandelt.
 - **Kontext-Kompaktierung** — sie darf die Provenienz-Trennung (episodisch vs. semantisch, §9 der
-  Architektur) nicht verwischen; bei Report-Läufen sind Zitate/Belege auszunehmen.
+  Architektur) nicht verwischen; bei Report-Läufen sind Zitate/Belege auszunehmen. Seit
+  `agent/compaction.py` ist das kein hypothetisches Risiko mehr, sondern ein benannter Handel: ein
+  geräumtes Werkzeugergebnis hinterlässt einen Platzhalter *ohne* die zitierte Spur, die D-025 noch
+  behielt. Der Handel greift erst oberhalb des Budgets, wo die Alternative ein harter Abbruch am
+  Kontextlimit ist; `exclude_tools` ist die Notbremse, falls eine Installation misst, dass sie eine
+  braucht.
 
 ## 10. Was der Wechsel auf LangGraph am Harness geändert hat
 

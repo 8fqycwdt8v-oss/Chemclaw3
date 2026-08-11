@@ -33,8 +33,9 @@ not (D-2026-08-08-a-borrowed-connection-is-bounded-by-default).
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import psycopg
 from psycopg import conninfo
@@ -273,3 +274,40 @@ def pool_stats() -> dict[str, int]:
         for name in total:
             total[name] += int(stats.get(name, 0))
     return total
+
+
+async def existing_tables(cur: Any, tables: Iterable[str]) -> set[str]:
+    """Which of `tables` exist on this connection's `search_path`.
+
+    One query rather than a guard inside each statement, because a guard inside the statement
+    cannot work: `DELETE FROM t` resolves `t` when the statement is *parsed*, long before any
+    `WHERE` runs. Measured against a schema with no checkpointer — a `WHERE to_regclass(...) IS NOT
+    NULL` guard never got evaluated and the whole erasure failed with `relation "checkpoints" does
+    not exist`.
+
+    Here rather than private to one caller because two subsystems ask the same question about the
+    same tables, and for the same reason: the LangGraph checkpoint tables are created by
+    `AsyncPostgresSaver.setup()` rather than by a migration in `infra/sql`, so a deployment that has
+    never run the graph engine does not have them. Erasure must not become the one operation such a
+    deployment cannot perform (`agent/leaver.py`), and neither must the nightly retention sweep
+    (`durable/retention.py`) — a sweep that fails outright on a missing table stops pruning every
+    other table too.
+
+    Args:
+        cur: An open async cursor. Taken rather than opened here so the check joins whatever
+            transaction the caller is already in — asking on a separate connection would answer
+            about a different snapshot.
+        tables: The table names to ask about.
+
+    Returns:
+        The subset that exists.
+    """
+    names = sorted(set(tables))
+    await cur.execute(
+        "SELECT c.relname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relkind = 'r' AND c.relname = ANY(%s) "
+        "AND n.nspname = ANY(current_schemas(true))",
+        (names,),
+    )
+    return {str(row[0]) for row in await cur.fetchall()}

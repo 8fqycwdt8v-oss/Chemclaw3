@@ -29,6 +29,55 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       only.
       **Trigger**: an operator asking a per-model question of a Grafana panel rather than of the
       database.
+      **Two candidate mechanisms, neither a vendor**
+      (D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape): a first-party
+      `wrap_model_call` middleware emitting a `chemclaw.model` span plus a `model` label — the usage
+      payload is already parsed at `api/runner.py` — or the LangSmith **SDK** in pure OTel-export
+      mode (`LANGSMITH_OTEL_ENABLED=true` with `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at the
+      collector the chart already runs), which needs no LangSmith backend, no credential and no
+      egress. The second is cheaper and is **not** a flag: those spans carry prompt and completion
+      content by default, so adopting it means deciding what is stripped and where, against
+      `core/tracing.py`'s "identifiers and counts, never a question, an argument or an answer". An
+      integration that quietly inverted that rule would be worse than the gap it closes.
+
+## Open — Left by the deep-agents audit (2026-08-11, D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape)
+
+- [ ] **The LLM call itself is invisible between `chemclaw.turn` and `chemclaw.tool`** — [S].
+      There is no span for a model call, so a slow turn can be attributed to a tool or to "the rest
+      of the turn" and no further. Same mechanism as the row above and worth doing in the same
+      change; listed separately because it is a *trace* gap where that one is a *metrics* gap, and
+      a deployment could reasonably want one without the other.
+      **Trigger**: the first turn-latency investigation that stalls at "the model, presumably".
+
+- [ ] **AG-13 has no experiment surface, and the eval lane is where one could live** — [M].
+      Blocked since D-057 on "needs an external benchmark + a live LLM to score it", and it in turn
+      blocks the plan-vs-single-shot A/B row below. `evals/live.py` already drives the real front
+      door and writes each probe's whole event stream to disk, and `evals/live_judge.py` already
+      runs a stronger model as judge; what is missing is dataset versioning, run-over-run diffing
+      and annotation — the things `data/evals/baseline.json` plus a Markdown report approximate.
+      **Scope, and it is the whole point of the row**: the eval lane only. Non-production, a dev
+      credential, and probe questions that are already committed to this repo — which is where the
+      content-egress objection is weakest, and the reason this is not a production-tracing question.
+      Do not re-open it as one: the ADR lists the four written constraints that decided that.
+      **Evaluate the self-hostable tools first**, because LangSmith cannot be self-hosted without an
+      enterprise contract. Both candidates are legally fine to run internally and they gate
+      different things, which is what should decide it rather than the licence label:
+      **Arize Phoenix** — Elastic License 2.0, source-available but *not* OSI-approved; its three
+      limitations are no-hosted-service-to-third-parties, no circumventing the licence key, no
+      removing notices, so internal use and modification are squarely permitted and **nothing is
+      feature-gated**. One container plus Postgres, which this cluster already runs; OTLP-first and
+      the reference implementation of the OpenInference conventions; OAuth2/OIDC with an Entra ID
+      config URL.
+      **Langfuse** — MIT core, so the licence has no asterisk, but audit logs, data-retention
+      management, server-side masking, project-level RBAC and SCIM sit behind a commercial key.
+      That gated set *is* the compliance surface a GxP deployment wants, so "MIT" describes the
+      licence rather than the deliverable. SSO and org-level RBAC are in the core. Four stateful
+      services (Postgres + ClickHouse + Redis + S3) against this cluster's current Postgres +
+      Temporal.
+      **Check the OSPO policy first**: a blanket ban on non-OSI licences ends the comparison before
+      any of the above matters, and that is a policy question rather than a legal one.
+      **Exit criterion**: whether it closes AG-13's stated blocker — not whether the UI is nice.
+      **Trigger**: a live model credential plus somebody who wants the A/B answered.
 
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
