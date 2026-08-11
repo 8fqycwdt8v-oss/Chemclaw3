@@ -414,6 +414,47 @@ arranged to keep that commit small and the suite green at each step.
       **So Step 7's test re-point has to come before Step 0, not after Step 3** — and it is 67
       tests, not the ~315–420 Step 7 budgets for the middleware halves. The order below is wrong in
       exactly that one place and nowhere else this attempt could see.
+
+      **Step 0's prerequisite landed on 2026-08-11 (Step 7a below); the flip itself has not.**
+      What remains before the switch can move is Step 4's `_resume` (done), the connector
+      representation (Step 3a, new and open) and Step 3 itself.
+- [x] **Step 7a — the graph path's injection seam and the 67-test re-point.** The seam is
+      `create_app(graph_factory=…)` → `app.state.graph_factory` → `FrontDoor.graph_factory` →
+      `run_turn(graph_factory=…)`, deliberately the same shape `agent_factory` and
+      `connector_factory` already have, so the two engines' injection points sit beside each other
+      and neither is the one a test forgot. The test side is `tests/fakes_turn.ScriptedTurn`: a
+      turn's behaviour written **once**, as an async generator of streamed pieces, exposed as both
+      `run` (MAF) and `graph_factory` (a real `build_langgraph_agent` over a model that replays
+      those pieces). A test passes the same object to both parameters and needs no branch on
+      `agent_engine`.
+
+      Result: `pytest -q` **4232 passed / 37 skipped / 0 failed** (6:57), and
+      `CHEMCLAW_AGENT_ENGINE=langgraph pytest -q` **4220 passed / 49 skipped / 0 failed** (7:14,
+      against the flipped run's previous 12:51 — it no longer hangs, because nothing waits on an
+      agent that is never run). Collected ids: 4267 → 4269, nothing removed. `make cov` 85.81 %
+      against the 84 % floor.
+
+      Thirteen tests carry `maf_engine_only`, each naming the MAF-only subject it pins and where
+      the graph engine's equivalent lives: the plan read through `runner.todo_titles` /
+      `_PlanEmitter` (6), the `open_reachable` connector lifecycle (3), MAF's
+      `function_approval_request` content (1), streamed-argument reassembly and the closing
+      `tool_trace.flush()` (1), the MAF tool-call event sequence (1), and the `awaiting-job:` todo
+      residue (1). They go with the branch in Step 3, which is what the mark is for. One skip runs
+      the other way — the graph engine's own resume test below — so the flipped run's skip count is
+      37 − 1 + 13 = 49.
+
+      **The marks are not weakened tests.** Where a behaviour genuinely exists on both engines the
+      test was re-pointed rather than marked, including the two that needed a real tool node
+      (`_CitingAgent` overrides `graph_factory` to compile a graph with one result-returning tool,
+      because a tool *result* cannot be narrated into existence on this engine). Exactly one
+      assertion was relaxed, with the measurement in its docstring:
+      `test_signals_are_ordered_between_the_tokens_around_them` now pins the invariant (signals in
+      recorded order, not batched at the end) rather than the exact transcript, because a fake
+      model that never suspends fills `astream`'s queue before the consumer is scheduled once —
+      measured at four event-loop hops — which is a property of the stream's buffering and not of
+      the drain-first rule both engines implement.
+
+      Two findings, both recorded against the steps they belong to (3a and 4 below).
 - [ ] **Step 1 — `harness_types.py`** (6 files). Not free: its importers are the MAF halves of
       `loop_cap` and `plan_gate`, so it lands with them.
 - [ ] **Step 2 — port `turn_signals` to the stream writer** (~18 files). Before the runner, so both
@@ -431,21 +472,58 @@ arranged to keep that commit small and the suite green at each step.
         `FrontDoor.agent_pool`'s only caller with it and leaves `run_turn`'s `agent` parameter with
         no consumer but `_resume`. It should be deleted and `api/routes/turns.py` should pass
         `None`, rather than kept as a context manager that yields a constant.
-- [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, `_resume`,
-      durable compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
-      **`_resume` is not merely dead on the graph engine, it is a live crash, so this step is a
-      prerequisite of Step 0 rather than a follow-up**: `turn_agent` already yields `None` there and
-      mid-turn resume calls `agent.run` on it, so a turn that launches a durable job under
-      `CHEMCLAW_MID_TURN_RESUME_ENABLED=true` dies with `AttributeError`. Off by default, so nothing
-      fails today and no test covers it — it is an operator-settable knob that the flip converts
-      into a crash.
+- [ ] **Step 3a — the two engines' connector representations are not wired to their engines.**
+      Found while re-pointing the tests (Step 7a), and it is the *fourth* live defect the flip
+      would expose. `run_turn` takes one `connectors` list, opens it with `open_reachable`, and
+      hands it to `graph_factory`. Both of those are MAF's: `open_reachable` enters MAF tool
+      objects as context managers, and `build_langgraph_agent` wants LangChain tools. The graph
+      engine's own path — `chemclaw_agent.connector_specs` + `registry.open_connector_specs`, which
+      returns the tools *because* they do not exist until the session is open — is **called from
+      nowhere in `src/`**. Measured: a graph turn with any real connector dies at graph
+      construction with `ValueError: The first argument must be a string or a callable with a
+      __name__ … Got <class 'chemclaw.connectors.transport.DegradingHttpConnector'>`. Every graph
+      test that passes today does so with `connectors=[]`.
+
+      It is deliberately **not** fixed here, because the fix is a decision rather than a patch: the
+      front door passes `connector_factory(profile)` explicitly, so either that default becomes
+      engine-aware or `run_turn` grows a *third* `graph_engine_selected()` branch — and the
+      "exactly two branch points" invariant above is a claim this step owns. It belongs with the
+      runner's MAF branch, not before it.
+- [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, durable
+      compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
+
+      **`_resume` is done (2026-08-11), and it was *ported*, not removed.** The crash was real:
+      `turn_agent` yields `None` on the graph engine and mid-turn resume called `agent.run` on it,
+      so a turn launching a durable job under `CHEMCLAW_MID_TURN_RESUME_ENABLED=true` died with
+      `AttributeError` — off by default, covered by no test, and an operator-settable knob.
+
+      *Why ported rather than deleted*, since this step's own heading says "subtractive": removing
+      it would have been a product decision smuggled in as migration cleanup. AGT-2 is a shipped
+      capability with config keys, `.env.example` rows, documentation, and a metering fix of its
+      own from the 2026-08-05 review; nothing about replacing the agent framework argues against
+      "compute this, then reason about the result" being one exchange. And the port is not a design
+      question after all — the note that its graph form is "an `interrupt()` design decision"
+      overstated it. MAF's resume is a second `agent.run` on the same session; the graph's is a
+      second `graph_events` over the same compiled graph and the same `thread_id`. Same shape, same
+      conversation, ~15 lines. `interrupt()` would be a *different* feature (pausing the graph mid
+      turn instead of re-entering it), and that remains available later without this crash sitting
+      in the tree meanwhile.
+
+      What the port moved: `_job_results_message` extracts the framing and the wording — the
+      *decision*, in M3's sense — so a chemist cannot get a differently-worded continuation
+      depending on `agent_engine`. `_resume` keeps only MAF's plumbing and dies with the branch.
+      Covered by `test_the_graph_resume_never_reaches_for_the_turns_agent`, which drives the
+      production shape (`agent=None`) and reproduces the exact `AttributeError` when the runner
+      change is reverted.
 - [ ] **Step 5 — the harness surface** (~12 files), including a **rewrite of `api/routes/plan.py`
       onto graph state** — new code.
 - [ ] **Step 6 — `template_activities.py` onto `wrap_tool_call`** (~3 files). Two workarounds go
       away free: `skip_parsing=True` and most of `_serializable`.
-- [ ] **Step 7 — the middleware MAF halves and the test re-point** (~50 files) — **budget more than
-      the other nine combined.** ~315–420 tests move to `tests/fakes_langgraph.py`, and the
-      `lg_*` wrappers need direct coverage that today exists only through whole-turn tests.
+- [ ] **Step 7 — the middleware MAF halves** (~50 files). **The turn-level test re-point is done —
+      it is Step 7a above, and it moved before Step 0 rather than after Step 3.** What is left here
+      is the middlewares' own MAF halves and the direct `lg_*` coverage that today exists only
+      through whole-turn tests. The ~315–420 estimate covered both halves; 67 of them were the
+      turn-level ones and they are green on both engines now.
 - [ ] **Step 8 — OTel** (~4 files). Isolated: the only item that can break observability in
       production with no test noticing.
 - [ ] **Step 9 — the dependency and the layering rows** (3 files, atomic per the ratchet). Verify

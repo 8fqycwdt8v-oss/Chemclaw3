@@ -31,6 +31,7 @@ from chemclaw.evals.harness import load_eval_cases
 from chemclaw.evals.metric import EvalCase, MetricError, registered_names
 from chemclaw.evals.metrics import precision_recall_f1
 from tests.fakes import FakeUpdate
+from tests.fakes_turn import maf_engine_only
 
 _ANSWER = {"type": "answer", "text": "done", "unsupported_claims": [], "review_required": False}
 
@@ -64,6 +65,11 @@ def test_the_autonomy_metrics_are_registered() -> None:
     assert {"plan_quality", "runaway_rate", "plan_execute_utility"} <= set(registered_names())
 
 
+@maf_engine_only(
+    "a `PlanEvent` stream produced from MAF's todo store through `runner.todo_titles`; on the "
+    "graph engine the same stream comes from `write_todos` via `graph_stream`, which is where "
+    "the plan's shape is pinned for that engine"
+)
 def test_a_committed_transcript_is_the_shape_the_front_door_really_emits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -111,6 +117,10 @@ def test_a_committed_transcript_is_the_shape_the_front_door_really_emits(
     assert result.value == 1.0
 
 
+@maf_engine_only(
+    "the `awaiting-job:` todo residue, which is MAF harness state; the graph engine's plan has "
+    "no description field for the marker to live in (see `chemclaw.agent.state.Todo`)"
+)
 def test_a_turn_that_defers_to_a_durable_job_is_not_a_runaway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -375,6 +375,18 @@ class FrontDoorState:
         return factory
 
     @property
+    def graph_factory(self) -> Callable[..., Any]:
+        """Builds one turn's compiled graph on the LangGraph engine — called per turn, never cached.
+
+        The graph engine's twin of `agent`, and read through the same view for the same reason:
+        `run_turn` needs it as an argument, and a route that reached `app.state` for it directly
+        would take an `Any` with it. On the MAF engine nothing calls the result, so passing it
+        costs a lookup and keeps the route free of a branch on `agent_engine`.
+        """
+        factory: Callable[..., Any] = self._app.state.graph_factory
+        return factory
+
+    @property
     def live_sessions(self) -> _LiveSessions:
         """The bounded cache of live in-process sessions (see `_LiveSessions`)."""
         sessions: _LiveSessions = self._app.state.live_sessions

@@ -12,6 +12,7 @@ ERROR, and the turn still succeeds.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -20,21 +21,14 @@ from agent_framework import AgentSession
 from chemclaw.api.events import AnswerEvent
 from chemclaw.api.runner import run_turn
 from chemclaw.core.metrics import METRICS
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Piece, ScriptedTurn
 
 
-class _SilentAgent:
+class _SilentAgent(ScriptedTurn):
     """A fake agent whose turn produces one chunk of text and no tool calls."""
 
-    mcp_tools: list[Any] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(text="done")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield "done"
 
 
 class _UnreachableHistory:
@@ -47,12 +41,18 @@ class _UnreachableHistory:
 
 def _run(history: Any) -> list[Any]:
     """Drive one turn to completion and return its events."""
+    agent = _SilentAgent()
 
     async def _collect() -> list[Any]:
         return [
             event
             async for event in run_turn(
-                _SilentAgent(), AgentSession(session_id="s-watermark"), "hi", history=history
+                agent,
+                AgentSession(session_id="s-watermark"),
+                "hi",
+                history=history,
+                connectors=[],
+                graph_factory=agent.graph_factory,
             )
         ]
 

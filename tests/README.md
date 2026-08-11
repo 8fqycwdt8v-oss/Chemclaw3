@@ -8,6 +8,14 @@ CI runs exactly these targets, so a green `make` locally is a green CI.
 Temporal harnesses (their tests skip when the service is absent — that is why a local run reports
 skips and CI does not), `fixtures/` the sample data.
 
+Three modules hold shared **doubles**, and which one you want depends on how much of the engine
+you mean to exercise. `fakes.py` is the MAF-shaped update double plus the ASGI client;
+`fakes_langgraph.py` is `ScriptedChatModel`, a model that replays a fixed script of tool calls and
+answers, for tests that drive a compiled graph directly; `fakes_turn.py` is `ScriptedTurn`, one
+turn's behaviour written once and playable on **either** engine — that is what a test uses when it
+drives `chemclaw.api.runner.run_turn` and must pass whatever `CHEMCLAW_AGENT_ENGINE` says. It also
+carries `maf_engine_only`, the mark for a test whose subject exists on one engine only.
+
 ## What is checked here that is not a behaviour
 
 A handful of these modules exist to catch **structural** drift — things that are true of the

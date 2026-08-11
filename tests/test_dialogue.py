@@ -14,6 +14,7 @@ requested dry run into a real HPC submission).
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -23,32 +24,32 @@ from chemclaw.agent.dialogue_tools import ask_clarifying_question
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from chemclaw.api.runner import run_turn
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Piece, ScriptedTurn
 
 
-class _AskingAgent:
+class _AskingAgent(ScriptedTurn):
     """An agent whose turn asks the chemist to disambiguate."""
 
-    mcp_tools: list[Any] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            await ask_clarifying_question("Which campaign?", ["proj-x", "proj-y"])
-            yield FakeUpdate()
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        await ask_clarifying_question("Which campaign?", ["proj-x", "proj-y"])
+        yield ""
 
 
-def _events(agent: Any, **kwargs: Any) -> list[Any]:
+def _events(agent: ScriptedTurn, **kwargs: Any) -> list[Any]:
+    """One turn's events on whichever engine is configured, with no connectors."""
+
     async def _collect() -> list[Any]:
-        return [e async for e in run_turn(agent, AgentSession(session_id="s1"), "hi", **kwargs)]
+        return [
+            e
+            async for e in run_turn(
+                agent,
+                AgentSession(session_id="s1"),
+                "hi",
+                connectors=[],
+                graph_factory=agent.graph_factory,
+                **kwargs,
+            )
+        ]
 
     return asyncio.run(_collect())
 
@@ -85,22 +86,14 @@ def test_the_runner_binds_and_clears_the_flag() -> None:
     """A dry-run turn must not leak the flag into the next turn on the same worker."""
     seen: list[bool] = []
 
-    class _Probe:
-        mcp_tools: list[Any] = []
+    class _Probe(ScriptedTurn):
+        """A turn that records whether the dry-run flag was ambient while it ran."""
 
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> Any:
-            async def _gen() -> Any:
-                seen.append(is_dry_run())
-                yield FakeUpdate(text="ok")
-
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            seen.append(is_dry_run())
+            yield "ok"
 
     _events(_Probe(), dry_run=True)
     assert seen == [True]

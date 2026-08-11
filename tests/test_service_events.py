@@ -7,6 +7,7 @@ answer — without any live model (a fake streaming agent is injected).
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from agent_framework import AgentSession
@@ -14,6 +15,7 @@ from agent_framework import AgentSession
 from chemclaw.api.events import AnswerEvent, ErrorEvent, Event, TokenEvent, ToolCallEvent
 from chemclaw.api.runner import run_turn
 from tests.fakes import FakeUpdate
+from tests.fakes_turn import Piece, ScriptedTurn, maf_engine_only
 
 
 class _ToolContent:
@@ -24,28 +26,33 @@ class _ToolContent:
         self.arguments = arguments
 
 
-class _FakeAgent:
-    """A fake agent whose `run(stream=True)` yields a scripted update sequence (no model)."""
+class _FakeAgent(ScriptedTurn):
+    """A fake agent whose turn is a scripted update sequence: one tool call, then two tokens.
 
-    mcp_tools: list[object] = []
+    The pieces here are MAF updates rather than text, because the sequence under test *is* MAF's:
+    a call content arriving before any prose. The turn-level test that reads it is
+    `maf_engine_only`, and the graph engine's twin — the whole event sequence for a scripted
+    tool-calling turn — is `tests/test_langgraph_stream.py`'s conformance test.
+    """
 
     def create_session(self, *, session_id: str) -> AgentSession:
+        """The one non-streaming method the front door calls on an agent."""
         return AgentSession(session_id=session_id)
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> object:
-        async def _gen() -> object:
-            yield FakeUpdate(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
-            yield FakeUpdate(text="The ")
-            yield FakeUpdate(text="answer.")
+    async def stream(self, message: str) -> AsyncIterator[Any]:
+        """The MAF-shaped stream: a call content, then two text updates.
 
-        return _gen()
+        Typed `Any` rather than `Piece` because these pieces are already MAF updates — the shared
+        rendering has nothing to add to a content the runner duck-types.
+        """
+        yield FakeUpdate(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
+        yield FakeUpdate(text="The ")
+        yield FakeUpdate(text="answer.")
+
+    def run(  # noqa: D102 - see the class docstring
+        self, message: str, *, stream: bool, session: Any, **_run_options: Any
+    ) -> AsyncIterator[Any]:
+        return self.stream(message)
 
 
 def test_events_round_trip_with_type_discriminator() -> None:
@@ -56,6 +63,11 @@ def test_events_round_trip_with_type_discriminator() -> None:
     assert ToolCallEvent(tool="predict_pka").type == "tool_call"
 
 
+@maf_engine_only(
+    "the MAF event sequence for a tool-calling turn — a `tool_call` with no `tool_result`, "
+    "because a MAF fake narrates the call without a tool node running. The graph engine's whole "
+    "sequence for the same turn is pinned by `tests/test_langgraph_stream.py`"
+)
 def test_run_turn_emits_toolcall_tokens_then_answer() -> None:
     """A scripted turn yields the tool-call trace, each token, then the assembled answer."""
     agent = _FakeAgent()
@@ -81,25 +93,24 @@ def test_run_turn_reports_failure_as_error_event() -> None:
     """A turn whose model call raises yields a single user-safe ErrorEvent, not an exception."""
 
     class _BoomAgent(_FakeAgent):
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> object:
-            async def _gen() -> object:
-                raise RuntimeError("model exploded")
-                yield  # pragma: no cover - makes this an async generator
+        """A turn whose model call raises before it says anything."""
 
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            raise RuntimeError("model exploded")
+            yield  # pragma: no cover - makes this an async generator
 
     agent = _BoomAgent()
     session = agent.create_session(session_id="s2")
 
     async def _collect() -> list[Event]:
-        return [event async for event in run_turn(agent, session, "hello", connectors=[])]
+        return [
+            event
+            async for event in run_turn(
+                agent, session, "hello", connectors=[], graph_factory=agent.graph_factory
+            )
+        ]
 
     events = [e for e in asyncio.run(_collect()) if e.type != "capability_degraded"]
     assert [e.type for e in events] == ["error"]

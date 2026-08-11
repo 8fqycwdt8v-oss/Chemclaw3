@@ -10,6 +10,7 @@ hand-written QM launcher that used to carry this plumbing became a declared job 
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 from agent_framework import AgentSession
@@ -23,7 +24,7 @@ from chemclaw.core.session_context import (
     reset_current_session_id,
     set_current_session_id,
 )
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Piece, ScriptedTurn
 
 _SPEC = JobSpec.model_validate(
     {
@@ -102,26 +103,15 @@ def test_a_durable_launch_stamps_the_current_session(monkeypatch) -> None:  # ty
     assert client.started and client.started[0].session_id == "sess-42"
 
 
-class _EchoSessionAgent:
+class _EchoSessionAgent(ScriptedTurn):
     """A fake agent whose turn echoes the ambient session id the runner stamped."""
 
-    mcp_tools: list[object] = []
-
     def create_session(self, *, session_id: str) -> AgentSession:
+        """The one non-streaming method the front door calls on an agent."""
         return AgentSession(session_id=session_id)
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> object:
-        async def _gen() -> object:
-            yield FakeUpdate(text=get_current_session_id() or "NONE")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield get_current_session_id() or "NONE"
 
 
 def test_runner_stamps_and_clears_session() -> None:
@@ -130,7 +120,12 @@ def test_runner_stamps_and_clears_session() -> None:
     session = agent.create_session(session_id="sess-run")
 
     async def _collect() -> list[Any]:
-        return [event async for event in run_turn(agent, session, "hi")]
+        return [
+            event
+            async for event in run_turn(
+                agent, session, "hi", connectors=[], graph_factory=agent.graph_factory
+            )
+        ]
 
     events = asyncio.run(_collect())
     answer = next(e for e in events if e.type == "answer")

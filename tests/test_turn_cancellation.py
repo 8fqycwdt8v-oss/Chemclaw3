@@ -28,7 +28,6 @@ What is pinned here:
 import asyncio
 import copy
 from collections.abc import AsyncGenerator, AsyncIterator
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -37,7 +36,7 @@ from agent_framework import AgentSession
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 
 def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:
@@ -50,7 +49,9 @@ def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:
     return cast(AsyncGenerator[Event, None], stream)
 
 
-async def _cancel_mid_turn(stream: AsyncIterator[Event], stalled: asyncio.Event) -> None:
+async def _cancel_mid_turn(
+    stream: AsyncIterator[Event], stalled: asyncio.Event, *, tokens: int = 0
+) -> None:
     """Consume the turn until it stalls, then tear it down the way a real disconnect does.
 
     The consumption runs in its own task so it can be *cancelled* rather than closed — the whole
@@ -62,74 +63,71 @@ async def _cancel_mid_turn(stream: AsyncIterator[Event], stalled: asyncio.Event)
     frame instead, the abandoned generator is finalised later by `asyncio.run`'s async-generator
     shutdown, which delivers `GeneratorExit` — and a test written that way passes against the very
     bug it is meant to catch. (It did. That is how this was found.)
+
+    `tokens` is the second half of that condition, and it exists because the two engines deliver a
+    stalled model's earlier chunks at different moments. Under MAF the runner consumes the model's
+    generator directly, so every chunk before the stall has already been metered by the time
+    `stalled` is set; under LangGraph they sit in `astream`'s queue until the producer suspends, so
+    the stall itself is what releases them and the cancel could otherwise land first. A test that
+    asserts on *metered* tokens therefore waits for both facts, which is deterministic on either
+    engine rather than a race one of them happens to win.
     """
+    counted = asyncio.Event()
+    seen = 0
 
     async def _consume() -> None:
-        async for _event in stream:
-            pass
+        nonlocal seen
+        async for event in stream:
+            seen += event.type == "token"
+            if seen >= tokens:
+                counted.set()
 
+    if not tokens:
+        counted.set()
     task = asyncio.create_task(_consume())
     await stalled.wait()
+    await counted.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
 
-def _update(text: str, tokens: int) -> Any:
-    """A streamed update carrying `tokens` of reported usage, shaped as MAF emits it."""
-    usage = SimpleNamespace(usage_details={"total_token_count": tokens})
-    return FakeUpdate(text=text, contents=[usage])
-
-
-class _EndlessAgent:
+class _EndlessAgent(ScriptedTurn):
     """An agent whose turn never finishes on its own — so only cancellation ends the stream."""
 
-    mcp_tools: list[Any] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            while True:
-                yield _update("tok", 10)
-                await asyncio.sleep(0)
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        while True:
+            yield Chunk("tok", output_tokens=10)
+            # A suspension point per chunk, so the consumer is scheduled between them. Under MAF
+            # this only yields the loop; under LangGraph it is what lets the stream's queue be
+            # drained at all, since a producer that never suspends fills it unboundedly.
+            await asyncio.sleep(0)
 
 
-class _StatePoisoningAgent:
+class _StatePoisoningAgent(ScriptedTurn):
     """An agent that writes a tool call into session state and then never returns its result.
 
     This is the shape of the real failure (ISSUE-B-10): the model opens a `tool_use` block, and the
     client disconnects before the matching `tool_result` is ever appended.
+
+    The session is held rather than taken from the run call, because the graph engine's model is
+    handed messages and not a `AgentSession` — the poisoning is a stand-in for whatever the turn
+    committed, and what matters is that it lands in the state the runner snapshotted.
     """
 
-    mcp_tools: list[Any] = []
+    def __init__(self, session: AgentSession) -> None:
+        """Poison `session`'s stored thread when the turn starts streaming."""
+        self._session = session
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            messages = session.state.setdefault("messages", [])
-            messages.append({"role": "assistant", "tool_use_id": "call_1"})
-            while True:
-                yield _update("tok", 1)
-                await asyncio.sleep(0)
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        messages = self._session.state.setdefault("messages", [])
+        messages.append({"role": "assistant", "tool_use_id": "call_1"})
+        while True:
+            yield Chunk("tok", output_tokens=1)
+            await asyncio.sleep(0)
 
 
-class _AnsweringAgent:
+class _AnsweringAgent(ScriptedTurn):
     """An agent that completes an ordinary turn: two tokens, a stored message, then it returns.
 
     The message is written the way a durable provider writes one — the runner never sees it, and
@@ -138,26 +136,16 @@ class _AnsweringAgent:
     nothing half-written, only a finished exchange somebody could still delete.
     """
 
-    mcp_tools: list[Any] = []
-
-    def __init__(self, history: "_RecordingHistory") -> None:
+    def __init__(self, history: "_RecordingHistory", session_id: str) -> None:
+        """Commit this turn's rows to `history` under `session_id` once the reply is out."""
         self._history = history
+        self._session_id = session_id
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            yield _update("the ", 5)
-            yield _update("answer", 5)
-            self._history.rows.append((session.session_id, "user: " + message))
-            self._history.rows.append((session.session_id, "assistant: the answer"))
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield Chunk("the ", output_tokens=5)
+        yield Chunk("answer", output_tokens=5)
+        self._history.rows.append((self._session_id, "user: " + message))
+        self._history.rows.append((self._session_id, "assistant: the answer"))
 
 
 class _RecordingHistory:
@@ -191,7 +179,7 @@ class _RecordingHistory:
         return deleted
 
 
-class _StallingAgent:
+class _StallingAgent(ScriptedTurn):
     """Emits a fixed number of updates and then blocks, announcing that it has.
 
     The block is what lets a test cancel the turn *from inside*: while it holds, the consumer is
@@ -199,34 +187,24 @@ class _StallingAgent:
     delivers it. `stalled` makes that deterministic — no sleep long enough to "probably" be enough.
     """
 
-    mcp_tools: list[Any] = []
-
-    def __init__(self, *, updates: int = 1, poison: bool = False) -> None:
+    def __init__(self, session: AgentSession, *, updates: int = 1, poison: bool = False) -> None:
+        """Stream `updates` metered chunks into `session`'s turn, then stall."""
         self.stalled = asyncio.Event()
+        self._session = session
         self._updates = updates
         self._poison = poison
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            if self._poison:
-                # The shape of the real failure (ISSUE-B-10): a `tool_use` block whose
-                # `tool_result` never arrives, because the client left in between.
-                session.state.setdefault("messages", []).append(
-                    {"role": "assistant", "tool_use_id": "call_1"}
-                )
-            for _ in range(self._updates):
-                yield _update("tok", 10)
-            self.stalled.set()
-            await asyncio.sleep(3600)
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        if self._poison:
+            # The shape of the real failure (ISSUE-B-10): a `tool_use` block whose
+            # `tool_result` never arrives, because the client left in between.
+            self._session.state.setdefault("messages", []).append(
+                {"role": "assistant", "tool_use_id": "call_1"}
+            )
+        for _ in range(self._updates):
+            yield Chunk("tok", output_tokens=10)
+        self.stalled.set()
+        await asyncio.sleep(3600)
 
 
 class _RecordingBudget(BudgetTracker):
@@ -248,15 +226,17 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     just before the answer, which is the cheapest possible attack on the runaway-cost guard.
     """
     budget = _RecordingBudget()
+    agent = _EndlessAgent()
 
     async def _abandon() -> None:
         stream = _closable(
             run_turn(
-                _EndlessAgent(),
+                agent,
                 AgentSession(session_id="s1"),
                 "hi",
                 actor="u1",
                 budget=budget,
+                graph_factory=agent.graph_factory,
                 # Stated, because this test counts updates to decide when to abandon: defaulting
                 # means every enabled connector, none of which is running in a test process, and
                 # the resulting degradation event (D-139) is noise in that count.
@@ -293,7 +273,10 @@ def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
         await semaphore.acquire()
         active.add("s1")
         seen: list[str] = []
-        stream = _closable(run_turn(_EndlessAgent(), AgentSession(session_id="s1"), "hi"))
+        agent = _EndlessAgent()
+        stream = _closable(
+            run_turn(agent, AgentSession(session_id="s1"), "hi", graph_factory=agent.graph_factory)
+        )
         try:
             async for event in stream:
                 seen.append(event.type)
@@ -327,8 +310,10 @@ def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
     session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
     before = copy.deepcopy(session.state)
 
+    agent = _StatePoisoningAgent(session)
+
     async def _abandon() -> None:
-        stream = _closable(run_turn(_StatePoisoningAgent(), session, "hi"))
+        stream = _closable(run_turn(agent, session, "hi", graph_factory=agent.graph_factory))
         async for _event in stream:
             break  # the client goes away after the first token
         await stream.aclose()  # sse-starlette's send-timeout teardown
@@ -352,8 +337,23 @@ def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
     before = copy.deepcopy(session.state)
 
     async def _drive() -> None:
-        agent = _StallingAgent(poison=True)
-        await _cancel_mid_turn(run_turn(agent, session, "hi"), agent.stalled)
+        agent = _StallingAgent(session, poison=True)
+        await _cancel_mid_turn(
+            run_turn(
+                agent,
+                session,
+                "hi",
+                # Stated, as every sibling in this file states it: defaulting means every enabled
+                # connector, none of which is running in a test process. It is no longer merely
+                # noise — the runner hands `connectors` straight to `build_langgraph_agent`, and
+                # the default is MAF's connector representation, which that builder cannot accept.
+                # See the M13 note in `tasks/todo.md`; the engines' connector wiring is a defect of
+                # its own and not this test's subject.
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            ),
+            agent.stalled,
+        )
         # Asserted *inside* the loop. After `asyncio.run` returns, its async-generator shutdown has
         # closed every abandoned generator, which restores the state by the other path and would
         # make this pass no matter what the runner does with cancellation.
@@ -384,13 +384,15 @@ def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
 
     async def _drive() -> None:
         for teardown in ("aclose", "cancel"):
+            agent = _AnsweringAgent(history, session.session_id)
             stream = _closable(
                 run_turn(
-                    _AnsweringAgent(history),
+                    agent,
                     session,
                     f"hi ({teardown})",
                     history=history,
                     connectors=[],
+                    graph_factory=agent.graph_factory,
                 )
             )
             seen: list[str] = []
@@ -441,13 +443,15 @@ def test_a_disconnect_after_the_answer_is_billed_as_completed(
     history = _RecordingHistory()
 
     async def _drive() -> None:
+        agent = _AnsweringAgent(history, "s-answered-cancel")
         stream = _closable(
             run_turn(
-                _AnsweringAgent(history),
+                agent,
                 AgentSession(session_id="s-answered-cancel"),
                 "hi",
                 history=history,
                 connectors=[],
+                graph_factory=agent.graph_factory,
             )
         )
         async for event in stream:
@@ -479,10 +483,21 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
     session = AgentSession(session_id="s5")
 
     async def _drive() -> None:
-        agent = _StallingAgent(updates=3)
+        agent = _StallingAgent(session, updates=3)
         await _cancel_mid_turn(
-            run_turn(agent, session, "hi", actor="u1", budget=budget, connectors=[]),
+            run_turn(
+                agent,
+                session,
+                "hi",
+                actor="u1",
+                budget=budget,
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            ),
             agent.stalled,
+            # The assertion below is about metered tokens, so the cancel waits for all three to
+            # have reached the runner as well as for the model to have stalled.
+            tokens=3,
         )
         assert budget.booked, "a cancelled turn booked nothing at all"
         booked_session, user_id, tokens = budget.booked[0]
@@ -522,9 +537,17 @@ def test_a_failed_watermark_read_never_turns_a_disconnect_into_a_history_wipe() 
     session = AgentSession(session_id="s-blind")
 
     async def _drive() -> None:
-        agent = _StallingAgent(poison=True)
+        agent = _StallingAgent(session, poison=True)
         await _cancel_mid_turn(
-            run_turn(agent, session, "hi", history=history, connectors=[]), agent.stalled
+            run_turn(
+                agent,
+                session,
+                "hi",
+                history=history,
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            ),
+            agent.stalled,
         )
         assert history.rollbacks == [], (
             "the durable rollback ran without a watermark — the delete boundary was a guess"
@@ -563,9 +586,17 @@ def test_a_disconnect_during_a_slow_verifier_keeps_the_committed_exchange(
     monkeypatch.setattr("chemclaw.api.runner_answer.verify_turn_answer", _stalling_verify)
 
     async def _drive() -> None:
-        agent = _AnsweringAgent(history)
+        agent = _AnsweringAgent(history, session.session_id)
         await _cancel_mid_turn(
-            run_turn(agent, session, "hi", history=history, connectors=[]), stalled
+            run_turn(
+                agent,
+                session,
+                "hi",
+                history=history,
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            ),
+            stalled,
         )
         assert history.rollbacks == [], (
             "a slow verifier made the teardown roll a finished turn back"
@@ -599,17 +630,12 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_committed_exchange
     class _JobAgent(_AnsweringAgent):
         """An answering agent whose turn also launched a durable job, so the resume wait runs."""
 
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-        ) -> Any:
-            inner = super().run(message, stream=stream, session=session)
-
-            async def _gen() -> Any:
-                record_job_started("job-slow", "qm")
-                async for update in inner:
-                    yield update
-
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            record_job_started("job-slow", "qm")
+            async for piece in super().stream(message):
+                yield piece
 
     async def _stalling_wait(*_args: Any, **_kwargs: Any) -> dict[str, dict[str, Any]]:
         stalled.set()
@@ -619,9 +645,17 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_committed_exchange
     monkeypatch.setattr("chemclaw.api.runner.await_job_results", _stalling_wait)
 
     async def _drive() -> None:
-        agent = _JobAgent(history)
+        agent = _JobAgent(history, session.session_id)
         await _cancel_mid_turn(
-            run_turn(agent, session, "hi", history=history, connectors=[]), stalled
+            run_turn(
+                agent,
+                session,
+                "hi",
+                history=history,
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            ),
+            stalled,
         )
         assert history.rollbacks == [], (
             "a slow job-result wait made the teardown roll a finished turn back"

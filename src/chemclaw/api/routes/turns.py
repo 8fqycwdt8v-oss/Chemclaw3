@@ -166,6 +166,11 @@ async def post_message(
                         connectors=front.connector_factory(live.profile),
                         history=front.history,
                         profile=live.profile,
+                        # The other engine's half of the same selection: `turn_agent` above hands
+                        # over a pooled MAF agent, this hands over the builder for a graph that
+                        # cannot exist until the turn's connectors do. Exactly one of the two is
+                        # used, and which one is `run_turn`'s business rather than this route's.
+                        graph_factory=front.graph_factory,
                     ):
                         if event.type == "error":
                             METRICS.increment("chemclaw_turns_failed_total")

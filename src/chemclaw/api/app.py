@@ -45,6 +45,7 @@ from chemclaw.agent.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.session_events import stream_new_events
@@ -177,6 +178,7 @@ def create_app(
     owner_store: SessionOwners | None = None,
     connector_factory: Callable[[str | None], list[Any]] = connector_tools,
     turn_claims: SessionTurns | None = None,
+    graph_factory: Callable[..., Any] = build_langgraph_agent,
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
@@ -199,6 +201,14 @@ def create_app(
             guard hold across processes rather than only within one (D-121). Defaults to the
             config-gated store (present only under `session_store="postgres"`); tests inject an
             in-memory fake to exercise the cross-process conflict without a database.
+        graph_factory: Builds *this turn's* compiled graph on the LangGraph engine, given the
+            profile, the turn's identity and its already-open connectors. The graph engine's twin
+            of `agent_factory`, and it exists for exactly the reason that one does: without it a
+            test can inject a credential-free agent on one engine and not on the other, so the
+            front door's own surface would be untestable the moment `agent_engine` flips. A
+            factory rather than an instance because a graph binds its tools at construction and
+            therefore belongs to one turn (`chemclaw.agent.langgraph_agent`), which is also why it
+            is *not* cached the way `agent_factory`'s result is.
 
     Returns:
         A configured `FastAPI` application.
@@ -230,6 +240,10 @@ def create_app(
     app.state.agent_factory = agent_factory
     # Called once per turn, not once per process — a connector connection belongs to a single turn.
     app.state.connector_factory = connector_factory
+    # The graph engine's agent, built per turn for the same reason the connectors are: it holds
+    # them. Seeded beside `agent_factory` so the two engines' injection points sit together and
+    # neither can be the one a test forgot.
+    app.state.graph_factory = graph_factory
 
     def _turn_in_flight(session_id: str) -> bool:
         """Whether `session_id` holds an unexpired in-process turn lease — the eviction pin.

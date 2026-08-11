@@ -14,6 +14,7 @@ that survived it are recorded side by side.
 import ast
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,7 @@ from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from tests.fakes import FakeUpdate, fed
+from tests.fakes_turn import Chunk, Piece, ScriptedTurn, maf_engine_only
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -45,33 +47,22 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 # --------------------------------------------------------------------------------------------
 
 
-class _ResumingAgent:
+class _ResumingAgent(ScriptedTurn):
     """Two passes: the first launches a job and spends tokens, the second spends far more."""
-
-    mcp_tools: list[Any] = []
 
     def __init__(self, first_tokens: int, second_tokens: int) -> None:
         self._tokens = (first_tokens, second_tokens)
         self.calls = 0
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_options: Any
-    ) -> Any:
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        from chemclaw.core.turn_signals import record_job_started
+
         self.calls += 1
         tokens = self._tokens[min(self.calls, 2) - 1]
         first = self.calls == 1
-
-        async def _gen() -> Any:
-            if first:
-                from chemclaw.core.turn_signals import record_job_started
-
-                record_job_started("job-1", "calc")
-            yield FakeUpdate(
-                text="ok" if first else " and the answer",
-                contents=[SimpleNamespace(usage_details={"total_token_count": tokens})],
-            )
-
-        return _gen()
+        if first:
+            record_job_started("job-1", "calc")
+        yield Chunk("ok" if first else " and the answer", output_tokens=tokens)
 
 
 def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,6 +94,8 @@ def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPat
             AgentSession(session_id="resume-usage"),
             "compute it",
             budget=_Recording(),
+            connectors=[],
+            graph_factory=agent.graph_factory,
         ):
             pass
 
@@ -343,6 +336,12 @@ class _UnparseableArgumentAgent:
         return _gen()
 
 
+@maf_engine_only(
+    "the reassembly of streamed argument *fragments*, and the closing `tool_trace.flush()` that "
+    "rescues a call whose fragments never parse. The graph engine reads calls whole from the "
+    "`updates` stream (`graph_stream`'s own docstring says why), so there is nothing to reassemble "
+    "and nothing left in the trace to flush"
+)
 def test_a_call_whose_arguments_never_parse_still_reaches_the_stream() -> None:
     """`run_turn`'s closing `tool_trace.flush()`, which nothing exercised through a whole turn.
 

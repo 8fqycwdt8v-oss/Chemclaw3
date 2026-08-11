@@ -24,6 +24,7 @@ import pytest
 import chemclaw.api.runner as runner
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.metrics import METRICS
+from tests.fakes_turn import maf_engine_only
 from tests.test_service import _client, _FakeAgent
 
 
@@ -82,6 +83,12 @@ def _stream_events(connectors: list[Any]) -> list[dict[str, Any]]:
     return events
 
 
+@maf_engine_only(
+    "a dark MAF connector object travelling through `open_reachable`. The graph engine's "
+    "connector path is `connector_specs` + `open_connector_specs` and nothing in `src/` calls "
+    "either from a turn, so this cannot be re-pointed — see the M13 Step 3a note in "
+    "`tasks/todo.md`"
+)
 def test_a_dark_connector_is_announced_before_the_answer_streams() -> None:
     """The chemist learns the answer is partial while it is still arriving, not afterwards.
 
@@ -96,6 +103,12 @@ def test_a_dark_connector_is_announced_before_the_answer_streams() -> None:
     assert events[0]["connectors"] == ["eln"]
 
 
+@maf_engine_only(
+    "a dark MAF connector object travelling through `open_reachable`. The graph engine's "
+    "connector path is `connector_specs` + `open_connector_specs` and nothing in `src/` calls "
+    "either from a turn, so this cannot be re-pointed — see the M13 Step 3a note in "
+    "`tasks/todo.md`"
+)
 def test_the_turn_still_answers_without_its_connectors() -> None:
     """Degrade, do not fail: an unreachable connector costs its tools, never the conversation.
 

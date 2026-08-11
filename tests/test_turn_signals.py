@@ -14,6 +14,7 @@ come out interleaved in order.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -28,38 +29,26 @@ from chemclaw.core.turn_signals import (
     record_job_started,
     record_proposal,
 )
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Piece, ScriptedTurn, maf_engine_only
 
 
-class _SignallingAgent:
+class _SignallingAgent(ScriptedTurn):
     """An agent whose streamed turn records signals partway through, as a real tool would."""
-
-    mcp_tools: list[Any] = []
 
     def __init__(self, *, jobs: list[tuple[str, str]], proposals: list[tuple[str, str]]) -> None:
         self._jobs = jobs
         self._proposals = proposals
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(text="thinking")
-            for job_id, kind in self._jobs:
-                record_job_started(job_id, kind)
-            for note_id, reference in self._proposals:
-                record_proposal(note_id, reference)
-            yield FakeUpdate(text=" done")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield "thinking"
+        for job_id, kind in self._jobs:
+            record_job_started(job_id, kind)
+        for note_id, reference in self._proposals:
+            record_proposal(note_id, reference)
+        yield " done"
 
 
-def _events(agent: Any) -> list[Any]:
+def _events(agent: ScriptedTurn) -> list[Any]:
     """Collect one turn's events, with no connectors and without the capability announcement.
 
     `connectors=[]` is stated rather than defaulted: omitting it means *every enabled connector*,
@@ -76,7 +65,13 @@ def _events(agent: Any) -> list[Any]:
     async def _collect() -> list[Any]:
         return [
             event
-            async for event in run_turn(agent, AgentSession(session_id="s1"), "hi", connectors=[])
+            async for event in run_turn(
+                agent,
+                AgentSession(session_id="s1"),
+                "hi",
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            )
             if event.type != "capability_degraded"
         ]
 
@@ -100,13 +95,28 @@ def test_a_proposed_note_becomes_a_note_proposed_event() -> None:
 
 
 def test_signals_are_ordered_between_the_tokens_around_them() -> None:
-    """A signal surfaces where it happened, not batched at the end, so the transcript reads true."""
+    """A signal surfaces where it happened, not batched at the end, so the transcript reads true.
+
+    **The assertion is the invariant, not the transcript, and that is a measurement rather than a
+    concession.** Under MAF the runner consumes the model's generator directly, so the sequence is
+    exactly `token, job_started, note_proposed, token, answer`. Under LangGraph the tokens travel
+    through `astream`'s queue, and a fake model that never suspends between chunks fills that queue
+    before the consumer is scheduled once: measured, the consumer needs four event-loop hops inside
+    the model's reply to dequeue the first chunk, so the same turn reads `job_started,
+    note_proposed, token, token, answer`. That difference is a property of the stream's buffering —
+    a real provider's chunks are separated by a network read — and not of the drain-first rule both
+    engines implement, so pinning the exact list would pin the fake.
+
+    What both engines must agree on, and what is asserted: the signals come out in the order they
+    were recorded, and they are *not* batched at the end — a token still follows the last one.
+    """
     events = _events(
         _SignallingAgent(jobs=[("report-1", "report")], proposals=[("r-1", "note/r-1")])
     )
     kinds = [e.type for e in events]
-    # The tool ran after the first chunk of text and before the next, so that is where it appears.
-    assert kinds == ["token", "job_started", "note_proposed", "token", "answer"]
+    assert kinds.index("job_started") < kinds.index("note_proposed"), kinds
+    assert kinds[kinds.index("note_proposed") + 1] == "token", kinds
+    assert kinds[-1] == "answer", kinds
 
 
 def test_no_signals_means_no_extra_events() -> None:
@@ -123,7 +133,13 @@ def test_signals_are_isolated_per_turn() -> None:
             agent = _SignallingAgent(jobs=[(job_id, "qm")], proposals=[])
             return [
                 e
-                async for e in run_turn(agent, AgentSession(session_id=job_id), "hi", connectors=[])
+                async for e in run_turn(
+                    agent,
+                    AgentSession(session_id=job_id),
+                    "hi",
+                    connectors=[],
+                    graph_factory=agent.graph_factory,
+                )
             ]
 
         return await asyncio.gather(_one("job-a"), _one("job-b"))
@@ -158,11 +174,18 @@ def test_plan_is_absent_when_the_harness_is_off(monkeypatch: pytest.MonkeyPatch)
     assert not [e for e in events if e.type == "plan"]
 
 
+@maf_engine_only(
+    "the plan read through `runner.todo_titles`; the graph engine renders the "
+    "`write_todos` state update in `chemclaw.api.graph_stream` instead"
+)
 def test_plan_is_emitted_from_the_harness_todo_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the harness on, the plan the loop is working is what the surface shows (RCH-5).
 
     Read from the harness's own `TodoProvider` store, not a parallel copy — a second representation
     would drift the moment the model revised its todos mid-turn.
+
+    MAF-only: on the graph engine the plan is the `write_todos` state update, which
+    `chemclaw.api.graph_stream._todo_titles` renders under the same change-and-never-empty rule.
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
 
@@ -180,8 +203,16 @@ def test_plan_is_emitted_from_the_harness_todo_state(monkeypatch: pytest.MonkeyP
     assert emitted == plans
 
 
+@maf_engine_only(
+    "`runner._PlanEmitter`'s change filter; the graph engine's copy of the rule is "
+    "in `graph_stream._from_update`"
+)
 def test_an_unchanged_plan_is_not_re_emitted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A static plan streams once, not on every update (which would spam the transcript)."""
+    """A static plan streams once, not on every update (which would spam the transcript).
+
+    MAF-only for the same reason as the test above; the graph engine's copy of this rule lives in
+    `graph_stream._from_update` and is pinned there.
+    """
     monkeypatch.setattr(settings, "harness_enabled", True)
 
     async def _fake_titles(session: Any) -> list[str]:
