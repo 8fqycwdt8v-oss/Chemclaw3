@@ -386,15 +386,59 @@ arranged to keep that commit small and the suite green at each step.
 
 - [ ] **Step 0 — flip the default** (2 files). `agent_engine = "langgraph"`. **This is the real
       proof gate**, and M12 left three probes unrun: say so rather than let the demolition imply
-      they passed.
+      they passed. **Attempted 2026-08-11 with Step 3 and stopped without a line of either landing:
+      it is not a 2-file change, and what blocks it is Step 7.** The switch itself is trivial —
+      `settings.agent_engine` is read nowhere in `src/` but `graph_engine_selected`, and
+      `.env.example` parity is two lines. What is not trivial is that **the MAF `agent` argument is
+      the injection seam the test suite runs on.** Sixteen test files drive `run_turn` — directly,
+      or through the front door with a fake `agent_factory` — by handing it a fake MAF agent. On
+      the graph branch that argument is ignored and `graph_factory` is called instead, and its
+      default is the real `build_langgraph_agent`, which needs a live model. Exactly **two** tests
+      in the tree pass a `graph_factory`, both in `test_langgraph_stream.py`.
+
+      **Measured rather than argued**, with `CHEMCLAW_AGENT_ENGINE=langgraph` and nothing else
+      changed (same tree, same Postgres, `--timeout=60` because the flip makes some tests hang
+      rather than fail):
+
+      - Whole suite: **67 failed, 4164 passed, 36 skipped**, against the 4231 / 36 baseline.
+      - 64 of the 67 sit in twelve files — `test_runner` 22, `test_service` 9, `test_turn_signals`
+        8, `test_turn_cancellation` 8, `test_mid_turn_resume` 5, `test_turn_observability` 3,
+        `test_review_2026_08_05` / `test_dialogue` / `test_autonomy_eval` 2 each, and one each in
+        `test_session_context`, `test_service_events`, `test_rollback_watermark_guard`.
+      - The failure is the same everywhere: `RuntimeError: ANTHROPIC_API_KEY is not set`, raised
+        out of `run_turn → build_langgraph_agent → build_chat_model`.
+      - It is not only failures. The stall-and-cancel tests wait on an agent that is now never run,
+        so the flipped suite does not terminate on its own; under `--timeout=60` it costs 12:51
+        against a 7:33 baseline, and an early un-timed subset had to be killed at 15 minutes.
+
+      **So Step 7's test re-point has to come before Step 0, not after Step 3** — and it is 67
+      tests, not the ~315–420 Step 7 budgets for the middleware halves. The order below is wrong in
+      exactly that one place and nowhere else this attempt could see.
 - [ ] **Step 1 — `harness_types.py`** (6 files). Not free: its importers are the MAF halves of
       `loop_cap` and `plan_gate`, so it lands with them.
 - [ ] **Step 2 — port `turn_signals` to the stream writer** (~18 files). Before the runner, so both
       engines stay green.
 - [ ] **Step 3 — the switch and the runner's MAF branch** (~8 files). The checkpoint that proves
-      the graph engine carries production alone.
+      the graph engine carries production alone. Two things verified while it was attempted with
+      Step 0, both of which survive the re-ordering:
+
+      - **`graph_engine_selected`'s "exactly two branch points" invariant still holds.**
+        `settings.agent_engine` is read nowhere in `src/` except that one predicate, and the
+        predicate has exactly two callers — `api/runner.run_turn` and
+        `api/state.FrontDoor.turn_agent`. Nothing has grown a third branch since M8.
+      - **`FrontDoor.turn_agent` collapses; it does not survive as an unconditional method.** With
+        only the graph engine left it is `yield None` and nothing else, which takes
+        `FrontDoor.agent_pool`'s only caller with it and leaves `run_turn`'s `agent` parameter with
+        no consumer but `_resume`. It should be deleted and `api/routes/turns.py` should pass
+        `None`, rather than kept as a context manager that yields a constant.
 - [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, `_resume`,
       durable compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
+      **`_resume` is not merely dead on the graph engine, it is a live crash, so this step is a
+      prerequisite of Step 0 rather than a follow-up**: `turn_agent` already yields `None` there and
+      mid-turn resume calls `agent.run` on it, so a turn that launches a durable job under
+      `CHEMCLAW_MID_TURN_RESUME_ENABLED=true` dies with `AttributeError`. Off by default, so nothing
+      fails today and no test covers it — it is an operator-settable knob that the flip converts
+      into a crash.
 - [ ] **Step 5 — the harness surface** (~12 files), including a **rewrite of `api/routes/plan.py`
       onto graph state** — new code.
 - [ ] **Step 6 — `template_activities.py` onto `wrap_tool_call`** (~3 files). Two workarounds go
