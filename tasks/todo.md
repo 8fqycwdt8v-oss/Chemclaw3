@@ -1534,3 +1534,151 @@ true after it, which is a better argument for renaming than brevity.
 **Still owed, unchanged from M12 and now a BACKLOG row of its own:** the concurrency probe, the live
 plan→approve→execute round trip, and team routing accuracy. Each needs a credential or a tenant this
 environment does not have. `agent_teams_enabled` stays off by default for the third of them.
+
+---
+
+# Deep-agents audit + the LangSmith question (2026-08-11)
+
+Prompted by: are the deep-agents patterns properly implemented, and is LangSmith implemented — if
+not, is it (or something comparable) worth adding? Audited against LangChain's own four pillars for
+Deep Agents plus the middleware `create_deep_agent` composes by default.
+
+Decided in [`D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has`](../docs/decisions/D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has.md)
+and [`D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape`](../docs/decisions/D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape.md).
+
+**The finding.** Five of six pillars are sound and each narrowing is already argued for in the tree.
+The sixth — context management — does not exist, and everything that *describes* it survived the
+framework removal: three settings with no reader, a config comment in the present tense, three
+`.env.example` rows, and a sentence in the system prompt telling the model its context is compacted.
+
+## Steps
+
+- [x] **Restore D-025's policy** as `agent/compaction.py`: upstream's `ClearToolUsesEdit` for the
+      tool-result half, first-party `KeepLastConversationGroupsEdit` for the conversation window,
+      both inside `wrap_model_call` (non-destructive), attached unconditionally.
+- [x] **Two counters** so the policy is checkable rather than believed —
+      `chemclaw_context_compactions_total`, `chemclaw_context_reclaimed_tokens_total`, incremented by
+      an observer nested inside the editor so it sees both the full thread and the edited request.
+- [x] **Prune the checkpoint tables by thread** (`retention_checkpoints_days`), all three in one
+      transaction, absent tables skipped rather than raised on.
+- [x] **`core.db.existing_tables`** — extracted from `agent/leaver.py` at its second caller.
+- [x] **Delete `ChemclawState.awaiting_jobs`** and rewrite the three docstrings that described it as
+      live.
+- [x] **Give the CLI the checkpointer it documents** (`cli_checkpointer`), handed to both the graph
+      and `_plan_command`.
+- [x] **Fix the stale prose**: `langgraph_agent`'s "not here yet" list, `infra/sql/README.md`'s
+      `session_messages` row, and the four checkpoint tables that inventory structurally cannot list.
+- [x] **Two ADRs + ledger rows + two BACKLOG rows** (the model-call span, the eval-lane spike).
+
+## Review
+
+**What the numbers say.** A thread of realistic turns (one 20,000-character evidence sweep each —
+the largest real result `api/tool_results.py` measured) under the shipped defaults, recorded off a
+fake model inside a real compiled graph. Below the budget the model gets the whole thread; above it
+the sent size stops tracking the thread size:
+
+| turns | thread tokens | sent to the model |
+|------:|--------------:|------------------:|
+| 10 | 51,610 | 51,616 |
+| 20 | 103,230 | **13,740** |
+| 80 | 412,950 | **25,140** |
+| 160 | 825,910 | **40,340** |
+
+`message_pairing.calls_without_adjacent_results` is empty on every one of those, asserted rather
+than reasoned about — a reduction that strands a tool call is rejected by the API outright and
+replayed on every later turn.
+
+**What the first failing test was worth.** The end-to-end test originally asserted a cleared
+placeholder *and* a shortened list in one run, and failed: with a two-group window the cleared
+results were themselves dropped, so both edits were working exactly as specified while the assertion
+was wrong. Split into two tests, one per edit, with the other edit's knob set out of range. The
+lesson is the file's own: an assertion that spans two mechanisms cannot tell you which one moved.
+
+**What could not be verified here.** This sandbox's pgvector is 0.6.0 and the full migration set
+needs 0.7+ (`bit_jaccard_ops`), so every Postgres-backed test skips locally and runs in CI. Rather
+than assert the checkpoint prune from the code, it was run against a live Postgres 16 with the
+checkpointer's own DDL: an expired thread left 0 rows in all three tables, a thread inside its window
+kept all 3, `_prune_checkpoints` reported per-table counts, and a schema with no checkpoint tables
+reported them skipped while `session_events` was still pruned.
+
+**What was declined and why it is a decision rather than a deferral.** LangSmith is proprietary —
+client SDKs open, backend/UI/storage closed, self-host Enterprise-only and sales-gated — so the one
+deployment shape this tree accepts is not on offer. Its core value is prompt/response content in a
+third-party service, which four merged decisions forbid (`core/tracing.py`, `core/logging.py`,
+`SECURITY.md`, D-049's self-hosted-Temporal argument). The gaps being used to argue for it split
+cleanly: per-model attribution, model-call spans and dashboards are in-house work through the
+collector the chart already runs, and the eval/experiment gap (AG-13) is a scoped spike on the eval
+lane where a *self-hostable* tool — Phoenix or Langfuse — is the candidate, not LangSmith.
+
+---
+
+# Phoenix / OpenInference: a model call becomes a span (2026-08-11)
+
+Prompted by: "then go with implementation of phoenix", after the licence comparison. Decided in
+[`D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`](../docs/decisions/D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment.md).
+
+**What working it out changed.** "Implement Phoenix" turned out not to mean adopting Phoenix.
+`openinference-instrumentation-langchain` and its closure are **Apache-2.0**; only the Phoenix
+server image is ELv2, and the instrumentation emits OpenInference spans over plain OTLP without
+speaking to Phoenix at all. So the backend is a deployment choice, nothing ELv2 enters this tree,
+and the change closes two backlog rows that were never vendor-shaped.
+
+## Steps
+
+- [x] Dependency: one Apache-2.0 package, with the reason in `pyproject.toml` beside it.
+- [x] `otel_llm_spans` (new, off in code / on in the chart) and **`otel_include_sensitive_data`
+      revived** — it had no consumer and a warning; this asks the identical question, so it gets the
+      flag back rather than a second knob.
+- [x] `_instrument_llm_calls` + `_trace_config` in `core/logging.py`, lazy-imported, raising the
+      same directive `RuntimeError` the SDK check raises when the extras are missing.
+- [x] `tests/test_llm_spans.py` — five tests, with the content assertion written as a **sweep over
+      every exported attribute** rather than a list of keys.
+- [x] `.env.example`, `values.yaml`, `docs/guides/runbook.md`, `deploy/README.md` — the three places
+      that said per-model attribution was gone now say what replaced it and in which pipeline.
+- [x] ADR + ledger row; the two backlog rows closed, the AG-13 row narrowed to the backend.
+
+## Review
+
+**Measured before a line was written.** An overlay venv (`.pth` onto the project's site-packages, so
+`.venv` was untouched while the gate ran) drove a scripted model through the real
+`build_langgraph_agent` with spans in an `InMemorySpanExporter`. Content allowed → 5 attributes
+carry the question or the answer; suppressed → **0**, with `llm.token_count.*` and `llm.provider`
+byte-identical across the two runs. That is what made suppression a default rather than a trade-off:
+it costs none of what the instrumentation was added for.
+
+A tool-calling turn exports 8 spans — `AGENT` ×1, `LLM` ×2, `CHAIN` ×4, `TOOL` ×1 — so the
+per-*call* attribution the backlog row asked for is there, not a per-turn total.
+
+**The test earned its shape immediately.** `test_every_hide_flag_is_set_together` compares against
+`TraceConfig`'s own dataclass fields rather than a list written twice, and it failed on the first
+run: three embedding flags were missing from the suppression list. `hide_embeddings_text` is the one
+that mattered — the text being embedded is a chemist's question or a note's body — so a list-versus-
+list test would have passed while the default configuration leaked content.
+
+**What this does not do.** It does not close AG-13. That row wants datasets, run-over-run diffing
+and annotation on the eval lane, which is a Phoenix *deployment* run against the probe transcripts.
+What changed is that the trace half of the original ask no longer needs a platform at all.
+
+### Run against a live Phoenix (2026-08-11, follow-up)
+
+The in-memory measurement covers spans as they are *built*. What a deployment gets is spans as they
+are *exported*, so the same turn went twice through the shipped path — `configure_telemetry()`, the
+real OTLP gRPC exporter, `CHEMCLAW_OTEL_ENDPOINT` — into Phoenix 20.0.0 running locally, read back
+out of Phoenix's own REST API:
+
+| | spans | traces | token counts | content-bearing attributes |
+|---|---|---|---|---|
+| suppressed (default) | 10 | 1 | 1234 / 56 / 1290 | **0** |
+| content allowed | 10 | 1 | 1234 / 56 / 1290 | **5** |
+
+Identical except for the one thing the flag governs, and the same five attributes the in-memory run
+found — nothing is added or removed on the way through the exporter.
+
+**The finding worth having run it for**: the first-party and OpenInference spans join into *one*
+trace. Phoenix shows `chemclaw.turn` as the root, with `chemclaw` (CHAIN) beneath it, the skills
+middleware (AGENT), `model` (CHAIN) → the model call (LLM) twice, `tools` (CHAIN) →
+`ask_clarifying_question` (TOOL), and our `chemclaw.tool` as a second child of the turn. An operator
+sees one turn, not two disconnected halves — which was an assumption until this run.
+
+Phoenix needed Python 3.12 to import (20.0.0 declares `>=3.10` and carries a dataclass default only
+3.12 accepts), so it ran in a venv of its own. That is the topology anyway.

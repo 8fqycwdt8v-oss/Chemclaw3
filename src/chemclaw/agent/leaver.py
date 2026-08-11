@@ -39,6 +39,7 @@ import psycopg
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
 
 logger = logging.getLogger(__name__)
@@ -152,19 +153,13 @@ class ErasureReport:
 async def _existing_tables(cur: Any, tables: set[str]) -> set[str]:
     """Which of `tables` exist on this connection's `search_path`.
 
-    One query rather than a guard inside each statement, because a guard inside the statement
-    cannot work: `DELETE FROM t` resolves `t` when the statement is *parsed*, long before any
-    `WHERE` runs. Every table in `_ERASE` is checked, not just the checkpointer's, so the answer
-    does not depend on remembering which ones might be missing.
+    A thin pass-through since the nightly retention sweep needed the same answer about the same
+    tables for the same reason (`core.db.existing_tables`, which carries the explanation). Kept as a
+    name here because every table in `_ERASE` is checked, not just the checkpointer's, so the answer
+    does not depend on remembering which ones might be missing — and that framing is this module's,
+    not the helper's.
     """
-    await cur.execute(
-        "SELECT c.relname FROM pg_class c "
-        "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE c.relkind = 'r' AND c.relname = ANY(%s) "
-        "AND n.nspname = ANY(current_schemas(true))",
-        (sorted(tables),),
-    )
-    return {str(row[0]) for row in await cur.fetchall()}
+    return await existing_tables(cur, tables)
 
 
 async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
