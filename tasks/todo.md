@@ -598,9 +598,18 @@ arranged to keep that commit small and the suite green at each step.
 - [ ] **Step 9 — the dependency and the layering rows** (3 files, atomic per the ratchet). Verify
       by uninstalling `agent-framework-core` and running the suite green.
 - [ ] **Step 10 — docs** (~15 files). `docs/reference/architektur.md` (48 mentions) is a full
-      rewrite — MAF is its thesis, not a mention. **`docs/guides/harness-konzept.md` needs a human
-      decision**: it is a *proposal document for a MAF feature that was built and has since been
-      replaced*, so archiving is the honest answer rather than rewriting it.
+      rewrite — MAF is its thesis, not a mention.
+
+      **`docs/guides/harness-konzept.md` needs no decision and must not be archived.** This row
+      said it was "a proposal document for a MAF feature that was built and has since been
+      replaced", and that was checked against the file on 2026-08-11 and is false: the title is
+      already *"Der Plan-/Ausführungs-Harness (LangGraph)"*, the status line reads "gebaut und in
+      Betrieb hinter `harness_enabled`", and §10 records what the switch changed and why two of the
+      original design decisions existed only to compensate framework defects. It is current
+      documentation that was rewritten with the rebuild. Archiving it would break citations from
+      three append-only ADRs (D-038, D-058, D-137) and from `agent/plan_gate.py`,
+      `agent/harness_todo.py` and `agent/harness_mode.py`, to retire a document that is true today.
+      Its remaining MAF mentions are §10's history, which is the one place they belong.
 
 ## Review
 
