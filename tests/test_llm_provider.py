@@ -1,6 +1,6 @@
 """The LLM provider seam builds the right client per config, and only here (plan Phase F0).
 
-These prove the *wiring* — that `build_chat_client` selects the configured provider and carries the
+These prove the *wiring* — that `build_chat_model` selects the configured provider and carries the
 endpoint/credential/transport into the constructed client — without any network call. The provider
 client classes are monkeypatched so the test asserts on what they were constructed with, not on live
 model behavior.
@@ -53,7 +53,7 @@ def test_openai_compatible_client_carries_endpoint_and_transport(
     fake_af_openai.OpenAIChatClient = FakeOpenAIChatClient  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
 
-    provider.build_chat_client()
+    provider.build_chat_model()
 
     assert captured["openai"]["base_url"] == "https://llm.internal/v1"
     assert captured["openai"]["api_key"] == "generic-key"
@@ -84,7 +84,7 @@ def test_keyless_endpoint_gets_placeholder(monkeypatch: pytest.MonkeyPatch) -> N
     fake_af_openai.OpenAIChatClient = lambda **k: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
 
-    provider.build_chat_client()
+    provider.build_chat_model()
 
     assert captured["api_key"]  # non-empty, so the OpenAI SDK will not refuse to construct
 
@@ -94,7 +94,7 @@ def test_anthropic_path_preflights_missing_key(monkeypatch: pytest.MonkeyPatch) 
     _use_settings(monkeypatch, llm_provider="anthropic")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        provider.build_chat_client()
+        provider.build_chat_model()
 
 
 def _fake_openai_client_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -120,10 +120,10 @@ def test_model_routes_select_the_task_model(monkeypatch: pytest.MonkeyPatch) -> 
     )
     captured = _fake_openai_client_capture(monkeypatch)
 
-    provider.build_chat_client("verifier")
+    provider.build_chat_model("verifier")
     assert captured["model"] == "internal-small"  # routed to the cheap model
 
-    provider.build_chat_client("agent")
+    provider.build_chat_model("agent")
     assert captured["model"] == "internal-large"  # unrouted → default llm_model
 
 
@@ -136,7 +136,7 @@ def test_default_task_is_unchanged_without_routes(monkeypatch: pytest.MonkeyPatc
         llm_model="internal-model",
     )
     captured = _fake_openai_client_capture(monkeypatch)
-    provider.build_chat_client()  # default task, empty model_routes
+    provider.build_chat_model()  # default task, empty model_routes
     assert captured["model"] == "internal-model"
 
 

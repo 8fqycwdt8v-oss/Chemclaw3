@@ -33,7 +33,7 @@ _DEV_OID = "dev-user"
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """The real app; the dev principal holds the privileged role."""
-    return TestClient(create_app(agent_factory=lambda _profile: object()))
+    return TestClient(create_app())
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def plain_user_client(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The app seen by an authenticated chemist holding no operator role."""
     monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     monkeypatch.setattr("chemclaw.core.config.settings.entra_privileged_roles", "operator")
-    app = create_app(agent_factory=lambda _profile: object())
+    app = create_app()
     app.dependency_overrides[require_principal] = lambda: Principal(oid=_DEV_OID)
     yield TestClient(app)
     app.dependency_overrides.clear()

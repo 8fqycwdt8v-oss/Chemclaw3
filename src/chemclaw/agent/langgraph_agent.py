@@ -68,10 +68,9 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     instructions_for,
 )
-from chemclaw.agent.harness_mode import harness_enabled_for
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.loop_cap import lg_loop_cap
-from chemclaw.agent.plan_gate import gate_applies, lg_enforce_plan_approval
+from chemclaw.agent.plan_gate import gate_applies, harness_enabled_for, lg_enforce_plan_approval
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
 from chemclaw.agent.skill_access import skill_permits

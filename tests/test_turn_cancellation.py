@@ -35,8 +35,8 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
 
 import pytest
-from agent_framework import AgentSession
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
@@ -115,11 +115,11 @@ class _StatePoisoningAgent(ScriptedTurn):
     client disconnects before the matching `tool_result` is ever appended.
 
     The session is held rather than taken from the run call, because the graph engine's model is
-    handed messages and not a `AgentSession` — the poisoning is a stand-in for whatever the turn
+    handed messages and not a `TurnSession` — the poisoning is a stand-in for whatever the turn
     committed, and what matters is that it lands in the state the runner snapshotted.
     """
 
-    def __init__(self, session: AgentSession) -> None:
+    def __init__(self, session: TurnSession) -> None:
         """Poison `session`'s stored thread when the turn starts streaming."""
         self._session = session
 
@@ -173,7 +173,7 @@ class _StallingAgent(ScriptedTurn):
     delivers it. `stalled` makes that deterministic — no sleep long enough to "probably" be enough.
     """
 
-    def __init__(self, session: AgentSession, *, updates: int = 1, poison: bool = False) -> None:
+    def __init__(self, session: TurnSession, *, updates: int = 1, poison: bool = False) -> None:
         """Stream `updates` metered chunks into `session`'s turn, then stall."""
         self.stalled = asyncio.Event()
         self._session = session
@@ -217,7 +217,7 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     async def _abandon() -> None:
         stream = _closable(
             run_turn(
-                AgentSession(session_id="s1"),
+                TurnSession(session_id="s1"),
                 "hi",
                 actor="u1",
                 budget=budget,
@@ -260,7 +260,7 @@ def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
         seen: list[str] = []
         agent = _EndlessAgent()
         stream = _closable(
-            run_turn(AgentSession(session_id="s1"), "hi", graph_factory=agent.graph_factory)
+            run_turn(TurnSession(session_id="s1"), "hi", graph_factory=agent.graph_factory)
         )
         try:
             async for event in stream:
@@ -291,7 +291,7 @@ def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
     thread, so one dropped connection would permanently brick the conversation rather than costing
     it a single answer. The earlier turns must survive — this is a rollback, not a wipe.
     """
-    session = AgentSession(session_id="s3")
+    session = TurnSession(session_id="s3")
     session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
     before = copy.deepcopy(session.state)
 
@@ -317,7 +317,7 @@ def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
     `except GeneratorExit:` instead of `except (GeneratorExit, asyncio.CancelledError):`, the
     poisoned `tool_use` survives here while the `aclose()` test above still passes.
     """
-    session = AgentSession(session_id="s4")
+    session = TurnSession(session_id="s4")
     session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
     before = copy.deepcopy(session.state)
 
@@ -365,7 +365,7 @@ def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
     into the yield the answer is suspended in.
     """
     history = _RecordingHistory()
-    session = AgentSession(session_id="s6")
+    session = TurnSession(session_id="s6")
 
     async def _drive() -> None:
         for teardown in ("aclose", "cancel"):
@@ -427,7 +427,7 @@ def test_a_disconnect_after_the_answer_is_billed_as_completed(
         agent = _AnsweringAgent()
         stream = _closable(
             run_turn(
-                AgentSession(session_id="s-answered-cancel"),
+                TurnSession(session_id="s-answered-cancel"),
                 "hi",
                 history=history,
                 connectors=[],
@@ -460,7 +460,7 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
     fails a test rather than silently making abandoned turns free.
     """
     budget = _RecordingBudget()
-    session = AgentSession(session_id="s5")
+    session = TurnSession(session_id="s5")
 
     async def _drive() -> None:
         agent = _StallingAgent(session, updates=3)
@@ -507,7 +507,7 @@ def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> None:
         ("s-blind", "assistant: an earlier answer"),
     ]
     before = list(history.rows)
-    session = AgentSession(session_id="s-blind")
+    session = TurnSession(session_id="s-blind")
 
     async def _drive() -> None:
         agent = _StallingAgent(session, poison=True)
@@ -536,7 +536,7 @@ class _StateWritingAgent(ScriptedTurn):
     settled before the post-run wait began.
     """
 
-    def __init__(self, session: AgentSession) -> None:
+    def __init__(self, session: TurnSession) -> None:
         """Advance `session`'s state as the turn streams."""
         self._session = session
 
@@ -567,7 +567,7 @@ def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
-    session = AgentSession(session_id="s-slow-verify")
+    session = TurnSession(session_id="s-slow-verify")
     stalled = asyncio.Event()
 
     async def _stalling_verify(answer: str, *_args: Any, **_kwargs: Any) -> VerificationResult:
@@ -604,7 +604,7 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
     from chemclaw.core.turn_signals import record_job_started
 
     monkeypatch.setattr(settings, "mid_turn_resume_enabled", True)
-    session = AgentSession(session_id="s-slow-resume")
+    session = TurnSession(session_id="s-slow-resume")
     stalled = asyncio.Event()
 
     class _JobAgent(_StateWritingAgent):

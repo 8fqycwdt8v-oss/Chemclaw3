@@ -43,26 +43,61 @@ from datetime import datetime
 from typing import Any
 
 import psycopg
-from agent_framework import HistoryProvider, Message
+from langchain_core.messages import AIMessage, BaseMessage, message_to_dict, messages_from_dict
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent.message_migration import (
+    LANGCHAIN_SHAPE,
+    UnconvertibleMessage,
+    to_langchain,
+)
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 
 log = logging.getLogger(__name__)
 
+
+def _message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
+    """One stored row as a LangChain message, whichever shape it holds.
+
+    Both shapes read, and that is what the `message_shape` stamp is for (D-2026-08-10 §"why a shape
+    version"): a rollout is not atomic, and `make db-migrate`'s conversion pass is resumable, so
+    during it some rows are MAF and some are LangChain. An unstamped row is MAF, because every row
+    written before the stamp existed has no stamp and rewriting them all to add one is exactly the
+    rewrite the version exists to avoid.
+
+    A row that will not convert degrades to its own text rather than raising. `to_langchain` is
+    deliberately strict — a migration must stop on a shape nobody anticipated rather than guess —
+    but this is the *read* path, and the reader is a chemist reloading a conversation. Failing the
+    whole transcript because one historical row holds a content type this system no longer writes
+    would lose the conversation to protect it.
+    """
+    if shape == LANGCHAIN_SHAPE:
+        return messages_from_dict([payload])[0]
+    try:
+        return to_langchain(payload)
+    except UnconvertibleMessage:
+        log.warning("could not render a stored message; showing it as plain text", exc_info=True)
+        return AIMessage(content=str(payload.get("text", "")))
+
+
 # The correlation id makes a stored message joinable to the audit rows of the turn that wrote it
 # (D-2026-07-31-the-audit-chain-is-versioned).
 # Without it the two halves of "what happened in this conversation" — the words and the
 # tool calls — sat in tables with no key between them, so the GxP trail could show *that* a tool ran
 # and never *why*.
-_INSERT = "INSERT INTO session_messages (session_id, message, correlation_id) VALUES (%s, %s, %s)"
+_INSERT = (
+    "INSERT INTO session_messages (session_id, message, message_shape, correlation_id) "
+    "VALUES (%s, %s, %s, %s)"
+)
 # Row ids come back too, so a repaired message can be written to the row it came from. There is no
 # id-less variant: every reader needs the id, and the one that existed was dead code that D-143's
 # prose then cited as the statement the read path runs.
-_SELECT_WITH_ID = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
+_SELECT_WITH_ID = (
+    "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
+)
 
 # The per-session turn claim (D-121). One statement, so the check and the take cannot be
 # interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
@@ -132,14 +167,17 @@ async def _session_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection
         yield conn
 
 
-class PostgresHistoryProvider(HistoryProvider):
-    """A `HistoryProvider` that persists a session's messages to Postgres (durable, resumable)."""
+class PostgresHistoryProvider:
+    """Persists a session's transcript to Postgres, and reads it back for a person.
 
-    _SOURCE_ID = "postgres_history"
+    A plain class since M13. It subclassed MAF's `HistoryProvider` while the framework asked a
+    provider for the thread it was about to send a model; nothing asks now — the graph reads its
+    checkpointer — so the base class contributed a `source_id` and a set of hooks with no callers.
+    What is left is the two storage primitives it always overrode.
+    """
 
     def __init__(self) -> None:
         """Configure the provider against the session-store database."""
-        super().__init__(source_id=self._SOURCE_ID)
         self._dsn = _session_dsn()
 
     def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
@@ -148,7 +186,7 @@ class PostgresHistoryProvider(HistoryProvider):
 
     async def get_messages(
         self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
-    ) -> list[Message]:
+    ) -> list[BaseMessage]:
         """Load a session's messages in insertion order (empty for an unknown/None session).
 
         A plain read, and the absence of the repair that used to sit here is the point. That repair
@@ -166,12 +204,12 @@ class PostgresHistoryProvider(HistoryProvider):
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
-        return [Message.from_dict(row[1]) for row in rows]
+        return [_message_from_row(row[1], row[2]) for row in rows]
 
     async def save_messages(
         self,
         session_id: str | None,
-        messages: Sequence[Message],
+        messages: Sequence[BaseMessage],
         *,
         state: dict[str, Any] | None = None,
         **kwargs: Any,
@@ -189,7 +227,10 @@ class PostgresHistoryProvider(HistoryProvider):
         # Read once for the whole batch: these messages are one turn's work, so they share its
         # correlation id. Empty off the request path (the CLI, tests), where there is no turn.
         correlation_id = get_current_correlation_id() or ""
-        rows = [(session_id, Jsonb(message.to_dict()), correlation_id) for message in messages]
+        rows = [
+            (session_id, Jsonb(message_to_dict(message)), LANGCHAIN_SHAPE, correlation_id)
+            for message in messages
+        ]
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(_INSERT, rows)
@@ -329,3 +370,41 @@ class SessionTurnClaims:
             async with conn.cursor() as cur:
                 await cur.execute(_TURN_RELEASE, (session_id, holder))
             await conn.commit()
+
+
+class InMemoryHistoryProvider:
+    """The dev/test transcript store: the same two primitives, over the session's own state.
+
+    Keeps the thread in `session.state` — the dict `TurnSession` carries — which is why both
+    primitives take `state`. That is not incidental: it is the whole difference from the Postgres
+    provider, which deliberately keeps nothing there, and it is why a memory-backed session's
+    transcript dies with the pod.
+
+    First-party since M13, replacing MAF's provider of the same name. Twelve lines rather than an
+    import because the framework's version carried a thread the model was sent, a compaction seam
+    and a set of run hooks — none of which has a caller now that the graph reads its checkpointer.
+    """
+
+    _KEY = "chemclaw_transcript"
+
+    async def get_messages(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
+    ) -> list[BaseMessage]:
+        """This session's stored transcript, or empty when it has none."""
+        if state is None:
+            return []
+        stored = state.get(self._KEY) or []
+        return list(stored)
+
+    async def save_messages(
+        self,
+        session_id: str | None,
+        messages: Sequence[BaseMessage],
+        *,
+        state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Append this turn's exchange to the session's state (no-op without one)."""
+        if state is None or not messages:
+            return
+        state.setdefault(self._KEY, []).extend(messages)

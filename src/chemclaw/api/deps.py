@@ -36,6 +36,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.state import LiveSession, SessionOwners, state
 from chemclaw.core.config import settings
@@ -138,7 +139,7 @@ async def _rehydrate_session(
     # widening, and it did not need a restart to happen. The live LRU has a capacity and no
     # TTL, so on a busy pod one session evicts another while both are in use; a chemist
     # mid-conversation regained every tool their profile had removed, having done nothing.
-    session = front.agent(profile).create_session(session_id=session_id)
+    session = TurnSession(session_id=session_id)
     return front.live_sessions.add(session_id, session, owner, profile)
 
 

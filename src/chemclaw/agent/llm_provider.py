@@ -31,30 +31,6 @@ from chemclaw.core.config import settings
 _KEYLESS_PLACEHOLDER = "not-required"
 
 
-def build_chat_client(task: str = "agent") -> Any:
-    """Build the configured MAF chat client (provider selected by `settings.llm_provider`).
-
-    Args:
-        task: The routing key for per-task model selection (plan F10-E). When
-            `settings.model_routes` names a model for this task, that model is used; otherwise the
-            provider's default model (`llm_model`/`agent_model`) is used. The default `"agent"`
-            reproduces the single-model behavior, so existing callers need no change.
-
-    Returns:
-        A MAF chat client ready to hand to `Agent(client=...)`. No network call happens here —
-        construction only.
-
-    Raises:
-        RuntimeError: When the selected provider's required credential/config is absent, with a
-            message naming exactly what to set (so a misconfiguration fails clearly at build time,
-            not as an opaque 401/404 on the first model call).
-    """
-    model = settings.model_routes.get(task)
-    if settings.llm_provider == "openai_compatible":
-        return _openai_compatible_client(model)
-    return _anthropic_client(model)
-
-
 def build_chat_model(task: str = "agent") -> Any:
     """Build the configured LangChain chat model — the LangGraph engine's half of this seam.
 
@@ -163,27 +139,6 @@ def _require_anthropic_key() -> None:
         )
 
 
-def _openai_compatible_client(model: str | None = None) -> Any:
-    """Point MAF's OpenAI client at the internal endpoint (base_url + generic credential).
-
-    Transport (private-CA TLS via `llm_tls_ca_bundle`, `llm_timeout_seconds`, `llm_max_retries`) is
-    carried by an `AsyncOpenAI` we construct explicitly, since MAF's client constructor does not
-    expose those — the model call must survive a slow or self-signed internal endpoint. `model`
-    overrides the default endpoint model for per-task routing (F10-E); None keeps `llm_model`.
-    """
-    from agent_framework.openai import OpenAIChatClient
-    from openai import AsyncOpenAI
-
-    async_client = AsyncOpenAI(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key or _KEYLESS_PLACEHOLDER,
-        timeout=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
-        http_client=_tls_http_client(),
-    )
-    return OpenAIChatClient(model=model or settings.llm_model, async_client=async_client)
-
-
 def _tls_http_client() -> Any | None:
     """An httpx client pinned to the internal CA when one is configured, else None (system store).
 
@@ -195,31 +150,3 @@ def _tls_http_client() -> Any | None:
     import httpx
 
     return httpx.AsyncClient(verify=settings.llm_tls_ca_bundle)
-
-
-def _anthropic_client(model: str | None = None) -> Any:
-    """Build the Anthropic dev-path client (unchanged behavior from the pre-seam default).
-
-    Preflights the key so a missing credential fails here with a clear message rather than an opaque
-    401 on the first call. `agent_model` (not `llm_model`) names the Anthropic model, keeping the
-    two providers' model settings independent; `model` overrides it for per-task routing (F10-E),
-    None keeps `agent_model`.
-    """
-    _require_anthropic_key()
-    from agent_framework.anthropic import AnthropicClient
-    from anthropic import AsyncAnthropic
-
-    # Transport carried explicitly, exactly as the openai_compatible branch does. `AnthropicClient`
-    # takes no timeout/retry arguments of its own, so a config that set them was silently ignored
-    # here: the real timeout was the SDK's 600 s default against a configured 60 s, and
-    # `llm_tls_ca_bundle` did nothing at all. The only bound left was the front door's turn
-    # deadline, which is a much blunter instrument than a per-call timeout — it kills the whole
-    # turn rather than retrying one stalled call.
-    return AnthropicClient(
-        model=model or settings.agent_model,
-        anthropic_client=AsyncAnthropic(
-            timeout=settings.llm_timeout_seconds,
-            max_retries=settings.llm_max_retries,
-            http_client=_tls_http_client(),
-        ),
-    )

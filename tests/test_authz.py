@@ -23,6 +23,7 @@ from chemclaw.agent.authz import (
 )
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from tests.surface import surface
 
 
 def _privileged_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,10 +199,9 @@ def test_every_advertised_tool_is_classified_write_or_read() -> None:
     would silently check a third of what it claims to.
     """
     from chemclaw.agent.authz import side_effecting_tools
-    from chemclaw.agent.chemclaw_agent import build_agent
     from chemclaw.core.tool_registry import registered_tool_names
 
-    build_agent(chat_client=object())
+    surface(None)
     advertised = set(registered_tool_names())
     classified = side_effecting_tools() | READ_ONLY_TOOLS
     assert advertised - classified == set(), (

@@ -21,8 +21,7 @@ import json
 from collections.abc import MutableMapping
 from typing import Any
 
-from agent_framework import AgentSession
-
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
 from chemclaw.core.config import settings
 from tests.fakes import FakeUpdate
@@ -33,16 +32,16 @@ class _StreamingAgent:
 
     mcp_tools: list[Any] = []
 
-    def create_session(self, *, session_id: str) -> AgentSession:
+    def create_session(self, *, session_id: str) -> TurnSession:
         """Build the turn's session object (the app calls this once per conversation)."""
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
     def run(  # noqa: D102 - a fake agent's run, documented by its class
         self,
         message: str,
         *,
         stream: bool,
-        session: AgentSession,
+        session: TurnSession,
         **_run_options: Any,
     ) -> Any:
         async def _gen() -> Any:
@@ -184,7 +183,6 @@ def test_a_release_that_cannot_reach_the_store_never_escapes_its_task() -> None:
     """
     claims = _BrokenClaims()
     app = create_app(
-        agent_factory=lambda _profile: _StreamingAgent(),
         connector_factory=lambda _profile: [],
         turn_claims=claims,
     )
@@ -219,7 +217,6 @@ def test_a_client_disconnect_releases_the_durable_turn_claim() -> None:
     """
     claims = _RecordingClaims()
     app = create_app(
-        agent_factory=lambda _profile: _StreamingAgent(),
         connector_factory=lambda _profile: [],
         turn_claims=claims,
     )
@@ -255,7 +252,6 @@ def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -> None
     """
     claims = _RecordingClaims()
     app = create_app(
-        agent_factory=lambda _profile: _StreamingAgent(),
         connector_factory=lambda _profile: [],
         turn_claims=claims,
     )
@@ -326,7 +322,6 @@ def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.2)
     app = create_app(
-        agent_factory=lambda _profile: _StreamingAgent(),
         connector_factory=lambda _profile: [],
     )
 
@@ -418,7 +413,6 @@ def test_a_client_gone_before_the_event_stream_starts_frees_its_per_user_slot(
 
     monkeypatch.setattr(front_door, "stream_new_events", _never_yields)
     app = create_app(
-        agent_factory=lambda _profile: _StreamingAgent(),
         connector_factory=lambda _profile: [],
     )
 

@@ -35,8 +35,6 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
-from chemclaw.agent.harness_todo import mark_awaiting_job
-from chemclaw.agent.live_session import get_current_session
 from chemclaw.connectors.manifest import JobParamType, JobSpec
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
@@ -434,13 +432,16 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 # It answered inside the turn, so there is no background work to announce and
                 # nothing for the chemist to poll — the result *is* the tool's return value.
                 return finished
-        # Two announcements, both only on a *genuine* start that is still running. The turn's event
-        # stream shows the launch while the turn is still streaming (D-042); the harness's todo list
-        # records that the plan is blocked on this id, so `todos_remaining` sees "waiting" rather
-        # than re-invoking the model with nothing new (D-040). A re-joined run is deliberately
-        # silent: it may already be finished, and neither surface would ever get the matching
+        # Announced only on a *genuine* start that is still running: the turn's event stream shows
+        # the launch while the turn is still streaming (D-042). A re-joined run is deliberately
+        # silent — it may already be finished, and no surface would ever get the matching
         # `job_completed` event to clear the row it drew.
-        await _mark_awaiting_if_harness(handle.id, job.name)
+        #
+        # There used to be a second announcement here, opening a harness todo that recorded the
+        # plan as blocked on this id. Its stated purpose was so MAF's `todos_remaining` loop
+        # predicate saw "waiting" rather than re-invoking the model with nothing new (D-040). That
+        # predicate is gone with the framework — the graph's loop ends when the model stops calling
+        # tools, so an open todo cannot drive one — and with it the reason for the todo.
         record_job_started(handle.id, job.name)
         return handle.id
 
@@ -448,26 +449,6 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     launch.__qualname__ = job.name
     launch.__doc__ = _docstring(job)
     return launch
-
-
-async def _mark_awaiting_if_harness(job_id: str, job_name: str) -> None:
-    """Record the harness todo awaiting `job_id`, when the harness's todo list is in play.
-
-    Core's obligation, not a bundle's: a durable launch that leaves the harness's plan open would
-    keep `todos_remaining` re-invoking the model with nothing to report, and no connector can see
-    the turn's todo state to close that itself. It lived in the hand-written QM launcher until the
-    HPC job became a declared job (D-118), which made this the only launcher left to hold it — and
-    fixed the gap that every *other* durable job had never had it at all.
-
-    Silent no-op off the harness path (harness disabled, or no live `AgentSession` ambient — e.g.
-    the CLI, which runs single-shot): writing to a todo list nothing reads would just be dead state.
-    """
-    if not settings.harness_enabled:
-        return
-    session = get_current_session()
-    if session is None:
-        return
-    await mark_awaiting_job(session, job_id, title=f"Await the {job_name} job {job_id}")
 
 
 async def _await_briefly(

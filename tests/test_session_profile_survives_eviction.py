@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 from chemclaw.api.app import create_app
 from chemclaw.core.config import settings
-from tests.test_service import _FakeAgent, _FakeOwnerStore, _no_connectors
+from tests.test_service import _FakeOwnerStore, _no_connectors
 
 
 def _client_with_one_slot(
@@ -41,7 +41,6 @@ def _client_with_one_slot(
     monkeypatch.setattr(settings, "service_max_live_sessions", 1)
     owners = _FakeOwnerStore()
     app = create_app(
-        agent_factory=lambda _profile: _FakeAgent(),
         owner_store=owners,
         connector_factory=_no_connectors,
     )

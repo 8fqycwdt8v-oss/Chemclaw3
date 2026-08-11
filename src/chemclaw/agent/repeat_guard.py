@@ -29,11 +29,10 @@ the agent's stream is driven from a task of its own.
 import json
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
-from agent_framework import FunctionInvocationContext, function_middleware
 from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.core.config import settings
@@ -81,32 +80,6 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
     a decoded JSON object or a pydantic model, and neither can be circular.
     """
     return (name, json.dumps(arguments, sort_keys=True, default=str))
-
-
-@function_middleware
-async def refuse_repeated_calls(
-    context: FunctionInvocationContext,
-    call_next: Callable[[], Awaitable[None]],
-) -> None:
-    """Let a tool call through unless this turn has already made the identical one too often.
-
-    Attached beside `refuse_writes_on_dry_run`: inside the audit middleware so the refusal is a
-    recorded outcome, inside `surface_domain_errors` so the model is told plainly, and outside
-    `announce_tool_failures` because nothing ran — a refusal is not a tool failure, and showing it
-    to the chemist as one would misdescribe a turn that is working correctly.
-
-    A no-op off the request path (no counter, no limit) and on every turn that does not repeat
-    itself, which is nearly all of them.
-
-    Raises:
-        RepeatedCallRefusal: This exact call has already been made `max_identical_tool_calls`
-            times in this turn. The tool body never runs; the message names the tool, says how
-            many times it was asked, and says what to do instead.
-    """
-    refusal = count_call(context.function.name, context.arguments)
-    if refusal is not None:
-        raise refusal
-    await call_next()
 
 
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:

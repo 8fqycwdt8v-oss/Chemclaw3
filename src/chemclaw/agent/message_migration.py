@@ -46,13 +46,6 @@ from langchain_core.messages import (
 )
 from psycopg.types.json import Jsonb
 
-# The store's own DSN resolver and pooled-connection helper, private but shared within the package
-# for the reason they exist at all: `_session_dsn` is "one resolver for all three classes so they
-# can never point at different databases". A conversion pass that resolved its own DSN could
-# rewrite a different database from the one the provider reads, which is the single worst thing
-# this module could do.
-from chemclaw.agent.session_store import _session_connection, _session_dsn
-
 logger = logging.getLogger(__name__)
 
 # The stamp that says which shape a row's `message` column holds. Absent means MAF, because every
@@ -188,6 +181,13 @@ _MARK_CONVERTED = (
 async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
     """Rewrite every MAF-shaped row into LangChain shape, stamping each as it goes.
 
+    The store's own DSN resolver and pooled-connection helper are imported here rather than at
+    module scope, and not only to break the cycle the read path introduced: `_session_dsn` is "one
+    resolver for all three classes so they can never point at different databases", and a
+    conversion pass that resolved its own DSN could rewrite a different database from the one the
+    provider reads — the single worst thing this module could do. Deferring the import keeps the
+    pure half genuinely pure, which is what its own docstring above promises.
+
     **Resumable by construction, which is what makes an irreversible step survivable.** The pass
     selects only rows still stamped `maf`, so running it twice converts nothing twice and an
     interrupted run simply continues where it stopped. Nothing is deleted and nothing is rewritten
@@ -205,6 +205,8 @@ async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
     Returns:
         What was converted and which rows were refused.
     """
+    from chemclaw.agent.session_store import _session_connection, _session_dsn
+
     converted = 0
     refused: list[int] = []
     async with _session_connection(_session_dsn()) as conn:

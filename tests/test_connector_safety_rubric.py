@@ -43,11 +43,13 @@ from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
 from chemclaw.agent.audit import AuditEvent
-from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
+from chemclaw.agent.chemclaw_agent import connector_specs
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.connectors.identity import HEADER_ACTOR
-from chemclaw.connectors.registry import open_reachable
+from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from tests.conftest import _free_port
+from tests.fakes_langgraph import ScriptedChatModel
 
 _BUNDLE = """\
 name: governed
@@ -211,17 +213,19 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
 
 def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:
     """Drive one real agent turn whose scripted model calls `tool_name`, and return its text."""
-    agent = build_agent(
-        chat_client=_ScriptedChatClient([_call(tool_name, {"subject": "benzene"}), _text("done")]),
-        audit_sink=sink,
-    )
 
     async def _go() -> str:
         async with AsyncExitStack() as stack:
-            turn_connectors = connector_tools()
-            await open_reachable(stack, turn_connectors)
-            response = await agent.run("check the subject", tools=turn_connectors)
-            return str(response.text)
+            connectors, _unreachable = await open_connector_specs(stack, connector_specs())
+            graph = build_langgraph_agent(
+                model=ScriptedChatModel(
+                    [{"name": tool_name, "args": {"subject": "benzene"}}, "done"]
+                ),
+                audit_sink=sink,
+                connectors=connectors,
+            )
+            result = await graph.ainvoke({"messages": [("user", "check the subject")]})
+            return str(result["messages"][-1].content)
         raise AssertionError("unreachable")  # pragma: no cover - satisfies the type checker
 
     return asyncio.run(_go())

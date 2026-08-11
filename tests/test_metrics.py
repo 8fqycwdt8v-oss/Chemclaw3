@@ -33,9 +33,9 @@ class _FakeAgent:
     mcp_tools: list[Any] = []
 
     def create_session(self, *, session_id: str) -> Any:
-        from agent_framework import AgentSession
+        from chemclaw.agent.session import TurnSession
 
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
 
 def test_a_counter_renders_with_help_and_type() -> None:
@@ -81,7 +81,7 @@ def test_a_gauge_reads_its_live_source_each_time() -> None:
 
 def test_the_endpoint_serves_the_prometheus_content_type() -> None:
     """A scraper keys off the content type; the route and the renderer must agree on it."""
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         response = client.get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
@@ -90,7 +90,7 @@ def test_the_endpoint_serves_the_prometheus_content_type() -> None:
 
 def test_the_endpoint_exposes_saturation_not_cpu() -> None:
     """In-flight turns against the cap is the signal the HPA should scale on (gap DEP-4)."""
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         body = client.get("/metrics").text
     assert "chemclaw_turns_in_flight" in body
     assert "chemclaw_turn_capacity" in body
@@ -111,7 +111,7 @@ def test_metrics_carry_no_identifiers_or_turn_content() -> None:
     here, and the allowlist is what keeps the next label from being one of those by accident — the
     registry refuses an undeclared label name, and this refuses an undeclared one reaching the wire.
     """
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         client.post("/sessions")
         body = client.get("/metrics").text
     permitted = {"le"} | {label for labels in _COUNTER_LABELS.values() for label in labels}
@@ -213,7 +213,7 @@ def test_a_merge_notification_triggers_a_rebuild_now(monkeypatch: pytest.MonkeyP
         return "note-reindex-202607250900"
 
     monkeypatch.setattr("chemclaw.api.app.request_note_reindex", _fake_reindex)
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         response = client.post("/events/knowledge-merged")
     assert response.status_code == 202
     assert response.json()["workflow_id"].startswith("note-reindex-")

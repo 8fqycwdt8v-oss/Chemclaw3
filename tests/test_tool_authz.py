@@ -1,30 +1,29 @@
 """Per-tool authorization: the decision and the middleware that enforces it.
 
 Proves `authorize_tool` allows/denies by the turn's ambient roles against `tool_role_gates` under
-both defaults, that dev mode is open, and that `enforce_tool_authz` blocks a denied call before the
-tool body runs and passes an allowed one through — all offline with fakes, no tenant.
+both defaults, that dev mode is open, and that `lg_enforce_tool_authz` blocks a denied call before
+the tool body runs and passes an allowed one through — all offline with fakes, no tenant.
 """
 
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
-from types import SimpleNamespace
-from typing import cast
+from typing import Any
 
 import pytest
-from agent_framework import FunctionInvocationContext
 
 from chemclaw.agent.authz import AuthorizationError, authorize_tool
 from chemclaw.agent.tool_authz import (
-    announce_tool_failures,
-    enforce_tool_authz,
-    surface_authorization_denials,
-    surface_domain_errors,
+    lg_announce_tool_failures,
+    lg_enforce_tool_authz,
+    lg_surface_authorization_denials,
+    lg_surface_domain_errors,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import Signal, ToolFailureSignal
+from tests.middleware import run_middleware, tool_request
 from tests.signals import collect_signals
 
 
@@ -179,24 +178,33 @@ def test_deny_default_refuses_write_tools_even_for_privileged_roles(
         reset_current_identity(token)
 
 
-def _ctx(name: str) -> FunctionInvocationContext:
-    """A minimal stand-in exposing the one field the middleware reads."""
-    return cast(FunctionInvocationContext, SimpleNamespace(function=SimpleNamespace(name=name)))
+def _ctx(name: str) -> Any:
+    """The call as the middleware reads it, with a slot for what it produced.
+
+    A `ToolCallRequest` plus a mutable `result` the assertions below read. The MAF halves these
+    replaced *wrote* their result onto the invocation context, so the tests were written against
+    that shape; a `wrap_tool_call` middleware returns a `ToolMessage` instead. `_drive_surfacing`
+    stores what came back on the request, which keeps the assertions about the *decision* rather
+    than about how the framework hands a result along.
+    """
+    request = tool_request(name)
+    object.__setattr__(request, "result", None)
+    return request
 
 
-def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]) -> None:
-    """Run the authz middleware over a stand-in context to completion."""
+def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
+    """Run the authz middleware over one call to completion."""
 
-    async def _run() -> None:
-        await enforce_tool_authz(ctx, call_next)
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    asyncio.run(run_middleware(lg_enforce_tool_authz, ctx, _handler))
 
 
 def test_middleware_blocks_a_denied_call_before_the_tool_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`enforce_tool_authz` raises for an unauthorized tool and never invokes the tool body."""
+    """`lg_enforce_tool_authz` raises for an unauthorized tool and never invokes the tool body."""
     _enforced(monkeypatch, tool_role_gates={"compute_dft_energy": ["process-chemist"]})
     ran = False
 
@@ -230,15 +238,15 @@ def test_middleware_passes_an_authorized_call_through(monkeypatch: pytest.Monkey
     assert ran is True
 
 
-def _drive_surfacing(
-    ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
-) -> None:
-    """Run `surface_authorization_denials` over a stand-in context to completion."""
+def _drive_surfacing(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
+    """Run `lg_surface_authorization_denials` over one call, storing what it produced on `ctx`."""
 
-    async def _run() -> None:
-        await surface_authorization_denials(ctx, call_next)
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    message = asyncio.run(run_middleware(lg_surface_authorization_denials, ctx, _handler))
+    if message is not None:
+        object.__setattr__(ctx, "result", message.content)
 
 
 def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
@@ -281,24 +289,23 @@ def test_surfacing_leaves_other_exceptions_untouched() -> None:
 def test_surfacing_passes_a_successful_call_through_unchanged() -> None:
     """A call that succeeds is unaffected — no result override, no swallowed exception."""
     ctx = _ctx("predict_pka")
-    ctx.result = None
 
-    async def _ok() -> None:
-        ctx.result = "6.51"
+    async def _ok() -> str:
+        return "6.51"
 
     _drive_surfacing(ctx, _ok)
     assert ctx.result == "6.51"
 
 
-def _drive_domain_errors(
-    ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
-) -> None:
-    """Run `surface_domain_errors` over a stand-in context to completion."""
+def _drive_domain_errors(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
+    """Run `lg_surface_domain_errors` over one call, storing what it produced on `ctx`."""
 
-    async def _run() -> None:
-        await surface_domain_errors(ctx, call_next)
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    message = asyncio.run(run_middleware(lg_surface_domain_errors, ctx, _handler))
+    if message is not None:
+        object.__setattr__(ctx, "result", message.content)
 
 
 def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> None:
@@ -332,7 +339,6 @@ def test_domain_errors_leave_other_exceptions_untouched() -> None:
 def test_domain_errors_pass_a_successful_call_through_unchanged() -> None:
     """A call that succeeds is unaffected — no result override, no swallowed exception."""
     ctx = _ctx("predict_pka")
-    ctx.result = None
 
     async def _ok() -> None:
         ctx.result = "6.51"
@@ -402,14 +408,15 @@ def test_an_unauthenticated_user_is_named_as_such(monkeypatch: pytest.MonkeyPatc
         authorize_tool("predict_pka")
 
 
-def _drive_announcing(
-    ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
-) -> list[Signal]:
-    """Run `announce_tool_failures` inside a turn and return the signals it left behind."""
+def _drive_announcing(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> list[Signal]:
+    """Run `lg_announce_tool_failures` inside a turn and return the signals it left behind."""
+
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
     async def _announce() -> None:
         with contextlib.suppress(Exception):
-            await announce_tool_failures(ctx, call_next)
+            await run_middleware(lg_announce_tool_failures, ctx, _handler)
 
     async def _run() -> list[Signal]:
         _returned, signals = await collect_signals(_announce)
@@ -441,9 +448,12 @@ def test_the_failing_exception_still_propagates_untouched() -> None:
     async def _boom() -> None:
         raise ValueError("unrelated failure")
 
+    async def _handler(_request: Any) -> Any:
+        return await _boom()
+
     async def _run() -> None:
         with pytest.raises(ValueError, match="unrelated failure"):
-            await announce_tool_failures(_ctx("predict_pka"), _boom)
+            await run_middleware(lg_announce_tool_failures, _ctx("predict_pka"), _handler)
 
     asyncio.run(_run())
 

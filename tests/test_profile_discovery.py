@@ -10,7 +10,6 @@ expressible at all now that the domain capabilities are out of process — and a
 underneath everything: a profile *attenuates*, it never authorizes.
 """
 
-import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -18,10 +17,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from chemclaw.agent.chemclaw_agent import advertised_tool_names, build_agent, connector_tools
+from chemclaw.agent.chemclaw_agent import advertised_tool_names, connector_specs
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles, profile_files
 from chemclaw.agent.profiles import _REGISTRY, get_profile, registered_profile_names
 from chemclaw.api.app import create_app
+from tests.surface import surface
 
 _PROFILE = """\
 instructions: Answer tersely.
@@ -122,7 +122,7 @@ def test_a_bundle_can_ship_its_own_profile(monkeypatch: pytest.MonkeyPatch) -> N
     assert profile_files() == []
 
 
-def test_the_shipped_profile_narrows_both_halves_of_the_surface() -> None:
+def test_the_shipped_profile_narrows_both_halves_of_thesurface() -> None:
     """`property-lookup` gets four connector tools and one in-process tool, and nothing else.
 
     This is the property that makes a profile useful after the domain capabilities moved out of
@@ -130,9 +130,9 @@ def test_the_shipped_profile_narrows_both_halves_of_the_surface() -> None:
     agent-facing allow-list, dropping connectors left with nothing.
     """
     load_profiles()
-    agent = build_agent(chat_client=object(), profile="property-lookup")
-    assert {t.name for t in agent.default_options["tools"]} == {"ask_clarifying_question"}
-    attached = {c.name: sorted(c.allowed_tools or ()) for c in connector_tools("property-lookup")}
+    agent = surface("property-lookup")
+    assert {t.name for t in agent.tools} == {"ask_clarifying_question"}
+    attached = {c.name: sorted(c.allowed_tools or ()) for c in connector_specs("property-lookup")}
     assert attached == {
         "calc": ["calculator_trust", "compute_xtb_energy", "predict_pka", "predict_solubility"]
     }
@@ -153,16 +153,13 @@ def test_advertised_tool_names_matches_the_surface_the_agent_really_builds(
     which is the case where the rules actually do something.
     """
     load_profiles()
-    agent = build_agent(chat_client=object(), profile=profile)
-    connectors = connector_tools(profile)
-    try:
-        real = {t.name for t in agent.default_options["tools"]}
-        for connector in connectors:
-            real |= set(connector.allowed_tools or ())
-    finally:
-        # Unconnected, but each one owns a client; releasing them keeps the test from leaking.
-        for connector in connectors:
-            asyncio.run(connector.close())
+    advertised = surface(profile)
+    # No `try/finally` releasing anything: a `ConnectorSpec` is a description, not an open client.
+    # It used to be an unconnected MAF tool object owning an httpx client, which had to be closed
+    # or the test leaked one per profile.
+    real = {tool.name for tool in advertised.tools}
+    for connector in advertised.connectors:
+        real |= set(connector.allowed_tools or ())
 
     assert advertised_tool_names(profile) == real
 
@@ -174,22 +171,24 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
     are attached afterwards and unconditionally, so a profile that named a tool the caller may
     not use would still be refused at call time.
     """
-    from chemclaw.agent.tool_authz import enforce_tool_authz
+    from chemclaw.agent.tool_authz import lg_enforce_tool_authz
 
     load_profiles()
-    narrowed = build_agent(chat_client=object(), profile="property-lookup")
-    default = build_agent(chat_client=object())
 
     # Asserted as *the same chain the default agent gets*, not as a count: the chain has grown
     # (error surfacing was added around audit + authz) and a hardcoded number would have failed
     # on that addition while saying nothing about the property that matters.
     # Compared by *name*, because the audit entry is a closure built per agent: identity would
     # differ for two agents that are nonetheless governed identically, which is the property here.
-    def names(agent: Any) -> list[str]:
-        return [middleware.__name__ for middleware in (agent.middleware or [])]
+    from chemclaw.agent.langgraph_agent import tool_call_middleware
+    from chemclaw.agent.profiles import get_profile
 
-    assert names(narrowed) == names(default)
-    assert enforce_tool_authz in (narrowed.middleware or [])
+    def names(profile_name: str | None) -> list[str]:
+        chain = tool_call_middleware(object(), get_profile(profile_name))
+        return [type(middleware).__name__ for middleware in chain]
+
+    assert names("property-lookup") == names(None)
+    assert lg_enforce_tool_authz in tool_call_middleware(object(), get_profile("property-lookup"))
 
 
 class _FakeAgent:
@@ -199,9 +198,9 @@ class _FakeAgent:
         self.profile = profile
 
     def create_session(self, *, session_id: str) -> Any:
-        from agent_framework import AgentSession
+        from chemclaw.agent.session import TurnSession
 
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
 
 def test_a_session_selects_its_profile_and_keeps_it() -> None:
@@ -216,7 +215,7 @@ def test_a_session_selects_its_profile_and_keeps_it() -> None:
         built.append(profile)
         return _FakeAgent(profile)
 
-    app = create_app(agent_factory=factory, connector_factory=lambda _profile: [])
+    app = create_app(connector_factory=lambda _profile: [])
     with TestClient(app) as client:
         default = client.post("/sessions").json()["session_id"]
         narrowed = client.post("/sessions", json={"profile": "property-lookup"}).json()[
@@ -231,10 +230,7 @@ def test_a_session_selects_its_profile_and_keeps_it() -> None:
 
 def test_an_unknown_profile_is_refused_at_session_creation() -> None:
     """A 400 when the session is created, not a 500 on the first turn — the caller can act on it."""
-    app = create_app(
-        agent_factory=lambda profile: _FakeAgent(profile),
-        connector_factory=lambda _profile: [],
-    )
+    app = create_app(connector_factory=lambda _profile: [])
     with TestClient(app) as client:
         response = client.post("/sessions", json={"profile": "no-such-profile"})
     assert response.status_code == 400

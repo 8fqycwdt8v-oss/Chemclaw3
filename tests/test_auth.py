@@ -11,13 +11,13 @@ from typing import Any
 
 import jwt
 import pytest
-from agent_framework import AgentSession
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 import chemclaw.api.auth as auth
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import AuthError, validate_token
 from chemclaw.core.config import settings
@@ -32,8 +32,8 @@ _REAL_SIGNING_KEY = auth._signing_key
 class _FakeAgent:
     """A minimal agent whose only used method is `create_session` (no model)."""
 
-    def create_session(self, *, session_id: str) -> AgentSession:
-        return AgentSession(session_id=session_id)
+    def create_session(self, *, session_id: str) -> TurnSession:
+        return TurnSession(session_id=session_id)
 
 
 @pytest.fixture
@@ -149,7 +149,7 @@ def test_route_requires_token_when_entra_required(
 ) -> None:
     """With enforcement on, a session route is 401 without a token and 200 with a valid one."""
     monkeypatch.setattr(settings, "entra_required", True)
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         assert client.post("/sessions").status_code == 401
         token = _sign(rsa_key, {"oid": "u-9"})
         ok = client.post("/sessions", headers={"Authorization": f"Bearer {token}"})
@@ -163,14 +163,14 @@ def test_route_requires_token_when_entra_required(
 
 def test_dev_mode_allows_no_token() -> None:
     """With enforcement off (local dev), a session route works without a token (dev principal)."""
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         assert client.post("/sessions").status_code == 200
 
 
 def test_healthz_never_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Liveness must not be gated, even with enforcement on (probes carry no token)."""
     monkeypatch.setattr(settings, "entra_required", True)
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         assert client.get("/healthz").status_code == 200
 
 
@@ -196,7 +196,7 @@ def test_token_validation_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
         return Principal(oid="u-thread")
 
     monkeypatch.setattr(auth, "validate_token", _probe)
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         res = client.post("/sessions", headers={"Authorization": "Bearer x.y.z"})
     assert res.status_code == 200
     assert on_loop == [False]  # validation ran in a thread, not on the serving loop
@@ -356,7 +356,7 @@ def test_unauthenticated_loopback_boots(monkeypatch: pytest.MonkeyPatch, host: s
     """The local dev flow is untouched: no auth on a loopback bind boots without complaint."""
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", host)
-    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
+    with TestClient(create_app()) as client:
         assert client.get("/healthz").status_code == 200
 
 
@@ -370,7 +370,7 @@ def test_unauthenticated_exposed_refuses_to_boot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", False)
     with pytest.raises(RuntimeError, match="CHEMCLAW_ENTRA_REQUIRED"):
-        create_app(agent_factory=lambda _profile: _FakeAgent())
+        create_app()
 
 
 def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
@@ -381,7 +381,7 @@ def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", True)
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
-        app = create_app(agent_factory=lambda _profile: _FakeAgent())
+        app = create_app()
     assert any("authorization gates OPEN" in r.message for r in caplog.records)
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
@@ -394,5 +394,5 @@ def test_entra_required_exposed_boots_without_warning(
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
-        create_app(agent_factory=lambda _profile: _FakeAgent())
+        create_app()
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)

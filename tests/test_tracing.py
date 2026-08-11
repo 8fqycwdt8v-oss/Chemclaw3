@@ -190,8 +190,7 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
     import asyncio
     from collections.abc import AsyncIterator
 
-    from agent_framework import AgentSession
-
+    from chemclaw.agent.session import TurnSession
     from chemclaw.api.runner import run_turn
     from tests.fakes_turn import Piece, ScriptedTurn
 
@@ -202,7 +201,7 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
             yield "ok"
 
     async def _drive() -> None:
-        session = AgentSession(session_id="s-trace")
+        session = TurnSession(session_id="s-trace")
         turn = _Turn()
         async for _event in run_turn(
             session, "hello", connectors=[], graph_factory=turn.graph_factory

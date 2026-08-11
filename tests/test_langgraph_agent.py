@@ -24,11 +24,9 @@ The claims under test, in the order the phases landed:
 
 import asyncio
 import re
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from agent_framework import SkillsSourceContext
-from agent_framework._agents import SupportsAgentRun
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
@@ -40,13 +38,13 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     available_tool_names,
     harness_tool_names,
-    skills_source,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
@@ -447,13 +445,16 @@ def test_the_skills_middleware_is_attached_and_narrows_by_role(
         reset_current_identity(allowed)
 
 
-def test_both_engines_narrow_skills_identically(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The two engines answer "which skills are visible" the same way, by construction.
+def test_the_backend_narrows_skills_by_the_shared_predicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role-gated skill is hidden from a caller without the role, on the shipped corpus.
 
-    The property that matters is not which set either produces but that they produce the *same*
-    one: a skill hidden under `maf` and offered under `langgraph` is not a gate. Asserted against
-    `skills_source`'s own chain rather than against a written list, so the shipped corpus and the
-    shipped gates are what is compared.
+    This compared the *two engines'* answers while both existed, because a skill hidden under one
+    and offered under the other is not a gate. One engine is left, and what survives the comparison
+    is the half that was never about engines: the backend narrows by `skill_permits`, the same
+    predicate every other caller asks, against the shipped corpus and the shipped gates rather
+    than a written list.
     """
     gated = sorted(declared_tools([*settings.skills_dirs]))[0]
     monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
@@ -461,20 +462,22 @@ def test_both_engines_narrow_skills_identically(monkeypatch: pytest.MonkeyPatch)
 
     token = set_current_identity("u-1", frozenset({"reader"}))
     try:
-        maf = {
-            skill.frontmatter.name
-            for skill in asyncio.run(
-                skills_source(profile, tools).get_skills(
-                    SkillsSourceContext(agent=cast(SupportsAgentRun, None))
-                )
-            )
+        permitted = {
+            name
+            for name in declared_tools([*settings.skills_dirs])
+            if skill_permits(
+                enabled=settings.skills_enabled_list,
+                declared=declared_tools([*settings.skills_dirs]),
+                available={t.name for t in tools},
+                gates=settings.skill_role_gates,
+            )(name)
         }
         graph = _skill_names(skills_backend(profile, tools))
     finally:
         reset_current_identity(token)
 
-    assert graph == maf
-    assert gated not in maf, "the fixture must actually gate something for this to mean anything"
+    assert graph == permitted, "the backend and the shared predicate disagreed about visibility"
+    assert gated not in graph, "the fixture must gate something for this to mean anything"
 
 
 def _skill_names(backend: Any) -> set[str]:

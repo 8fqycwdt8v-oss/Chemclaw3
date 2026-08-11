@@ -19,11 +19,11 @@ import threading
 
 import httpx
 import pytest
-from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 from chemclaw.agent import attachments
 from chemclaw.agent.attachments import Attachment
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
 from chemclaw.api.rate_limit import RateLimited, RequestLimiter, reset_limiter
 from tests.fakes import asgi_client
@@ -36,14 +36,14 @@ class _SessionOnlyAgent:
         """No tools: the middleware under test never reaches one."""
         self.mcp_tools: list[object] = []
 
-    def create_session(self, *, session_id: str) -> AgentSession:
+    def create_session(self, *, session_id: str) -> TurnSession:
         """Hand back a session, so a 413 is the middleware's doing and not a missing method."""
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
 
 def _app_with_sessions() -> TestClient:
     """A client whose `POST /sessions` really works, so a 413 is the middleware's doing."""
-    return TestClient(create_app(agent_factory=lambda _profile: _SessionOnlyAgent()))
+    return TestClient(create_app())
 
 
 @pytest.fixture(autouse=True)
@@ -156,7 +156,7 @@ def test_a_limited_request_is_a_429_carrying_how_long_to_wait(
     monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_burst", 1.0)
     reset_limiter()
 
-    with TestClient(create_app(agent_factory=lambda _profile: object())) as client:
+    with TestClient(create_app()) as client:
         assert client.get("/profiles").status_code == 200
         refused = client.get("/profiles")
 
@@ -175,7 +175,7 @@ def test_the_probes_are_never_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_burst", 1.0)
     reset_limiter()
 
-    with TestClient(create_app(agent_factory=lambda _profile: object())) as client:
+    with TestClient(create_app()) as client:
         for _ in range(10):
             assert client.get("/healthz").status_code == 200
             assert client.get("/metrics").status_code == 200
@@ -190,7 +190,7 @@ def test_the_limiter_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     from chemclaw.core.config import settings
 
     assert settings.service_rate_limit_per_minute == 0.0
-    with TestClient(create_app(agent_factory=lambda _profile: object())) as client:
+    with TestClient(create_app()) as client:
         assert all(client.get("/profiles").status_code == 200 for _ in range(50))
 
 
@@ -351,7 +351,7 @@ def test_a_slow_upload_does_not_stall_every_other_request(
     monkeypatch.setattr(attachments, "parse_attachment", parse)
 
     async def _drive() -> None:
-        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        app = create_app()
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             upload = asyncio.create_task(_upload(client, session_id))
@@ -398,7 +398,7 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
     async def _drive() -> None:
-        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        app = create_app()
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             first = asyncio.create_task(_upload(client, session_id))
@@ -435,7 +435,7 @@ def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 10)
 
     async def _drive() -> None:
-        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        app = create_app()
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             uploads = [asyncio.create_task(_upload(client, session_id)) for _ in range(4)]
@@ -466,7 +466,7 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
     async def _drive() -> float:
-        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        app = create_app()
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             before = METRICS.value("chemclaw_attachment_parses_shed_total")
@@ -542,7 +542,7 @@ def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
 
     async def _drive() -> None:
-        app = create_app(agent_factory=lambda _profile: _SessionOnlyAgent())
+        app = create_app()
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             refused = await _upload(client, session_id)

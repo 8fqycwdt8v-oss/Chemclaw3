@@ -48,12 +48,7 @@ from chemclaw.connectors.manifest import (
     JobSpec,
     StdioEndpoint,
 )
-from chemclaw.connectors.transport import (
-    ConnectorSpec,
-    DegradingHttpConnector,
-    DegradingStdioConnector,
-    HeldConnectorSession,
-)
+from chemclaw.connectors.transport import ConnectorSpec, HeldConnectorSession
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
@@ -74,7 +69,6 @@ _CONNECT_TIMEOUT_SECONDS = 5.0
 
 # What one configured connector endpoint becomes, whichever transport it declares. Both are MAF
 # MCP tools with the same agent-facing surface, so callers never branch on the transport.
-ConnectorMcpTool = DegradingStdioConnector | DegradingHttpConnector
 
 
 class ConnectorError(ChemclawError):
@@ -335,46 +329,6 @@ def health_url(manifest: ConnectorManifest) -> str | None:
         # inventing a path from an address we do not understand would be wrong *and* silent.
         return endpoint.health_url
     return effective.removesuffix(endpoint_tail) + health_tail
-
-
-def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTool:
-    """Build one MAF MCP tool for a connector endpoint, dispatching on the transport.
-
-    The transports differ only in how the server is *reached* — a locally spawned subprocess vs.
-    an already-running endpoint. Everything bounding what the agent may do with it
-    (`allowed_tools`, prompts off) is identical on both, so the read/compute-only boundary does
-    not depend on transport. The tool is returned **unconnected**: `chemclaw.api.runner.run_turn`
-    opens each MCP context for the duration of a turn and tears it down after.
-    """
-    if isinstance(endpoint, HttpEndpoint):
-        return DegradingHttpConnector(
-            name=manifest.name,
-            url=_endpoint_url(manifest.name, endpoint),
-            allowed_tools=endpoint.tools,
-            request_timeout=endpoint.request_timeout,
-            load_prompts=False,
-            http_client=connector_http_client(manifest.name, endpoint),
-        )
-    if isinstance(endpoint, StdioEndpoint):
-        # No identity headers: a subprocess of our own process, under our own identity, with no
-        # request to attach them to (`connectors.identity`).
-        return DegradingStdioConnector(
-            name=manifest.name,
-            command=endpoint.command,
-            args=endpoint.args,
-            allowed_tools=endpoint.tools,
-            load_prompts=False,
-        )
-    assert_never(endpoint)  # exhaustive over the union — a new transport without a branch is a bug
-
-
-def mcp_tools() -> list[Any]:
-    """One MCP tool per enabled connector that declares an endpoint (unconnected)."""
-    return [
-        _mcp_tool(manifest, manifest.endpoint)
-        for manifest in enabled()
-        if manifest.endpoint is not None
-    ]
 
 
 def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:

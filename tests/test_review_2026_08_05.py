@@ -20,10 +20,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ActivityError, ChildWorkflowError
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import ToolCallEvent
 from chemclaw.api.runner import run_turn
@@ -87,7 +87,7 @@ def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPat
 
     async def _drive() -> None:
         async for _ in run_turn(
-            AgentSession(session_id="resume-usage"),
+            TurnSession(session_id="resume-usage"),
             "compute it",
             budget=_Recording(),
             connectors=[],
@@ -124,8 +124,8 @@ def test_a_job_that_fails_inside_the_wait_is_framed_wherever_it_was_awaited() ->
     It was written at one of the two awaits. The freshly-started branch had it; the *re-joined*
     branch — a second chemist asking for a job already running — did not, so a rejoined run that
     failed handed MAF a raw `WorkflowFailureError`. That type is neither a `ChemclawError` nor a
-    `SubsystemUnavailableError`, so `agent.tool_authz.surface_domain_errors` passes it through and
-    the model reads "Error: Function failed." — the wordless failure that three earlier incidents
+    `SubsystemUnavailableError`, so `agent.tool_authz.lg_surface_domain_errors` passes it through
+    and the model reads a wordless failure — which three earlier incidents
     established is read as *proceed*.
     """
     with pytest.raises(jobs_module.ConnectorJobError) as caught:
@@ -320,7 +320,7 @@ class _UnparseableArgumentAgent:
     mcp_tools: list[Any] = []
 
     def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_options: Any
+        self, message: str, *, stream: bool, session: TurnSession, **_options: Any
     ) -> Any:
         async def _gen() -> Any:
             yield FakeUpdate(

@@ -22,7 +22,7 @@ from pydantic import BaseModel, ValidationError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
-from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
+from chemclaw.agent.tool_authz import DryRunRefusal, lg_refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.connectors.jobs import (
     ConnectorJobError,
@@ -35,6 +35,7 @@ from chemclaw.connectors.registry import enabled
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import JobSignal
 from chemclaw.durable.connector_job import ConnectorJobInput
+from tests.middleware import run_middleware, tool_request
 from tests.signals import collect_signals
 
 _SPEC = JobSpec.model_validate(
@@ -357,81 +358,10 @@ def test_a_fresh_start_is_announced_to_the_streaming_turn(client: _FakeClient) -
     assert signals == [JobSignal(job_id=job_id, kind="run_calculation")]
 
 
-def test_a_fresh_start_blocks_the_harness_plan_on_the_job(
-    client: _FakeClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The harness's todo records that it is waiting on this id, so the loop stops re-invoking.
-
-    Without it, `todos_remaining` sees an open todo every iteration with nothing new to report,
-    and the model cannot tell "still running" from "forgotten" (D-040). This lived in the
-    hand-written QM launcher and reached no other durable job; moving the QM job onto this factory
-    is what gave every job the behaviour rather than taking it away (D-118).
-    """
-    from agent_framework import AgentSession
-
-    from chemclaw.agent.harness_todo import complete_awaiting_job
-    from chemclaw.agent.live_session import reset_current_session, set_current_session
-
-    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
-    tool = build_job_tool("calc", _SPEC)
-    session = AgentSession(session_id="s1")
-    token = set_current_session(session)
-    try:
-        job_id = _launch(tool, smiles="CCO")
-    finally:
-        reset_current_session(token)
-    # Round-tripped through the public bridge rather than a hardcoded description format.
-    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is True
-
-
-def test_a_duplicate_launch_leaves_the_harness_plan_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A re-joined run may already be finished, so an awaiting todo for it would never flip."""
-    from agent_framework import AgentSession
-
-    from chemclaw.agent.harness_todo import complete_awaiting_job
-    from chemclaw.agent.live_session import reset_current_session, set_current_session
-
-    fake = _FakeClient(error=WorkflowAlreadyStartedError("dup", "wf", run_id=None))
-
-    async def _connect() -> _FakeClient:
-        return fake
-
-    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
-    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
-    tool = build_job_tool("calc", _SPEC)
-    session = AgentSession(session_id="s1")
-    token = set_current_session(session)
-    try:
-        job_id = _launch(tool, smiles="CCO")
-    finally:
-        reset_current_session(token)
-    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is False
-
-
-def test_the_classic_agent_never_writes_to_a_todo_list_nobody_reads(
-    client: _FakeClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With the harness off (the default), a launch touches no todo state."""
-    from agent_framework import AgentSession
-
-    from chemclaw.agent.harness_todo import complete_awaiting_job
-    from chemclaw.agent.live_session import reset_current_session, set_current_session
-
-    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", False)
-    tool = build_job_tool("calc", _SPEC)
-    session = AgentSession(session_id="s1")
-    token = set_current_session(session)
-    try:
-        job_id = _launch(tool, smiles="CCO")
-    finally:
-        reset_current_session(token)
-    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is False
-
-
 def test_a_launch_with_no_ambient_session_does_not_crash(
     client: _FakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The CLI path: harness on, but no live `AgentSession` to hold a plan."""
+    """The CLI path: harness on, but no live `TurnSession` to hold a plan."""
     monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
     tool = build_job_tool("calc", _SPEC)
     assert _launch(tool, smiles="CCO") == job_workflow_id(
@@ -458,12 +388,15 @@ def test_a_generated_launcher_is_covered_by_the_dry_run_gate() -> None:
         nonlocal ran
         ran = True
 
+    async def _handler(_request: Any) -> Any:
+        return await _body()
+
     token = set_dry_run(True)
     try:
         for job_name in sorted(declared):
             with pytest.raises(DryRunRefusal):
                 asyncio.run(
-                    refuse_writes_on_dry_run(_DryRunContext(job_name), _body)  # type: ignore[arg-type]
+                    run_middleware(lg_refuse_writes_on_dry_run, tool_request(job_name), _handler)
                 )
     finally:
         reset_dry_run(token)

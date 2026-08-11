@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from agent_framework import HistoryProvider
 from fastapi import FastAPI, Request
 
 from chemclaw.agent.plan_approval_store import ApprovalStore
@@ -54,7 +53,7 @@ class LiveSession:
 class _LiveSessions:
     """A bounded, LRU cache of the front door's live in-process sessions with their owner (COR-3).
 
-    The service keeps the live `AgentSession` object per session id; without a bound this map grows
+    The service keeps the live `TurnSession` handle per session id; without a bound this map grows
     for the pod's whole lifetime (a memory leak). This caps it and evicts the least-recently-used
     entry when full — an evicted session's durable history still lives in the session store,
     only the live in-process handle is dropped, so the worst case under memory pressure is a
@@ -63,7 +62,7 @@ class _LiveSessions:
     so a session that lost it would silently change agent mid-conversation.
 
     `pinned` names the sessions eviction must skip: a session with a turn in flight. Evicting one
-    does not stop its turn — the turn holds the `AgentSession` object directly — it makes the next
+    does not stop its turn — the turn holds the `TurnSession` handle directly — it makes the next
     request rehydrate a *second* handle over the same durable history, and the two then diverge in
     `session.state` (the hazard `chemclaw.api.deps._rehydrate_session`'s docstring names). The pin
     source is the in-process turn lease, which expires (see `_claim_turn_slot`), so a leaked pin
@@ -350,21 +349,6 @@ class FrontDoorState:
         """Wrap `app`, whose `state` this view types."""
         self._app = app
 
-    def agent(self, profile: str | None = None) -> Any:
-        """The process's agent for `profile`, built once and cached under its name.
-
-        One agent per profile rather than one per session: an `Agent` is a configuration (tools,
-        instructions, providers), not per-conversation state — the thread lives in the session —
-        so two sessions on the same profile share it safely, exactly as every session shared the
-        single agent before profiles were selectable. Connectors are the one thing an agent must
-        *not* hold for the process's lifetime, and it does not
-        (`chemclaw.agent.chemclaw_agent.connector_tools`).
-        """
-        agents: dict[str | None, Any] = self._app.state.agents
-        if profile not in agents:
-            agents[profile] = self._app.state.agent_factory(profile)
-        return agents[profile]
-
     @property
     def connector_factory(self) -> Callable[[str | None], list[Any]]:
         """Builds one turn's connectors for a profile — called per turn, never cached.
@@ -408,9 +392,9 @@ class FrontDoorState:
         return store
 
     @property
-    def history(self) -> HistoryProvider:
+    def history(self) -> Any:
         """The session-history provider the agent writes turns through, shared for reads."""
-        history: HistoryProvider = self._app.state.history
+        history: Any = self._app.state.history
         return history
 
     @property

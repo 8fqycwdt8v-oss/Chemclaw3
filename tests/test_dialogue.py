@@ -18,13 +18,14 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
 
 from chemclaw.agent.dialogue_tools import ask_clarifying_question
-from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
+from chemclaw.agent.session import TurnSession
+from chemclaw.agent.tool_authz import DryRunRefusal, lg_refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from chemclaw.api.runner import run_turn
 from tests.fakes_turn import Piece, ScriptedTurn
+from tests.middleware import run_middleware, tool_request
 
 
 class _AskingAgent(ScriptedTurn):
@@ -42,7 +43,7 @@ def _events(agent: ScriptedTurn, **kwargs: Any) -> list[Any]:
         return [
             e
             async for e in run_turn(
-                AgentSession(session_id="s1"),
+                TurnSession(session_id="s1"),
                 "hi",
                 connectors=[],
                 graph_factory=agent.graph_factory,
@@ -123,7 +124,10 @@ def _call(tool: str) -> bool:
         nonlocal ran
         ran = True
 
-    asyncio.run(refuse_writes_on_dry_run(_Context(tool), _body))  # type: ignore[arg-type]
+    async def _handler(_request: Any) -> Any:
+        return await _body()
+
+    asyncio.run(run_middleware(lg_refuse_writes_on_dry_run, tool_request(tool), _handler))
     return ran
 
 
@@ -164,7 +168,7 @@ def test_the_refusal_can_never_be_mistaken_for_a_real_result() -> None:
     """The one genuinely harmful failure mode: a dry-run answer read as a real one.
 
     It reaches the model as a refusal rather than a return value, so
-    `surface_authorization_denials` relays it verbatim — the path `PlanNotApprovedError` already
+    `lg_surface_authorization_denials` relays it verbatim — the path `PlanNotApprovedError` already
     proves works — instead of MAF's opaque "Function failed."
     """
     token = set_dry_run(True)

@@ -31,16 +31,14 @@ mutated rather than rebound — so the decision is visible to the runner even wh
 is driven from a task of its own.
 """
 
-import inspect
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 from langchain.agents.middleware import before_model
 
-from chemclaw.agent.harness_types import ShouldContinueCallable, ShouldContinueResult
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -75,35 +73,6 @@ def loop_hit_cap() -> bool:
     """
     watch = _watch.get()
     return watch is not None and watch.wants_more
-
-
-def observe_loop_cap(
-    inner: ShouldContinueCallable,
-) -> Callable[..., Awaitable[ShouldContinueResult]]:
-    """Wrap the loop predicate so the turn can tell a capped loop from a completed one.
-
-    Wraps rather than replaces: the decision is `inner`'s alone, including the `(bool, str | None)`
-    feedback MAF routes to `next_message` — dropping that string would silently disable the "these
-    todos are still open" reminder (`chemclaw.agent.plan_gate.approved_todos_remaining` records the
-    same reasoning). This only *reads* the answer on its way past.
-
-    Applied outermost of the predicate chain, so what it records is the decision the loop acted on
-    rather than one input to it — an unapproved plan stopping the loop is a deliberate stop, not a
-    runaway.
-    """
-
-    async def _should_continue(**kwargs: Any) -> ShouldContinueResult:
-        # Sync or async, per MAF's own predicate contract — normalized exactly as `plan_gate` does,
-        # for the same reason: three lines beat importing an underscore-prefixed helper.
-        raw = inner(**kwargs)
-        decision = await raw if inspect.isawaitable(raw) else raw
-        proceed = bool(decision[0]) if isinstance(decision, tuple) else bool(decision)
-        watch = _watch.get()
-        if watch is not None:
-            watch.wants_more = proceed
-        return decision
-
-    return _should_continue
 
 
 # `can_jump_to` is not decoration, it is the edge. **Without it the cap was inert**, and inert in

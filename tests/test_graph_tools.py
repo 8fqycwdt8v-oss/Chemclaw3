@@ -81,7 +81,7 @@ def test_expand_unknown_note_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     """Expanding an unknown id is a clear error (G4), and a `ChemclawError` specifically.
 
     `ChemclawError` (a `ValueError` subclass) is chemclaw's own always-safe "bad input"
-    contract, so `chemclaw.agent.tool_authz.surface_domain_errors` surfaces this message to the
+    contract, so `chemclaw.agent.tool_authz.lg_surface_domain_errors` surfaces this message to the
     model
     verbatim instead of MAF's opaque generic failure — the common real cause is a citation to a
     note still pending PR-gate review, which the chemist can otherwise not distinguish from a

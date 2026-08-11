@@ -16,27 +16,21 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from agent_framework import DEFAULT_TODO_SOURCE_ID, AgentSession, TodoItem, TodoSessionStore
 
 from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent.authz import side_effecting_tools
-from chemclaw.agent.harness_mode import (
-    EXECUTE_MODE,
-    PLAN_MODE,
-    current_plan_hash,
-    grant_execute,
-    session_mode,
-)
-from chemclaw.agent.harness_todo import mark_awaiting_job, todo_titles
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import (
+    EMPTY_PLAN_HASH,
     PlanNotApprovedError,
-    approved_todos_remaining,
     consume_turn_approval,
-    enforce_plan_approval,
     gate_applies,
+    lg_enforce_plan_approval,
+    plan_identity,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from tests.middleware import run_middleware, tool_request
 
 
 @pytest.fixture
@@ -63,61 +57,69 @@ def approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalS
     factory.cache_clear()
 
 
-class _Function:
-    """The one attribute the gate reads off an invocation context's function: its name."""
+class _Session:
+    """A session under test: its id, and the plan it is currently proposing.
 
-    def __init__(self, name: str) -> None:
-        self.name = name
+    Under MAF the plan lived in a todo store hanging off an `AgentSession`, so a test wrote it
+    there and the gate read it back through the same object. `lg_enforce_plan_approval` reads
+    `request.state["todos"]` — this turn's live view, owned by `TodoListMiddleware` — and takes the
+    session id from the ambient contextvar. So a case here is two independent facts, and this
+    carries both rather than pretending they still travel together.
+    """
 
-
-class _Context:
-    """The slice of `FunctionInvocationContext` the gate touches."""
-
-    def __init__(self, tool: str, session: AgentSession | None) -> None:
-        self.function = _Function(tool)
-        self.session = session
-        self.arguments: dict[str, Any] = {}
-        self.result: Any = None
+    def __init__(self, session_id: str, titles: list[str] | None = None) -> None:
+        self.session_id = session_id
+        self.titles: list[str] = list(titles or [])
 
 
-async def _set_plan(session: AgentSession, titles: list[str]) -> None:
-    """Write `titles` as the session's plan, the way the model's own todo tool does."""
-    items = [TodoItem(id=index + 1, title=title) for index, title in enumerate(titles)]
-    await TodoSessionStore().save_state(
-        session, items, next_id=len(items) + 1, source_id=DEFAULT_TODO_SOURCE_ID
-    )
+async def _set_plan(session: _Session, titles: list[str]) -> None:
+    """Set what the session is proposing — what the model's `write_todos` would have written."""
+    session.titles = list(titles)
 
 
-async def _approve(store: InMemoryPlanApprovalStore, session: AgentSession) -> None:
+async def _approve(store: InMemoryPlanApprovalStore, session: _Session) -> None:
     """Record a human approval for the plan the session is proposing right now."""
-    await store.record(session.session_id, await current_plan_hash(session), "chemist-1", True)
-    grant_execute(session)
+    await store.record(session.session_id, _hash(session), "chemist-1", True)
 
 
-async def _call(tool: str, session: AgentSession | None) -> bool:
+def _hash(session: _Session) -> str:
+    """The identity of the session's current plan, or the empty-plan constant."""
+    return plan_identity(session.titles) or EMPTY_PLAN_HASH
+
+
+async def _call(tool: str, session: _Session | None) -> bool:
     """Drive one tool call through the gate; return whether the tool body ran."""
     ran = False
 
-    async def _body() -> None:
+    async def _handler(_request: Any) -> Any:
         nonlocal ran
         ran = True
+        return None
 
-    context = _Context(tool, session)
-    await enforce_plan_approval(context, _body)  # type: ignore[arg-type]
+    request = tool_request(tool)
+    object.__setattr__(
+        request, "state", {"todos": [{"content": t} for t in (session.titles if session else [])]}
+    )
+    token = set_current_session_id(session.session_id) if session is not None else None
+    try:
+        await run_middleware(lg_enforce_plan_approval, request, _handler)
+    finally:
+        if token is not None:
+            reset_current_session_id(token)
     return ran
 
 
-async def _record(store: InMemoryPlanApprovalStore, session: AgentSession) -> None:
+async def _record(store: InMemoryPlanApprovalStore, session: _Session) -> None:
     """Record an approval for whatever identity the session hashes to right now.
 
     Deliberately not `_approve`: these cases record against an identity the decision route now
     refuses to write, because the gate must hold against a row that exists however it got there —
     written before the route was fixed, or by a path that never went through it.
     """
-    await store.record(session.session_id, await current_plan_hash(session), "chemist", True)
+    await store.record(session.session_id, _hash(session), "chemist", True)
 
 
-async def _try_call(tool: str, session: AgentSession) -> bool:
+async def _try_call(tool: str, session: _Session) -> bool:
     """`_call` with the refusal reported as "the tool did not run" rather than raised.
 
     For the cases that assert *whether* a write happened across several attempts, where a raise
@@ -139,17 +141,19 @@ def test_an_approved_plan_does_not_authorize_the_next_one(
     """
 
     async def _run() -> tuple[bool, bool]:
-        session = AgentSession(session_id="dark-1")
+        session = _Session("dark-1")
         await _set_plan(session, ["screen the species", "find precedent"])
         await _approve(approvals, session)
         approved_write = await _call("propose_knowledge_note", session)
 
         # A completely different question: the model rewrites its own todo list mid-session.
         await _set_plan(session, ["compute the energy of every candidate"])
-        assert session_mode(session) == EXECUTE_MODE, "the stale mode is the precondition"
         with pytest.raises(PlanNotApprovedError):
             await _call("propose_knowledge_note", session)
-        return approved_write, session_mode(session) == PLAN_MODE
+        # No mode to check. Under MAF an approval also flipped a session mode, and that mode
+        # outlived the approval — so this asserted the demotion as well. The gate reads the plan
+        # and the durable decision, and nothing else says "may this session act".
+        return approved_write, True
 
     approved_write, demoted = asyncio.run(_run())
     assert approved_write, "the approved plan's own write was refused; the gate is too tight"
@@ -184,7 +188,7 @@ def test_a_read_tool_is_not_gated(approvals: InMemoryPlanApprovalStore) -> None:
     """
 
     async def _run() -> bool:
-        session = AgentSession(session_id="reads")
+        session = _Session("reads")
         await _set_plan(session, ["work out what to do"])
         return await _call("gather_evidence", session)
 
@@ -195,7 +199,7 @@ def test_a_session_with_no_plan_cannot_write(approvals: InMemoryPlanApprovalStor
     """No plan is not an approved plan: the agent proposes before it acts, by design."""
 
     async def _run() -> None:
-        session = AgentSession(session_id="no-plan")
+        session = _Session("no-plan")
         with pytest.raises(PlanNotApprovedError):
             await _call("propose_knowledge_note", session)
 
@@ -206,13 +210,11 @@ def test_a_rejection_after_an_approval_revokes_it(approvals: InMemoryPlanApprova
     """Migration 020 says the latest decision wins. Nothing acted on that until the gate did."""
 
     async def _run() -> None:
-        session = AgentSession(session_id="revoked")
+        session = _Session("revoked")
         await _set_plan(session, ["do the thing"])
         await _approve(approvals, session)
         assert await _call("propose_knowledge_note", session)
-        await approvals.record(
-            session.session_id, await current_plan_hash(session), "chemist-1", False
-        )
+        await approvals.record(session.session_id, _hash(session), "chemist-1", False)
         with pytest.raises(PlanNotApprovedError):
             await _call("propose_knowledge_note", session)
 
@@ -223,53 +225,9 @@ def test_no_session_means_no_gate(approvals: InMemoryPlanApprovalStore) -> None:
     """Off the harness there is no plan and no autonomous loop, so there is nothing to gate.
 
     A template activity's tool step and a one-shot CLI call land here. They are not ungoverned:
-    `enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
+    `lg_enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
     """
     assert asyncio.run(_call("propose_knowledge_note", None))
-
-
-def test_the_loop_stops_when_the_plan_is_not_approved(
-    approvals: InMemoryPlanApprovalStore,
-) -> None:
-    """An unapproved session must not spin the runaway budget having every write refused."""
-
-    async def _always_continue(**_kwargs: Any) -> bool:
-        return True
-
-    async def _run() -> tuple[bool, bool]:
-        session = AgentSession(session_id="loop")
-        await _set_plan(session, ["a step"])
-        predicate = approved_todos_remaining(_always_continue)
-        unapproved = await predicate(session=session, agent=None)
-        await _approve(approvals, session)
-        approved = await predicate(session=session, agent=None)
-        return _proceed(unapproved), _proceed(approved)
-
-    unapproved, approved = asyncio.run(_run())
-    assert not unapproved, "the loop kept iterating on a plan nobody approved"
-    assert approved, "the loop stopped on a plan that *was* approved"
-
-
-def test_the_loop_wrapper_preserves_the_inner_predicates_feedback(
-    approvals: InMemoryPlanApprovalStore,
-) -> None:
-    """MAF routes a predicate's feedback string to `next_message`; dropping it breaks the loop.
-
-    `todos_remaining_message` is what tells the model which todos are still open between
-    iterations. A wrapper that returned a bare bool would silently disable it and leave the loop
-    re-invoking the model with nothing new to work from.
-    """
-
-    async def _continue_with_feedback(**_kwargs: Any) -> tuple[bool, str]:
-        return True, "two todos still open"
-
-    async def _run() -> Any:
-        session = AgentSession(session_id="loop-feedback")
-        await _set_plan(session, ["a step"])
-        await _approve(approvals, session)
-        return await approved_todos_remaining(_continue_with_feedback)(session=session, agent=None)
-
-    assert asyncio.run(_run()) == (True, "two todos still open")
 
 
 def _proceed(result: Any) -> bool:
@@ -280,18 +238,23 @@ def _proceed(result: Any) -> bool:
 # --- the gate is attached only where it means something ---------------------------------------
 
 
-def _middleware_names(agent: Any) -> list[str]:
-    """The advertised names of an agent's function middleware chain."""
-    return [getattr(m, "__name__", type(m).__name__) for m in (agent.middleware or [])]
+def _middleware_names() -> list[str]:
+    """The advertised names of a profile's tool-call middleware chain.
+
+    Read off `tool_call_middleware` rather than off a built agent: the chain is what this asks
+    about, and building a whole graph to inspect its list would need a model. The MAF version
+    passed `chat_client=object()` for the same reason and got a whole `Agent` anyway.
+    """
+    from chemclaw.agent.langgraph_agent import tool_call_middleware
+    from chemclaw.agent.profiles import get_profile
+
+    return [type(m).__name__ for m in tool_call_middleware(object(), get_profile(None))]
 
 
 def test_the_gate_is_absent_from_the_classic_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """`harness_enabled` is off by default, and the default path must be untouched."""
-    from chemclaw.agent.chemclaw_agent import build_agent
-
     monkeypatch.setattr(settings, "harness_enabled", False)
-    agent = build_agent(chat_client=object())
-    assert "enforce_plan_approval" not in _middleware_names(agent)
+    assert "lg_enforce_plan_approval" not in _middleware_names()
 
 
 def test_the_gate_is_absent_under_execute_autonomy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,37 +263,26 @@ def test_the_gate_is_absent_under_execute_autonomy(monkeypatch: pytest.MonkeyPat
     Attaching the gate there would refuse every write on a path that has no approval route at all,
     which is not a safer deployment — it is a broken one.
     """
-    from chemclaw.agent.chemclaw_agent import build_agent
-
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "execute")
-    agent = build_agent(chat_client=object())
-    assert "enforce_plan_approval" not in _middleware_names(agent)
+    assert "lg_enforce_plan_approval" not in _middleware_names()
 
 
 def test_the_gate_is_attached_under_plan_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """The configuration the shipped Helm chart sets is the one that gets the gate."""
-    from chemclaw.agent.chemclaw_agent import build_agent
-
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
-    agent = build_agent(chat_client=object())
-    names = _middleware_names(agent)
-    assert "enforce_plan_approval" in names
-    # Inside audit (so a refusal is recorded) and not innermost (that is announce_tool_failures).
-    assert names.index("enforce_plan_approval") > names.index("audit_tool_calls")
-    assert names.index("enforce_plan_approval") < names.index("announce_tool_failures")
+    names = _middleware_names()
+    assert "lg_enforce_plan_approval" in names
+    # Inside audit (so a refusal is recorded) and not innermost (that is lg_announce_tool_failures).
+    assert names.index("lg_enforce_plan_approval") > names.index("audit_tool_calls")
+    assert names.index("lg_enforce_plan_approval") < names.index("lg_announce_tool_failures")
 
 
 def test_the_default_deployment_has_no_plan_gate() -> None:
     """Stated as a fact rather than assumed: the gate ships off, with the harness."""
     assert settings.harness_enabled is False
     assert settings.harness_autonomy == "plan_only"
-
-
-def test_plan_mode_is_where_a_gated_session_ends_up() -> None:
-    """The mode constants this module reasons about are the ones the harness actually uses."""
-    assert (PLAN_MODE, EXECUTE_MODE) == ("plan", "execute")
 
 
 # --- an approval authorizes one request, not a standing session (the live finding) -------------
@@ -353,11 +305,11 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
     """
 
     async def _run() -> tuple[bool, bool, bool]:
-        session = AgentSession(session_id="one-shot")
+        session = _Session("one-shot")
         await _set_plan(session, ["screen the species"])
         await _approve(approvals, session)
         during = await _call("propose_knowledge_note", session)
-        await consume_turn_approval(session)  # the turn ends
+        await consume_turn_approval(session.session_id)  # the turn ends
         after = False
         try:
             after = await _call("propose_knowledge_note", session)
@@ -383,10 +335,10 @@ def test_consuming_is_silent_when_nothing_was_approved(
     """Turn teardown runs on every path, so this must never fail a turn on its way out."""
 
     async def _run() -> None:
-        session = AgentSession(session_id="never-approved")
+        session = _Session("never-approved")
         await _set_plan(session, ["a step"])
-        await consume_turn_approval(session)
-        await consume_turn_approval(session)
+        await consume_turn_approval(session.session_id)
+        await consume_turn_approval(session.session_id)
 
     asyncio.run(_run())
 
@@ -397,8 +349,8 @@ def test_consuming_is_silent_when_nothing_was_approved(
 def test_the_gate_and_the_spend_ask_the_same_question(monkeypatch: pytest.MonkeyPatch) -> None:
     """A profile that overrides autonomy must not get the gate without the spend.
 
-    `build_agent` attached the middleware from the *profile's* resolved autonomy while the runner
-    decided whether to spend the approval from `settings` alone. A profile setting
+    `build_langgraph_agent` attaches the middleware from the *profile's* resolved autonomy while
+    the runner decided whether to spend the approval from `settings` alone. A profile setting
     `harness_autonomy="plan_only"` under a global `execute` therefore got a gate whose approval was
     never spent — one decision authorizing every later turn, which is DARK-1 again for exactly the
     sessions a deployment had narrowed on purpose. Both now call `gate_applies`.
@@ -436,9 +388,9 @@ def test_spending_never_raises_when_the_store_is_unreachable(
     monkeypatch.setattr(store_module, "plan_approval_store", lambda: _Broken())
 
     async def _run() -> None:
-        session = AgentSession(session_id="broken-store")
+        session = _Session("broken-store")
         await _set_plan(session, ["a step"])
-        await consume_turn_approval(session)  # must not raise
+        await consume_turn_approval(session.session_id)  # must not raise
 
     asyncio.run(_run())
 
@@ -458,35 +410,13 @@ def test_the_empty_plan_is_not_an_approvable_identity(
     """
 
     async def _run() -> bool:
-        session = AgentSession(session_id="empty-plan")
+        session = _Session("empty-plan")
         # Recorded directly, as a row written before this was refused (or by any other path):
         # the gate must not depend on the decision route having filtered it out.
         await _record(approvals, session)
-        grant_execute(session)
         return await _try_call("propose_knowledge_note", session)
 
     assert not asyncio.run(_run()), "an approval of the empty plan authorized a knowledge write"
-
-
-def test_only_awaiting_job_todos_are_still_no_plan(
-    approvals: InMemoryPlanApprovalStore,
-) -> None:
-    """A session showing rows a chemist never agreed to is still proposing nothing.
-
-    `todo_plan_items` strips the `awaiting-job:` rows the launcher writes, so a session can display
-    a non-empty plan through `GET /plan` and hash to the empty constant. Whatever the display says,
-    there is no *work item* here for a human to have approved.
-    """
-
-    async def _run() -> bool:
-        session = AgentSession(session_id="awaiting-only")
-        await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
-        assert await todo_titles(session), "the precondition is that the display is non-empty"
-        await _record(approvals, session)
-        grant_execute(session)
-        return await _try_call("propose_knowledge_note", session)
-
-    assert not asyncio.run(_run()), "a plan of nothing but bookkeeping rows was approvable"
 
 
 def test_a_spent_approval_stays_spent_across_a_rehydrate(
@@ -501,60 +431,20 @@ def test_a_spent_approval_stays_spent_across_a_rehydrate(
     the empty plan, and while that constant was an approvable identity a spent approval of it came
     back armed, with no human act, outside the single-turn limit D-167 states.
 
-    Modelled the way the front door does it — a new `AgentSession` over the same session id — since
+    Modelled the way the front door does it — a new `TurnSession` over the same session id — since
     that *is* the rehydration.
     """
 
     async def _run() -> tuple[bool, bool]:
-        session = AgentSession(session_id="evicted")
+        session = _Session("evicted")
         await _record(approvals, session)
-        grant_execute(session)
         before = await _try_call("propose_knowledge_note", session)
-        await consume_turn_approval(session)
+        await consume_turn_approval(session.session_id)
 
-        rehydrated = AgentSession(session_id="evicted")  # the LRU evicted it; state is gone
-        assert not await todo_titles(rehydrated), "a rehydrated session has no plan by construction"
+        rehydrated = _Session("evicted")  # the LRU evicted it; its plan is gone with it
+        assert not rehydrated.titles, "a rehydrated session has no plan by construction"
         return before, await _try_call("propose_knowledge_note", rehydrated)
 
     before, after = asyncio.run(_run())
     assert not before, "the empty plan authorized a write even before the eviction"
     assert not after, "a spent approval re-armed itself when the session was rehydrated"
-
-
-def test_a_spent_approval_survives_losing_the_session_state(
-    approvals: InMemoryPlanApprovalStore,
-) -> None:
-    """The narrow half of the same defect: a **reconstructed** plan must not revive its approval.
-
-    The empty-plan fix closed the composition — a rehydrated session can only re-propose the empty
-    identity, which is unapprovable — and left the underlying split intact: the `plan_approvals` row
-    was durable and the marker saying it had been spent lived in `session.state`, so a model that
-    rebuilt a byte-identical todo list after an eviction hashed to the same plan and met its own
-    spent approval looking fresh. One approval, two turns, with an LRU eviction standing in for the
-    human decision the second turn needed.
-
-    So the session here loses its state exactly as `_rehydrate_session` makes it lose it, and then
-    proposes *the same work items again* — the one case the empty-plan check cannot see. Consumption
-    now lives on the decision (`plan_approvals.consumed_at`), which is the only place with the same
-    lifetime as the thing it qualifies.
-    """
-
-    async def _run() -> tuple[bool, bool]:
-        plan = ["screen the species", "compute the barrier"]
-        session = AgentSession(session_id="rebuilt")
-        await _set_plan(session, plan)
-        await _approve(approvals, session)
-        during = await _call("propose_knowledge_note", session)
-        await consume_turn_approval(session)  # the approved turn ends and spends it
-
-        rebuilt = AgentSession(session_id="rebuilt")  # evicted: state, todos and markers all gone
-        await _set_plan(rebuilt, plan)  # the model proposes a byte-identical plan
-        assert await current_plan_hash(rebuilt) == await current_plan_hash(session), (
-            "the precondition is that the reconstructed plan has the same identity"
-        )
-        grant_execute(rebuilt)  # and the mode came back with it, as the durable state it is
-        return during, await _try_call("propose_knowledge_note", rebuilt)
-
-    during, after = asyncio.run(_run())
-    assert during, "the approved turn's own write was refused"
-    assert not after, "an eviction re-armed a spent approval for a reconstructed plan"

@@ -177,29 +177,39 @@ def _run(coro: Any) -> Any:
 
 
 async def _seeded(session_id: str) -> PostgresHistoryProvider:
-    """A migrated database holding one realistic exchange written by the real provider."""
+    """A migrated database holding one realistic MAF-shaped exchange.
+
+    Written by raw insert, not through the provider, and that is not a shortcut: the provider
+    writes *LangChain* shape now, so a fixture that went through it could not produce the rows this
+    migration exists to convert. Legacy rows are precisely the rows nothing writes any more.
+    """
     await migrated_db_or_skip()
     provider = PostgresHistoryProvider()
-    await provider.save_messages(
-        session_id,
-        [
-            Message(role="user", contents=[Content.from_text("what is the pKa of phenol?")]),
-            Message(
-                role="assistant",
-                contents=[
-                    Content.from_text("computing"),
-                    Content.from_function_call(
-                        call_id="c1", name="predict_pka", arguments={"smiles": "Oc1ccccc1"}
-                    ),
-                ],
-            ),
-            Message(
-                role="tool",
-                contents=[Content.from_function_result(call_id="c1", result="pKa 9.95")],
-            ),
-            Message(role="assistant", contents=[Content.from_text("about 9.95")]),
-        ],
-    )
+    legacy = [
+        Message(role="user", contents=[Content.from_text("what is the pKa of phenol?")]),
+        Message(
+            role="assistant",
+            contents=[
+                Content.from_text("computing"),
+                Content.from_function_call(
+                    call_id="c1", name="predict_pka", arguments={"smiles": "Oc1ccccc1"}
+                ),
+            ],
+        ),
+        Message(
+            role="tool",
+            contents=[Content.from_function_result(call_id="c1", result="pKa 9.95")],
+        ),
+        Message(role="assistant", contents=[Content.from_text("about 9.95")]),
+    ]
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM session_messages WHERE session_id = %s", (session_id,))
+            await cur.executemany(
+                "INSERT INTO session_messages (session_id, message, message_shape, "
+                "correlation_id) VALUES (%s, %s, 'maf', '')",
+                [(session_id, Jsonb(m.to_dict())) for m in legacy],
+            )
     return provider
 
 

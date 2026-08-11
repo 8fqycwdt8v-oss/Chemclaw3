@@ -21,9 +21,9 @@ import asyncio
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
 
 import chemclaw.api.runner as runner
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.events import Event
 from chemclaw.core.config import settings
 from chemclaw.evals.harness import load_eval_cases
@@ -51,7 +51,7 @@ def _drive(agent: Any, session_id: str) -> list[Event]:
     """Collect one real turn's events from the front-door runner."""
 
     async def _collect() -> list[Event]:
-        session = AgentSession(session_id=session_id)
+        session = TurnSession(session_id=session_id)
         return [event async for event in runner.run_turn(session, "go")]
 
     return asyncio.run(_collect())

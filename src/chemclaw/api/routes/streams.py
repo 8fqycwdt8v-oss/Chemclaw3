@@ -17,7 +17,6 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 from starlette.types import Receive, Scope, Send
 
-from chemclaw.agent.harness_todo import defer_job_completion
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
 from chemclaw.api.events import JobCompletedEvent, JobFailedEvent
@@ -114,24 +113,12 @@ async def session_events(
             job_id = str(pushed.payload.get("job_id", ""))
             failed = pushed.kind == "job_failed"
             reason = str(pushed.payload.get("reason", ""))
-            # Record the outcome for the harness todo waiting on this job (F3-T3
-            # follow-up) — recorded, not applied. This stream runs concurrently with
-            # whatever turn the session has in flight, and flipping the todo here was a
-            # load-modify-save over the live `session.state` under a running writer: a
-            # flip landing mid-turn was silently un-done when a disconnect teardown
-            # restored that turn's pre-turn snapshot (`chemclaw.api.runner`). The next
-            # turn applies it at its start (`apply_deferred_completions`), where nothing
-            # else writes; the notification itself was already durably claimed above,
-            # so nothing durable rides on this process surviving.
-            #
-            # A *failure* releases the todo too, and that is the point rather than a
-            # convenience: the plan is blocked on a job that will now never complete, so
-            # leaving it waiting would hang the harness on an outcome that has already
-            # happened. It is released with the reason, so the next turn re-plans knowing
-            # what went wrong instead of merely knowing it is no longer waiting.
-            if settings.harness_enabled:
-                outcome = f"failed — {reason}" if failed else "completed"
-                defer_job_completion(session_id, job_id, reason=f"job {job_id} {outcome}")
+            # The completion used to also be recorded against a harness todo waiting on this job,
+            # deferred rather than applied because this stream runs concurrently with whatever turn
+            # the session has in flight. Both halves are gone: the todo existed so MAF's
+            # `todos_remaining` loop predicate saw "waiting" rather than re-invoking the model, and
+            # the graph's loop ends when the model stops calling tools. What the chemist sees is
+            # unchanged — that was always this event, not the todo.
             event: JobCompletedEvent | JobFailedEvent = (
                 JobFailedEvent(job_id=job_id, reason=reason)
                 if failed

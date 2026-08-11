@@ -14,10 +14,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import LiveSession, _LiveSessions, create_app
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -67,9 +67,9 @@ class _SpyMcpTool:
 class _FakeAgent(ScriptedTurn):
     """Fake agent: yields two tokens per turn. Connectors are the front door's business, not its."""
 
-    def create_session(self, *, session_id: str) -> AgentSession:
+    def create_session(self, *, session_id: str) -> TurnSession:
         """The one non-streaming method the front door calls on an agent."""
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
         yield "hi "
@@ -88,7 +88,7 @@ def _no_connectors(_profile: str | None = None) -> list[Any]:
 def _app(agent: _FakeAgent | None = None, **kwargs: Any) -> FastAPI:
     """The app under test, wired to one fake for *both* engines' injection points.
 
-    `agent_factory` and `graph_factory` are the same fake seen from either side (see
+    `graph_factory` is how the fake gets in (see
     `tests.fakes_turn.ScriptedTurn`), so one call configures whichever engine is selected and no
     test here has to know which that is. Connectors default to none for the reason
     `_no_connectors` records; a test that does want one passes whichever representation the engine
@@ -96,9 +96,7 @@ def _app(agent: _FakeAgent | None = None, **kwargs: Any) -> FastAPI:
     """
     fake = agent if agent is not None else _FakeAgent()
     kwargs.setdefault("connector_factory", _no_connectors)
-    return create_app(
-        agent_factory=lambda _profile: fake, graph_factory=fake.graph_factory, **kwargs
-    )
+    return create_app(graph_factory=fake.graph_factory, **kwargs)
 
 
 def _client(
@@ -549,91 +547,6 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
             "summary": {"job_id": "qm-1", "converged": True},
         }
     ]
-
-
-def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A `job_completed` push-back flips the harness todo waiting on it (F3-T3 follow-up).
-
-    Flipped at the *next turn's start*, not by the events stream itself: the stream runs
-    concurrently with whatever turn the session has in flight, so applying the flip there raced
-    the turn's own state writes and was silently discarded by a disconnect's snapshot restore
-    (A4). Both halves are pinned here — the stream records without touching live state, and the
-    next turn applies the recording.
-    """
-    import asyncio
-
-    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
-
-    import chemclaw.api.app as app_module
-    from chemclaw.agent.harness_todo import mark_awaiting_job
-    from chemclaw.agent.session_events import SessionEvent
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _fake_stream(session_id: str, **_: object) -> object:
-        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
-
-    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
-
-    app = _app()
-    with TestClient(app) as client:
-        session_id = client.post("/sessions").json()["session_id"]
-        live_session = app.state.live_sessions.get(session_id).session
-        asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
-
-        with client.stream("GET", f"/sessions/{session_id}/events") as res:
-            assert res.status_code == 200
-            for _line in res.iter_lines():  # drain so the handler actually runs
-                pass
-
-        # The stream recorded the completion but must not have written live session state.
-        items = asyncio.run(
-            TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-        )
-        assert items[0].is_complete is False, "the push-back stream mutated live state (A4)"
-
-        # The next turn applies it at turn start, where nothing else writes.
-        _stream_events(client, session_id)
-
-    items = asyncio.run(
-        TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-    )
-    assert items[0].is_complete is True
-
-
-def test_job_pushback_does_not_touch_todos_when_harness_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """With the harness off, a push-back never touches the (harness-only) todo list."""
-    import asyncio
-
-    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
-
-    import chemclaw.api.app as app_module
-    from chemclaw.agent.harness_todo import mark_awaiting_job
-    from chemclaw.agent.session_events import SessionEvent
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "harness_enabled", False)
-
-    async def _fake_stream(session_id: str, **_: object) -> object:
-        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
-
-    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
-
-    app = _app()
-    with TestClient(app) as client:
-        session_id = client.post("/sessions").json()["session_id"]
-        live_session = app.state.live_sessions.get(session_id).session
-        asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
-
-        with client.stream("GET", f"/sessions/{session_id}/events") as res:
-            for _line in res.iter_lines():
-                pass
-
-    items = asyncio.run(
-        TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-    )
-    assert items[0].is_complete is False
 
 
 def test_pushback_for_unknown_session_is_404() -> None:
@@ -1152,7 +1065,7 @@ def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: s
 def test_concurrent_turn_on_same_session_is_409() -> None:
     """While one turn runs, a second POST to the same session is rejected with 409.
 
-    Two concurrent turns would drive `agent.run` against the same AgentSession at once,
+    Two concurrent turns would drive `agent.run` against the same TurnSession at once,
     interleaving two turns' messages into one conversation thread — so the second is shed
     (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
     the running turn's stream ends.
@@ -1278,78 +1191,11 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
     asyncio.run(_run())
 
 
-def test_a_mid_turn_job_completion_survives_a_disconnect_rollback(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A push-back landing while a turn streams is not undone by that turn's rollback (A4).
-
-    The events stream used to call `complete_awaiting_job` on the live session the moment the
-    push-back arrived — a load-modify-save over `session.state` under a running turn. `run_turn`
-    snapshots that state at turn start and restores it when the client disconnects before the
-    answer, so a completion that landed in between was silently un-completed by an unrelated
-    teardown: the job was done, durably claimed, and the plan showed it open forever. The stream
-    now only *records* the completion; the next turn applies it at turn start, before its own
-    snapshot, where nothing else writes.
-
-    Counterfactual: revert the events route to flipping the todo directly (and drop the
-    turn-start apply) and the final assertion fails — the disconnect's snapshot restore discards
-    the flip.
-    """
-    import contextlib
-
-    import httpx
-    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
-
-    import chemclaw.api.app as app_module
-    from chemclaw.agent.harness_todo import mark_awaiting_job
-    from chemclaw.agent.session_events import SessionEvent
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _fake_stream(session_id: str, **_: object) -> object:
-        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
-
-    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
-
-    async def _run() -> None:
-        gate = asyncio.Event()
-        started = asyncio.Event()
-        app = _app(_gated_agent(gate, started, "park"))
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            live_session = app.state.live_sessions.get(session_id).session
-            await mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1")
-
-            turn = asyncio.create_task(
-                client.post(f"/sessions/{session_id}/messages", json={"message": "park"})
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)  # the turn is mid-stream
-            # The job finishes now: its push-back is delivered while the turn is in flight.
-            await client.get(f"/sessions/{session_id}/events")
-            # ...and the client then vanishes, cancelling the turn — the teardown that restores
-            # the pre-turn state snapshot (`chemclaw.api.runner`).
-            turn.cancel()
-            with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
-                await turn
-            async with asyncio.timeout(5):
-                while session_id in app.state.active_turns:  # the slot is back
-                    await asyncio.sleep(0.01)
-
-            res = await client.post(f"/sessions/{session_id}/messages", json={"message": "next"})
-            assert res.status_code == 200
-
-        items = await TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-        assert items[0].is_complete is True, (
-            "the mid-turn job completion was discarded by the disconnect's snapshot restore (A4)"
-        )
-
-    asyncio.run(_run())
-
-
 def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Capacity pressure must not evict a mid-turn session and mint a second live handle (A5).
 
     The live cache is a pure-capacity LRU with no notion of "in use": evicting a session does not
-    stop its running turn — the turn holds the `AgentSession` object directly — it makes the next
+    stop its running turn — the turn holds the `TurnSession` object directly — it makes the next
     request rehydrate a brand-new handle over the same durable history, and the two then diverge
     in `session.state`. So a session whose turn is in flight (an unexpired `active_turns` lease)
     is pinned, and the cache briefly holds over capacity instead.

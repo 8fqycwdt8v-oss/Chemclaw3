@@ -9,8 +9,12 @@ regardless of profile. See `docs/archive/audit/10-config-extensibility.md` ยง6/ย
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, build_agent, connector_tools
-from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies
+from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, connector_specs
+from chemclaw.agent.plan_gate import (
+    gate_applies,
+    harness_enabled_for,
+    lg_enforce_plan_approval,
+)
 from chemclaw.agent.profiles import (
     AgentProfile,
     get_profile,
@@ -18,21 +22,20 @@ from chemclaw.agent.profiles import (
     registered_profile_names,
 )
 from chemclaw.core.config import settings
+from tests.surface import surface
 
 
 def test_default_profile_reproduces_todays_agent() -> None:
-    """`build_agent()` and `build_agent(profile="default")` build the identical agent surface."""
-    base = build_agent(chat_client=object())
-    default = build_agent(chat_client=object(), profile="default")
-    assert default.default_options["instructions"] == base.default_options["instructions"]
-    assert default.default_options["instructions"] == _INSTRUCTIONS
-    assert {t.name for t in default.default_options["tools"]} == {
-        t.name for t in base.default_options["tools"]
-    }
-    assert {t.name for t in default.mcp_tools} == {t.name for t in base.mcp_tools}
+    """`surface()` and `surface("default")` advertise the identical thing."""
+    base = surface(None)
+    default = surface("default")
+    assert default.instructions == base.instructions
+    assert default.instructions == _INSTRUCTIONS
+    assert {t.name for t in default.tools} == {t.name for t in base.tools}
+    assert {t.name for t in default.connectors} == {t.name for t in base.connectors}
     # And the default profile's connector set is every enabled connector, as the global agent's is.
-    assert {tool.name for tool in connector_tools()} == {
-        tool.name for tool in connector_tools("default")
+    assert {tool.name for tool in connector_specs()} == {
+        tool.name for tool in connector_specs("default")
     }
 
 
@@ -49,11 +52,11 @@ def test_profile_narrows_tools_and_swaps_instructions() -> None:
         instructions="Answer physical-property questions tersely; cite computed values.",
         tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
     )
-    agent = build_agent(chat_client=object(), profile=profile)
-    assert {t.name for t in agent.default_options["tools"]} == {"gather_evidence"}
-    assert agent.default_options["instructions"] != _INSTRUCTIONS
+    agent = surface(profile)
+    assert {t.name for t in agent.tools} == {"gather_evidence"}
+    assert agent.instructions != _INSTRUCTIONS
 
-    connectors = connector_tools(profile)
+    connectors = connector_specs(profile)
     assert [connector.name for connector in connectors] == ["calc"]
     assert set(connectors[0].allowed_tools or ()) == {"predict_pka", "predict_solubility"}
     # Every other connector is dropped rather than attached with an empty surface.
@@ -67,49 +70,33 @@ def test_profile_can_narrow_connectors() -> None:
     the agent, so the profile is applied where the set is built (`connector_tools`).
     """
     profile = AgentProfile(name="mol-only", mcp_server_names=frozenset({"molfp"}))
-    assert {tool.name for tool in connector_tools(profile)} == {"molfp"}
+    assert {tool.name for tool in connector_specs(profile)} == {"molfp"}
 
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     """The invariant: narrowing a profile never removes the audit + per-tool authz middleware."""
-    from chemclaw.agent.repeat_guard import refuse_repeated_calls
+    from chemclaw.agent.langgraph_agent import tool_call_middleware
+    from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
     from chemclaw.agent.tool_authz import (
-        announce_tool_failures,
-        enforce_tool_authz,
-        refuse_writes_on_dry_run,
+        lg_announce_tool_failures,
+        lg_enforce_tool_authz,
+        lg_refuse_writes_on_dry_run,
     )
 
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"})),
-    )
-    middleware = list(agent.middleware or [])
+    profile = AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"}))
+    middleware = tool_call_middleware(object(), profile)
     # denial + domain-error surfacing + audit + authz + dry-run + repeat guard + announcing
     assert len(middleware) == 7
-    assert enforce_tool_authz in middleware
-    assert refuse_writes_on_dry_run in middleware
-    assert refuse_repeated_calls in middleware
-    assert announce_tool_failures in middleware
+    assert lg_enforce_tool_authz in middleware
+    assert lg_refuse_writes_on_dry_run in middleware
+    assert lg_refuse_repeated_calls in middleware
+    assert lg_announce_tool_failures in middleware
 
 
 def test_unknown_tool_name_in_profile_fails_loud() -> None:
     """A profile naming a tool nothing provides is a build-time error, not a silent empty set."""
     with pytest.raises(ValueError, match="unknown tool"):
-        build_agent(
-            chat_client=object(),
-            profile=AgentProfile(name="typo", tool_names=frozenset({"predict_pkaa"})),
-        )
-
-
-def test_profile_overrides_harness_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A profile can flip the harness on even when the global default keeps it off."""
-    monkeypatch.setattr(settings, "harness_enabled", False)
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(name="autonomous", harness_enabled=True, harness_autonomy="execute"),
-    )
-    provider_types = {type(p).__name__ for p in agent.context_providers}
-    assert "TodoProvider" in provider_types  # the harness path was taken despite the global default
+        surface(AgentProfile(name="typo", tool_names=frozenset({"predict_pkaa"})))
 
 
 def test_get_profile_resolution_and_registration() -> None:
@@ -146,10 +133,11 @@ def test_a_profiles_harness_answer_is_the_same_one_the_plan_gate_gets(
     monkeypatch.setattr(settings, "harness_autonomy", "execute")
     profile = AgentProfile(name="gxp", harness_enabled=True, harness_autonomy="plan_only")
 
+    from chemclaw.agent.langgraph_agent import tool_call_middleware
+
     assert gate_applies(profile), "the deployment default must not decide this for the profile"
-    agent = build_agent(chat_client=object(), profile=profile)
-    assert "TodoProvider" in {type(p).__name__ for p in agent.context_providers}
-    assert enforce_plan_approval in list(agent.middleware or [])
+    assert harness_enabled_for(profile), "the profile's harness override lost to the default"
+    assert lg_enforce_plan_approval in tool_call_middleware(object(), profile)
 
 
 def test_a_harness_profiles_instructions_are_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,6 +149,6 @@ def test_a_harness_profiles_instructions_are_its_own(monkeypatch: pytest.MonkeyP
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     profile = AgentProfile(name="terse-harness", instructions="Answer tersely.")
-    agent = build_agent(chat_client=object(), profile=profile)
-    assert "Answer tersely." in agent.default_options["instructions"]
-    assert _INSTRUCTIONS not in agent.default_options["instructions"]
+    agent = surface(profile)
+    assert "Answer tersely." in agent.instructions
+    assert _INSTRUCTIONS not in agent.instructions

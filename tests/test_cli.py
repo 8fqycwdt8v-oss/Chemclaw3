@@ -114,7 +114,7 @@ def test_successive_turns_continue_one_thread() -> None:
     give a terminal session amnesia between questions while every individual turn still worked.
 
     Its ancestor asserted that `converse` passed a `session=` to `agent.run`, because under
-    `harness_enabled` MAF's `ToolApprovalMiddleware` raised "requires an AgentSession" on a
+    `harness_enabled` MAF's `ToolApprovalMiddleware` raised "requires an TurnSession" on a
     session-less run and the CLI could not take a single turn under the shipped Helm configuration
     (D-152). A thread id is a string in a config dict; there is nothing to be absent, so what is
     left worth pinning is that it does not *change*.

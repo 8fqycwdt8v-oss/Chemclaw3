@@ -17,9 +17,9 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from agent_framework import AgentSession
 
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
@@ -56,7 +56,7 @@ def _events(agent: ScriptedTurn) -> list[Any]:
         return [
             e
             async for e in run_turn(
-                AgentSession(session_id="s1"),
+                TurnSession(session_id="s1"),
                 "compute it",
                 connectors=[],
                 graph_factory=agent.graph_factory,
@@ -186,7 +186,7 @@ def test_the_resume_continues_the_same_graph_with_the_job_results(
         return [
             event
             async for event in run_turn(
-                AgentSession(session_id="s-graph-resume"),
+                TurnSession(session_id="s-graph-resume"),
                 "compute it",
                 connectors=[],
                 graph_factory=agent.graph_factory,

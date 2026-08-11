@@ -18,8 +18,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import (
@@ -65,7 +65,7 @@ def _events(agent: ScriptedTurn) -> list[Any]:
         return [
             event
             async for event in run_turn(
-                AgentSession(session_id="s1"),
+                TurnSession(session_id="s1"),
                 "hi",
                 connectors=[],
                 graph_factory=agent.graph_factory,
@@ -132,7 +132,7 @@ def test_signals_are_isolated_per_turn() -> None:
             return [
                 e
                 async for e in run_turn(
-                    AgentSession(session_id=job_id),
+                    TurnSession(session_id=job_id),
                     "hi",
                     connectors=[],
                     graph_factory=agent.graph_factory,

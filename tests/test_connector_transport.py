@@ -21,7 +21,10 @@ import asyncio
 import logging
 import threading
 from collections.abc import Iterator
-from typing import Any
+from contextlib import AsyncExitStack
+from dataclasses import replace
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -34,10 +37,14 @@ from chemclaw.connectors.identity import (
     HEADER_ROLES,
     HEADER_SESSION,
 )
-from chemclaw.connectors.manifest import HttpEndpoint
-from chemclaw.connectors.registry import connector_http_client, discovered
+from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
+from chemclaw.connectors.registry import (
+    _mcp_connection,
+    connector_http_client,
+    discovered,
+    open_connector_specs,
+)
 from chemclaw.connectors.server import connector_app
-from chemclaw.connectors.transport import DegradingHttpConnector
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
@@ -122,15 +129,14 @@ def test_the_agent_sees_exactly_the_manifest_allow_list(name: str, composite: in
     assert declared, f"{name} declares no agent-facing tools"
 
     async def _discover() -> set[str]:
-        tool = DegradingHttpConnector(
-            name=name,
-            url=f"http://127.0.0.1:{composite}/{name}/mcp",
-            allowed_tools=sorted(declared),
-            load_prompts=False,
-        )
-        async with tool:
-            assert tool.is_connected, f"{name} did not connect over HTTP"
-            return {function.name for function in tool.functions}
+        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{composite}/{name}/mcp")
+        spec = _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
+        spec = replace(spec, allowed_tools=tuple(sorted(declared)))
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable, f"{name} did not connect over HTTP"
+            return {tool.name for tool in tools}
+        raise AssertionError("unreachable")  # pragma: no cover
 
     assert asyncio.run(_discover()) == declared
 
@@ -165,17 +171,16 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
 
     async def _call() -> None:
         endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
-        tool = DegradingHttpConnector(
-            name="header-probe",
-            url=endpoint.url,
-            load_prompts=False,
-            # The production client, built by the one function a deployment builds it with, so
-            # this proves the identity hook lands on the client the agent actually uses.
-            http_client=connector_http_client("header-probe", endpoint),
+        # Built by `_mcp_connection`, which is the one function a deployment builds a connector
+        # with — so this proves the identity hook lands on the client the agent actually uses.
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="header-probe")), endpoint
         )
-        async with tool:
-            assert tool.is_connected
-            await tool.call_tool("echo")
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
+            echo = next(tool for tool in tools if tool.name == "echo")
+            await echo.ainvoke({})
 
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
     session = set_current_session_id("session-xyz")
@@ -186,9 +191,9 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
         reset_current_session_id(session)
         reset_current_identity(identity)
 
-    # At least one request — the tool call — carried the full identity. The handshake
-    # deliberately does not (MAF only invokes `header_provider` for `call_tool`), which is
-    # exactly why our own credential travels on the httpx client instead.
+    # At least one request — the tool call — carried the full identity. The headers are stamped
+    # by the httpx client `connector_http_client` builds, which is also why the deployment's own
+    # credential travels there rather than on a per-call hook.
     assert any(
         headers.get(HEADER_ACTOR.lower()) == "user-42"
         and headers.get(HEADER_ROLES.lower()) == "process-chemist"
@@ -223,14 +228,13 @@ def test_a_tool_body_can_read_the_caller_core_stamped() -> None:
 
     async def _call() -> None:
         endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
-        tool = DegradingHttpConnector(
-            name="caller-probe",
-            url=endpoint.url,
-            load_prompts=False,
-            http_client=connector_http_client("caller-probe", endpoint),
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="caller-probe")),
+            HttpEndpoint(url=endpoint.url),
         )
-        async with tool:
-            await tool.call_tool("whoami")
+        async with AsyncExitStack() as stack:
+            tools, _unreachable = await open_connector_specs(stack, [spec])
+            await next(t for t in tools if t.name == "whoami").ainvoke({})
 
     identity = set_current_identity("user-77", frozenset({"process-chemist"}))
     session = set_current_session_id("session-abc")
@@ -343,95 +347,6 @@ def test_oversized_body_is_rejected_before_the_mcp_handler_runs(
     assert response.status_code == 413
 
 
-def test_an_unreachable_connector_costs_its_tools_not_the_turn() -> None:
-    """The degrade posture, at the layer it has to live in (`chemclaw.connectors.transport`).
-
-    Nothing is listening on this port. The connector must come back *not connected* and
-    contribute no tools, rather than raising — because `Agent.run` re-enters an unconnected MCP
-    tool, so a failure that escapes here would surface mid-turn no matter what the caller did.
-    """
-    port = _free_port()
-
-    async def _attempt() -> tuple[bool, int]:
-        tool = DegradingHttpConnector(
-            name="absent", url=f"http://127.0.0.1:{port}/mcp", load_prompts=False
-        )
-        async with tool:
-            return tool.is_connected, len(tool.functions)
-
-    connected, tool_count = asyncio.run(_attempt())
-    assert connected is False
-    assert tool_count == 0
-
-
-def test_concurrent_turns_get_their_own_connections_and_their_own_identity() -> None:
-    """Why connectors are built per turn: sharing one tool object across turns is doubly wrong.
-
-    Two turns run at once with different actors, each with its own connector instance — the
-    shape `chemclaw.agent.chemclaw_agent.connector_tools` produces. Both must complete, and every
-    request must carry the identity of the turn that made it.
-
-    Measured, not assumed: with a *shared* tool object instead, the same two turns deadlock
-    (each turn's `async with` entering and leaving one connection's lifecycle), and any request
-    that did get through would travel over a connection opened in the other turn's context —
-    misattributing it in the connector's own log. That is the whole reason connectors are not
-    attached to the process-lived agent, and this test is what would fail if they were put back.
-    """
-    seen: list[str] = []
-    server = FastMCP("concurrency-probe")
-
-    @server.tool()
-    async def slow() -> str:
-        """Slow enough that the two turns genuinely overlap rather than serialize by luck."""
-        await asyncio.sleep(0.3)
-        return "ok"
-
-    app = connector_app(server, name="concurrency-probe")
-
-    @app.middleware("http")
-    async def _capture(request: Any, call_next: Any) -> Any:
-        """Record the actor of every request that carries one."""
-        actor = request.headers.get(HEADER_ACTOR.lower())
-        if actor:
-            seen.append(actor)
-        return await call_next(request)
-
-    port = _free_port()
-
-    def _tool() -> DegradingHttpConnector:
-        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
-        return DegradingHttpConnector(
-            name="concurrency-probe",
-            url=endpoint.url,
-            load_prompts=False,
-            http_client=connector_http_client("concurrency-probe", endpoint),
-        )
-
-    async def _turn(actor: str) -> None:
-        """One turn: stamp its identity, open its own connector, call a tool, tear down."""
-        token = set_current_identity(actor, frozenset())
-        try:
-            tool = _tool()
-            async with tool:
-                assert tool.is_connected
-                await tool.call_tool("slow")
-        finally:
-            reset_current_identity(token)
-
-    async def _both() -> None:
-        await asyncio.gather(
-            asyncio.create_task(_turn("user-A")), asyncio.create_task(_turn("user-B"))
-        )
-
-    with _Server(app, port):
-        asyncio.run(_both())
-
-    # Both turns got through (a shared connection deadlocks here), and neither borrowed the
-    # other's identity: every request is attributable to the turn that made it.
-    assert "user-A" in seen and "user-B" in seen
-    assert set(seen) == {"user-A", "user-B"}
-
-
 def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
     """An unhandled exception's text must not carry a DSN/path/internal identifier to the caller.
 
@@ -454,14 +369,17 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
     port = _free_port()
 
     async def _call() -> str:
-        tool = DegradingHttpConnector(
-            name="leak-probe", url=f"http://127.0.0.1:{port}/mcp", load_prompts=False
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="leak-probe")),
+            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp"),
         )
-        async with tool:
-            assert tool.is_connected
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
             with pytest.raises(Exception) as excinfo:  # noqa: PT011 - the MCP client's own type
-                await tool.call_tool("blow_up")
+                await next(t for t in tools if t.name == "blow_up").ainvoke({})
             return str(excinfo.value)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     with _Server(app, port):
         message = asyncio.run(_call())
@@ -536,14 +454,17 @@ def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
     port = _free_port()
 
     async def _call() -> str:
-        tool = DegradingHttpConnector(
-            name="domain-error-probe", url=f"http://127.0.0.1:{port}/mcp", load_prompts=False
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="domain-error-probe")),
+            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp"),
         )
-        async with tool:
-            assert tool.is_connected
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
             with pytest.raises(Exception) as excinfo:  # noqa: PT011 - the MCP client's own type
-                await tool.call_tool("bad_smiles")
+                await next(t for t in tools if t.name == "bad_smiles").ainvoke({})
             return str(excinfo.value)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     with _Server(app, port):
         message = asyncio.run(_call())

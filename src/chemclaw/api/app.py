@@ -35,7 +35,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from chemclaw.agent.chemclaw_agent import build_agent, connector_specs, history_provider
+from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.interaction_tools import (
@@ -156,24 +156,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-def _default_agent_factory(profile: str | None) -> Any:
-    """Build the agent for one profile — `build_agent` with the profile passed by keyword.
-
-    A named adapter rather than a lambda so the app's default factory has the same one-argument
-    shape a test's fake does, and so the signature is somewhere a reader can find it.
-
-    No `audit_sink` argument, deliberately: `chemclaw.agent.audit.default_audit_sink` supplies the
-    durable
-    GxP trail wherever a database is configured. This line used to be the whole of the finding —
-    it passed no sink, so the compliance record was log-only in the one process chemists use.
-    Fixing it *here* would have left the same trap set for the Temporal template activities and
-    every future entry point, so the default moved to the one place that decides.
-    """
-    return build_agent(profile=profile)
-
-
 def create_app(
-    agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
     connector_factory: Callable[[str | None], list[Any]] = connector_specs,
     turn_claims: SessionTurns | None = None,
@@ -182,10 +165,6 @@ def create_app(
     """Build the front-door FastAPI app.
 
     Args:
-        agent_factory: Builds the agent for one profile name (`None` = the default profile). Called
-            once per distinct profile and cached, since an agent is configuration rather than
-            per-conversation state. Tests pass a factory returning a fake streaming agent so the
-            whole HTTP surface is exercised without a live model.
         owner_store: The durable session-ownership registry used to reattach a client to its session
             after a pod restart. Defaults to the config-gated store (present only under
             `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
@@ -194,20 +173,18 @@ def create_app(
             (`chemclaw.agent.chemclaw_agent.connector_specs`). A factory rather than a list because
             a connector's connection must belong to a single turn, so the app calls it per turn; and
             per-profile because the profile narrows the connector surface as well as the
-            in-process one. Injectable for the same reason `agent_factory` is: a test drives the
+            in-process one. Injectable for the same reason `graph_factory` is: a test drives the
             whole HTTP surface without a connector server running.
         turn_claims: The durable "one turn at a time per session" claim, which is what makes that
             guard hold across processes rather than only within one (D-121). Defaults to the
             config-gated store (present only under `session_store="postgres"`); tests inject an
             in-memory fake to exercise the cross-process conflict without a database.
-        graph_factory: Builds *this turn's* compiled graph on the LangGraph engine, given the
-            profile, the turn's identity and its already-open connectors. It is the seam a test
-            injects a credential-free turn through, and the *only* one now that the agent argument
-            is gone: without it the front door's own surface would need a live model to exercise at
-            all. A factory rather than an instance because a graph binds its tools at construction
-            and
-            therefore belongs to one turn (`chemclaw.agent.langgraph_agent`), which is also why it
-            is *not* cached the way `agent_factory`'s result is.
+        graph_factory: Builds *this turn's* compiled graph, given the profile, the turn's identity
+            and its already-open connectors. It is the seam a test injects a credential-free turn
+            through, and the only one: without it the front door's own surface would need a live
+            model to exercise at all. A factory rather than an instance because a graph binds its
+            tools at construction and therefore belongs to one turn
+            (`chemclaw.agent.langgraph_agent`) — nothing here is cached per process.
 
     Returns:
         A configured `FastAPI` application.
@@ -230,18 +207,11 @@ def create_app(
     # difference. See `_database_unavailable`.
     app.add_exception_handler(ConnectionError, _database_unavailable)
     app.add_exception_handler(SubsystemUnavailableError, _subsystem_unavailable)
-    # One agent per process, built lazily on first use so importing the app needs no
-    # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
-    # session map with a durable store and wires job→session push-back. One agent per profile
-    # name, built lazily on first use so importing the app needs no credentials. `None` is the
-    # default profile — the key a session gets when it names none.
-    app.state.agents = {}
-    app.state.agent_factory = agent_factory
-    # Called once per turn, not once per process — a connector connection belongs to a single turn.
+    # Both called once per *turn*, not once per process. A connector's session belongs to a single
+    # turn, and a graph binds its tools at construction — so the graph's lifetime is pinned to its
+    # connectors' (`chemclaw.agent.langgraph_agent`). There used to be an `agents` dict beside
+    # these, holding one process-lived MAF `Agent` per profile; nothing outlives a turn now.
     app.state.connector_factory = connector_factory
-    # The graph engine's agent, built per turn for the same reason the connectors are: it holds
-    # them. Seeded beside `agent_factory` so the two engines' injection points sit together and
-    # neither can be the one a test forgot.
     app.state.graph_factory = graph_factory
 
     def _turn_in_flight(session_id: str) -> bool:

@@ -11,42 +11,44 @@ enough — no live agent run or model call is needed.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from types import SimpleNamespace
-from typing import cast
+from typing import Any
 
 import pytest
-from agent_framework import FunctionInvocationContext
 
 from chemclaw.agent.audit import (
     AuditEvent,
     NullAuditSink,
     default_audit_sink,
-    make_audit_middleware,
+    make_langgraph_audit_middleware,
 )
 from chemclaw.core.config import settings
+from tests.middleware import run_middleware, tool_request
 
 
-def _ctx(name: str, arguments: object, result: object = None) -> FunctionInvocationContext:
-    """A minimal stand-in exposing only the fields the middleware reads."""
-    return cast(
-        FunctionInvocationContext,
-        SimpleNamespace(function=SimpleNamespace(name=name), arguments=arguments, result=result),
-    )
+def _ctx(name: str, arguments: object, result: object = None) -> Any:
+    """The call as the audit middleware reads it: a name and its arguments.
+
+    `result` is accepted and ignored. A `wrap_tool_call` middleware records what the *handler*
+    returns rather than what the caller pre-set on a context, so the tests that care pass it back
+    from their `call_next` instead — which is the more honest arrangement, since the trail is
+    supposed to record what the tool produced.
+    """
+    return tool_request(name, dict(arguments) if isinstance(arguments, dict) else {})
 
 
-def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]) -> None:
+def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
     """Run the middleware with no explicit sink over a stand-in context.
 
     Log-only in practice because the test config leaves `session_store="memory"`, which is what
     `default_audit_sink` resolves to — not because omitting `sink` means log-only (it no longer
     does; see `test_an_omitted_sink_no_longer_silently_means_log_only`).
     """
-    mw = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
+    mw = make_langgraph_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
 
-    async def _run() -> None:
-        await mw(ctx, call_next)
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    asyncio.run(run_middleware(mw, ctx, _handler))
 
 
 async def _ok() -> None:
@@ -104,15 +106,22 @@ class _BrokenSink:
         raise RuntimeError("audit store down")
 
 
-def _drive_mw(
-    mw: object, ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
-) -> None:
-    """Run an arbitrary middleware over a stand-in context to completion."""
+def _as_handler(call_next: Callable[[], Awaitable[Any]]) -> Callable[[Any], Awaitable[Any]]:
+    """Adapt a zero-arg tool body to the `handler(request)` a middleware calls."""
 
-    async def _run() -> None:
-        await mw(ctx, call_next)  # type: ignore[operator]
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    return _handler
+
+
+def _drive_mw(mw: Any, ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
+    """Run an arbitrary middleware over one call to completion."""
+
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
+
+    asyncio.run(run_middleware(mw, ctx, _handler))
 
 
 def test_ambient_identity_overrides_the_static_actor() -> None:
@@ -120,7 +129,7 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
     sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-9", actor="unknown", sink=sink)
+    mw = make_langgraph_audit_middleware(correlation_id="conv-9", actor="unknown", sink=sink)
 
     async def _ok_call() -> None:
         return None
@@ -150,7 +159,7 @@ def test_a_specialist_is_recorded_beside_the_human_actor() -> None:
     )
 
     sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-sub", actor="unknown", sink=sink)
+    mw = make_langgraph_audit_middleware(correlation_id="conv-sub", actor="unknown", sink=sink)
 
     async def _ok_call() -> None:
         return None
@@ -184,7 +193,7 @@ def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -
     )
 
     sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
+    mw = make_langgraph_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
 
     async def _ok_call() -> None:
         return None
@@ -237,7 +246,7 @@ def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -
     """Every recorded event carries the process's deployment revision (AG-14, GxP provenance)."""
     monkeypatch.setattr(settings, "deployment_revision", "sha-abc123")
     sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-r", actor="a", sink=sink)
+    mw = make_langgraph_audit_middleware(correlation_id="conv-r", actor="a", sink=sink)
 
     async def _ok_call() -> None:
         return None
@@ -250,7 +259,7 @@ def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -
 def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
     """The per-conversation middleware records cid, actor, outcome, and the result effect."""
     sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-1", actor="alice@corp", sink=sink)
+    mw = make_langgraph_audit_middleware(correlation_id="conv-1", actor="alice@corp", sink=sink)
 
     async def _returns_ref() -> None:
         return None
@@ -270,7 +279,7 @@ def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
 def test_factory_records_failure_and_reraises() -> None:
     """A failing tool records an `error` event and still propagates the exception."""
     sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-2", actor="bob", sink=sink)
+    mw = make_langgraph_audit_middleware(correlation_id="conv-2", actor="bob", sink=sink)
     with pytest.raises(ValueError, match="boom"):
         _drive_mw(mw, _ctx("compute_xtb_energy", {}), _boom)
     assert sink.events[0].outcome == "error"
@@ -279,7 +288,7 @@ def test_factory_records_failure_and_reraises() -> None:
 
 def test_sink_failure_does_not_break_the_tool_call(caplog: pytest.LogCaptureFixture) -> None:
     """A broken audit sink is logged (alertably) and swallowed — the tool call still succeeds."""
-    mw = make_audit_middleware(correlation_id="c", actor="a", sink=_BrokenSink())
+    mw = make_langgraph_audit_middleware(correlation_id="c", actor="a", sink=_BrokenSink())
     with caplog.at_level(logging.ERROR):
         _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok)  # must not raise
     # SEC-3: the lost GxP record is logged at ERROR with a stable, greppable marker so it can alert.
@@ -320,7 +329,7 @@ def test_a_deployment_with_no_database_falls_back_to_log_only(
 def test_an_omitted_sink_no_longer_silently_means_log_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`make_audit_middleware()` with no `sink` resolves the default, not `NullAuditSink`.
+    """`make_langgraph_audit_middleware()` with no `sink` resolves the default, not `NullAuditSink`.
 
     The polarity that matters for a GxP control: a forgotten argument must not downgrade the
     compliance record. Opting *out* stays possible by passing `NullAuditSink()` explicitly.
@@ -332,13 +341,10 @@ def test_an_omitted_sink_no_longer_silently_means_log_only(
             recorded.append(event.tool)
 
     monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: _Marker())
-    middleware = make_audit_middleware(correlation_id="c", actor="a")
+    middleware = make_langgraph_audit_middleware(correlation_id="c", actor="a")
     context = _ctx("compute_xtb_energy", {"smiles": "CCO"})
 
-    async def _run() -> None:
-        await middleware(context, _ok)
-
-    asyncio.run(_run())
+    _drive_mw(middleware, context, _ok)
 
     assert recorded == ["compute_xtb_energy"], "the default sink was not consulted"
 
@@ -364,7 +370,7 @@ class _SlowSink:
         self.written.set()
 
 
-def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[None]]:
+def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[Any]]:
     """A tool body that announces it is running and then never returns."""
 
     async def _call() -> None:
@@ -384,12 +390,18 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     cancellation is neither a success nor a tool failure.
     """
     sink = _RecordingSink()
-    middleware = make_audit_middleware(correlation_id="conv-cancel", actor="carol", sink=sink)
+    middleware = make_langgraph_audit_middleware(
+        correlation_id="conv-cancel", actor="carol", sink=sink
+    )
 
     async def _run() -> None:
         started = asyncio.Event()
         task = asyncio.ensure_future(
-            middleware(_ctx("compute_xtb_energy", {"smiles": "CCO"}), _hangs_until(started))
+            run_middleware(
+                middleware,
+                _ctx("compute_xtb_energy", {"smiles": "CCO"}),
+                _as_handler(_hangs_until(started)),
+            )
         )
         await started.wait()
         task.cancel()
@@ -419,12 +431,18 @@ def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     write on its own task, the pattern `chemclaw.api.runner` already uses for the history rollback.
     """
     sink = _SlowSink()
-    middleware = make_audit_middleware(correlation_id="conv-torn", actor="dave", sink=sink)
+    middleware = make_langgraph_audit_middleware(
+        correlation_id="conv-torn", actor="dave", sink=sink
+    )
 
     async def _run() -> None:
         started = asyncio.Event()
         task = asyncio.ensure_future(
-            middleware(_ctx("gather_evidence", {"query": "biaryl"}), _hangs_until(started))
+            run_middleware(
+                middleware,
+                _ctx("gather_evidence", {"query": "biaryl"}),
+                _as_handler(_hangs_until(started)),
+            )
         )
         await started.wait()
         task.cancel()

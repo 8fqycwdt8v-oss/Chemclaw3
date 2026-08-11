@@ -28,7 +28,7 @@ from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
 from chemclaw.agent.audit import NullAuditSink
-from chemclaw.agent.chemclaw_agent import connector_specs, connector_tools
+from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.connectors.identity import HEADER_ACTOR
@@ -180,7 +180,7 @@ def test_a_real_turn_reaches_a_real_connector_on_the_graph_engine(
 
     Every other test in this file opens the specs itself and hands the tools to
     `build_langgraph_agent`, which is why they all passed while the path a chemist takes was
-    broken. `run_turn` built its connectors with `connector_tools` — MAF's — on *both* engines and
+    broken. `run_turn` built its connectors with `connector_specs` — MAF's — on *both* engines and
     handed those objects to the graph factory, so the first graph turn with any connector enabled
     died at construction with `ValueError: The first argument must be a string or a callable …
     Got <class '…transport.DegradingHttpConnector'>`. Nothing caught it because every graph test
@@ -312,7 +312,7 @@ def test_a_profile_narrows_connectors_identically_on_both_engines() -> None:
     profile = AgentProfile(
         name="narrow-both", tool_names=frozenset({"predict_pka", "screen_hazards"})
     )
-    maf = {tool.name: tuple(tool.allowed_tools or ()) for tool in connector_tools(profile)}
+    maf = {tool.name: tuple(tool.allowed_tools or ()) for tool in connector_specs(profile)}
     graph = {spec.name: tuple(spec.allowed_tools or ()) for spec in connector_specs(profile)}
     assert maf == graph
     assert maf == {"calc": ("predict_pka",), "safety": ("screen_hazards",)}

@@ -18,11 +18,11 @@ import logging
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.graph_tools import NoteRef, NoteView
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
 from chemclaw.api.tool_results import (
     StoredToolResult,
@@ -292,14 +292,14 @@ def test_setting_the_cap_to_zero_disables_the_store(monkeypatch: pytest.MonkeyPa
 class _SessionOnlyAgent:
     """Enough agent to create a session and no more — these tests never run a turn."""
 
-    def create_session(self, *, session_id: str) -> AgentSession:  # noqa: D102 - see class
-        return AgentSession(session_id=session_id)
+    def create_session(self, *, session_id: str) -> TurnSession:  # noqa: D102 - see class
+        return TurnSession(session_id=session_id)
 
 
 @pytest.fixture
 def client() -> TestClient:
     """The real app, built the way the service builds it, with a session-creating stub agent."""
-    return TestClient(create_app(agent_factory=lambda _profile: _SessionOnlyAgent()))
+    return TestClient(create_app())
 
 
 def test_a_stored_result_is_fetchable_from_its_session(

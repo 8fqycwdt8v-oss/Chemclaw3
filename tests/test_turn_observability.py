@@ -12,8 +12,8 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
-from agent_framework import AgentSession
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.runner import run_turn
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS, Metrics
@@ -37,7 +37,7 @@ def _drive(agent: ScriptedTurn, session_id: str) -> None:
 
     async def _collect() -> None:
         async for _ in run_turn(
-            AgentSession(session_id=session_id),
+            TurnSession(session_id=session_id),
             "hi",
             connectors=[],
             graph_factory=agent.graph_factory,
@@ -94,7 +94,7 @@ def test_a_failed_turn_is_still_timed() -> None:
 
     async def _collect() -> None:
         async for _ in run_turn(
-            AgentSession(session_id="s-e"),
+            TurnSession(session_id="s-e"),
             "hi",
             connectors=[],
             graph_factory=broken.graph_factory,
@@ -146,7 +146,7 @@ def test_token_spend_is_counted_not_only_budgeted() -> None:
 
     async def _collect() -> None:
         async for _ in run_turn(
-            AgentSession(session_id="s-f"),
+            TurnSession(session_id="s-f"),
             "hi",
             connectors=[],
             graph_factory=metered.graph_factory,
@@ -188,7 +188,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
 
     async def _collect() -> None:
         async for _ in run_turn(
-            AgentSession(session_id="s-cost"),
+            TurnSession(session_id="s-cost"),
             "hi",
             connectors=[],
             graph_factory=metered.graph_factory,
@@ -226,7 +226,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
 
     async def _collect_broken() -> None:
         async for _ in run_turn(
-            AgentSession(session_id="s-broken"),
+            TurnSession(session_id="s-broken"),
             "hi",
             connectors=[],
             graph_factory=broken.graph_factory,
@@ -251,15 +251,13 @@ def test_the_front_door_configures_logging_and_telemetry_at_startup(
     from fastapi.testclient import TestClient
 
     from chemclaw.api import app as service_app
-    from tests.test_service import _FakeAgent, _no_connectors
+    from tests.test_service import _no_connectors
 
     calls: list[str] = []
     monkeypatch.setattr(service_app, "configure_logging", lambda: calls.append("logging"))
     monkeypatch.setattr(service_app, "configure_telemetry", lambda: calls.append("telemetry"))
 
-    app = service_app.create_app(
-        agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
-    )
+    app = service_app.create_app(connector_factory=_no_connectors)
     with TestClient(app):
         pass
     assert calls == ["logging", "telemetry"]

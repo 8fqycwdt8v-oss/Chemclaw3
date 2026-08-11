@@ -7,10 +7,11 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 
 import asyncio
 
-from agent_framework import InMemoryHistoryProvider, Message
+from langchain_core.messages import HumanMessage
 
 from chemclaw.agent.chemclaw_agent import history_provider
 from chemclaw.agent.session_store import (
+    InMemoryHistoryProvider,
     PostgresHistoryProvider,
     SessionOwnerStore,
     SessionTurnClaims,
@@ -53,13 +54,13 @@ def test_messages_survive_a_new_provider_instance() -> None:
     async def _run() -> None:
         writer = await _provider_or_skip()
         session_id = "sess-f3-roundtrip"
-        turn = [Message(role="user", contents=["what is the pKa of phenol?"])]
+        turn = [HumanMessage(content="what is the pKa of phenol?")]
         await writer.save_messages(session_id, turn)
 
         # A brand-new provider instance (as a restarted pod would build) sees the persisted turn.
         reader = PostgresHistoryProvider()
         loaded = await reader.get_messages(session_id)
-        assert any("phenol" in m.text for m in loaded)
+        assert any("phenol" in str(m.content) for m in loaded)
 
     asyncio.run(_run())
 
@@ -237,10 +238,10 @@ def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
                 )
         turns = 80  # comfortably past any plausible default window
         for index in range(turns):
-            await provider.save_messages(session_id, [Message("user", [f"question {index}"])])
+            await provider.save_messages(session_id, [HumanMessage(content=f"question {index}")])
 
         loaded = await provider.get_messages(session_id)
-        assert [m.text for m in loaded] == [f"question {index}" for index in range(turns)], (
+        assert [m.content for m in loaded] == [f"question {index}" for index in range(turns)], (
             f"the transcript read returned {len(loaded)} of {turns} messages — a window would "
             "make a reloaded conversation look like it began later than it did"
         )

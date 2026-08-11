@@ -28,19 +28,18 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 import psycopg
-from agent_framework import AgentSession, Message
+from langchain_core.messages import AIMessage, HumanMessage
 
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.framing import frame_untrusted
-from chemclaw.agent.harness_todo import apply_deferred_completions, todo_titles
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.live_session import reset_current_session, set_current_session
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.session import TurnSession
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.budget import BudgetTracker
@@ -49,7 +48,6 @@ from chemclaw.api.events import (
     ErrorCode,
     ErrorEvent,
     Event,
-    PlanEvent,
     TokenEvent,
 )
 from chemclaw.api.graph_stream import graph_events
@@ -111,7 +109,7 @@ def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
 
 
 async def run_turn(
-    session: AgentSession,
+    session: TurnSession,
     user_message: str,
     *,
     actor: str | None = None,
@@ -189,7 +187,6 @@ async def run_turn(
     # The live session object too, so a job-launching tool can mark the harness todo it's
     # waiting on (`agents.harness_todo`) — the id alone cannot reach the session's own todo-list
     # state.
-    live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     # One correlation id per *turn*, stamped here rather than bound inside `build_agent`: agents
@@ -198,36 +195,17 @@ async def run_turn(
     # which is the one thing a correlation id exists to do.
     correlation_id = uuid.uuid4().hex
     correlation_token = set_current_correlation_id(correlation_id)
-    # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
-    # proposals) — the runner only sees the model's updates, so tools hand these over out of
-    # band.
     # Count this turn's tool calls, so the identical question asked a third time is refused rather
     # than re-executed (`chemclaw.agent.repeat_guard`). Started here beside the signal buffer
-    # because both are per-turn ambients the middleware reads and the runner owns the lifetime of.
+    # because it is a per-turn ambient the middleware reads and the runner owns the lifetime of.
     calls_token = begin_call_watch()
-    # Watch the harness loop's stop decisions, so a turn stopped by the runaway cap can say so
-    # instead of looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op for the
-    # classic agent, which has no loop to watch.
+    # Watch the loop's stop decisions, so a turn stopped by the runaway cap can say so instead of
+    # looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op without the
+    # harness, which is what attaches the cap.
     loop_token = begin_loop_watch()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
     dry_run_token = set_dry_run(dry_run)
-    # Emits a plan when the harness's todo list first appears and again whenever it changes — not
-    # once per update (which would spam an unchanged plan), and never as an empty checklist.
-    plan = _PlanEmitter()
-    # Apply job completions the push-back stream recorded while no turn could safely take the
-    # write (`chemclaw.agent.harness_todo.defer_job_completion`). Turn start is the one moment
-    # nothing else writes `session.state`, and it must happen *before* the snapshot below: the
-    # flip then belongs to the pre-turn state, so a disconnect that restores the snapshot keeps
-    # it instead of silently un-completing the todo. Guarded because it is bookkeeping — a
-    # failed flip must not cost the chemist the turn it precedes.
-    if settings.harness_enabled:
-        try:
-            await apply_deferred_completions(session)
-        except Exception:  # noqa: BLE001 - a todo flip must never fail the turn it precedes
-            logger.exception(
-                "could not apply deferred job completions for session %s", session.session_id
-            )
     # Snapshot the session state before the turn so a client disconnect can roll it back
     # (ISSUE-B-10). `session.state` is the harness's own bookkeeping — the todo list, the plan
     # hash, the approval marks — and a turn torn down half-way through has advanced it for work
@@ -369,11 +347,6 @@ async def run_turn(
                             answer_parts.append(event.text)
                         yield event
                     run_complete = True
-                # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
-                # launch and then the plan that reflects it.
-                plan_event = await plan.changed(session)
-                if plan_event is not None:
-                    yield plan_event
         # The runaway guard fired: the harness loop still had work it wanted to do and its
         # iteration cap stopped it (`chemclaw.agent.loop_cap`). Said out loud, before the answer,
         # for the same reason `CapabilityDegradedEvent` precedes the tokens — the answer that
@@ -446,7 +419,7 @@ async def run_turn(
         # in `finally`, which also runs on the disconnect path where an `await` would re-raise the
         # cancellation and skip every teardown step after it — see `consume_turn_approval`.
         if plan_gated:
-            await consume_turn_approval(session)
+            await consume_turn_approval(session.session_id)
     except (GeneratorExit, asyncio.CancelledError):
         # The turn is being torn down from outside — the client went away, or the front door's
         # wall-clock deadline expired. Roll the session back to its pre-turn state: a half-written
@@ -520,7 +493,7 @@ async def run_turn(
         # run before it failed, and re-running under the same approval is exactly what a person
         # would want asked about again.
         if plan_gated:
-            await consume_turn_approval(session)
+            await consume_turn_approval(session.session_id)
     finally:
         # **Nothing in this block may `await`.** It runs on the disconnect path too, which
         # production reaches by cancellation rather than `aclose()` (D-130) — an `await` here
@@ -589,7 +562,6 @@ async def run_turn(
         end_loop_watch(loop_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
-        reset_current_session(live_session_token)
         reset_current_correlation_id(correlation_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
@@ -659,63 +631,6 @@ async def _durable_subsystem_reachable() -> bool:
         return False
 
 
-class _PlanEmitter:
-    """Turns the harness's todo list into `PlanEvent`s — one per distinct plan, never an empty one.
-
-    **Two emit sites used to ask two different questions**, and the second one was wrong. The
-    streaming loop guarded with `if plan and plan != last_plan`; the post-resume site guarded with
-    `if current_plan is not None and current_plan != last_plan`, which admits `[]` — so a turn whose
-    plan was emptied (the model clearing its todo list, which MAF's own instructions tell it to do
-    when the chemist changes topic) emitted the empty checklist `_current_plan`'s docstring says
-    must never be produced. Measured: `plan events: [['step one'], []]`. A surface renders that as
-    "the agent has no plan", which is the reading reserved for an agent that does not plan at all.
-
-    Holding both the last-emitted plan and the predicate in one object is what makes the two sites
-    identical by construction rather than by two people remembering the same rule. It is the same
-    move `ToolCallTrace` makes for streamed tool calls: state the loop must carry across iterations
-    belongs with the decision that reads it.
-    """
-
-    def __init__(self) -> None:
-        self._last: list[str] = []
-
-    async def changed(self, session: AgentSession) -> PlanEvent | None:
-        """The event to emit now, or None when there is no plan or it has not changed.
-
-        Falsy covers both cases a plan must not be sent for — no harness (`None`) and an empty
-        checklist (`[]`) — which is why one predicate can serve both sites.
-        """
-        plan = await _current_plan(session)
-        if not plan or plan == self._last:
-            return None
-        self._last = plan
-        return PlanEvent(todos=plan)
-
-
-async def _current_plan(session: AgentSession) -> list[str] | None:
-    """The harness's current todo list for this session, or None when there is no plan to show.
-
-    Why this is emitted at all (gap RCH-5): `PlanEvent` has been in the typed contract and
-    rendered by the UI since F2, but nothing ever produced one — so `plan_only` autonomy, which
-    the Helm chart ships as the production default, asked a human to approve a plan the surface
-    could never show them. Titles are read from the harness's own `TodoProvider` state, the same
-    store `chemclaw.agent.harness_todo` mutates, so there is no second representation of the plan to
-    drift.
-
-    None (not an empty list) off the harness path: the classic agent has no todo state, and an
-    empty `PlanEvent` would render as an empty checklist — "the agent has no plan" — rather than
-    "this agent does not plan". A malformed todo state degrades to None as well: the plan is a
-    view, and no view is worth failing a turn over.
-    """
-    if not settings.harness_enabled:
-        return None
-    try:
-        return await todo_titles(session)
-    except Exception:
-        logger.exception("could not read the plan for session %s", session.session_id)
-        return None
-
-
 def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
     """The completed jobs, worded and framed as the message that continues the turn.
 
@@ -779,7 +694,7 @@ async def _record_transcript(
     try:
         await history.save_messages(
             session_id,
-            [Message("user", [user_message]), Message("assistant", [answer])],
+            [HumanMessage(content=user_message), AIMessage(content=answer)],
             # `state` is where the in-memory provider keeps its thread, and the durable one
             # deliberately keeps nothing there. Passing it is what makes this one call correct
             # under both stores, which is the same reason the transcript route passes it on read.

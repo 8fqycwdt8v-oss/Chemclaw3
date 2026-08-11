@@ -121,7 +121,7 @@ def test_a_scripted_probe_is_refused_by_the_single_question_runner() -> None:
 def test_a_plan_refusal_is_not_counted_as_a_broken_tool() -> None:
     """The gate working and the tool falling over must not land in the same list.
 
-    They arrive on the stream as the same event type — `announce_tool_failures` is attached
+    They arrive on the stream as the same event type — `lg_announce_tool_failures` is attached
     innermost, so it sees `PlanNotApprovedError` raw and announces it exactly as it announces a
     database outage. Folding them together would make a correctly-gated turn read as a turn whose
     tools broke, which is precisely inverted: one is the GxP line holding, the other is a fault.

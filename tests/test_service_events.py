@@ -10,8 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from agent_framework import AgentSession
-
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.events import ErrorEvent, Event, TokenEvent, ToolCallEvent
 from chemclaw.api.runner import run_turn
 from tests.fakes import FakeUpdate
@@ -35,9 +34,9 @@ class _FakeAgent(ScriptedTurn):
     tool-calling turn — is `tests/test_langgraph_stream.py`'s conformance test.
     """
 
-    def create_session(self, *, session_id: str) -> AgentSession:
+    def create_session(self, *, session_id: str) -> TurnSession:
         """The one non-streaming method the front door calls on an agent."""
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
     async def stream(self, message: str) -> AsyncIterator[Any]:
         """The MAF-shaped stream: a call content, then two text updates.

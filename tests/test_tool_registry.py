@@ -8,7 +8,7 @@ same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md`
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import _capability_tools, build_agent
+from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.connectors.registry import enabled
 from chemclaw.core.tool_registry import (
     _REGISTRY,
@@ -18,6 +18,7 @@ from chemclaw.core.tool_registry import (
     tool,
 )
 from chemclaw.templates.registry import template_tool_names
+from tests.surface import surface
 
 # Every in-process capability tool, spelled out: the registry must reproduce this set, no more and
 # no less (a connector's tools are advertised separately, per turn). Adding one is a deliberate,
@@ -69,7 +70,7 @@ def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides
     *else* ever appears.
     """
     assert _EXPECTED_INPROCESS_TOOLS <= set(registered_tool_names())
-    build_agent(chat_client=object())
+    surface(None)
     extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
     jobs = {job.name for manifest in enabled() for job in manifest.jobs}
     assert extra == jobs | set(template_tool_names())
@@ -87,8 +88,8 @@ def test_capability_tools_are_exactly_the_registry() -> None:
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:
     """The built agent advertises every registered in-process tool under its function name."""
-    agent = build_agent(chat_client=object())
-    advertised = {t.name for t in agent.default_options["tools"]}
+    agent = surface(None)
+    advertised = {t.name for t in agent.tools}
     assert _EXPECTED_INPROCESS_TOOLS <= advertised
 
 

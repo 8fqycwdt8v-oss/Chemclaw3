@@ -32,11 +32,10 @@ contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail 
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
-from agent_framework import FunctionInvocationContext, function_middleware
 from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from pydantic import BaseModel
 
@@ -171,53 +170,6 @@ def _truncate(value: object) -> str:
     text = repr(value)
     limit = settings.agent_audit_max_arg_chars
     return text if len(text) <= limit else text[:limit] + "…"
-
-
-def make_audit_middleware(
-    *,
-    correlation_id: str,
-    actor: str,
-    sink: AuditSink | None = None,
-) -> Callable[[FunctionInvocationContext, Callable[[], Awaitable[None]]], Awaitable[None]]:
-    """Build the tool-audit middleware bound to one conversation's identity.
-
-    `correlation_id` and `actor` are both *fallbacks*, used only when the call has no ambient one
-    (`chemclaw.core.identity_context`): the turn's real Entra user takes precedence per call
-    (F4-T5), and
-    so does the turn's correlation id. The id has to work that way because agents are cached per
-    profile for the process's lifetime — an id bound here would be shared by every turn from every
-    user on the pod, which would make the audit trail unable to separate two conversations. The
-    build-time value still serves the callers that bind a meaningful one and stamp nothing per turn
-    (the Temporal template activities pass the workflow id).
-
-    `sink` is the durable trail. Omitted means `default_audit_sink()` — durable wherever a
-    database is configured — so a caller that forgets downgrades nothing; pass `NullAuditSink()`
-    explicitly to opt out. A sink failure is logged and swallowed: the audit store must never
-    break a tool call.
-    """
-    audit_sink: AuditSink = sink if sink is not None else default_audit_sink()
-    # The revision in effect for this process, captured once at build time (AG-14) — every event
-    # this middleware records carries it, so a result ties to the exact version that produced it.
-    revision = settings.deployment_revision
-
-    @function_middleware
-    async def audit_tool_calls(
-        context: FunctionInvocationContext,
-        call_next: Callable[[], Awaitable[None]],
-    ) -> None:
-        """Record one audit event per tool invocation (observe-only)."""
-        async with _recording(
-            context.function.name,
-            context.arguments,
-            actor=actor,
-            correlation_id=correlation_id,
-            sink=audit_sink,
-            revision=revision,
-        ) as recorded:
-            await call_next()
-            recorded.result = context.result
-
-    return audit_tool_calls
 
 
 def make_langgraph_audit_middleware(

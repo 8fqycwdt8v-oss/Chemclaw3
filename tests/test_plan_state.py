@@ -2,7 +2,7 @@
 
 The plan gate reads the plan *during* a call, off `request.state`. `GET /sessions/{id}/plan` and
 the CLI's `/plan` read it when no turn is running, and under MAF that came off the in-process
-`AgentSession` the front door held — the object an LRU eviction or a pod roll dropped, which is
+`TurnSession` the front door held — the object an LRU eviction or a pod roll dropped, which is
 half of why a rehydrated session used to propose the empty plan and meet its own already-spent
 approval.
 

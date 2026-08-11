@@ -20,14 +20,14 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession, Content, TodoSessionStore
+from agent_framework import Content
 
 import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_answer as runner_answer
 import chemclaw.api.runner_trace as runner_trace
-from chemclaw.agent.harness_todo import mark_awaiting_job
-from chemclaw.agent.loop_cap import observe_loop_cap
+from chemclaw.agent.loop_cap import record_loop_cap
+from chemclaw.agent.session import TurnSession
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
@@ -63,7 +63,7 @@ def _run_turn(message: str = "q") -> list[Any]:
     agent = _FakeAgent()
 
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-1")
+        session = TurnSession(session_id="s-1")
         return [
             event
             async for event in runner.run_turn(
@@ -160,14 +160,14 @@ class _JobLaunchingAgent(ScriptedTurn):
         yield "done."
 
 
-def _events(agent: ScriptedTurn, session: AgentSession | None = None) -> list[Any]:
+def _events(agent: ScriptedTurn, session: TurnSession | None = None) -> list[Any]:
     """One turn's events for `agent`, on whichever engine is configured (see `_run_turn`).
 
     `session` is injectable because a fake that plans has to write into the *same* session object
     the runner reads its todo list from — building one here and another in the test would leave
     the plan somewhere nothing looks.
     """
-    turn_session = session if session is not None else AgentSession(session_id="s-jobs")
+    turn_session = session if session is not None else TurnSession(session_id="s-jobs")
 
     async def _collect() -> list[Any]:
         return [
@@ -253,7 +253,7 @@ class _PlanClearingAgent(ScriptedTurn):
     `PlanEvent` site.
     """
 
-    def __init__(self, session: AgentSession) -> None:
+    def __init__(self, session: TurnSession) -> None:
         """Plan into `session`'s todo store, then clear it on the continuation pass."""
         self.calls = 0
         self._session = session
@@ -261,30 +261,23 @@ class _PlanClearingAgent(ScriptedTurn):
     async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
         self.calls += 1
         if self.calls == 1:
-            await mark_awaiting_job(self._session, "qm-9", title="Await QM job qm-9")
             record_job_started("qm-9", "qm")
             yield "running it. "
         else:
-            await TodoSessionStore().save_state(self._session, [], next_id=1, source_id="todo")
             yield "never mind, here is the answer."
 
 
 class _CappedLoopAgent(ScriptedTurn):
     """An agent whose loop still wanted another iteration when it stopped — a capped turn.
 
-    Drives the *real* `observe_loop_cap` wrapper, called the way MAF's loop middleware calls a
-    predicate, rather than poking the contextvar: what the runner then reads is what a genuinely
-    capped loop leaves behind. That a real MAF loop leaves it is pinned in
-    `tests/test_harness_execution.py`; this is the front-door half — the turn says so.
-
-    The wrapper is engine-neutral by construction (`chemclaw.agent.loop_cap` is one of the shared
-    decisions M3 extracted), so the same call stands in for the graph engine's `lg_loop_cap`
-    reaching the same watch — which is what `tests/test_langgraph_stream.py` pins from the other
-    side.
+    Calls `record_loop_cap`, which is what `lg_loop_cap` calls when it fires, rather than poking
+    the contextvar: what the runner then reads is what a genuinely capped loop leaves behind. That
+    the real cap calls it is pinned in `tests/test_langgraph_stream.py`; this is the front-door
+    half — the turn says so.
     """
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
-        await observe_loop_cap(lambda **_kwargs: True)(session=None, agent=None)
+        record_loop_cap()
         yield "still working on it"
 
 
@@ -634,7 +627,7 @@ def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _verified_answer(agent: ScriptedTurn) -> AnswerEvent:
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-cite")
+        session = TurnSession(session_id="s-cite")
         return [
             event
             async for event in runner.run_turn(
@@ -787,7 +780,7 @@ def _turn_events(**overrides: Any) -> list[Any]:
     agent = _FakeAgent()
 
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-probe")
+        session = TurnSession(session_id="s-probe")
         return [
             event
             async for event in runner.run_turn(

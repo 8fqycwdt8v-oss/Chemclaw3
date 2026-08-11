@@ -13,9 +13,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from agent_framework import AgentSession
-
 import chemclaw.connectors.jobs as connector_jobs
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.runner import run_turn
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.manifest import JobSpec
@@ -106,9 +105,9 @@ def test_a_durable_launch_stamps_the_current_session(monkeypatch) -> None:  # ty
 class _EchoSessionAgent(ScriptedTurn):
     """A fake agent whose turn echoes the ambient session id the runner stamped."""
 
-    def create_session(self, *, session_id: str) -> AgentSession:
+    def create_session(self, *, session_id: str) -> TurnSession:
         """The one non-streaming method the front door calls on an agent."""
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
         yield get_current_session_id() or "NONE"
