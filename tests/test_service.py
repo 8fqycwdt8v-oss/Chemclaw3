@@ -858,6 +858,46 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     assert transcript[1]["text"] == "hi there"
 
 
+def test_a_turn_writes_itself_into_the_transcript() -> None:
+    """A turn that ran is readable afterwards — the half the seeded test cannot see.
+
+    `test_transcript_reads_back_the_stored_thread` seeds `session_messages` by calling
+    `save_messages` itself, deliberately and for a stated reason: it pins the route's ordering,
+    flattening and ownership gate without re-implementing storage in a fake. The cost is that it
+    asserts over rows it wrote itself, so it passes whether or not a turn writes anything — and for
+    a while none did. `session_messages` was
+    filled as a side effect of MAF's history provider; the graph keeps its thread in the
+    checkpointer and calls no such hook, so when the MAF branch went the table stopped being
+    written. Measured at the time: one complete turn, 0 rows, while the same session accumulated 8
+    checkpoint rows. The conversation was intact and the transcript route returned `[]`.
+
+    So this one seeds nothing. It posts a message, lets the turn run, and reads the route back —
+    which is the only shape of test that can fail when the writer disappears again.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = _app()
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+
+    with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": "what is the pKa?"}
+    ) as res:
+        assert res.status_code == 200
+        for _line in res.iter_lines():
+            pass
+
+    transcript = client.get(f"/sessions/{session_id}/messages").json()
+    assert [row["role"] for row in transcript] == ["user", "assistant"], transcript
+    assert transcript[0]["text"] == "what is the pKa?"
+    # `_FakeAgent` streams "hi " then "there"; the transcript stores the assembled answer, not the
+    # fragments, because that is what a chemist reading back is owed.
+    assert transcript[1]["text"] == "hi there"
+
+
 def test_transcript_of_an_unknown_session_is_404() -> None:
     """An id nobody owns is a 404, same as every other session-scoped route."""
     client = _client(_FakeAgent())

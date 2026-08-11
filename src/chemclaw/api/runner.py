@@ -27,7 +27,8 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
 
-from agent_framework import AgentSession
+import psycopg
+from agent_framework import AgentSession, Message
 
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
@@ -71,6 +72,7 @@ from chemclaw.core.identity_context import (
     set_current_identity,
 )
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import (
     reset_current_session_id,
     set_current_session_id,
@@ -153,7 +155,8 @@ async def run_turn(
             count are booked against the session/user when the turn ends (the front-door
             admission check reads those counters before the *next* turn). `None` disables
             metering (test/CLI).
-        history: The session's history provider, when it stores durably. Only used to roll the
+        history: The session's history provider. This turn's transcript is written through it
+            (`_record_transcript`), and it is what the rollback below rolls
             turn's committed rows back on a client disconnect that lands *before* the turn
             answered — under the in-memory provider the state snapshot below is the whole story,
             but a durable one has already written them.
@@ -492,11 +495,12 @@ async def run_turn(
                 correlation_id=correlation_id,
             )
         answer = await build_answer_event(text, tool_trace.outputs, tool_trace.called_tools)
-        # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
-        # has already committed this turn's rows and they are a complete, paired exchange — there is
-        # nothing half-written left to undo. The cancellation that reaches a finished turn is
-        # delivered *while suspended in the yield below*, as sse-starlette sends the answer, so a
-        # flag set after it is still false exactly when the teardown clause needs it to be true.
+        await _record_transcript(history, session, user_message, text)
+        # **Before the yield, not after it.** The turn's rows are committed by now and they are a
+        # complete, paired exchange — there is nothing half-written left to undo. The cancellation
+        # that reaches a finished turn is delivered *while suspended in the yield below*, as
+        # sse-starlette sends the answer, so a flag set after it is still false exactly when the
+        # teardown clause needs it to be true.
         answered = True
         yield answer
         # The turn used its authorization, so the authorization is spent (D-167). Here rather than
@@ -849,6 +853,59 @@ def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
         "work as done. Their results follow as data; continue your answer using them.\n"
         + frame_untrusted(summary, note_id="job-results")
     )
+
+
+async def _record_transcript(
+    history: Any | None, session: Any, user_message: str, answer: str
+) -> None:
+    """Write this turn's exchange to the session transcript, best-effort.
+
+    **The read model, and the reason it is written here rather than derived.** `session_messages`
+    backs `GET /sessions/{id}/messages` — what a chemist sees after a reload — and it used to be
+    filled as a side effect of MAF's history provider, which the engine called on every run. The
+    graph keeps its thread in the checkpointer and calls no such hook, so when the MAF branch went
+    the table stopped being written at all: measured, a complete turn left **0 rows** while the
+    same session accumulated 8 checkpoint rows. The conversation was never lost — the checkpointer
+    is what the next turn reads — but the transcript route returned `[]` for every session.
+
+    **Written from the turn's own text, which is the trade this being "the light option" names.**
+    The alternative is projecting from the checkpoint stream, which survives a process that dies
+    mid-turn because the checkpoint is already committed. This runs after the answer is assembled,
+    so a turn killed before it answers leaves no transcript row — and that is the same exchange the
+    teardown path deliberately rolls back anyway, so the two agree about what a half-turn is worth.
+
+    **Best-effort, like every other write on this path.** A transcript is a rendering; no rendering
+    is worth failing an answered turn over, which is the rule `chemclaw.api.tool_results` already
+    states for stored tool results. An empty answer is not written at all: the turn yielded an
+    `ErrorEvent` saying nothing was produced, and a blank assistant row would contradict it.
+    """
+    if history is None or not answer.strip():
+        return
+    if not hasattr(history, "save_messages"):
+        # Duck-typed, exactly as the rollback below tests for `latest_message_id` and
+        # `rollback_to`: `history` is whatever the caller injected, and a provider that does not
+        # store is a configuration this path has to tolerate rather than a fault to raise on.
+        return
+    session_id = session.session_id
+    try:
+        await history.save_messages(
+            session_id,
+            [Message("user", [user_message]), Message("assistant", [answer])],
+            # `state` is where the in-memory provider keeps its thread, and the durable one
+            # deliberately keeps nothing there. Passing it is what makes this one call correct
+            # under both stores, which is the same reason the transcript route passes it on read.
+            state=session.state,
+        )
+    except (ConnectionError, psycopg.Error) as exc:
+        degraded(
+            logger,
+            "transcript_projection",
+            "could not record the transcript for session %s (%s); the turn answered and the "
+            "conversation is intact in the checkpointer, but this exchange will be missing from "
+            "the transcript route",
+            session_id,
+            exc,
+        )
 
 
 def _signal_event(signal: Signal) -> Event:

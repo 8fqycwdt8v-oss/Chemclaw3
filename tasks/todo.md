@@ -622,13 +622,41 @@ arranged to keep that commit small and the suite green at each step.
       test structurally blind to the writer's absence: it asserts ordering, flattening and the
       ownership gate over rows it wrote itself.
 
-      **So the order inverts.** Build the projection first, prove it with a test that runs a turn
-      instead of seeding the table, and only then delete the rollback watermark, the orphan repair
-      and `PostgresHistoryProvider` — otherwise this step takes the system from "transcript
-      silently empty" to "transcript route deleted" and locks the regression in. The open design
-      question is where the projection is written from: the checkpoint stream (what §2 says, and
-      the only source that survives a pod restart mid-turn) or `run_turn`'s own event stream
-      (simpler, already ordered, but lost if the process dies before the turn ends).
+      **So the order inverted, and the additive half is done (Step 4a, below).** Only then the
+      rollback watermark, the orphan repair and `PostgresHistoryProvider` — otherwise this step
+      takes the system from "transcript silently empty" to "transcript route deleted" and locks the
+      regression in.
+- [x] **Step 4a — the transcript projection, from the turn's event stream** (done 2026-08-11).
+      Written in `run_turn._record_transcript`, immediately after the answer is assembled, through
+      the history provider the front door already passes. Re-measured on the same probe that found
+      the regression: **0 rows → 2 rows** for one turn.
+
+      **The lighter of the two sources, chosen deliberately and with its cost stated in the
+      docstring.** Projecting from the checkpoint stream survives a process that dies mid-turn,
+      because the checkpoint is already committed; this runs after the answer, so a turn killed
+      before it answers leaves no transcript row. That is the same exchange the teardown path
+      already rolls back, so the two agree about what a half-turn is worth — which is what makes
+      the cheaper source honest here rather than merely cheaper.
+
+      Best-effort, for the rule `chemclaw.api.tool_results` already states: a transcript is a
+      rendering and no rendering is worth failing an answered turn over. An empty answer writes
+      nothing, because the turn yielded an `ErrorEvent` saying nothing was produced and a blank
+      assistant row would contradict it.
+
+      `tests/test_service.py::test_a_turn_writes_itself_into_the_transcript` seeds nothing: it
+      posts a message, lets the turn run, and reads the route back. **Mutation-verified** — remove
+      the one writer line and it fails. That is the shape the existing transcript test could not
+      have, since it asserts over rows it wrote itself.
+
+      Two things fell out of it, both worth keeping:
+
+      - `state=` has to be passed, or the in-memory provider has nowhere to put the messages. One
+        call is now correct under both stores, which is the same reason the read route passes it.
+      - `test_rollback_watermark_guard`'s fake provider implements only `latest_message_id`, so
+        calling `save_messages` on it raised `AttributeError` and failed an otherwise-good turn.
+        Guarded with `hasattr`, matching how the rollback two lines away already duck-types the
+        same object — rather than swallowing `AttributeError` broadly, which would hide real
+        faults in a provider that does implement the hook.
 
       **`_resume` is done (2026-08-11), and it was *ported*, not removed.** The crash was real:
       `turn_agent` yields `None` on the graph engine and mid-turn resume called `agent.run` on it,
