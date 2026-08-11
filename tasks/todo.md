@@ -626,6 +626,39 @@ arranged to keep that commit small and the suite green at each step.
       rollback watermark, the orphan repair and `PostgresHistoryProvider` — otherwise this step
       takes the system from "transcript silently empty" to "transcript route deleted" and locks the
       regression in.
+- [ ] **Step 4b — the subtractive half, now that 4a exists.** Scoped 2026-08-11 by reading what
+      each target is still load-bearing for, which changed the step in two ways.
+
+      **`PostgresHistoryProvider` does not go away — it *became* the projection store.** Step 4a
+      writes through its `save_messages`, so "delete `PostgresHistoryProvider`" is now wrong as
+      written. What goes is the machinery it carried *because MAF made the store authoritative*,
+      and each piece is deletable for a reason the new shape supplies rather than for tidiness:
+
+      - **The rollback watermark** (`latest_message_id`, `rollback_to`, and `run_turn`'s two
+        branches, ~60 lines). It existed to undo a *half-written* turn, because MAF wrote the
+        thread incrementally as the run progressed. The projection writes both messages in one
+        statement after the answer is assembled, and `answered = True` follows it with no `await`
+        between — so there is no cancellation point that can leave half an exchange. Nothing to
+        roll back.
+      - **The orphan repair** (`unmatched_call_ids`, `strip_call_ids`, `_persist_repair`, and the
+        repair branch in `get_messages`). Its justification is quoted in its own docstring: an
+        unmatched `tool_use` "makes every later turn on that session fail outright", because the
+        stored thread was fed back to the model. The graph reads the checkpointer; the projection
+        holds user text and answer text and is never read back into a turn. It also contains no
+        tool calls at all, so new rows cannot even produce a pair to orphan.
+      - **Durable compaction** (`_compact`, `history_compaction.py`, and the
+        `agent_durable_compaction_enabled` / `_min_rows` settings, which is D-151's row in
+        `DEFERRED.md` — delete it in the same commit per CLAUDE.md). It existed because
+        `get_messages` re-read every row before each model call, so the thread's length was a
+        context cost. The only caller left is the transcript route, read by a human on reload;
+        `retention_session_messages_days` is what bounds the table now.
+
+      **`message_pairing.py` survives, and only `droppable_rows` does.** It is the one function
+      with a caller outside this cluster: `durable/retention.py`'s nightly sweep uses it to refuse
+      deleting a row whose partner is not also expiring (D-145). That caller is about *legacy* rows
+      that still hold tool calls, and it is unaffected by any of the above.
+
+      Not started. The pieces are independent and each wants its own suite run.
 - [x] **Step 4a — the transcript projection, from the turn's event stream** (done 2026-08-11).
       Written in `run_turn._record_transcript`, immediately after the answer is assembled, through
       the history provider the front door already passes. Re-measured on the same probe that found
