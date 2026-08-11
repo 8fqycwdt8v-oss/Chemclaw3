@@ -1380,6 +1380,36 @@ test and fails the ordering test, which is what earns the ordering test its plac
 test` green at 4042 passed, 154 skipped, 0 failed (141 of the skips are the offline sandbox's
 missing Postgres, not this change).
 
+**M12 suite C, run live for the first time (2026-08-11).** Postgres + Temporal + the four workers +
+the front door, against a real credential. Three findings, and *two of them were in the reading
+rather than in the system* — which is the reason to run a harness before trusting the number it
+prints:
+
+1. **The `agent` attribution named the tool node, never the specialist.** Every specialist event
+   arrived as agent `"tools"`, so the suite scored its one observed delegation as
+   `expected evidence → tools` — reporting a supervisor mis-route that had not happened. The name
+   is not in the subgraph namespace under any dispatch through the `task` tool, so this was not a
+   formatting slip. Fixed by attributing from the handoff pair, which is the only reader that holds
+   the real name (`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`).
+2. **The cost column was `None` on every turn** while 26 rows sat in `turn_costs`. `session_tokens`
+   short-circuited on *the harness process's* `session_store`, which defaults to `memory` and is
+   exported by `processes.sh` only to the processes it starts. A local guess about a remote
+   process; the query is now the only reader.
+3. **The measurement itself: the supervisor delegated 0 times in 15 probes.** It answered every one
+   directly, and used only tools the expected specialist advertises in **14 of 15** (12 of those
+   unambiguously — `ask_clarifying_question` and `find_notes` are shared across profiles; rt-07
+   called no tool at all). So the shape here is *not* the mis-routing M9 feared. On this model the
+   single agent picks the right capability cluster on its own, and the team buys nothing it is
+   paying for. A five-probe sonnet-5 arm delegated once out of fifteen before the credential's
+   usage limit cut the run short, so "rarely, and model-dependent" is as far as the evidence goes.
+
+**What is still unmeasured, and why.** The API key hit its usage limit mid-run (`400 … regain
+access on 2026-09-01`), so the single-agent control arm never ran and the comparison M9 actually
+asked for — team accuracy *and cost* against the baseline — remains open. `agent_teams_enabled`
+therefore stays off: nothing here argues for turning it on, and one arm is still half a
+measurement. The plan-gate suite is likewise unrun. The degradation suite needs no credential (it
+drives `cli/mock_llm` over HTTP) and is the one that can still be taken.
+
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
 **The plan's stated reason for this phase was wrong, and finding that out is most of what M10

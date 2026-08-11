@@ -22,7 +22,7 @@ import pytest
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.api.events import HandoffEvent, ToolCallEvent, ToolResultEvent
-from chemclaw.api.graph_stream import _agent_of, _custom_event, graph_events
+from chemclaw.api.graph_stream import _custom_event, graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import HandoffSignal
@@ -159,23 +159,20 @@ def test_the_token_stream_carries_prose_and_never_a_tool_call_fragment() -> None
     assert "ask_clarifying_question" not in tokens
 
 
-@pytest.mark.parametrize(
-    ("namespace", "expected"),
-    [
-        ((), ""),
-        (("evidence:7f3a",), "evidence"),
-        (("supervisor:1", "safety:2"), "safety"),
-    ],
-)
-def test_the_agent_attribution_is_read_from_the_subgraph_namespace(
-    namespace: tuple[str, ...], expected: str
-) -> None:
-    """An event's `agent` is the specialist whose subgraph produced it; empty at the root.
+def test_an_unrouted_turn_attributes_nothing() -> None:
+    """Empty-at-the-root is what makes `agent` additive, and it is asserted on a real turn.
 
-    Empty-at-the-root is what makes the field additive: every event emitted before teams existed
-    came from the one agent, so a consumer that ignores `agent` reads exactly what it read before.
+    This replaces a parametrized check on `_agent_of(namespace)` — a helper that has been deleted.
+    It mapped `("evidence:7f3a",) → "evidence"` and passed for months against a namespace shape the
+    engine never produces: `SubAgentMiddleware` runs a specialist inside the `task` tool, so the
+    only frame is the parent's tool node and every specialist event was attributed to `"tools"`.
+    The lesson is the assertion's *input*, not its logic — hand-written fixtures cannot establish
+    what a graph emits, so the turn is driven and the events are read off it.
     """
-    assert _agent_of(namespace) == expected
+    events, _trace, _usage = _drive(
+        [{"name": "ask_clarifying_question", "args": {"question": "which route?"}}, "done"]
+    )
+    assert {event.agent for event in events if hasattr(event, "agent")} == {""}
 
 
 def test_the_handoff_event_round_trips_with_its_discriminator() -> None:

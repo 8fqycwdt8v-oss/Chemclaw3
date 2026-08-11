@@ -366,9 +366,18 @@ async def session_tokens(session_id: str) -> TurnTokens | None:
     the cancellation and skip every teardown step after it (D-130). So the row lands shortly
     *after* the stream this harness is reading closes. Waiting a bounded moment for it is the
     honest read; querying once and recording `None` would report most turns as unmeasured.
+
+    **It asks the ledger rather than asking this process's settings whether one exists.** There
+    used to be a `settings.session_store != "postgres"` short-circuit here, and it was a local
+    guess about a *remote* process: the harness runs outside the lane, `processes.sh` exports
+    `CHEMCLAW_SESSION_STORE` only to the processes it starts, and the default is `memory` — so a
+    `make live-routing` run from an ordinary shell reported **every** turn unmeasured against a
+    front door that was writing the ledger correctly the whole time. Measured: 15/15 turns priced
+    `None` with 26 rows sitting in `turn_costs`. Two readers for one fact, disagreeing silently,
+    with the arithmetic the M9 comparison needs as the casualty. The query is the only reader that
+    can be right, so it is now the only reader; an absent ledger fails the connection and takes the
+    logged `None` below, which is the same answer arrived at honestly.
     """
-    if settings.session_store != "postgres":
-        return None
     dsn = settings.session_store_dsn or settings.postgres_dsn
     deadline = time.monotonic() + settings.live_probe_cost_wait_seconds
     # A tenth of the budget, so the wait is sampled ten times whatever it is set to. Derived rather

@@ -17,9 +17,20 @@ the half that can be wrong silently:
   every `expects_tools` name exists on the agent surface, and (new here) every `expects_specialist`
   names a real specialist.
 
-**No suite was executed against a live system when this was written, and these tests do not claim
-otherwise.** They establish that each harness runs the moment a credential and a stack exist; what
-the system then does is the thing being measured, and it has not been measured.
+**The routing suite has now been run against a live stack** (2026-08-11: Postgres + Temporal +
+front door + a real credential), and what it found belongs here because it changes how these tests
+should be read. Two of the three findings were defects in the *reading* rather than in the system:
+the `agent` attribution named the tool node instead of the specialist
+(`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`), and the cost column was silently
+`None` for every turn because `session_tokens` gated on this process's own `session_store`. Both
+had passing unit tests. The third is a measurement, recorded in `tasks/todo.md`: with the team
+enabled, the supervisor delegated **0 times in 15 probes** and answered each one itself — using
+only tools the expected specialist advertises in 14 of the 15 (12 of those unambiguously; the
+fifteenth called no tool at all).
+
+The plan-gate and degradation suites remain unexecuted against a live model. What each of these
+tests still owns is the half that can be wrong silently: the scoring, the wire reading, and the
+corpus as a declaration.
 """
 
 from __future__ import annotations
@@ -155,11 +166,17 @@ def test_the_plan_gate_marker_is_still_a_substring_of_the_live_refusal() -> None
 def test_a_specialists_name_is_read_off_the_events_it_raised() -> None:
     """Routing is observed from the `agent` field, in first-seen order.
 
-    Not from a handoff event, though one is now raised
-    (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`). Attribution stays the
-    routing key because it is the *stricter* observation: a handoff says the supervisor delegated,
-    while an `agent`-stamped event says the specialist actually did something. A turn routed to
-    `safety` that then did nothing there is a mis-route the handoff alone would score as correct.
+    Attribution stays the routing key rather than the handoff event, because it is the *stricter*
+    observation: a handoff says the supervisor delegated, while an `agent`-stamped event says the
+    specialist actually did something. A turn routed to `safety` that then did nothing there is a
+    mis-route the handoff alone would score as correct.
+
+    That holds only because the two now share a source. Attribution used to be derived from the
+    subgraph namespace and named the tool node — every specialist event arrived as agent `"tools"`,
+    so this key scored every delegation as a mis-route (measured on the live lane before it was
+    believed). It is now stamped from the handoff pair, which carries the name
+    `agent/team.running_specialist` was constructed with; the handoff is the reading, and this is
+    the reading plus evidence that work happened.
     """
     outcome = _run_one(
         _probe(),
@@ -721,6 +738,58 @@ def test_both_arms_are_reported_side_by_side() -> None:
     assert "Only one arm has run" not in report
     assert "| team |" in report
     assert "| single |" in report
+
+
+# --------------------------------------------------------------- the cost half of suite C
+
+
+def test_the_cost_ledger_is_read_even_when_this_process_says_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness must ask the ledger, not ask its own settings whether the ledger exists.
+
+    A `settings.session_store != "postgres"` short-circuit used to stand in front of this query,
+    and it was a local guess about a *remote* process. The harness runs outside the lane,
+    `infra/live/processes.sh` exports `CHEMCLAW_SESSION_STORE` only to the processes it starts, and
+    the default is `memory` — so `make live-routing` from an ordinary shell priced **every** turn
+    `None` against a front door that had been writing the ledger correctly all along. Measured on
+    the live lane: 15/15 turns unmeasured with 26 rows in `turn_costs`.
+
+    That is not a cosmetic gap. `score_routing`'s whole cost column feeds the M9 comparison — "a
+    supervisor that mis-routes is worse than the single agent it replaces" is a claim about price
+    as well as accuracy — so a silently unpriced arm makes half the question unanswerable while the
+    report still prints a table.
+
+    `session_store` is pinned to `memory` here precisely because that is the configuration under
+    which the bug hid: the assertion is that the numbers come back anyway.
+    """
+    from chemclaw.evals import live as live_module
+
+    monkeypatch.setattr(settings, "session_store", "memory")
+
+    class _Cursor:
+        async def fetchone(self) -> tuple[int, int, int, int, int]:
+            return (2, 1200, 300, 50, 10)
+
+    class _Conn:
+        async def execute(self, _sql: str, _args: object) -> _Cursor:
+            return _Cursor()
+
+    class _Connection:
+        def __init__(self, _dsn: str) -> None:
+            """Accept the DSN the caller resolved; this double never opens a socket."""
+
+        async def __aenter__(self) -> _Conn:
+            return _Conn()
+
+        async def __aexit__(self, *_exc: object) -> None:
+            """Nothing to release."""
+
+    monkeypatch.setattr(live_module, "db_connection", _Connection)
+    tokens = asyncio.run(live_module.session_tokens("s-cost"))
+    assert tokens is not None, "the ledger was reachable; the harness must not report it untaken"
+    assert (tokens.turns, tokens.input, tokens.output) == (2, 1200, 300)
+    assert tokens.total == 1560
 
 
 # --------------------------------------------------------------------------- the report shape
