@@ -13,19 +13,21 @@ why the fix lives in the provider rather than in the `CompactionProvider` wiring
 ever go red, someone has started populating that slot and the durable path needs re-deciding, not
 patching.
 
-**`get_messages` still has no `LIMIT`, and must not grow one.** Windowing the read looks like the
-cheaper fix and silently corrupts data: the repair on that path *writes back*, and over a partial
-read a `tool_result` whose `tool_use` merely fell outside the window is indistinguishable from a
-real orphan. Compaction sidesteps the whole class by deleting only whole pairing components
-(`droppable_rows`, D-145) — it never reads a partial history.
+**`get_messages` still has no `LIMIT`, and must not grow one** — though the reason changed under
+it. It was a data-safety rule while the read repaired pairings and wrote the repair back; with the
+repair gone it is a rendering rule, because the one caller left is the transcript route and a
+window makes a reloaded conversation look like it began later than it did. Compaction is what
+bounds the table, deleting only whole pairing components (`droppable_rows`, D-145).
 """
 
 import asyncio
-from pathlib import Path
 
 from agent_framework import AgentSession, CompactionProvider, Message
 
 from chemclaw.agent.session_store import PostgresHistoryProvider
+from chemclaw.core import db
+from chemclaw.core.config import settings
+from tests.pg import migrated_db_or_skip
 
 
 def test_the_durable_provider_writes_nothing_where_compaction_looks() -> None:
@@ -76,29 +78,43 @@ def test_compaction_after_run_is_a_no_op_without_that_state() -> None:
     asyncio.run(_drive())
 
 
-def test_the_load_repair_writes_back_which_is_why_a_limit_is_unsafe() -> None:
-    """The trap: `get_messages` heals orphaned pairings by *deleting and rewriting stored rows*.
+def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
+    """`get_messages` still has no `LIMIT`, for a reason that changed under it.
 
-    That is right for a full read — a `SIGKILL` between a tool call and its result leaves a genuine
-    orphan that breaks every later turn, and healing it on read fixes sessions already broken in the
-    wild. It is wrong for a *windowed* read, and the difference is invisible to the repair: a
-    `tool_result` whose `tool_use` sits just outside the window looks precisely like one whose
-    `tool_use` never arrived. Adding a `LIMIT` would therefore commit the stripping of pairings that
-    were intact on disk.
+    It used to be a data-safety rule: the read repaired orphaned pairings and *wrote the repair
+    back*, so over a windowed read a `tool_result` whose `tool_use` merely fell outside the window
+    was indistinguishable from a real orphan and would be stripped and committed. That repair is
+    gone — nothing feeds this back to a model any more — and the previous version of this test said
+    in as many words that its own deletion should turn it into a different test. This is that test.
 
-    Pinned against the source, because the hazard is the write-back and there is no way to observe
-    it without a database. A future change that makes the repair in-memory-only is what unlocks
-    bounding the read, and it should turn this test into a different one.
+    The surviving reason is the reader. The one caller is `GET /sessions/{id}/messages`, rendered
+    for a person reloading a conversation, and a transcript that silently drops its own beginning
+    is worse than a slow one: it does not look truncated, it looks like the conversation started
+    later than it did. Compaction is what bounds this table, and it deletes whole pairing
+    components (`droppable_rows`, D-145) so what remains is always coherent.
+
+    Asserted behaviorally rather than by grepping the SQL, which is what the old version had to do
+    (the write-back was unobservable without a database). A window would show up here as a short
+    list, however it were implemented.
     """
-    source = (
-        Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "agent" / "session_store.py"
-    ).read_text()
-    assert "await self._persist_repair(" in source, (
-        "the read-repair no longer writes back — which is exactly the change that makes bounding "
-        "the history load safe, so re-derive REV-4's fix rather than deleting this test"
-    )
-    select = next(line for line in source.splitlines() if line.startswith("_SELECT_WITH_ID ="))
-    assert "LIMIT" not in select.upper(), (
-        "the history load grew a LIMIT while the repair still persists: a tool_result whose "
-        "tool_use fell outside the window will be stripped and committed (REV-4)"
-    )
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        provider = PostgresHistoryProvider()
+        session_id = "sess-no-window"
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                )
+        turns = 80  # comfortably past any plausible default window
+        for index in range(turns):
+            await provider.save_messages(session_id, [Message("user", [f"question {index}"])])
+
+        loaded = await provider.get_messages(session_id)
+        assert [m.text for m in loaded] == [f"question {index}" for index in range(turns)], (
+            f"the transcript read returned {len(loaded)} of {turns} messages — a window would "
+            "make a reloaded conversation look like it began later than it did"
+        )
+
+    asyncio.run(_run())

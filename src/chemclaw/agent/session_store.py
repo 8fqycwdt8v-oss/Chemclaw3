@@ -32,16 +32,15 @@ them before the model call — `_SELECT_WITH_ID` has no `LIMIT`. `save_messages`
 *same* strategy to the table after storing a turn (see `_compact`), which is the promise
 `_build_compaction`'s docstring was already making, kept in the one place that can keep it.
 
-**`get_messages` is untouched, and the `LIMIT` that looks like the obvious fix stays out.** Loading
-only a recent window looks safe because the read already repairs unmatched tool-call pairings — and
-it is not, because that repair *writes back*. Over a windowed read a `tool_result` whose `tool_use`
-merely fell outside the window is indistinguishable from a real orphan, so the repair would strip it
-and commit that, destroying a pairing that was intact on disk. Worse, the repair is one-directional
-(`chemclaw.agent.message_pairing`): it can heal an orphaned call and is blind to an orphaned
-*result*, which
-has no self-heal path at all. Compaction avoids the whole class by deleting only whole pairing
-components, via `droppable_rows` (D-145). `tests/test_durable_compaction_gap.py` pins both the
-absent `LIMIT` and the write-back that makes it unsafe.
+**`get_messages` is a plain read, and the `LIMIT` that looks like the obvious fix stays out.** It
+used to repair unmatched tool-call pairings on the way out and write the correction back, which is
+what made a windowed read unsafe: a `tool_result` whose `tool_use` merely fell outside the window is
+indistinguishable from a real orphan, so the repair would strip it and commit that, destroying a
+pairing that was intact on disk. The repair went with the MAF thread that needed it — nothing feeds
+this back to a model any more — but the `LIMIT` is still wrong for a different reason: the route is
+a transcript, and a transcript that silently omits its own beginning is worse than a slow one.
+Compaction is what bounds the table, and it deletes only whole pairing components, via
+`droppable_rows` (D-145). `tests/test_durable_compaction_gap.py` pins the absent `LIMIT`.
 """
 
 import logging
@@ -56,7 +55,6 @@ from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.history_compaction import plan_compaction
-from chemclaw.agent.message_pairing import strip_call_ids, unmatched_call_ids
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
@@ -180,12 +178,14 @@ class PostgresHistoryProvider(HistoryProvider):
     ) -> list[Message]:
         """Load a session's messages in insertion order (empty for an unknown/None session).
 
-        Repairs the history on the way out: a function call with no matching result is dropped,
-        and the stored row is corrected. See `chemclaw.agent.message_pairing` for why this is
-        enforced on
-        read rather than only on write — a `SIGKILL` or pod eviction between the call and its
-        result runs no cleanup handler, and the orphan it leaves behind makes every later turn on
-        that session fail outright. Doing it here also heals sessions already broken in the wild.
+        A plain read, and the absence of the repair that used to sit here is the point. That repair
+        dropped a function call no result answered, and wrote the correction back, because the
+        thread it returned was fed straight to the model and an unmatched `tool_use` makes every
+        later turn on the session fail outright — a `SIGKILL` between the call and its result
+        leaves one behind and runs no cleanup handler. Both halves of that are gone: the graph
+        builds its thread from the checkpointer, never from here, and the only caller left is the
+        transcript route, which renders for a person. New rows cannot even acquire an orphan, since
+        the projection writes the user's message and the answer as plain text (D-2026-08-10 §2).
         """
         if not session_id:
             return []
@@ -193,57 +193,7 @@ class PostgresHistoryProvider(HistoryProvider):
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
-        stored = [(int(row[0]), Message.from_dict(row[1])) for row in rows]
-        orphans = unmatched_call_ids([message for _, message in stored])
-        if not orphans:
-            return [message for _, message in stored]  # the common path: no rewrite, no write
-        # Decided per row rather than by diffing two lists: once a message is dropped entirely the
-        # lists no longer line up, and a positional pairing would rewrite the wrong row's message.
-        kept: list[Message] = []
-        deletions: list[int] = []
-        rewrites: list[tuple[Jsonb, int]] = []
-        for row_id, message in stored:
-            repaired = strip_call_ids(message, orphans)
-            if repaired is None:
-                deletions.append(row_id)
-                continue
-            kept.append(repaired)
-            if repaired is not message:  # identity, so only genuinely changed rows are written
-                rewrites.append((Jsonb(repaired.to_dict()), row_id))
-        await self._persist_repair(session_id, deletions, rewrites)
-        return kept
-
-    async def _persist_repair(
-        self, session_id: str, deletions: list[int], rewrites: list[tuple[Jsonb, int]]
-    ) -> None:
-        """Write back a repaired history, so the orphan is removed once rather than re-filtered.
-
-        Best-effort: reading the conversation is the critical path, so a failure here is logged and
-        swallowed — the caller still gets the clean history either way. Idempotent, so two readers
-        racing on the same broken session converge on the same rows.
-        """
-        try:
-            async with self._connection() as conn:
-                async with conn.cursor() as cur:
-                    if deletions:
-                        await cur.execute(_DELETE_IDS, (session_id, deletions))
-                    if rewrites:
-                        await cur.executemany(_UPDATE_MESSAGE, rewrites)
-                await conn.commit()
-        except (psycopg.Error, ConnectionError):
-            degraded(
-                log,
-                "history_repair",
-                "could not persist history repair for session %s; "
-                "the unmatched tool call was filtered for this turn but remains stored",
-                session_id,
-            )
-        else:
-            log.warning(
-                "repaired session %s: removed %d unmatched tool call(s) from durable history",
-                session_id,
-                len(deletions) + len(rewrites),
-            )
+        return [Message.from_dict(row[1]) for row in rows]
 
     async def save_messages(
         self,

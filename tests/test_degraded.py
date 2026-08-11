@@ -36,7 +36,6 @@ _COUNTER = "chemclaw_degraded_total"
 _EXPECTED_SUBSYSTEMS = {
     "cost_ledger",
     "history_compaction",
-    "history_repair",
     "job_resume",
     "log_redaction",
     "mode_display",

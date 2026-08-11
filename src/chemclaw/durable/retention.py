@@ -15,10 +15,11 @@ a records story with no disposal story is incomplete.
   whole thread on every subsequent turn. Rows of one turn are written together and so share a
   `created_at`, but a cutoff is an instant with no knowledge of turns, and a pair *can* straddle it
   — a call retried across a window boundary, a mid-turn-resume interleaving, a clock that moved.
-  Worse, the asymmetry in `agent.message_pairing` means only one of the two failures self-heals:
-  an orphaned *call* is stripped on the next read, while an orphaned *result* is invisible to the
-  repair and bricks the session permanently. So this table is pruned per session through
-  `droppable_rows`, which refuses any row whose partner is not also expiring.
+  Worse, nothing repairs the damage afterwards. A read-time repair used to strip an orphaned
+  *call*, which made half of this failure self-healing; it went with the MAF thread that needed it
+  (D-2026-08-10 §2), so both directions are now permanent. So this table is pruned per session
+  through `droppable_rows`, which refuses any row whose partner is not also expiring — the sweep
+  has to be right the first time.
 
 - `tool_result_blobs` — the full text of what a tool returned, kept so a surface can fetch it
   (`api/tool_results.py`, migration 042). This is the table that shows what the three refusals
