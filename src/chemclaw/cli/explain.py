@@ -21,6 +21,7 @@ import sys
 from typing import NamedTuple
 
 from chemclaw.agent.session_store import message_from_row
+from chemclaw.api.schemas import message_role, message_text
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection
 
@@ -90,23 +91,9 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
         restored = message_from_row(message, shape)
     except Exception:  # noqa: BLE001 - a reconstruction must survive any stored shape
         return "unknown", str(message)
-    content = restored.content
-    text = content if isinstance(content, str) else " ".join(_texts(content))
-    return _ROLES.get(restored.type, restored.type), text.strip()
-
-
-# LangChain's message `type` to the word a transcript reads in. The two agree except for
-# `human`/`ai`, which nobody calls that out loud.
-_ROLES = {"human": "user", "ai": "assistant"}
-
-
-def _texts(content: object) -> list[str]:
-    """The prose of a block-list content, ignoring blocks that carry none (images, tool use)."""
-    if not isinstance(content, list):
-        return []
-    return [
-        str(block["text"]) for block in content if isinstance(block, dict) and block.get("text")
-    ]
+    # Rendered by the transcript route's own projection, not a second one: a conversation that
+    # reads `assistant` in the browser and `ai` here would make one turn look like two records.
+    return message_role(restored), message_text(restored).strip()
 
 
 def _wrap(text: str, *, limit: int = 400) -> str:

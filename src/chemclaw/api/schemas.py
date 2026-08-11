@@ -241,11 +241,11 @@ def _transcript(stored: "Sequence[Any]") -> list[TranscriptMessage]:
         ]
         # A tool message is the carrier for a result that has already been attached to its call,
         # so surfacing it as its own bubble would render every tool twice.
-        role = _ROLES.get(message.type, message.type)
+        role = message_role(message)
         if role == "tool" and not calls:
             continue
         transcript.append(
-            TranscriptMessage(index=index, role=role, text=_text_of(message), tool_calls=calls)
+            TranscriptMessage(index=index, role=role, text=message_text(message), tool_calls=calls)
         )
     return transcript
 
@@ -256,8 +256,22 @@ def _transcript(stored: "Sequence[Any]") -> list[TranscriptMessage]:
 _ROLES = {"human": "user", "ai": "assistant"}
 
 
-def _text_of(message: Any) -> str:
-    """The prose of one message, whether its content is a string or a list of blocks."""
+def message_role(message: Any) -> str:
+    """The word a human reads for who said this, from LangChain's `type`.
+
+    Public because `chemclaw.cli.explain` renders the same conversation for the audit join and must
+    call it the same thing: a transcript that says `assistant` in the browser and `ai` in the audit
+    reconstruction makes two records of one turn look like two turns.
+    """
+    return str(_ROLES.get(message.type, message.type))
+
+
+def message_text(message: Any) -> str:
+    """The prose of one message, whether its content is a string or a list of blocks.
+
+    Public for the reason `message_role` is, and pairs with it. Blocks carrying no `text` (an
+    image, a tool-use block) contribute nothing rather than a `repr`.
+    """
     content = message.content
     if isinstance(content, str):
         return content
