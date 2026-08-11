@@ -1669,3 +1669,34 @@ Rules for myself:
 - **A filename that is already taken is telling you the name is ambiguous.** In this tree "the
   graph" means the knowledge graph. Check what a name already means here before claiming it, rather
   than after the collision.
+
+## A stale local clone is not evidence about a remote (2026-08-10)
+
+I told the user four commits I had made and pushed "do not exist", and that a sibling session's M11
+and M12 work was gone. All of it was on `origin` the whole time. The container's clone had been
+restored to an earlier point — the same reclaim that killed Postgres twice in the session — so
+`git log` and even `git reflog` ended at M10, and I read that as the truth about the repository.
+
+The user was one reply away from re-doing thirteen phases of finished work on my say-so.
+
+What made it convincing was that the local evidence was *internally consistent*: the log, the
+reflog, the working tree and the absence of `tests/test_m12_probes.py` all agreed. Consistency
+within one source is not corroboration; every one of those reads the same `.git` directory. One
+`git ls-remote` — three seconds — would have contradicted all four at once.
+
+This is the second time in one session that a local view misled me about durable state. The first
+was a full suite reporting "0 failed" with 182 skips against a usual 36, because Postgres had died
+mid-run. Same shape: a green-looking local signal about something whose truth lives elsewhere.
+
+Rules for myself:
+
+- **Before reporting anything about what is or is not committed, ask the remote.** `git ls-remote
+  --heads origin <branch>` against `git rev-parse HEAD`. The local log answers "what does this
+  clone remember", which is a different question from "what is durably stored".
+- **Say "I cannot see X locally" rather than "X does not exist"** until the authoritative source
+  has been checked. The two sentences license completely different actions from the person reading
+  them, and I chose the one that licenses destroying work.
+- **After every push, verify it landed.** One `ls-remote` per push. The cost is nothing; the
+  failure it catches is a phase of work reported as safe and silently absent.
+- **When several signals agree, check whether they share a source.** Four reads of one `.git`
+  directory is one observation, not four.
