@@ -309,10 +309,13 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-08-the-conversation-is-erasable-the-record-is-not](D-2026-08-08-the-conversation-is-erasable-the-record-is-not.md) | What offboarding removes, and what it refuses to |
 | [D-2026-08-08-the-inventory-that-vouched-for-itself](D-2026-08-08-the-inventory-that-vouched-for-itself.md) | Seven claims, re-measured, and the two that became tests |
 | [D-2026-08-09-a-connector-we-do-not-run](D-2026-08-09-a-connector-we-do-not-run.md) | Hosting is a deployment fact, and the URL is the whole knob |
+| [D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one](D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one.md) | A derivable ref is not a fetchable one, so the transcript checks before it advertises |
 | [D-2026-08-09-a-hand-written-list-of-columns-drifts](D-2026-08-09-a-hand-written-list-of-columns-drifts.md) | Seven review findings against the offboarding and seam work |
 | [D-2026-08-09-a-preview-is-not-a-result](D-2026-08-09-a-preview-is-not-a-result.md) | A preview is not a result, so give the result somewhere to live |
 | [D-2026-08-09-a-scope-that-matches-no-point](D-2026-08-09-a-scope-that-matches-no-point.md) | The group moved to the cutting and the scope stayed at the document |
 | [D-2026-08-09-a-twin-rule-is-one-string](D-2026-08-09-a-twin-rule-is-one-string.md) | A twin rule is one string, and a guard must be measured |
+| [D-2026-08-09-a-valid-prefix-is-not-a-molecule](D-2026-08-09-a-valid-prefix-is-not-a-molecule.md) | A valid prefix is not a molecule, so a hazard screen refuses it |
+| [D-2026-08-10-a-list-of-ids-is-not-a-conversation-list](D-2026-08-10-a-list-of-ids-is-not-a-conversation-list.md) | A list of ids is not a conversation list, so the service names and orders its own sessions |
 | [D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor](D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md) | A specialist inherits the caller's authority, narrowed |
 | [D-2026-08-10-basestore-is-not-where-this-systems-memory-lives](D-2026-08-10-basestore-is-not-where-this-systems-memory-lives.md) | BaseStore is not adopted; the memory package emits notes, not rows |
 | [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md) | Layer 1 is rebuilt on LangGraph, and turn state stops being hand-built |

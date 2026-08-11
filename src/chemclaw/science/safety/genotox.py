@@ -33,7 +33,7 @@ from rdkit import Chem
 
 from chemclaw.science.safety.screen import (
     compile_smarts,
-    parse_molecule,
+    parse_components,
     read_rule_table,
     require_screenable_size,
 )
@@ -158,12 +158,20 @@ def screen_genotoxic_alerts(component_smiles: list[str]) -> AlertResult:
             solvent and product whose meeting is being assessed.
 
     Raises:
-        SafetyRulesError: a component is unparseable, the alert table is malformed, or more than
-            `safety_max_components` components were given.
+        SafetyRulesError: a component does not parse in full — the refusal names the component's
+            position in the list given, since a route is a list and "one of these is unusable" is
+            not something a chemist can act on — the alert table is malformed, or the list is empty
+            or longer than `safety_max_components`.
     """
     require_screenable_size(component_smiles, what="a genotoxicity screen")
     table, patterns = _load_alerts()
-    molecules = {smiles: parse_molecule(smiles) for smiles in dict.fromkeys(component_smiles)}
+    # `parse_components` rather than a bare RDKit parse, and shared with the hazard screen for the
+    # reason `require_screenable_size` is shared: RDKit reads `"CCO O=[N+]([O-])c1ccccc1"` as
+    # ethanol and discards the nitroarene after the space, so this screen used to answer "no
+    # structural alert matched" about a molecule the caller never named. On a result whose verdict
+    # spends three lines explaining that an empty list is not a negative mutagenicity prediction,
+    # being wrong about *which molecule* the list is empty for is the worse half of the sentence.
+    molecules = parse_components(component_smiles)
     alerts = [
         GenotoxAlert(
             alert_id=alert.id,

@@ -20,6 +20,7 @@ from chemclaw.agent.attachments import (
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session import TurnSession
+from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
 from chemclaw.api.schemas import (
     SessionIn,
@@ -82,13 +83,20 @@ async def list_sessions(
     Empty under the in-memory session store: there is no durable registry to enumerate, and
     reporting the process's live LRU instead would answer a question about the deployment
     with a partial, eviction-dependent guess.
+
+    Ordered by last activity and carrying each session's name, because a list of ids and start
+    dates is not a conversation list — see `SessionSummary`. Sessions that were created and never
+    used are not listed at all; the query that establishes the last activity is the same one that
+    establishes there was any.
     """
     owners: SessionOwners | None = state(request).session_owners
     if owners is None:
         return []
     return [
-        SessionSummary(session_id=session_id, created_at=created_at)
-        for session_id, created_at in await owners.list_for_owner(principal.oid)
+        SessionSummary(
+            session_id=session_id, created_at=created_at, updated_at=updated_at, title=title
+        )
+        for session_id, created_at, updated_at, title in await owners.list_for_owner(principal.oid)
     ]
 
 
@@ -111,9 +119,19 @@ async def get_messages(
     Each message carries the tools invoked alongside it, so a reload renders what the agent
     *did* and not only what it said. See `TranscriptMessage` for what that recovers and
     `_transcript` for what it cannot.
+
+    **The second read is what makes a past tool call resolvable.** `TranscriptToolCall.result` is
+    400 characters, so a reloaded conversation could show that `screen_hazards` ran and never what
+    it found, while the full text sat in `tool_result_blobs` — the one path on which the ref
+    `D-2026-08-09-a-preview-is-not-a-result` added never reached a surface. `fetchable_refs` is the
+    set of refs this session can still be served, read once for the whole transcript rather than
+    once per call, and it is what lets an advertised ref mean "fetchable" rather than merely
+    "computable": a store that is off, unreachable, or has swept these blobs yields an empty set,
+    and every `result_ref` is then `""` — the same value with the same meaning the live stream
+    gives a result it did not store. See `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one`.
     """
     stored = await state(request).history.get_messages(session_id, state=live.session.state)
-    return _transcript(stored)
+    return _transcript(stored, fetchable=await front_door.fetchable_refs(session_id))
 
 
 async def upload_attachment(

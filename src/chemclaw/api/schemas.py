@@ -6,14 +6,20 @@ decision while a route change is a behavior one — a reviewer should see each k
 own. Nothing here touches `app.state`, the database or Temporal: the two functions beside the
 models (`_transcript`, `_proposal_summary`) are pure projections from stored records onto these
 shapes, which is what lets `tests/test_jobs_api.py` drive them without an app.
+
+`content_address` is imported for the same reason and is no exception to it: it is `hashlib` over a
+string, and the *decision* it feeds — whether a past tool call's full result is still fetchable —
+is a set of refs the route reads and passes in. Naming a result and finding out whether it still
+exists are two questions, and only the second one needs a database.
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
 from chemclaw.kg.proposal import NoteProposal
 
@@ -21,6 +27,11 @@ from chemclaw.kg.proposal import NoteProposal
 # applies for the same reason: a tool argument can be a whole optimization problem or an evidence
 # sweep, and a reload must not ship one per call.
 _TRANSCRIPT_ARG_CHARS = 400
+
+# How much of the opening message becomes the session's name. Sized so a client can truncate to
+# whatever its sidebar is wide enough for — a server that pre-truncated to 40 would have thrown away
+# what a wider surface wanted, and nothing downstream can put it back.
+_TITLE_CHARS = 120
 
 
 class MessageIn(BaseModel):
@@ -62,10 +73,24 @@ class SessionOut(BaseModel):
 
 
 class SessionSummary(BaseModel):
-    """One of the caller's sessions, for the conversation list."""
+    """One of the caller's sessions, for the conversation list.
+
+    `session_id` and `created_at` were the whole of this, and a sidebar cannot be built from them:
+    there is no name to show and no way to order by recency. The companion UI worked around it by
+    labelling every restored conversation with the same placeholder and renaming it only once the
+    chemist opened it and its transcript came back — so ten restored conversations were ten
+    identical rows until nine of them had been clicked.
+
+    `updated_at` is the last stored message, not this row's `created_at`, which is when the session
+    was *started* — the difference between "what have I been working on" and "what did I once open".
+    """
 
     session_id: str
     created_at: datetime
+    updated_at: datetime
+    # Null for a session whose first turn predates this field, so a client can tell "never named"
+    # from "named with an empty string" — only one of those is a bug worth reporting.
+    title: str | None = None
 
 
 class TranscriptToolCall(BaseModel):
@@ -75,11 +100,35 @@ class TranscriptToolCall(BaseModel):
     storage. `result` is `None` while the pairing is incomplete — a turn that failed mid-call, or a
     call whose result row was pruned — which is a real state a surface should render as "this ran
     and we do not know how it ended", not as a success with an empty answer.
+
+    `result_ref` is the same handle `ToolResultEvent.result_ref` carries on the live stream, and it
+    is here because without it a reload was the one path on which a result stopped being reachable.
+    `result` is 400 characters — the same "prose about the data" the preview was, which is what
+    `D-2026-08-09-a-preview-is-not-a-result` exists to stop being the only thing a surface can
+    render — so a chemist coming back to a conversation could see *that* `screen_hazards` ran and
+    never what it found, while the full text sat in `tool_result_blobs`. It resolves through
+    `GET /sessions/{id}/tool-results/{ref}`, the same route the live stream's ref resolves through
+    (`D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one`).
+
+    **The three states are distinct on purpose**, and the middle one is the one retention creates:
+
+    - `result is None` — the call has no result at all. It ran and nobody knows how it ended.
+    - `result` set, `result_ref == ""` — there is a result, and only these 400 characters of it.
+      The bytes were never stored (the store is off, the result was over `stream_max_result_bytes`,
+      the write failed) **or** they were stored and retention has since swept them. A surface
+      renders the text it has and offers no link.
+    - `result` set, `result_ref` non-empty — the full text is fetchable now.
+
+    "Swept" and "never stored" are deliberately *not* separated. Both mean the same thing to the
+    only consumer that acts on this — there is nothing to fetch — and telling them apart would
+    mean keeping a tombstone per expired blob, which is a durable record of a rendering, on the one
+    table in the schema that grows per tool call.
     """
 
     tool: str
     arguments: str = ""
     result: str | None = None
+    result_ref: str = ""
 
 
 class TranscriptMessage(BaseModel):
@@ -210,7 +259,25 @@ class PlanStatusOut(BaseModel):
     decided_by: str | None = None
 
 
-def _transcript(stored: "Sequence[Any]") -> list[TranscriptMessage]:
+def session_title(message: str) -> str:
+    """A session's name, from the message that opened it.
+
+    Here, in the pure-projections half of this module, because that is what it is: the turn route
+    hands over the user's message as a plain string and gets back the string to store. Deriving it
+    from the *stored* message instead would mean interpreting the serialization in
+    `session_messages`, which `infra/sql/008_sessions.sql` is explicit the store must not do.
+
+    Collapsed and bounded, not summarised. A title that paraphrases is a title that can be wrong,
+    and this one names a row a chemist navigates by. The cap is generous — enough that a surface can
+    truncate to its own width without the server having pre-truncated to a narrower one, which is
+    the mistake that cannot be undone downstream.
+    """
+    return " ".join(message.split())[:_TITLE_CHARS]
+
+
+def _transcript(
+    stored: "Sequence[Any]", *, fetchable: "Collection[str]" = ()
+) -> list[TranscriptMessage]:
     """Flatten stored messages into the transcript contract, pairing calls with their results.
 
     Results arrive in a *later* message than the call they answer — an assistant message carries
@@ -223,22 +290,52 @@ def _transcript(stored: "Sequence[Any]") -> list[TranscriptMessage]:
     — they are turn-time events computed and streamed, and nothing writes them to
     `session_messages`. Recovering those is a change to what a turn *stores*, not to how it is
     read, so it is a separate decision rather than something this can quietly approximate.
+
+    **The ref is computed here, not looked up.** A stored result's handle is the SHA-256 of the
+    result's own text (`api/tool_results.py::content_address`), and the text is sitting in the
+    message this is reading. The two sides agree by construction rather than by coincidence:
+    `api/graph_stream.py` hashes what `message_text` returns for the same `ToolMessage`, and the
+    durable row is that message's JSON round trip — so the read side is not reimplementing the
+    write side's flattening, it is calling it. That makes the pairing *identity of bytes* rather
+    than a guess from `(session, tool, correlation_id, created_at)`: those four cannot separate two
+    calls of one tool in one turn, and a link row's timestamp is the last time those bytes were
+    produced by anything, which is not a key at all. A mispaired result would be worse than an
+    absent one, and content addressing is the reason there is no pairing step to get wrong.
+
+    `fetchable` is the set of refs the store can serve for this session
+    (`tool_results.fetchable_refs`), and a computed ref outside it is reported as `""`. Passed in
+    rather than queried here so this stays a pure projection the tests can drive without an app,
+    and so the one database read happens once per transcript rather than once per tool call.
     """
-    results: dict[str, str] = {}
+    results: dict[str, tuple[str, str]] = {}
     for message in stored:
         call_id = getattr(message, "tool_call_id", None)
-        if call_id:
-            results[str(call_id)] = _truncate_for_transcript(message.content)
+        if not call_id:
+            continue
+        # `message_text`, not the raw attribute: it is the same flattening `graph_stream` hashed
+        # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
+        # result that came back empty gets no ref, matching `runner_trace._result_text`, which
+        # declines to store one — so the two agree on which results are fetchable.
+        text = message_text(message)
+        ref = content_address(text) if text else ""
+        results[str(call_id)] = (
+            _truncate_for_transcript(text),
+            ref if ref in fetchable else "",
+        )
     transcript: list[TranscriptMessage] = []
     for index, message in enumerate(stored):
-        calls = [
-            TranscriptToolCall(
-                tool=str(call.get("name", "")),
-                arguments=_truncate_for_transcript(call.get("args", "")),
-                result=results.get(str(call.get("id", ""))),
+        calls: list[TranscriptToolCall] = []
+        for call in getattr(message, "tool_calls", None) or []:
+            paired = results.get(str(call.get("id", "")))
+            result, ref = paired if paired is not None else (None, "")
+            calls.append(
+                TranscriptToolCall(
+                    tool=str(call.get("name", "")),
+                    arguments=_truncate_for_transcript(call.get("args", "")),
+                    result=result,
+                    result_ref=ref,
+                )
             )
-            for call in getattr(message, "tool_calls", []) or []
-        ]
         # A tool message is the carrier for a result that has already been attached to its call,
         # so surfacing it as its own bubble would render every tool twice.
         role = message_role(message)
@@ -269,8 +366,13 @@ def message_role(message: Any) -> str:
 def message_text(message: Any) -> str:
     """The prose of one message, whether its content is a string or a list of blocks.
 
-    Public for the reason `message_role` is, and pairs with it. Blocks carrying no `text` (an
-    image, a tool-use block) contribute nothing rather than a `repr`.
+    Public for two readers beyond this module, and the second one makes it load-bearing rather than
+    convenient: `chemclaw.cli.explain` renders the same rows, and `api/graph_stream.py` hashes what
+    this returns to name a stored tool result. A second implementation of the flattening would mean
+    a ref computed on read that no longer matches the one computed on write — a result that exists
+    and cannot be fetched.
+
+    Blocks carrying no `text` (an image, a tool-use block) contribute nothing rather than a `repr`.
     """
     content = message.content
     if isinstance(content, str):

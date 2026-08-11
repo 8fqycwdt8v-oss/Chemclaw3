@@ -19,6 +19,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import settings as hypothesis_settings
+from hypothesis import strategies as st
 
 from chemclaw.connectors.safety.server.tools import screen_hazards
 from chemclaw.core.config import settings
@@ -205,8 +208,70 @@ def test_flags_are_ordered_worst_first() -> None:
 
 def test_unparseable_smiles_is_a_clear_error() -> None:
     """A bad structure is an error, not an empty (reassuring) result (G4)."""
-    with pytest.raises(SafetyRulesError, match="unparseable SMILES"):
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
         screen_structure("not-a-molecule(((")
+
+
+def test_a_structure_with_trailing_text_is_refused_and_not_quietly_narrowed() -> None:
+    """The test that would have caught it: trailing garbage must not screen as a clean result.
+
+    RDKit's SMILES parser accepts a valid *prefix* and ignores whatever follows a space, so
+    `screen_structure` used to answer this call with zero flags, the verdict "No rule in the hazard
+    table matched", and `screened == ["CCO"]` — a clean screen of **ethanol**, for an input whose
+    ignored tail is an azide. That is the worst failure mode available to this module: its own
+    docstring says an empty result must never read as a clearance, and here the empty result was
+    not even about the molecule asked about.
+
+    Asserted as a refusal *and* as an absence of a clean result, because the second is the part
+    that was wrong: a test that only pinned the exception would pass against a version that
+    returned `ScreenResult(flags=[], screened=["CCO"])`.
+    """
+    concatenated = f"CCO {_HAZARDOUS['organic-azide']}"
+    assert screen_structure(_HAZARDOUS["organic-azide"]).flags  # the tail alone is a real flag
+
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
+        screen_structure(concatenated)
+
+
+def test_an_empty_string_is_refused_rather_than_screened_as_a_molecule() -> None:
+    """RDKit parses `""` to a molecule with no atoms, which matches no rule and reads as clean."""
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
+        screen_structure("")
+
+
+def test_a_reaction_refusal_names_which_component_it_could_not_read() -> None:
+    """A chemist told "one of these nine is unusable" cannot act on it; the position is the fix.
+
+    The refusal counts positions in the list *as given*, so it points at the string the caller
+    wrote rather than at an index into the deduplicated set the screen works on.
+    """
+    with pytest.raises(SafetyRulesError, match="component 2 of 3"):
+        screen_reaction(["CCO", f"CCO {_HAZARDOUS['organic-azide']}", "O"])
+
+
+def test_a_screened_reaction_still_echoes_what_it_looked_at() -> None:
+    """The refusal above does not cost a good call its `screened` list.
+
+    `screened` is the evidence that a screen is about the molecules the caller meant: it is the
+    canonical form of every structure parsed, deduplicated, so two spellings of one substance
+    appear once.
+    """
+    result = screen_reaction(["OCC", "CCO", "O"])
+    assert result.screened == ["CCO", "O"]
+
+
+def test_a_screen_of_nothing_is_refused_rather_than_answered_cleanly() -> None:
+    """An empty list used to produce a clean screen of nothing, which is the whole thesis inverted.
+
+    `screen_hazards([])` returned `flags=[]`, `screened=[]` and "No rule in the hazard table
+    matched. This is not a safety assessment." — the exact payload a clean screen produces, with
+    nothing in it to say that no molecule was ever looked at. `screened` exists so a clean result
+    names its subject; an empty result with an empty `screened` is the one case where that evidence
+    is missing and the verdict still reads like an answer.
+    """
+    for screen in (screen_reaction, screen_genotoxic_alerts):
+        with pytest.raises(SafetyRulesError, match="at least one structure"):
+            screen([])
 
 
 def test_missing_rule_table_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,6 +487,147 @@ def test_structures_are_read_from_smiles_and_code_spans() -> None:
     found = structures_in(note)
     assert "CCO" in found and "CCOC(C)=O" in found  # reaction SMILES split into components
     assert "docs/guides/runbook.md" not in found  # RDKit is the arbiter of what is a structure
+    # `80 °C` names no molecule and yields one: the span is cut on the degree sign, and RDKit
+    # reads the `C` left behind as methane. Pinned rather than tolerated silently — it is the
+    # stated price of never dropping a structure glued to a unit or a dash, and a lone atom
+    # matches no rule in the table.
+    assert "°C" not in found and "C" in found
+
+
+def test_a_hazard_in_an_annotated_code_span_still_reaches_the_gate() -> None:
+    """The test that would have caught it: an annotated span must not take its hazard with it.
+
+    An agent writing an `experiment-proposal` writes prose, and a span carrying a SMILES *and* an
+    annotation — `` `CN=[N+]=[N-] (2 equiv)` ``, a quantity, a solvent, a temperature — is the
+    normal shape of it. When `structures_in` asked the screen's strict predicate about the whole
+    span, the span was not a molecule, so it was **dropped from the list entirely**: measured, this
+    note yielded no structures and no problems, while `screen_structure("CN=[N+]=[N-]")` on the
+    same azide returns a high-severity `organic-azide` flag. A filter is the wrong instrument for a
+    predicate whose false answers cost a screen; the span is cut into tokens first, so the strict
+    predicate classifies rather than discards.
+    """
+    note = Note(
+        id="experiment-proposal-annotated",
+        type="experiment-proposal",
+        created_by="agent",
+        body="Proposed run.\n\n- azide source: `CN=[N+]=[N-] (2 equiv)`\n- solvent: `CCO`\n",
+    )
+    assert "CN=[N+]=[N-]" in structures_in(note)
+
+    problems = hazard_problems(note)
+    assert len(problems) == 1
+    assert "organic-azide" in problems[0] and "## Hazards" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "span",
+    [
+        "CCCN=[N+]=[N-] (2 equiv)",  # a quantity
+        "CCCN=[N+]=[N-] in DMF",  # a solvent
+        "CCCN=[N+]=[N-] at 80 °C",  # a condition, with the degree sign that ends up beside it
+        "1.2 equiv of CCCN=[N+]=[N-]",  # the annotation first: the lenient parse saw none of it
+        "CCO CCCN=[N+]=[N-]",  # two structures in one span: the lenient parse saw only the first
+        "CCO.CCCN=[N+]=[N-] >> CCOCCC",  # a reaction written with spaces around the arrow
+    ],
+)
+def test_every_shape_of_annotated_span_keeps_its_hazard(span: str) -> None:
+    """One flag, six spellings — because the gate's input is written by a language model.
+
+    Parametrized rather than folded into one body: these fail independently, and the one that
+    breaks is the one worth naming in the failure output.
+    """
+    note = Note(
+        id="experiment-proposal-shapes",
+        type="experiment-proposal",
+        created_by="agent",
+        body=f"Proposed run.\n\n- reagent: `{span}`\n",
+    )
+    assert hazard_problems(note), span
+
+
+# The pieces a code span is built from: hazardous structures, an ordinary one, and the prose a
+# model puts beside them — quantities, units, conditions, a path, a dash, a word RDKit happens to
+# read (`C` is methane, `N` is ammonia). Generated rather than enumerated because the property
+# below is universally quantified and the failing input is the one nobody wrote down: the review
+# that found this defect had one example, and the fixed corpus that came with the fix had eight.
+_SPAN_PIECES = st.sampled_from(
+    [
+        _HAZARDOUS["organic-azide"],
+        _HAZARDOUS["polynitro-aromatic"],
+        _HAZARDOUS["peroxide"],
+        "CCO",
+        "(2",
+        "equiv)",
+        "at",
+        "80",
+        "°C",
+        "—",
+        "in",
+        "DMF",
+        "1.2",
+        "junk",
+        "docs/guides/runbook.md",
+        "C",
+        ">>",
+        ".",
+        # Glued rather than spaced, because that is the case the whitespace rule alone does not
+        # cover: RDKit skips a non-ASCII run at the *end* of a string, so the lenient parser read
+        # the azide out of both of these, and a token rule that only split on whitespace would have
+        # refused them whole and dropped the flag.
+        _HAZARDOUS["organic-azide"] + "°",
+        _HAZARDOUS["peroxide"] + "—",
+    ]
+)
+_SPANS = st.lists(_SPAN_PIECES, min_size=1, max_size=4).map(" ".join)
+
+
+@given(st.lists(_SPANS, min_size=1, max_size=3))
+@hypothesis_settings(max_examples=200, deadline=None)
+def test_no_note_loses_a_hazard_flag_the_lenient_parser_would_have_raised(spans: list[str]) -> None:
+    """The hard constraint, quantified: the gate screens **at least** what it screened before.
+
+    Before the screens were made strict, `structures_in` kept any candidate RDKit's bare parser
+    read — which is the first whitespace-delimited token, with a non-ASCII run at either end
+    skipped, since that is where that parser stops. Making the predicate strict without cutting the
+    span first turned it into a *filter* and dropped whole spans, taking their hazards with them.
+    So the fix is checked against the thing it must never do less than, over generated spans rather
+    than a list of the shapes that occurred to whoever wrote the fix.
+
+    `_lenient_structures` is that old extraction, re-implemented here rather than imported, because
+    a comparison is worth nothing if both sides are maintained together.
+    """
+    body = "\n".join(f"- reagent: `{span}`" for span in spans)
+    note = Note(id="reaction-p", type="reaction", created_by="agent", body=body)
+
+    assert _lenient_flags(structures_in(note)) >= _lenient_flags(_lenient_structures(note)), body
+
+
+def _lenient_structures(note: Note) -> list[str]:
+    """`structures_in` as it read a note before the screens were made strict.
+
+    A bare `Chem.MolFromSmiles` over every candidate, which is the predicate this file has to prove
+    nothing regressed against. Kept beside its one caller rather than in the module under test,
+    because the point of a comparison is that both sides are not maintained together.
+    """
+    from rdkit import Chem
+
+    from chemclaw.science.safety.notes import _CODE_SPAN
+
+    candidates = [note.compound_smiles] if note.compound_smiles else []
+    for span in _CODE_SPAN.findall(note.body):
+        candidates.extend(part for half in span.split(">>") for part in half.split("."))
+    return [
+        canonical
+        for raw in candidates
+        if (smiles := raw.strip())
+        and (mol := Chem.MolFromSmiles(smiles)) is not None
+        and (canonical := str(Chem.MolToSmiles(mol)))
+    ]
+
+
+def _lenient_flags(structures: list[str]) -> set[str]:
+    """The rule ids a screen of `structures` raises, or nothing when there is nothing to screen."""
+    return {flag.rule_id for flag in screen_reaction(structures).flags} if structures else set()
 
 
 def test_broken_rule_table_blocks_the_gate_instead_of_crashing_it(
@@ -941,8 +1147,24 @@ def test_the_alert_screen_is_advertised_to_the_agent() -> None:
 
 def test_an_unparseable_component_stops_the_alert_screen() -> None:
     """A component that cannot be parsed must not silently screen as "no alerts"."""
-    with pytest.raises(SafetyRulesError, match="unparseable SMILES"):
+    with pytest.raises(SafetyRulesError, match="invalid SMILES"):
         screen_genotoxic_alerts(["not-a-molecule"])
+
+
+def test_a_component_with_trailing_text_stops_the_alert_screen_too() -> None:
+    """The same silent narrowing, on the screen where a clean result is hedged hardest.
+
+    `"CCO O=[N+]([O-])c1ccccc1"` used to parse as ethanol, drop the nitroarene after the space, and
+    come back with no alerts — under a verdict spending three lines explaining that an empty list
+    is not a negative mutagenicity prediction, about a molecule the payload never identifies.
+    Refusing is the only answer that does not require the reader to know which of the two things
+    the emptiness meant.
+    """
+    nitroarene = "O=[N+]([O-])c1ccccc1"
+    assert screen_genotoxic_alerts([nitroarene]).alerts  # the ignored tail is a real alert
+
+    with pytest.raises(SafetyRulesError, match="component 1 of 1"):
+        screen_genotoxic_alerts([f"CCO {nitroarene}"])
 
 
 # --- the ICH Q3C / Q3D reference tables -----------------------------------------------

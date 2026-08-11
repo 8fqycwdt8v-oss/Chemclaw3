@@ -54,6 +54,7 @@ from chemclaw.api.events import (
 )
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.runner_usage import graph_usage_tokens
+from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
     ApprovalSignal,
@@ -167,7 +168,7 @@ async def _from_update(
             if message.__class__.__name__ == "ToolMessage":
                 yield _attributed(
                     await trace.returned(
-                        str(getattr(message, "tool_call_id", "")), _content(message)
+                        str(getattr(message, "tool_call_id", "")), message_text(message)
                     ),
                     agent,
                 )
@@ -210,23 +211,6 @@ def _args(call: Any) -> str:
         return json.dumps(call.get("args") or {})
     except (TypeError, ValueError):
         return str(call.get("args") or {})
-
-
-def _content(message: Any) -> str:
-    """A message's content as text, however the provider shaped it.
-
-    A `ToolMessage`'s content is a string for every tool Chemclaw registers, but LangChain permits
-    a list of content blocks and a provider may send one — so the list case is joined rather than
-    `str()`-ed, which would put a Python repr in front of a chemist.
-    """
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
-        )
-    return str(content)
 
 
 def _text_of(chunk: Any) -> str:

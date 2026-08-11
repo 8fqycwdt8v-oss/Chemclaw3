@@ -14,6 +14,8 @@ from chemclaw.core.chem import (
     InvalidSmilesError,
     canonical_smiles,
     require_canonical_smiles,
+    require_molecule,
+    require_standard_smiles,
 )
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.pka import PkaInput, run_cached_pka
@@ -71,6 +73,48 @@ def test_require_canonical_smiles_rejects_embedded_whitespace() -> None:
 def test_require_canonical_smiles_tolerates_surrounding_whitespace() -> None:
     """Leading/trailing whitespace is a copy-paste artifact, not a different molecule."""
     assert require_canonical_smiles(" CCO\n") == require_canonical_smiles("CCO")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "CCO junk",
+        "CCO\tjunk",
+        "",
+        "   ",
+        "not-a-molecule(((",
+        # RDKit skips a non-ASCII run at either *edge* of the string and fails on one in the
+        # middle, so these three are methane, ethane and ethane to a bare parse — the whitespace
+        # truncation in another character, and a clean screen of a molecule nobody named if it
+        # reaches one. Prose is where it comes from: a unit symbol, a dash or a quotation mark
+        # copied in beside a structure.
+        "°C",
+        "CC°",
+        "°CC°",
+    ],
+)
+def test_the_three_strict_helpers_share_one_definition_of_parses(bad: str) -> None:
+    """`require_molecule` is the gate; the two SMILES helpers must not have their own.
+
+    They each spelled the same four lines out, which is how the hazard screens ended up with a
+    *fifth*, weaker copy — a bare `Chem.MolFromSmiles` that accepted `"CCO junk"` as ethanol. One
+    definition means adding a case to it reaches every caller, and this pins that they agree.
+    """
+    for helper in (require_molecule, require_canonical_smiles, require_standard_smiles):
+        with pytest.raises(InvalidSmilesError):
+            helper(bad)
+
+
+def test_require_molecule_returns_the_molecule_the_canonical_form_is_taken_from() -> None:
+    """The reason it exists: a caller needing the molecule gets the gate without a second parse.
+
+    `science/safety/screen.py` matches SMARTS against the molecule and then echoes
+    `Chem.MolToSmiles` of it as `ScreenResult.screened`, so the two must be the same object's two
+    faces rather than two parses of one string.
+    """
+    from rdkit import Chem
+
+    assert str(Chem.MolToSmiles(require_molecule(" OCC\n"))) == require_canonical_smiles("CCO")
 
 
 def test_qm_job_key_ignores_smiles_spelling() -> None:

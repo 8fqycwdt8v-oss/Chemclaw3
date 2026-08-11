@@ -22,7 +22,7 @@ from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.events import ErrorEvent, QueuedEvent
 from chemclaw.api.middleware import _AT_CAPACITY
 from chemclaw.api.runner import run_turn
-from chemclaw.api.schemas import MessageIn
+from chemclaw.api.schemas import MessageIn, session_title
 from chemclaw.api.state import (
     _WORKER_ID,
     SessionTurns,
@@ -76,6 +76,15 @@ async def post_message(
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
     semaphore = front.turn_semaphore
+
+    # Name the session after the message that opened it, so `GET /sessions` can render a
+    # conversation list rather than a column of ids. Here rather than in the history provider
+    # because here the message is still a plain string — the provider stores an opaque MAF payload
+    # it is not allowed to interpret. After the turn claim, so a rejected double-submit does not
+    # write; before the stream, so a turn that fails mid-answer still leaves the conversation named.
+    # `set_title_if_absent` is a no-op once there is a title, which is every turn after the first.
+    if front.session_owners is not None:
+        await front.session_owners.set_title_if_absent(session_id, session_title(body.message))
 
     async def _turn_events() -> AsyncIterator[dict[str, str]]:
         # Release the permit and the session's turn slot when the stream ends — normal

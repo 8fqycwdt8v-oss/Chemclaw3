@@ -15,18 +15,22 @@ own session id so it is independent of anything else sharing the schema.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, ToolMessage, message_to_dict, messages_from_dict
 
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.graph_tools import NoteRef, NoteView
+from chemclaw.agent.message_migration import to_langchain
 from chemclaw.agent.session import TurnSession
-from chemclaw.api.app import create_app
+from chemclaw.api.app import _transcript, create_app
+from chemclaw.api.schemas import message_text
 from chemclaw.api.tool_results import (
     StoredToolResult,
     content_address,
+    fetchable_refs,
     load_tool_result,
     session_sink,
     store_tool_result,
@@ -130,9 +134,78 @@ def test_an_identical_result_stores_one_blob_and_keeps_one_link() -> None:
                 links = await cur.fetchone()
         assert blobs is not None and blobs[0] == 1
         assert links is not None and links[0] == 1
-        # The link is refreshed rather than left behind: the row names the most recent turn that
-        # produced these bytes, which is the correlation id worth having on a fetch.
-        assert links[1] == "corr-2"
+        # And the label the dedup cost is **empty**, not the last writer's. The row is one row for
+        # two turns, so no correlation id belongs to it; `SET correlation_id = EXCLUDED
+        # .correlation_id` made the fetch route answer with the right bytes under the wrong turn's
+        # id, which is the near-miss pairing this whole surface refuses on the read side.
+        assert links[1] == ""
+
+    asyncio.run(_run())
+
+
+def test_a_result_two_calls_produced_names_neither_of_them() -> None:
+    """The label is dropped rather than guessed, and the bytes are still exactly right.
+
+    This is not a corner case. `include_detailed_errors` is off (`agent/tool_authz.py` says why),
+    so *every* unexpected tool exception in the system returns the same byte string "Error:
+    Function failed." — one blob per session covering every failed call it ever makes. A fetch of
+    it under one arbitrary tool name and one arbitrary correlation id would be a mispairing served
+    with full confidence, and `StoredToolResult.correlation_id` is documented as "the join a GxP
+    reviewer asks for".
+
+    Asserted through `load_tool_result` rather than on the row, because what matters is what a
+    *reviewer* is handed: unknown where it is unknown, and the result text where it is not.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        failure = "Error: Function failed."
+
+        ref = await store_tool_result(
+            session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
+        )
+        await store_tool_result(
+            session_id="tr-ambiguous",
+            correlation_id="corr-2",
+            tool="screen_hazards",
+            text=failure,
+        )
+
+        stored = await load_tool_result("tr-ambiguous", ref)
+        assert stored is not None
+        assert (stored.tool, stored.correlation_id) == ("", "")
+        assert stored.text == failure
+
+        # A third disagreeing write must not un-collapse it: `''` disagrees with every value, so
+        # the column stays empty once it has been emptied.
+        await store_tool_result(
+            session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
+        )
+        again = await load_tool_result("tr-ambiguous", ref)
+        assert again is not None and (again.tool, again.correlation_id) == ("", "")
+
+    asyncio.run(_run())
+
+
+def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> None:
+    """The other half of the rule: only *disagreement* costs the labels.
+
+    A turn that re-runs the same tool with the same arguments — a retry after a transient failure,
+    the repeat guard letting one through — writes the same bytes under the same tool and the same
+    correlation id. There is nothing ambiguous about that row, and emptying it would throw away a
+    join that is correct, which is the opposite error.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        for _ in range(2):
+            ref = await store_tool_result(
+                session_id="tr-repeat", correlation_id="corr-9", tool="screen_hazards", text=_SCREEN
+            )
+
+        stored = await load_tool_result("tr-repeat", ref)
+        assert stored is not None
+        assert (stored.tool, stored.correlation_id) == ("screen_hazards", "corr-9")
 
     asyncio.run(_run())
 
@@ -400,3 +473,280 @@ def test_an_unmerged_note_is_a_404_carrying_its_reason(
 
     assert res.status_code == 404
     assert "note-not-yet-merged" in res.json()["detail"]
+
+
+# --- the transcript ----------------------------------------------------------------------------
+
+
+# What a screening tool returns: a model object dumped to a `dict`, never a string. It starts here
+# rather than at a string literal because the whole ref identity is about *coercion* — feeding the
+# same literal to both sides would prove only that `content_address` is a function.
+_SCREEN_RESULT: dict[str, Any] = {
+    "flags": [
+        {
+            "rule_id": "azide",
+            "severity": "high",
+            "explanation": "energetic",
+            "citation": "Bretherick 7th ed.",
+            "matched": "CCN=[N+]=[N-]",
+        }
+    ],
+    "screened": ["CCN=[N+]=[N-]"],
+}
+
+
+def _turn(result: object, *, call_id: str = "t1", tool: str = "screen_hazards") -> list[Any]:
+    """One tool call and its result, in the messages a turn actually produces.
+
+    A `ToolMessage` is where a non-string return value becomes text, so the coercion is inside the
+    constructor rather than in front of it — which is the point: the producer and the transcript
+    have to be looking at the same bytes, and a test that stringified first would never find out.
+    """
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": tool,
+                    "args": {"smiles": ["CCN=[N+]=[N-]"]},
+                    "id": call_id,
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        # `cast` because the annotation says `str | list` while the runtime coerces anything —
+        # which is exactly the coercion `test_every_entry_point_coerces_a_result_to_text...`
+        # exists to pin, and a test that could not pass a `dict` could not pin it.
+        ToolMessage(content=cast(str, result), tool_call_id=call_id),
+    ]
+
+
+def _reloaded(messages: list[Any]) -> list[Any]:
+    """`messages` after the round trip a reload puts them through.
+
+    `PostgresHistoryProvider` writes `message_to_dict()` into a JSONB column and rebuilds it with
+    `messages_from_dict`, so this is the transformation between "what the turn produced" and "what
+    `_transcript` reads". Doing it for real is what makes the identity below a property of the
+    serialization rather than of this file.
+    """
+    return list(messages_from_dict([message_to_dict(message) for message in messages]))
+
+
+def _stored_turn(result: str, *, call_id: str = "t1", tool: str = "screen_hazards") -> list[Any]:
+    """A round-tripped turn whose result is already a string — the ordinary stored shape."""
+    return _reloaded(_turn(result, call_id=call_id, tool=tool))
+
+
+def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() -> None:
+    """The whole pairing argument, driven through both real paths rather than asserted about them.
+
+    A reload had no way to resolve a past turn's results: `result_ref` reached a surface on the SSE
+    stream only, so a chemist coming back to a conversation saw *that* `screen_hazards` ran and
+    400 characters of prose about what it found, while the full text sat in `tool_result_blobs`.
+
+    The join is content addressing and nothing else. The producer hashes the result text; the
+    transcript hashes the result text it reads out of the stored message; **both reach it through
+    `schemas.message_text`**, so they are the same bytes by construction rather than by two
+    implementations happening to agree. Nothing pairs on `(session, tool, correlation_id,
+    created_at)` — which could not tell two calls of one tool in one turn apart anyway — so there
+    is no near-miss pairing available to get wrong.
+
+    Driven from a `dict` the tool never stringified, and through the real producer call
+    (`graph_stream` hands `trace.returned` exactly this text), because the one event that could
+    break the identity is a change to how a message's content becomes a string.
+    """
+    stored: dict[str, str] = {}
+
+    async def _sink(_tool: str, text: str) -> str:
+        ref = content_address(text)
+        stored[ref] = text
+        return ref
+
+    turn = _turn(_SCREEN_RESULT)
+    trace = runner_trace.ToolCallTrace(sink=_sink)
+    trace.issued("t1", "screen_hazards", "{}")
+    event = asyncio.run(trace.returned("t1", message_text(turn[1])))
+
+    [message] = [m for m in _transcript(_reloaded(turn), fetchable=stored) if m.tool_calls]
+    [call] = message.tool_calls
+
+    assert event.result_ref != ""  # the stream stored it
+    assert call.result_ref == event.result_ref  # and the reload names the same bytes
+    assert call.tool == "screen_hazards"
+    # And the bytes carry the screen itself, not a summary of it: the store holds what a client
+    # will render, and a coercion that changed shape would move every ref at once.
+    assert call.result is not None and "azide" in call.result
+
+
+def test_a_result_the_store_cannot_serve_is_advertised_as_unfetchable() -> None:
+    """The retention case, and the reason the ref is *checked* rather than merely computed.
+
+    A ref in a transcript outlives the blob it names the moment the TTL sweep runs, and it is also
+    computable for results the store never took (off, over the cap, a failed write). Advertising a
+    derivable address in either case would hand a client a link that 404s and no way to know in
+    advance — so the transcript reports only refs the store can currently serve, and `""` keeps
+    exactly the meaning it has on the live stream: there is nothing to fetch.
+
+    What the client still has is the 400-character `result`, which is why this is a degradation of
+    the rendering and never a loss of the transcript.
+    """
+    [message] = [m for m in _transcript(_stored_turn(_SCREEN), fetchable=()) if m.tool_calls]
+    [call] = message.tool_calls
+
+    assert call.result_ref == ""
+    assert call.result is not None and "azide" in call.result
+
+
+def test_an_unanswered_call_stays_distinguishable_from_an_unfetchable_one() -> None:
+    """Three states, and the pair that must not collapse into each other.
+
+    `result is None` means the call has no result at all — it ran and nobody knows how it ended.
+    `result` set with an empty `result_ref` means it returned and only the preview survives. A
+    surface that conflated them would tell a chemist a tool produced nothing when it produced
+    something the store no longer holds, which is the more reassuring of the two claims and the
+    wrong one.
+    """
+    orphan = _reloaded(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "screen_hazards", "args": {}, "id": "gone", "type": "tool_call"}
+                ],
+            )
+        ]
+    )
+    [unanswered] = _transcript(orphan)[0].tool_calls
+    [unfetchable] = [
+        call for m in _transcript(_stored_turn(_SCREEN), fetchable=()) for call in m.tool_calls
+    ]
+
+    assert (unanswered.result, unanswered.result_ref) == (None, "")
+    assert unfetchable.result is not None and unfetchable.result_ref == ""
+
+
+def test_the_transcript_route_carries_the_ref_the_store_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the route a client actually reloads through.
+
+    `GET /sessions/{id}/messages` is the rehydration path, and it is where the ref had to arrive: a
+    projection that can produce one is worth nothing if the route never asks for it. The app is
+    built here rather than taken from the `client` fixture because the stored history has to be
+    replaced on `app.state.history`, which is the seam the route reads its transcript through.
+    """
+    app = create_app()
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+    ref = content_address(_SCREEN)
+
+    async def _messages(_session_id: str | None, **_kwargs: Any) -> list[Any]:
+        return _stored_turn(_SCREEN)
+
+    async def _fetchable(session: str) -> frozenset[str]:
+        assert session == session_id
+        return frozenset({ref})
+
+    monkeypatch.setattr(app.state.history, "get_messages", _messages)
+    monkeypatch.setattr("chemclaw.api.app.fetchable_refs", _fetchable)
+
+    [call] = [
+        call
+        for message in client.get(f"/sessions/{session_id}/messages").json()
+        for call in message["tool_calls"]
+    ]
+    assert call["result_ref"] == ref
+
+
+def test_the_refs_a_session_can_fetch_are_its_own() -> None:
+    """`fetchable_refs` is scoped by the link row's session, like every other read of this store.
+
+    Otherwise the transcript would advertise a ref that `load_tool_result` then refuses — the same
+    ownership boundary applied twice, and it must give the same answer both times or a surface
+    renders a link that cannot resolve.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        mine = await store_tool_result(
+            session_id="tr-refs-mine", correlation_id="c", tool="screen_hazards", text=_SCREEN
+        )
+        theirs = await store_tool_result(
+            session_id="tr-refs-theirs", correlation_id="c", tool="find_notes", text="[]"
+        )
+        refs = await fetchable_refs("tr-refs-mine")
+        assert mine in refs
+        assert theirs not in refs
+
+    asyncio.run(_run())
+
+
+def test_a_store_that_cannot_be_read_costs_the_transcript_only_its_refs(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading fails the same way writing does: an empty answer, a count, and no raised error.
+
+    A chemist reloading a conversation must still get every message and every tool call when the
+    blob store is unreachable; what they lose is the link to a full result, which is a rendering.
+    Driven against a DSN pointing at nothing rather than a patched exception, for the reason the
+    write-side test states — that is the real shape of the failure.
+    """
+    monkeypatch.setattr(settings, "postgres_dsn", "postgresql://127.0.0.1:1/nowhere")
+
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(fetchable_refs("tr-unreadable")) == frozenset()
+    assert "tr-unreadable" in caplog.text
+    assert 'chemclaw_degraded_total{subsystem="tool_result_store"}' in METRICS.render()
+
+
+def test_the_off_switch_asks_the_database_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the store disabled there is nothing stored, so there is nothing to look up.
+
+    Asserted by making any connection attempt fail the test: a lookup against a store that is off
+    is a round trip per reload buying an answer that is known in advance.
+    """
+    monkeypatch.setattr(settings, "stream_max_result_bytes", 0)
+
+    def _no_connection(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover - must not be called
+        raise AssertionError("the store is disabled and must not be queried")
+
+    monkeypatch.setattr("chemclaw.api.tool_results.db.connection", _no_connection)
+    assert asyncio.run(fetchable_refs("tr-off")) == frozenset()
+
+
+def test_every_entry_point_coerces_a_result_to_text_before_it_can_be_addressed() -> None:
+    """Why there is no "a stored dict 500s the reload" test here — measured, not assumed.
+
+    There used to be one, and it pinned a real defect: a stored row carrying `"result": {…}`
+    reached `content_address`, which calls `.encode`, and raised `AttributeError` — an uncaught
+    exception on `GET /sessions/{id}/messages`, which is the route a chemist reloads a *whole*
+    conversation through. Losing the conversation because one result card cannot be addressed is
+    the wrong trade by a wide margin.
+
+    On this engine that row cannot exist. Measured across all three ways a `ToolMessage` is made —
+    the constructor, `messages_from_dict` rebuilding a stored row, and `message_migration
+    .to_langchain` converting a row the previous framework wrote — every one coerces a non-string
+    content to `str` before anything reads it. So the guard belongs where the coercion is, and a
+    test asserting "does not 500" would pass for a reason unrelated to its name.
+
+    What is pinned instead is the coercion itself, at each entry, because *that* is the property
+    the ref identity rests on: if one of them stopped coercing, the defect above comes back
+    somewhere this file no longer looks.
+    """
+    payload: dict[str, list[str]] = {"flags": [], "screened": []}
+    constructed = ToolMessage(content=cast(str, payload), tool_call_id="t1")
+    rebuilt = messages_from_dict(
+        [{"type": "tool", "data": {"content": payload, "tool_call_id": "t1", "type": "tool"}}]
+    )[0]
+    converted = to_langchain(
+        {
+            "type": "message",
+            "role": "tool",
+            "contents": [{"type": "function_result", "call_id": "t1", "result": payload}],
+        }
+    )
+
+    for message in (constructed, rebuilt, converted):
+        assert isinstance(message.content, str), f"{type(message).__name__} kept a non-string"
+        # And the ref is computable from it, which is the consequence that actually matters.
+        assert len(content_address(message_text(message))) == 64

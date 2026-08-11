@@ -62,6 +62,12 @@ async def screen_hazards(smiles: list[str]) -> ScreenResult:
     to run an experiment; it is one input to a human's assessment, which also needs the SDS and,
     for anything energetic, a process-safety review.
 
+    **A SMILES this cannot read in full is refused, not screened.** Pass one structure per list
+    entry and nothing else in the string — no name beside it, no two structures run together, no
+    units. RDKit stops at the first space, so a string like `"CCO 1-azidopropane"` would otherwise
+    be screened as ethanol and come back clean. If a call is refused, fix the string and ask again;
+    never report the refusal as a result.
+
     Args:
         smiles: One SMILES per species. Pass a single molecule to screen it alone, or every
             component of a reaction (reactants, reagents, solvents, products) to also check for
@@ -69,7 +75,9 @@ async def screen_hazards(smiles: list[str]) -> ScreenResult:
 
     Returns:
         The matched hazard flags, most serious first, each with a rule id, severity, an
-        explanation of the hazard, and the literature citation it rests on.
+        explanation of the hazard, and the literature citation it rests on, plus `screened` — the
+        canonical SMILES of every structure the result actually covers, which is how a reader
+        confirms the screen is about the molecules they meant.
     """
     if len(smiles) == 1:
         return await asyncio.to_thread(screen_structure, smiles[0])
@@ -97,6 +105,11 @@ async def screen_genotoxic_alerts(smiles: list[str]) -> AlertResult:
     state one, not even as an illustration. An empty result is equally not a negative prediction:
     the table is nine alerts long, and absence means nothing in it matched.
 
+    **A SMILES this cannot read in full is refused, not screened**, and the refusal names the
+    component's position in the list — one structure per entry, with nothing else in the string.
+    RDKit stops at the first space, so `"CCO O=[N+]([O-])c1ccccc1"` would otherwise be read as
+    ethanol and answer "no alert matched" while ignoring the nitroarene.
+
     Args:
         smiles: One SMILES per species. Pass the whole route rather than one step — the formation
             alert can only see components given to it together, so a nitrosating agent introduced
@@ -104,7 +117,8 @@ async def screen_genotoxic_alerts(smiles: list[str]) -> AlertResult:
 
     Returns:
         The matched alerts, each with the motif it names, why it is an alert, and the published
-        alert set it comes from — plus a verdict that states what the result does not mean.
+        alert set it comes from — plus `screened` (the canonical SMILES of every structure the
+        result covers) and a verdict that states what the result does not mean.
     """
     return await asyncio.to_thread(genotox.screen_genotoxic_alerts, smiles)
 

@@ -4,8 +4,8 @@
 
 Completes M13 of [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md).
 That ADR decided the rebuild; this one records what taking the dependency out actually turned up,
-because two of the four findings are defects rather than tidying and one of them reverses a premise
-another module still argued from.
+because two of the five findings are defects rather than tidying, one reverses a premise another
+module still argued from, and one arrived from `main` while the branch was open.
 
 ## Context
 
@@ -80,6 +80,33 @@ Those are rewritten. The line is: **past tense about the framework is evidence; 
 it is false.** `docs/reference/architektur.md`, `docs/planning/implementation-plan.md` and
 `implementation-tickets.md` keep theirs — each already opens by saying it is a historical document —
 and `BACKLOG.md`'s mentions are all inside closed rows, which are a log and not a claim about now.
+
+### 5. Merging `main` back in made the ref identity a stronger claim, not a weaker one
+
+`main` shipped `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one` while this branch was open: a
+reloaded transcript now carries `result_ref` per tool call, so a chemist can fetch a past turn's
+full result instead of the 400-character preview. Its correctness argument was about the *previous*
+framework — "a function result is coerced to `str` once, at the content, so the producer's ref and
+the transcript's ref are the same bytes" — and that sentence does not survive the removal.
+
+What replaces it is better. Both sides now reach the text through one function,
+`api/schemas.message_text`: `api/graph_stream.py` hashes what it returns when the turn runs, and
+`_transcript` hashes what it returns on reload. The identity is *by construction* rather than by
+two implementations of a flattening happening to agree — which is the same rule §1 states, applied
+to the write side.
+
+That function is public for exactly this reason, and it now has three callers (the transcript
+route, the audit CLI, the stream). A second copy of the flattening would not be a style problem: it
+would be a ref computed on read that no longer matches the one computed on write, i.e. a stored
+result that exists and cannot be fetched.
+
+One of `main`'s tests was **deliberately not ported**. It pinned that a stored row carrying
+`"result": {…}` does not 500 the reload, which was a real defect. Measured across all three ways a
+`ToolMessage` comes into being — the constructor, `messages_from_dict` on a stored row, and
+`message_migration.to_langchain` on a legacy one — every path coerces a non-string content to `str`
+before anything can read it, so the defect is now unreachable and the test would have passed for a
+reason unrelated to its name. What ships instead pins the *coercion*, at each of the three entries,
+because that is the property the ref identity actually rests on.
 
 ## Consequences
 
