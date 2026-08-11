@@ -7,31 +7,37 @@ a job started. The same is true of a PR-gate proposal: `propose_note` opens a br
 reference to the model, so the chemist never learns their contribution landed (the GxP "human signs
 off" line lived only in a git host's UI, disconnected from the conversation that produced it).
 
-A contextvar is the right carrier, for exactly the reasons `chemclaw.core.session_context` gives:
-it is task-local (concurrent turns cannot see each other's signals), it defaults to empty off the
-request path, and it keeps the information out of the *model-facing* tool signature — the model must
-not be able to fabricate "a job started" or "a note was proposed".
+The carrier is LangGraph's own custom stream (`get_stream_writer()`), which is what the rebuild
+bought here. It was a task-local contextvar buffer the runner drained after every streamed update,
+plus a `begin_turn`/`end_turn` pair the runner's non-awaiting `finally` had to police, plus two
+extra drains at the points where "there is no next iteration to carry the last signal" — one after
+the graph returned and one after a mid-turn resume. All of that existed because MAF had no
+side-channel, so ordering had to be reconstructed by the reader. A writer publishes into the same
+stream the tokens ride, so the order is the stream's rather than something the runner maintains,
+and the three drains and the reset go with it.
 
-The runner drains this after each streamed update, so signals surface in the order they happened,
-interleaved with the tokens and tool calls around them.
+What did *not* change is why a side-channel exists at all: the information must stay out of the
+*model-facing* tool signature, so the model cannot fabricate "a job started" or "a note was
+proposed". A tool returns its job id to the model; it reports the launch to the chemist here.
 
-**In `core/` rather than `agent/`, since the R2 layering move**: this is a contextvar over five
-pydantic records, it imports nothing first-party, and both ends of it sit outside the conversation
-layer — a connector job or a template step records the signal, and the front-door runner drains it.
-The event types it feeds still live in `api/events.py`; nothing here imports them, and that
-one-way relationship is what lets the recording side stay ignorant of the transport.
+**In `core/` rather than `agent/`, since the R2 layering move**: five pydantic records and one
+publish call, with both ends outside the conversation layer — a connector job or a template step
+records the signal, and the front-door stream renders it. That is also why the LangGraph import
+here is declared rather than avoided (`tests/test_third_party_layering.py`): moving this into
+`agent/` to keep the kernel engine-free would make `connectors/` and `templates/` import layer 1,
+which is the worse trade. The event types it feeds still live in `api/events.py`; nothing here
+imports them, and that one-way relationship is what lets the recording side stay ignorant of the
+transport.
 
 **One sink, not one per kind.** A second mechanism carrying job ids only (`job_events`, a
 Replit-only addition, D-091) was built independently and folded in here rather than kept beside
-this one: two contextvar sinks
-drained separately leave the *relative order* of a launched job and a proposed note undefined,
-which is precisely what a transcript must get right. Its four caller-facing names survived the
-fold as aliases and were removed in D-149 — three had never had a caller, and the fourth discarded
-the `kind` this module's whole point is to carry.
+this one: two sinks read separately leave the *relative order* of a launched job and a proposed
+note undefined, which is precisely what a transcript must get right. Its four caller-facing names
+survived the fold as aliases and were removed in D-149 — three had never had a caller, and the
+fourth discarded the `kind` this module's whole point is to carry.
 """
 
-from contextvars import ContextVar
-
+from langgraph.config import get_stream_writer
 from pydantic import BaseModel
 
 
@@ -97,61 +103,53 @@ class ToolFailureSignal(BaseModel):
 Signal = JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal | ToolFailureSignal
 
 
-# One buffer per turn, holding every kind in the order they occurred. A single list (rather than one
-# per kind) keeps ordering across kinds, which is what a transcript needs.
-_signals: ContextVar[list[Signal] | None] = ContextVar("chemclaw_turn_signals", default=None)
+# The key a signal rides under in the graph's custom stream. Namespaced because the channel is
+# shared: any node may write any payload to it (`gather_evidence`'s per-source counts do), and
+# `api/graph_stream._custom_event` dispatches on shape rather than on a schema neither side owns.
+_KEY = "chemclaw_signal"
 
 
-def begin_turn() -> object:
-    """Start a fresh signal buffer for a turn; returns a token for `end_turn`."""
-    return _signals.set([])
+def _emit(signal: Signal) -> None:
+    """Publish one signal on the turn's stream, or drop it where nothing is streaming.
 
+    **The guard is the design, not a precaution.** `get_stream_writer()` resolves the writer off
+    LangGraph's ambient runnable config, and outside a graph it does not return `None` — it raises
+    `RuntimeError: Called get_config outside of a runnable context` (measured). The same tools run
+    in two places: a chat turn's tool node, where a writer exists and a chemist is watching, and a
+    Temporal activity replaying a template step, where neither is true. Letting the second raise
+    would fail a durable job because it tried to *narrate*.
 
-def end_turn(token: object) -> None:
-    """Tear the turn's buffer down (mirrors every other ambient's reset)."""
-    _signals.reset(token)  # type: ignore[arg-type]
+    Dropping there costs nothing that was not already lost. The only consumers are the front door's
+    stream and `api/graph_stream`, so a signal recorded in an activity had no reader before this
+    either — it accumulated in a buffer nobody drained.
+    """
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        return
+    writer({_KEY: signal})
 
 
 def record_job_started(job_id: str, kind: str) -> None:
-    """Note that `kind` job `job_id` was launched. A no-op off the request path (CLI, tests)."""
-    buffer = _signals.get()
-    if buffer is not None:
-        buffer.append(JobSignal(job_id=job_id, kind=kind))
+    """Note that `kind` job `job_id` was launched. A no-op where nothing is streaming."""
+    _emit(JobSignal(job_id=job_id, kind=kind))
 
 
 def record_proposal(note_id: str, reference: str) -> None:
-    """Note that a note was proposed through the PR-gate. A no-op off the request path."""
-    buffer = _signals.get()
-    if buffer is not None:
-        buffer.append(ProposalSignal(note_id=note_id, reference=reference))
+    """Note that a note was proposed through the PR-gate. A no-op where nothing is streaming."""
+    _emit(ProposalSignal(note_id=note_id, reference=reference))
 
 
 def record_question(question: str, options: list[str]) -> None:
-    """Note that the agent asked the chemist to disambiguate. A no-op off the request path."""
-    buffer = _signals.get()
-    if buffer is not None:
-        buffer.append(QuestionSignal(question=question, options=options))
+    """Note that the agent asked the chemist to disambiguate. A no-op where nothing streams."""
+    _emit(QuestionSignal(question=question, options=options))
 
 
 def record_approval_request(prompt: str, approval_id: str) -> None:
-    """Note that a durable approval hold was opened. A no-op off the request path."""
-    buffer = _signals.get()
-    if buffer is not None:
-        buffer.append(ApprovalSignal(prompt=prompt, approval_id=approval_id))
+    """Note that a durable approval hold was opened. A no-op where nothing is streaming."""
+    _emit(ApprovalSignal(prompt=prompt, approval_id=approval_id))
 
 
 def record_tool_failure(tool: str, message: str) -> None:
-    """Note that `tool` raised. A no-op off the request path (CLI, tests)."""
-    buffer = _signals.get()
-    if buffer is not None:
-        buffer.append(ToolFailureSignal(tool=tool, message=message))
-
-
-def drain() -> list[Signal]:
-    """Take and clear everything recorded since the last drain (empty off the request path)."""
-    buffer = _signals.get()
-    if not buffer:
-        return []
-    taken = list(buffer)
-    buffer.clear()
-    return taken
+    """Note that `tool` raised. A no-op where nothing is streaming."""
+    _emit(ToolFailureSignal(tool=tool, message=message))

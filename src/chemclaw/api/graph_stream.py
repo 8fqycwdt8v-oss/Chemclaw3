@@ -41,10 +41,27 @@ from typing import Any
 
 from langchain_core.messages import AIMessageChunk
 
-from chemclaw.api.events import Event, EvidenceSourceEvent, PlanEvent, TokenEvent
+from chemclaw.api.events import (
+    ApprovalRequestEvent,
+    Event,
+    EvidenceSourceEvent,
+    JobStartedEvent,
+    NoteProposedEvent,
+    PlanEvent,
+    QuestionEvent,
+    TokenEvent,
+    ToolFailedEvent,
+)
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.runner_usage import graph_usage_tokens
-from chemclaw.core.turn_signals import Signal, drain
+from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
+from chemclaw.core.turn_signals import (
+    ApprovalSignal,
+    JobSignal,
+    QuestionSignal,
+    Signal,
+    ToolFailureSignal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +104,6 @@ async def graph_events(
     async for namespace, mode, payload in graph.astream(
         {"messages": [("user", message)]}, config, stream_mode=_MODES, subgraphs=True
     ):
-        for signal in drain():
-            on_signal(signal)
-            yield _signal_event(signal)
         if mode == "messages":
             chunk, _metadata = payload
             usage.add(graph_usage_tokens(chunk))
@@ -97,30 +111,31 @@ async def graph_events(
             if text:
                 yield TokenEvent(text=text)
         elif mode == "custom":
-            event = _custom_event(payload)
+            event = _custom_event(payload, on_signal)
             if event is not None:
                 yield event
         elif mode == "updates":
             async for event in _from_update(payload, namespace, trace, todos):
                 yield event
-    # A signal recorded while producing the *final* update has no next iteration to carry it, so
-    # drain once more — otherwise the last job started or note proposed in a turn is dropped. The
-    # MAF loop does exactly this, and for exactly this reason.
-    for signal in drain():
-        on_signal(signal)
-        yield _signal_event(signal)
 
 
-def _custom_event(payload: Any) -> Event | None:
+def _custom_event(payload: Any, on_signal: Any) -> Event | None:
     """One node's self-report as its event, or `None` for a payload nothing renders.
 
     Matched on shape rather than on a type tag, because a writer payload is whatever the node
     passed and there is no schema between them. Unknown payloads are dropped rather than guessed
     at: a node that publishes something no surface understands is a node ahead of its consumers,
     which is a normal state during a migration and not an error.
+
+    `on_signal` fires here rather than in the caller because a signal *is* a custom payload now,
+    and the runner's ledger of launched job ids has to see it before the event is yielded.
     """
     if not isinstance(payload, dict):
         return None
+    signal = payload.get(_SIGNAL_KEY)
+    if isinstance(signal, Signal):
+        on_signal(signal)
+        return _signal_event(signal)
     if "evidence_source" in payload:
         return EvidenceSourceEvent(
             source=str(payload["evidence_source"]), chunks=int(payload.get("chunks", 0))
@@ -240,12 +255,22 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
 
 
 def _signal_event(signal: Signal) -> Event:
-    """One out-of-band signal as its event — deferred to the runner's single map.
+    """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift).
 
-    Imported at call time rather than at module load because `chemclaw.api.runner` imports this
-    module: the map belongs beside the MAF loop that has always owned it, and duplicating it here
-    is precisely the drift `runner._signal_event` exists to prevent ("so the two cannot drift").
+    It used to live in `chemclaw.api.runner` and be imported here at call time, because the runner
+    owned the MAF loop that drained the signal buffer and this module could not import it back
+    without a cycle. Both reasons are gone: there is one loop, it is this one, and a signal reaches
+    it as a stream payload rather than out of a contextvar.
     """
-    from chemclaw.api.runner import _signal_event as to_event
-
-    return to_event(signal)
+    if isinstance(signal, JobSignal):
+        return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
+    if isinstance(signal, QuestionSignal):
+        return QuestionEvent(question=signal.question, options=signal.options)
+    if isinstance(signal, ApprovalSignal):
+        # Carries the durable hold's handle, so a surface can answer it via
+        # POST /approvals/{id}/decision. Plan approval is *not* this: that is
+        # `chemclaw.agent.plan_gate`, and it never reaches this stream.
+        return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
+    if isinstance(signal, ToolFailureSignal):
+        return ToolFailedEvent(tool=signal.tool, message=signal.message)
+    return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)

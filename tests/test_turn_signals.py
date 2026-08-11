@@ -23,13 +23,12 @@ from agent_framework import AgentSession
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import (
-    begin_turn,
-    drain,
-    end_turn,
+    JobSignal,
     record_job_started,
     record_proposal,
 )
 from tests.fakes_turn import Piece, ScriptedTurn
+from tests.signals import collect_signals
 
 
 class _SignallingAgent(ScriptedTurn):
@@ -147,22 +146,34 @@ def test_signals_are_isolated_per_turn() -> None:
     assert [e.job_id for e in right if e.type == "job_started"] == ["job-b"]
 
 
-def test_recording_off_the_request_path_is_a_no_op() -> None:
-    """The CLI and tests call the same tools with no turn in flight; that must not blow up."""
-    record_job_started("qm-1", "qm")  # no begin_turn() — no buffer bound
+def test_recording_outside_a_graph_is_a_no_op_rather_than_an_error() -> None:
+    """The same tools run where nothing is streaming; that must not blow up.
+
+    This is the case the port made sharp. `get_stream_writer()` does not return `None` outside a
+    runnable context — it raises `RuntimeError: Called get_config outside of a runnable context`
+    (measured). A Temporal activity replaying a template step calls these same tools with no graph
+    anywhere, so an unguarded publish would fail a durable job because it tried to *narrate*. The
+    CLI and most tests are in the same position.
+    """
+    record_job_started("qm-1", "qm")
     record_proposal("n-1", "note/n-1")
-    assert drain() == []
 
 
-def test_drain_clears_so_a_signal_is_emitted_once() -> None:
-    """A drained signal must not resurface on the next update as a duplicate event."""
-    token = begin_turn()
-    try:
-        record_job_started("qm-1", "qm")
-        assert len(drain()) == 1
-        assert drain() == []
-    finally:
-        end_turn(token)
+def test_a_signal_reaches_the_stream_from_inside_a_tool() -> None:
+    """The other half: where a writer *does* exist, the publish actually lands.
+
+    Asserted against a real graph rather than a patched writer, because the guard above swallows
+    `RuntimeError` — and a guard that swallows everything is indistinguishable from one that
+    swallows nothing unless something proves the success path too.
+    """
+
+    async def _record() -> str:
+        record_job_started("qm-2", "qm")
+        return "returned to the model"
+
+    returned, signals = asyncio.run(collect_signals(_record))
+    assert returned == "returned to the model"
+    assert signals == [JobSignal(job_id="qm-2", kind="qm")]
 
 
 def test_plan_is_absent_when_the_harness_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,15 +205,13 @@ def test_an_approval_signal_carries_the_holds_handle_to_the_stream() -> None:
     approval arrived renderable but unanswerable — and `service/static/app.js` returns early on an
     empty handle, so the Yes/No control never rendered at all.
     """
-    from chemclaw.api.runner import _signal_event
+    from chemclaw.api.graph_stream import _signal_event
     from chemclaw.core.turn_signals import record_approval_request
 
-    token = begin_turn()
-    try:
+    async def _record() -> None:
         record_approval_request("Save this to the knowledge graph? What is the pKa?", "approval-7")
-        signals = drain()
-    finally:
-        end_turn(token)
+
+    _returned, signals = asyncio.run(collect_signals(_record))
 
     assert len(signals) == 1
     event = _signal_event(signals[0])

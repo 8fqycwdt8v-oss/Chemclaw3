@@ -1700,3 +1700,26 @@ Rules for myself:
   failure it catches is a phase of work reported as safe and silently absent.
 - **When several signals agree, check whether they share a source.** Four reads of one `.git`
   directory is one observation, not four.
+
+## Never `git checkout <file>` to undo a mutation test
+
+**2026-08-11, twice in one session.** The mutation-testing loop is: edit the source, run the
+tests, revert. I reverted with `git checkout src/…` — which discards *every* uncommitted change to
+that file, not just the mutation. Both times it silently threw away 30–60 lines of the real work
+and I only noticed because the next `grep` came back wrong.
+
+The rule: **mutate through a copy, restore from the copy.**
+
+```sh
+cp src/…/x.py "$SCRATCH/x.py.bak"        # before
+# … mutate, run tests …
+cp "$SCRATCH/x.py.bak" src/…/x.py        # after
+```
+
+`git stash`/`git stash pop` is the same trap in a different shape when other files are also dirty.
+The copy is unambiguous: it restores exactly the state that existed a moment ago, with no view of
+the index at all.
+
+The cost of getting this wrong is not the lost edit — it is that the *next* thing you read looks
+correct-but-stale, so the mistake is discovered several steps later, by which point some of the
+intervening work has been built on the reverted file.

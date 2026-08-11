@@ -55,7 +55,8 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tool_registry import registered_tool_names
-from chemclaw.core.turn_signals import begin_turn, drain, end_turn
+from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
+from chemclaw.core.turn_signals import Signal
 from chemclaw.kg.note import NoteError
 
 
@@ -225,6 +226,29 @@ def _run(graph: Any) -> Any:
     return asyncio.run(graph.ainvoke({"messages": [("user", "help")]}))
 
 
+def _run_collecting_signals(graph: Any) -> tuple[Any, list[Any]]:
+    """Drive one turn and also collect what its tools announced out of band.
+
+    `ainvoke` above cannot see them: a signal is published to the graph's *custom* stream, so it
+    only exists while something is streaming. This is the same pair `api/graph_stream` reads — the
+    final state and the custom payloads — asked for directly, without the event translation.
+    """
+
+    async def _drive() -> tuple[Any, list[Any]]:
+        state: Any = None
+        signals: list[Any] = []
+        async for mode, payload in graph.astream(
+            {"messages": [("user", "help")]}, stream_mode=["values", "custom"]
+        ):
+            if mode == "values":
+                state = payload
+            elif isinstance(payload, dict) and isinstance(payload.get(_SIGNAL_KEY), Signal):
+                signals.append(payload[_SIGNAL_KEY])
+        return state, signals
+
+    return asyncio.run(_drive())
+
+
 def _tool_result(result: Any) -> str:
     """The content of the single `ToolMessage` in a completed turn."""
     tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
@@ -376,14 +400,11 @@ def test_a_failing_tool_is_announced_and_recorded(monkeypatch: pytest.MonkeyPatc
         ),
     )
 
-    turn = begin_turn()
-    try:
-        content = _tool_result(_run(graph))
-        signals = drain()
-    finally:
-        end_turn(turn)
+    state, signals = _run_collecting_signals(graph)
 
-    assert content == "Error: no note with id 'nope'"
+    assert _tool_result(state) == "Error: no note with id 'nope'"
+    # The failure signal rides the graph's own custom stream — there is no buffer beside the turn
+    # to drain any more, so the turn has to be *streamed* for it to exist at all.
     assert [type(s).__name__ for s in signals] == ["ToolFailureSignal"]
     assert [e.outcome for e in sink.events] == ["error"]
 

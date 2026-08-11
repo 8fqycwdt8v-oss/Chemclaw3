@@ -24,7 +24,6 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.api.events import HandoffEvent, ToolCallEvent, ToolResultEvent
 from chemclaw.api.graph_stream import _agent_of, graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
-from chemclaw.core.turn_signals import begin_turn, end_turn
 from tests.fakes_langgraph import ScriptedChatModel
 
 
@@ -49,21 +48,17 @@ def _drive(script: list[Any], **kwargs: Any) -> tuple[list[Any], ToolCallTrace, 
         graph = build_langgraph_agent(
             ScriptedChatModel(script), audit_sink=NullAuditSink(), **kwargs
         )
-        token = begin_turn()
-        try:
-            return [
-                event
-                async for event in graph_events(
-                    graph,
-                    "hello",
-                    config={"configurable": {"thread_id": "t-1"}},
-                    trace=trace,
-                    on_signal=signals.append,
-                    usage=usage,
-                )
-            ]
-        finally:
-            end_turn(token)
+        return [
+            event
+            async for event in graph_events(
+                graph,
+                "hello",
+                config={"configurable": {"thread_id": "t-1"}},
+                trace=trace,
+                on_signal=signals.append,
+                usage=usage,
+            )
+        ]
 
     return asyncio.run(_run()), trace, usage
 

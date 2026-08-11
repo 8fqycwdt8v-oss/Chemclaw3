@@ -24,7 +24,8 @@ from chemclaw.agent.tool_authz import (
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
-from chemclaw.core.turn_signals import Signal, ToolFailureSignal, begin_turn, drain, end_turn
+from chemclaw.core.turn_signals import Signal, ToolFailureSignal
+from tests.signals import collect_signals
 
 
 def _enforced(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
@@ -406,14 +407,13 @@ def _drive_announcing(
 ) -> list[Signal]:
     """Run `announce_tool_failures` inside a turn and return the signals it left behind."""
 
+    async def _announce() -> None:
+        with contextlib.suppress(Exception):
+            await announce_tool_failures(ctx, call_next)
+
     async def _run() -> list[Signal]:
-        token = begin_turn()
-        try:
-            with contextlib.suppress(Exception):
-                await announce_tool_failures(ctx, call_next)
-            return list(drain())
-        finally:
-            end_turn(token)
+        _returned, signals = await collect_signals(_announce)
+        return signals
 
     return asyncio.run(_run())
 

@@ -33,8 +33,9 @@ from chemclaw.connectors.jobs import (
 from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import enabled
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
-from chemclaw.core.turn_signals import JobSignal, begin_turn, drain, end_turn
+from chemclaw.core.turn_signals import JobSignal
 from chemclaw.durable.connector_job import ConnectorJobInput
+from tests.signals import collect_signals
 
 _SPEC = JobSpec.model_validate(
     {
@@ -119,6 +120,16 @@ def _launch(tool: Any, rationale: str = "why the tests run it", **values: Any) -
     the reason itself (D-157) pass their own.
     """
     return str(asyncio.run(tool(_params(tool, **values), rationale)))
+
+
+async def _alaunch(tool: Any, rationale: str = "why the tests run it", **values: Any) -> str:
+    """`_launch` without the `asyncio.run`, for a caller that already owns the loop.
+
+    Which is every test that also wants the tool's *signals*: those only exist while a graph is
+    streaming (`tests/signals.collect_signals`), so the call has to happen inside that stream
+    rather than in its own event loop.
+    """
+    return str(await tool(_params(tool, **values), rationale))
 
 
 def test_the_generated_tool_is_named_and_documented_for_the_model() -> None:
@@ -284,12 +295,7 @@ def test_a_duplicate_submit_returns_the_existing_id_rather_than_erroring(
 
     monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
     tool = build_job_tool("calc", _SPEC)
-    token = begin_turn()
-    try:
-        job_id = _launch(tool, smiles="CCO")
-        signals = drain()
-    finally:
-        end_turn(token)
+    job_id, signals = asyncio.run(collect_signals(lambda: _alaunch(tool, smiles="CCO")))
     assert job_id == job_workflow_id("calc", "run_calculation", {"smiles": "CCO"})
     # Deliberately NOT announced as started: an already-finished run will never emit the
     # matching `job_completed` event, so the surface would show a row that stays "running"
@@ -347,12 +353,7 @@ def test_a_duplicate_submit_is_unaffected_by_the_generic_failure_framing(
 def test_a_fresh_start_is_announced_to_the_streaming_turn(client: _FakeClient) -> None:
     """The launch reaches the UI immediately instead of silence until the push-back (D-042)."""
     tool = build_job_tool("calc", _SPEC)
-    token = begin_turn()
-    try:
-        job_id = _launch(tool, smiles="CCO")
-        signals = drain()
-    finally:
-        end_turn(token)
+    job_id, signals = asyncio.run(collect_signals(lambda: _alaunch(tool, smiles="CCO")))
     assert signals == [JobSignal(job_id=job_id, kind="run_calculation")]
 
 
@@ -604,12 +605,10 @@ def test_a_slow_job_falls_back_to_a_job_id_and_announces_it(
         {**_INLINE_SPEC.model_dump(exclude_none=True), "inline_wait_seconds": 0.05}
     )
     tool = build_job_tool("calc", spec)
-    token = begin_turn()
-    try:
-        result = asyncio.run(tool(_params(tool, smiles="CCO"), "why the tests run it"))
-        signals = [signal for signal in drain() if isinstance(signal, JobSignal)]
-    finally:
-        end_turn(token)
+    result, published = asyncio.run(
+        collect_signals(lambda: tool(_params(tool, smiles="CCO"), "why the tests run it"))
+    )
+    signals = [signal for signal in published if isinstance(signal, JobSignal)]
     assert result == fake.calls[0]["id"]
     assert [s.job_id for s in signals] == [fake.calls[0]["id"]]
 

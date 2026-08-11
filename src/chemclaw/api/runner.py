@@ -45,17 +45,12 @@ from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
-    ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorCode,
     ErrorEvent,
     Event,
-    JobStartedEvent,
-    NoteProposedEvent,
     PlanEvent,
-    QuestionEvent,
     TokenEvent,
-    ToolFailedEvent,
 )
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
@@ -79,16 +74,7 @@ from chemclaw.core.session_context import (
 )
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
-from chemclaw.core.turn_signals import (
-    ApprovalSignal,
-    JobSignal,
-    QuestionSignal,
-    Signal,
-    ToolFailureSignal,
-    begin_turn,
-    drain,
-    end_turn,
-)
+from chemclaw.core.turn_signals import JobSignal
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +201,6 @@ async def run_turn(
     # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
     # proposals) — the runner only sees the model's updates, so tools hand these over out of
     # band.
-    signals_token = begin_turn()
     # Count this turn's tool calls, so the identical question asked a third time is refused rather
     # than re-executed (`chemclaw.agent.repeat_guard`). Started here beside the signal buffer
     # because both are per-turn ambients the middleware reads and the runner owns the lifetime of.
@@ -343,16 +328,12 @@ async def run_turn(
             # moment it becomes true, not at the answer, which is still a verifier call and
             # possibly a job-result wait away.
             run_complete = True
-            # A signal recorded while producing the *final* update has no next iteration to
-            # carry it, so drain once more before the answer — otherwise the last job started or
-            # note proposed in a turn would be silently dropped. The same is true of a tool call
-            # whose arguments finished on that update: nothing follows to close it out.
+            # A tool call whose arguments finished on the *final* update has nothing following it
+            # to close it out, so flush the trace before the answer. (Signals used to need the same
+            # treatment and no longer do: they ride the stream itself, so the last one is yielded
+            # by the same loop as every other.)
             for call in tool_trace.flush():
                 yield call
-            for signal in drain():
-                if isinstance(signal, JobSignal):
-                    started_jobs.append(signal.job_id)
-                yield _signal_event(signal)
 
             # Mid-turn resume (gap AGT-2): if this turn launched durable jobs, optionally wait
             # for them and continue the *same* turn with their results, so "compute this, then
@@ -388,11 +369,6 @@ async def run_turn(
                             answer_parts.append(event.text)
                         yield event
                     run_complete = True
-                # The resume can itself launch jobs or propose notes, so drain the full signal
-                # buffer rather than only the job ids — a proposal made during the resume would
-                # otherwise never reach the stream.
-                for signal in drain():
-                    yield _signal_event(signal)
                 # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
                 # launch and then the plan that reflects it.
                 plan_event = await plan.changed(session)
@@ -609,7 +585,6 @@ async def run_turn(
         ):
             if value:
                 METRICS.increment(name, float(value), spend_labels)
-        end_turn(signals_token)
         end_call_watch(calls_token)
         end_loop_watch(loop_token)
         reset_dry_run(dry_run_token)
@@ -820,24 +795,3 @@ async def _record_transcript(
             session_id,
             exc,
         )
-
-
-def _signal_event(signal: Signal) -> Event:
-    """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift)."""
-    if isinstance(signal, JobSignal):
-        return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
-    if isinstance(signal, QuestionSignal):
-        return QuestionEvent(question=signal.question, options=signal.options)
-    if isinstance(signal, ApprovalSignal):
-        # Carries the durable hold's handle, so a surface can answer it via
-        # POST /approvals/{id}/decision. The `user_input_requests` path in the turn loop emits the
-        # *other* kind of approval — MAF's own `function_approval_request` content, raised by a
-        # tool registered with `approval_mode="always_require"` — and leaves `approval_id` empty
-        # because there is no durable hold behind it and nothing in this deployment answers one.
-        # (The comment here used to call that path "a plan prompt … answered by the next turn".
-        # It is not: plan approval is `chemclaw.agent.plan_gate`, and it never reaches this
-        # stream.)
-        return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
-    if isinstance(signal, ToolFailureSignal):
-        return ToolFailedEvent(tool=signal.tool, message=signal.message)
-    return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)

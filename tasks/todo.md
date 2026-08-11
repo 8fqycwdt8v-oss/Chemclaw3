@@ -461,23 +461,45 @@ arranged to keep that commit small and the suite green at each step.
       Two findings, both recorded against the steps they belong to (3a and 4 below).
 - [ ] **Step 1 — `harness_types.py`** (6 files). Not free: its importers are the MAF halves of
       `loop_cap` and `plan_gate`, so it lands with them.
-- [ ] **Step 2 — port `turn_signals` to the stream writer** (~18 files). **Its stated ordering —
-      "before the runner, so both engines stay green" — is wrong, measured 2026-08-11.** The
-      premise was that the contextvar side-channel is MAF-shaped and would strand the graph engine.
-      It does not: `graph_stream.graph_events` drains the same buffer the MAF loop drains, and
-      `CHEMCLAW_AGENT_ENGINE=langgraph pytest tests/test_turn_signals.py` is **11 passed / 2
-      skipped**, the two skips being plan-rendering, not signals. A tool appends to a list held in
-      a contextvar, and a list mutated inside a graph node, a `Send` branch or a subgraph is the
-      same list the runner reads — contextvar *copies* into child tasks do not copy the object.
+- [x] **Step 2 — port `turn_signals` to the stream writer** (done 2026-08-11). Its stated ordering
+      — "before the runner, so both engines stay green" — was wrong, measured 2026-08-11: the
+      contextvar was never MAF-shaped, `graph_stream` drained the same buffer, and
+      `test_turn_signals.py` was 11 passed / 2 skipped on the graph engine. So it ran last, as
+      cleanup, and what it bought is what that re-measurement predicted: the contextvar, the
+      `begin_turn`/`end_turn` pair the runner's non-awaiting `finally` had to police, and **three**
+      separate drains — one per streamed update, one after the graph returned ("no next iteration
+      to carry the last signal"), one after a mid-turn resume. A writer publishes into the same
+      stream the tokens ride, so the ordering is the stream's rather than something the runner
+      reconstructs.
 
-      So this is not a prerequisite for anything; it is post-MAF cleanup and belongs **after**
-      Step 3, not before it. What porting actually buys is deleting the contextvar and the
-      non-awaiting `finally` that polices its lifetime, and that cannot be collected while a second
-      drainer exists: `drain()` has six call sites today, four in `api/runner.py` (two on the MAF
-      branch, one in `_resume`, one shared post-resume) and two in `api/graph_stream.py`. Step 3
-      removes three of the four. Doing it first would mean tools writing to *both* channels for the
-      duration of the dual-engine window — a second copy of one decision, which is the exact
-      duplication this migration's discipline forbids.
+      **The measurement that shaped the design.** `get_stream_writer()` does not return `None`
+      outside a graph — it raises `RuntimeError: Called get_config outside of a runnable context`.
+      The same tools run in two places: a chat turn's tool node, and a Temporal activity replaying
+      a template step (`durable/template_activities.py`), where no graph exists. An unguarded port
+      would fail a durable job because a tool tried to *narrate*. So `_emit` catches `RuntimeError`
+      and drops — which costs nothing that was not already lost, since the only readers are the
+      front door's stream and `api/graph_stream`, and a signal recorded in an activity had no
+      reader before this either.
+
+      That guard is also why `tests/signals.py` drives a **real one-node graph** rather than
+      patching `get_stream_writer`: a guard that swallows everything is indistinguishable from one
+      that swallows nothing unless something proves the success path. Mutation-checked — making
+      `_emit` never call the writer fails 5 tests.
+
+      **`_signal_event` moved from `runner.py` to `graph_stream.py`.** It lived in the runner and
+      was imported at call time to dodge a cycle, because the runner owned the MAF loop that
+      drained the buffer. Both reasons are gone: there is one loop, it is `graph_events`, and a
+      signal arrives as a stream payload.
+
+      **One declared coupling, written down rather than worked around.** `core/turn_signals.py` now
+      imports `langgraph.config`, so the kernel knows the conversation engine — a row in
+      `test_third_party_layering.py` states why the alternative is worse: the *recording* ends are
+      `connectors/` and `templates/`, so moving the module into `agent/` would make capability code
+      import layer 1. The kernel already owns the other engines' single primitives on everyone's
+      behalf (`core/db.py`, `core/temporal_client.py`).
+
+      Suite 4178 → 4179; 2 ids removed, 3 added.
+
 - [x] **Step 3 — the switch and the runner's MAF branch** (done 2026-08-11). The checkpoint that
       proves the graph engine carries production alone.
 

@@ -161,6 +161,19 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.core", "temporal"): "core/temporal_client.py is the one client-per-process",
     ("chemclaw.core", "http"): "core/asgi.py + core/worker_http.py are the shared ASGI primitives",
     ("chemclaw.core", "rdkit"): "core/chem.py canonicalises SMILES for every layer",
+    # `core/turn_signals.py` publishes a turn's out-of-band signals through `get_stream_writer()`.
+    #
+    # This is a real coupling the contextvar it replaced did not have, and it is declared rather
+    # than worked around because the alternative is worse. The recording ends are `connectors/` and
+    # `templates/` — a connector job and a template step both announce their launch — so moving the
+    # module into `agent/` would make capability code import layer 1, which is the one direction
+    # this file exists to prevent. The kernel already owns the other engines' single primitives on
+    # everyone's behalf (`core/db.py` the pool, `core/temporal_client.py` the client-per-process);
+    # the stream writer is that same kind of thing, and one publish call is the whole of it.
+    ("chemclaw.core", "langgraph"): (
+        "core/turn_signals.py publishes a turn's signals on the graph's custom stream; the "
+        "recording ends are connectors/ and templates/, so this cannot live in agent/"
+    ),
     # agent: layer 1. "MAF — conversation orchestration" is the definition of the layer.
     ("chemclaw.agent", "maf"): "layer 1 IS the Microsoft Agent Framework",
     ("chemclaw.agent", "langgraph"): (
