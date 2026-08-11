@@ -21,35 +21,8 @@ import json
 from collections.abc import MutableMapping
 from typing import Any
 
-from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
 from chemclaw.core.config import settings
-from tests.fakes import FakeUpdate
-
-
-class _StreamingAgent:
-    """Streams one token, then never finishes — so only the disconnect ends the turn."""
-
-    mcp_tools: list[Any] = []
-
-    def create_session(self, *, session_id: str) -> TurnSession:
-        """Build the turn's session object (the app calls this once per conversation)."""
-        return TurnSession(session_id=session_id)
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: TurnSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(text="tok")
-            while True:
-                await asyncio.sleep(0.05)
-
-        return _gen()
 
 
 class _RecordingClaims:

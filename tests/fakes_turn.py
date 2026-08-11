@@ -1,14 +1,14 @@
-"""One turn's model behaviour, written once and played on either engine.
+"""One turn's model behaviour, written once and injected where a real graph would go.
 
-**Why this module exists.** `chemclaw.api.runner.run_turn` once took a built MAF `agent` *and* a
-`graph_factory` and used exactly one of them, and sixteen test files were written when only the
-first existed — so they handed `run_turn` a fake agent and let `graph_factory` keep its production
-default, the real `build_langgraph_agent`, which needs a live model credential. Measured on
-2026-08-11: selecting the graph engine with nothing else changed turned 67 of those tests into
-`RuntimeError: ANTHROPIC_API_KEY is not set`, and left the stall-and-cancel cases waiting on an
-agent that was never run. The asymmetry was the whole finding: `agent` was injectable and
-`graph_factory` effectively was not. That argument outlived the engine it was made about —
-`graph_factory` is now the only seam a turn can be driven through, so it has to stay one.
+**Why this module exists.** `run_turn` once took a built agent object *and* a `graph_factory` and
+used exactly one of them, and sixteen test files were written when only the first existed — so they
+handed `run_turn` a fake agent and let `graph_factory` keep its production default, the real
+`build_langgraph_agent`, which needs a live model credential. Measured on 2026-08-11: selecting the
+graph engine with nothing else changed turned 67 of those tests into `RuntimeError:
+ANTHROPIC_API_KEY is not set`, and left the stall-and-cancel cases waiting on an agent that was
+never run. The asymmetry was the whole finding: one seam was injectable and the other effectively
+was not. That argument outlived the engine it was made about — `graph_factory` is now the only seam
+a turn can be driven through, so it has to stay one.
 
 **What it replaces, and why not the alternatives.** Two cheaper shapes were rejected:
 
@@ -17,16 +17,13 @@ agent that was never run. The asymmetry was the whole finding: `agent` was injec
   script said, which has no relation to the behaviour each test was written to pin. Tests that
   pass for a reason unrelated to their assertion are worse than tests that fail.
 - *A `graph_factory=` written out at each of the ~40 call sites.* That is forty chances to build a
-  graph slightly differently, and it leaves each test's model behaviour stated twice — once as a
-  fake MAF agent and once as a script — free to drift apart. `tests/fakes.py` records what that
-  costs: twenty hand-written update fakes drifted until the runner's approval branch was covered by
-  none of them.
+  graph slightly differently, and it leaves each test's model behaviour stated twice — free to
+  drift apart. `tests/fakes.py` records what that costs: twenty hand-written update fakes drifted
+  until the runner's approval branch was covered by none of them.
 
-So a turn's behaviour is written **once**, as an async generator of streamed pieces, and this
-class renders it into whichever framework's shape the configured engine wants. That generator is
-the same object the MAF fakes already were — their `_gen()` bodies, with the framework's update
-type removed — so porting a fake is a signature change rather than a rewrite. When M13 deletes the
-MAF branch, `run` goes and the rest stays.
+So a turn's behaviour is written **once**, as an async generator of streamed pieces, and this class
+renders it into a real compiled graph over a model that replays them. A test asserts on the events
+`run_turn` yields, which is the contract, rather than on a shape it invented for a fake.
 """
 
 from abc import ABC, abstractmethod
@@ -81,10 +78,9 @@ class ScriptedTurn(ABC):
     """A turn's model behaviour, exposed as both engines' injection points.
 
     Subclass and implement `stream`; the base supplies `graph_factory`, which is what
-    `run_turn(graph_factory=…)` calls. It had a second face — `run`, the shape MAF's `agent.run`
-    presented to `run_turn` — so that one test body could cover both engines without a branch in
-    it; that face went with the engine, and what it bought survives as the reason the remaining
-    one exists.
+    `run_turn(graph_factory=…)` calls. It briefly had a second face, for the other engine's
+    injection point, so one test body could cover both without a branch in it. That face went with
+    the engine; what it bought — the behaviour stated once — is why this one exists.
     """
 
     @abstractmethod

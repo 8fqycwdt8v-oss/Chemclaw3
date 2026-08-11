@@ -33,7 +33,7 @@ from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
-from tests.fakes import FakeUpdate, fed
+from tests.fakes import fed
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -312,24 +312,6 @@ def test_an_empty_fragment_mid_document_does_not_split_one_call_into_two() -> No
 # --------------------------------------------------------------------------------------------
 # The turn's own flush (api/runner.py)
 # --------------------------------------------------------------------------------------------
-
-
-class _UnparseableArgumentAgent:
-    """Streams a call whose arguments never parse as JSON, and then ends the stream."""
-
-    mcp_tools: list[Any] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: TurnSession, **_options: Any
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(
-                contents=[
-                    SimpleNamespace(call_id="c9", name="find_notes", arguments="not json at all")
-                ]
-            )
-
-        return _gen()
 
 
 # --------------------------------------------------------------------------------------------

@@ -26,9 +26,9 @@ from chemclaw.core.identity_context import reset_current_identity, set_current_i
 def _discovered() -> set[str]:
     """Every skill name on disk, which is what the narrowings narrow.
 
-    `declared_tools`'s keys, because they *are* the discovered names — it walks the same tree MAF's
-    `FileSkillsSource` walked, and reading them from the one first-party reader is what keeps the
-    tests from needing a second answer to "what skills exist".
+    `declared_tools`'s keys, because they *are* the discovered names — it walks the same tree the
+    skills backend walks, and reading them from the one first-party reader is what keeps the tests
+    from needing a second answer to "what skills exist".
     """
     return set(declared_tools(settings.skills_dirs))
 

@@ -533,24 +533,11 @@ class _CitingAgent(ScriptedTurn):
     async def stream(self, message: str) -> AsyncIterator[Piece]:
         """The answer, and only the answer — the tool is each engine's own business.
 
-        A tool result cannot be narrated: on MAF it is a streamed content (see `run`), on the graph
-        it is a tool node that ran (see `graph_factory`). Keeping this to the prose is what lets the
-        no-tool case — a citation the turn never retrieved — run unchanged on both engines.
+        A tool result cannot be narrated into existence — it is a tool node that ran, which is why
+        `graph_factory` below compiles one. Keeping the script to the prose is what lets the no-tool
+        case — a citation the turn never retrieved — share this class with the tool-calling one.
         """
         yield self._answer
-
-    def run(
-        self, message: str, *, stream: bool, session: Any, **_run_options: Any
-    ) -> AsyncIterator[Any]:
-        """The MAF face: the call and its result as streamed contents, then the answer."""
-
-        async def _updates() -> AsyncIterator[Any]:
-            if self._tool_result is not None:
-                yield _update(_CallContent(name="find_notes", call_id="c1", arguments={"q": "x"}))
-                yield _update(_CallContent(call_id="c1", result=self._tool_result))
-            yield FakeUpdate(text=self._answer)
-
-        return _updates()
 
     def graph_factory(self, **build_kwargs: Any) -> Any:
         """A real graph whose model calls one result-returning tool, then answers."""

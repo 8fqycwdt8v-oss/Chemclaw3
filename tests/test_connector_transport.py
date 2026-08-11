@@ -4,7 +4,7 @@ This replaces `test_mcp_transport.py`, which spawned each stdio MCP server and a
 advertised exactly its `allowed_tools`. The property is the one worth keeping: it is the check
 that the agent-facing surface is what the manifest says, so the write/index tools stay off the
 conversation (D-029) and a renamed tool cannot pass as present. Only the transport changed, so
-the test follows it — a real uvicorn server on an ephemeral port, connected by the same MAF
+the test follows it — a real uvicorn server on an ephemeral port, connected by the same
 client the agent uses.
 
 It also verifies the three things the HTTP transport adds and stdio did not have: the `/healthz`

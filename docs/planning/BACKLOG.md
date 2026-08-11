@@ -3,6 +3,33 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the LangGraph rebuild (2026-08-11, D-2026-08-11-what-the-removal-found)
+
+- [ ] **The three M12 probes are still unrun, and nothing in M13 measured them** — [M].
+      Each needs a credential or a tenant this environment does not have, and the migration shipped
+      without them on purpose rather than by oversight:
+      **(a) concurrency** — 8 simultaneous turns against a compiled graph. D-123's *defect* has no
+      surface left (its parser went with the dependency, which is why `agent_pool.py` could be
+      deleted), but LangGraph's own behaviour under that load is unmeasured, so this is a new
+      question rather than the old one re-asked. **(b) plan → approve → execute, end to end, live**
+      — historically this *silently* did not work, and every unit test passed while it did not.
+      **(c) team routing accuracy and per-specialist token cost** against the single-agent
+      baseline; `agent_teams_enabled` is off by default for exactly this reason, and a team that
+      mis-routes is worse than no team.
+      **Trigger**: a live model credential in a deployment, whichever arrives first. Use the
+      cheapest model available for (a) and (b); (c) needs the real one to mean anything.
+
+- [ ] **Per-model token attribution is gone from the metrics surface and only the ledger has it** —
+      [S]. The framework's chat-client instrumentation emitted `gen_ai.client.token.usage` labelled
+      by request model, response model, provider and token type; the LangChain stack ships no
+      equivalent (measured — `docs/guides/runbook.md` §(viii)). `turn_costs` still carries model
+      attribution per turn, which is where D-2026-08-01-spend-is-a-ledger-not-a-label decided it
+      belongs, so nothing is *lost* that a query cannot answer — but a dashboard that read the OTel
+      histogram now reads nothing, and `core/metrics.py`'s counters deliberately carry `profile`
+      only.
+      **Trigger**: an operator asking a per-model question of a Grafana panel rather than of the
+      database.
+
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
 - [ ] **A reloaded conversation cannot resolve the results of its past turns** — [M].

@@ -200,7 +200,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
 
 
 def test_launching_accepts_the_raw_json_object_the_framework_hands_it(client: _FakeClient) -> None:
-    """MAF publishes the params model's schema but passes the body a decoded `dict`.
+    """The params model's schema is published, but the body is passed a decoded `dict`.
 
     Every test above this one checked the generated tool's *name*, *docstring* and *schema*; none
     ever called it. So `launch` carried `cast(BaseModel, params).model_dump(...)` — a `cast` is a

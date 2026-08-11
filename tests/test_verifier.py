@@ -29,7 +29,7 @@ from chemclaw.retrieval.evidence import EvidenceChunk
 
 
 class _FakeResponse:
-    """A stand-in for a MAF `ChatResponse`, carrying only the parsed structured `value`."""
+    """A stand-in for a structured-output response, carrying only the parsed `value`."""
 
     def __init__(self, value: Any) -> None:
         self.value = value

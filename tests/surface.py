@@ -1,7 +1,7 @@
 """What one profile advertises, without building an agent to find out.
 
 Every test that asked "does this profile narrow the tools / swap the instructions / drop that
-connector" used to build a whole MAF `Agent` behind a `chat_client=object()` stand-in and read
+connector" used to build a whole agent object behind a `chat_client=object()` stand-in and read
 `agent.default_options["tools"]`. It worked, and it made the assertion about a framework object's
 internal keys rather than about the decision.
 

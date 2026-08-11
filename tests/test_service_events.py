@@ -28,10 +28,10 @@ class _ToolContent:
 class _FakeAgent(ScriptedTurn):
     """A fake agent whose turn is a scripted update sequence: one tool call, then two tokens.
 
-    The pieces here are MAF updates rather than text, because the sequence under test *is* MAF's:
-    a call content arriving before any prose. The turn-level test that reads it is
-    `maf_engine_only`, and the graph engine's twin — the whole event sequence for a scripted
-    tool-calling turn — is `tests/test_langgraph_stream.py`'s conformance test.
+    The pieces are streamed-update doubles rather than plain text, because what is under test is
+    the *event* mapping — a tool call arriving before any prose. The whole event sequence for a
+    scripted tool-calling turn is `tests/test_langgraph_stream.py`'s conformance test; this file
+    pins the serialization and the error path.
     """
 
     def create_session(self, *, session_id: str) -> TurnSession:
@@ -39,19 +39,14 @@ class _FakeAgent(ScriptedTurn):
         return TurnSession(session_id=session_id)
 
     async def stream(self, message: str) -> AsyncIterator[Any]:
-        """The MAF-shaped stream: a call content, then two text updates.
+        """A call content, then two text updates.
 
-        Typed `Any` rather than `Piece` because these pieces are already MAF updates — the shared
+        Typed `Any` rather than `Piece` because these pieces are already update doubles — the shared
         rendering has nothing to add to a content the runner duck-types.
         """
         yield FakeUpdate(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
         yield FakeUpdate(text="The ")
         yield FakeUpdate(text="answer.")
-
-    def run(  # noqa: D102 - see the class docstring
-        self, message: str, *, stream: bool, session: Any, **_run_options: Any
-    ) -> AsyncIterator[Any]:
-        return self.stream(message)
 
 
 def test_events_round_trip_with_type_discriminator() -> None:

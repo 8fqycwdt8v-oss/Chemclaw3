@@ -2,19 +2,18 @@
 
 Moving capability out of process is only acceptable if it changes *where a tool runs* and
 nothing about *what governs it*. Two of the four safety-rubric invariants are the ones a process
-boundary could plausibly break, because both are MAF function middleware and a connector's tools
-are not MAF
-functions we wrote:
+boundary could plausibly break, because both are tool-call middleware and a connector's tools are
+not functions we wrote:
 
 1. **GxP audit** — every call recorded with the turn's actor, whether it succeeded or was denied.
 2. **Per-tool authorization** — `tool_role_gates` addresses a connector tool by the same name the
    model calls, and a denied call never runs on the connector.
 
-Neither can be shown by inspecting the wiring: MAF assembles MCP tools into the run's tool list
-at a different point from the configured ones, so "the middleware list is attached" proves
-nothing about whether it wraps *these*. So this drives the real thing — a real `Agent`, a real
-connector server over HTTP, MAF's own tool-calling loop — and asserts on what the audit sink
-recorded and what the server received.
+Neither can be shown by inspecting the wiring: a connector's tools reach the model by a different
+route from the configured ones, so "the middleware list is attached" proves nothing about whether
+it wraps *these*. So this drives the real thing — a real compiled graph, a real connector server
+over HTTP, a real tool node — and asserts on what the audit sink recorded and what the server
+received.
 
 The other two invariants need no test here because the boundary makes them structural: a
 connector has no PR-gate access (its only route into the graph is a job result core publishes)
@@ -166,10 +165,10 @@ def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:
 def test_a_connector_tool_call_is_recorded_in_the_gxp_audit_trail(governed: _Observed) -> None:
     """Invariant 1: the audit middleware wraps a connector's tool, not just the in-process ones.
 
-    This is the assertion that could not be made by reading the wiring. MAF appends MCP-derived
-    functions to the run's tool list separately from the configured ones, so whether the agent's
-    middleware chain reaches them is a property of the framework, not of our construction — and
-    it is the property the whole out-of-process move depends on.
+    This is the assertion that could not be made by reading the wiring. A connector's tools are
+    loaded off a live MCP session rather than registered like the configured ones, so whether the
+    middleware chain reaches them is a property of how the framework binds tools, not of our
+    construction — and it is the property the whole out-of-process move depends on.
     """
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))

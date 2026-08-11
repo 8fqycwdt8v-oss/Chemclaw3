@@ -217,7 +217,7 @@ def test_launching_works_when_the_argument_arrives_as_the_raw_json_object(
     them passed while every declared job — `compute_reaction_energy`, `compare_solvents`,
     `start_optimization_campaign`, `compute_dft_energy` — failed on its first real use with
     `'dict' object has no attribute 'model_dump'`. The parameter's annotation is a pydantic model
-    and MAF publishes its JSON schema, but MAF hands the body the decoded JSON object; nothing
+    and its JSON schema is published, but the body is handed the decoded JSON object; nothing
     between the wire and the tool builds the model.
     """
     tool = build_job_tool("calc", _SPEC)

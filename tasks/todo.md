@@ -1471,3 +1471,44 @@ stream parser — and D-123 *is* a stream-parser defect. My first version even r
 consistent" while making zero tool calls, because `all(...)` over an empty list is true. The guard I
 added caught it. A probe that cannot see the defect it is named after is worse than no probe,
 because its green is quoted later.
+
+**M13 done.** `make lint type test` green, and the verification that matters is that the suite ran
+against a tree with `agent-framework-anthropic`, `-core` and `-openai` **uninstalled** — a grep
+proves an import is not written, an uninstall proves it cannot be satisfied.
+
+**The removal was not mechanical, and the reason generalises.** While both engines were live a
+module could read the *old* stored message shape and be right about half the rows. With one engine
+left, "half the rows" became "every row a live session writes", and that one sentence accounts for
+three of the four findings:
+
+- `chemclaw.cli.explain` parsed the legacy `contents` shape inline, so the audit reconstruction —
+  the tool that answers *"why was this run?"* for a GxP auditor — rendered role `unknown` with
+  empty text for every row written since M6. It never failed; it printed nothing, which reads as a
+  quiet session. `session_store.message_from_row` is public now and is the only function allowed to
+  decide which serialization a row holds. Mutation-checked: pinning its shape argument to `None`
+  fails the new test.
+- `connectors.registry.open_reachable` and `api.runner_usage.usage_tokens` had no production caller
+  once the branch went, and had survived earlier phases by *reading as one half of a pair*. That is
+  the failure mode worth naming — a symmetrical name makes dead code look load-bearing.
+- `core/metrics.py` argued for its `profile`-only counter label by pointing at a
+  `gen_ai.client.token.usage` histogram that went with the framework. The premise was corrected and
+  the decision left alone, because `turn_costs` is where model attribution belongs
+  (D-2026-08-01-spend-is-a-ledger-not-a-label) — but a comment that argues from a dead premise is
+  how the *next* decision gets made wrongly.
+
+**Prose was triaged on one line rather than swept.** ~180 `MAF` mentions in `src/`, roughly half of
+them load-bearing history: *past tense about the framework is evidence and stays; present tense
+about it is false and is rewritten.* Deleting the history would leave unexplained shapes — a
+duck-typed reader, a per-turn connector session, a counted loop cap — each of which exists because
+of something that framework did. The historical planning documents keep theirs (each already opens
+by saying it is historical) and `BACKLOG.md`'s are all inside closed `[x]` rows, which is a log
+rather than a claim about now. Checked rather than assumed: no *open* row mentions the framework.
+
+**Two names that were only ever twin-distinguishers went with the twins.** Eight `lg_`-prefixed
+middlewares and `make_langgraph_audit_middleware`. The tell was that the prose throughout the tree
+already cited the *unprefixed* names — ~30 docstring references that were false until the rename and
+true after it, which is a better argument for renaming than brevity.
+
+**Still owed, unchanged from M12 and now a BACKLOG row of its own:** the concurrency probe, the live
+plan→approve→execute round trip, and team routing accuracy. Each needs a credential or a tenant this
+environment does not have. `agent_teams_enabled` stays off by default for the third of them.

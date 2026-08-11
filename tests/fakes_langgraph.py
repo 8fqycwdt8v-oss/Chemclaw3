@@ -1,6 +1,6 @@
 """Shared doubles for the LangGraph engine's tests.
 
-The counterpart of `tests/fakes.py`, which holds the MAF engine's `FakeUpdate` for the same
+The counterpart of `tests/fakes.py`, which holds the streamed-update double for the same
 reason: a double that four test modules need is a double that must have one definition, or the
 suite ends up asserting against four subtly different models. `tests/fakes.py`'s own docstring
 records what the alternative cost — twenty fakes across fourteen files hard-coded

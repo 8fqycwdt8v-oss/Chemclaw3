@@ -1,4 +1,4 @@
-"""The graph engine drives the same event contract the MAF engine does (M8).
+"""The graph drives the event contract `api/events.py` declares (M8).
 
 `api/events.py` is this migration's conformance boundary — "a LangGraph turn either emits the
 agreed event stream or the migration is not done". These tests are where that is checked, so most
@@ -63,12 +63,11 @@ def _drive(script: list[Any], **kwargs: Any) -> tuple[list[Any], ToolCallTrace, 
     return asyncio.run(_run()), trace, usage
 
 
-def test_a_scripted_turn_emits_the_same_event_sequence_as_the_maf_engine() -> None:
+def test_a_scripted_turn_emits_the_declared_event_sequence() -> None:
     """The conformance assertion: call, result, then the answer's tokens — in that order.
 
-    `tests/test_service_events.py` pins the MAF engine's sequence for the equivalent turn; the
-    `answer` is assembled by the runner *after* the stream on both engines, so what this module
-    owns is everything up to it. The order matters as much as the membership — a surface renders
+    The `answer` is assembled by the runner *after* the stream, so what this module owns is
+    everything up to it. The order matters as much as the membership — a surface renders
     the trace as a timeline, and a result announced before its call reads as a tool answering a
     question nobody asked.
 
@@ -247,18 +246,17 @@ def test_the_runner_serves_a_whole_turn_on_the_graph_engine(
 
 
 def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
-    """One reader answers for both engines — the wiring that was missing.
+    """Both records agree that the cap fired — the wiring that was missing.
 
     `chemclaw.api.runner` decides whether to emit `loop_cap_reached` and increment
     `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`, which reads the ambient watch.
-    Only `observe_loop_cap` — the MAF half — ever wrote it, while the graph engine kept its count
-    in `model_calls`, which the runner never reads back. So a capped turn on this engine was
-    externally identical to a finished one: the exact defect `enforce_loop_cap` was written to fix,
-    reintroduced one layer up.
+    Nothing wrote it: the graph kept its count in `model_calls`, which a streaming driver never
+    reads back. So a capped turn was externally identical to a finished one — the exact defect
+    `enforce_loop_cap` was written to fix, reintroduced one layer up.
 
-    Driven at a cap of 1 because that is the value MAF's inference was blind at, and asserted on
-    **both** records: the state count `loop_capped` reads, and the watch the runner reads. Before
-    the fix the first held and the second did not, which is precisely how the defect hid.
+    Driven at a cap of 1 because that is the value the inference this replaced was blind at, and
+    asserted on **both** records: the state count `loop_capped` reads, and the watch the runner
+    reads. Before the fix the first held and the second did not, which is precisely how it hid.
     """
     from chemclaw.agent.loop_cap import (
         begin_loop_watch,
@@ -303,8 +301,8 @@ def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatc
     (`loop_cap_reached`, which is what lets a surface mark the answer partial). A unit test on the
     hook proves neither, and passed throughout.
 
-    A cap of 1 deliberately: it is the value MAF's inference was blind at, and the value at which
-    this defect is unambiguous.
+    A cap of 1 deliberately: it is the value the inference this replaced was blind at, and the
+    value at which this defect is unambiguous.
     """
     from chemclaw.api.runner import run_turn
     from chemclaw.core.config import settings

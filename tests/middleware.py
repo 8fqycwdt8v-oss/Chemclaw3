@@ -4,7 +4,7 @@
 a caller with no graph. A *test* of one middleware wants neither: it wants that middleware, one
 call, and a handler it controls, so a failure names the decision rather than the composition.
 
-The MAF halves these replaced were plain async functions, so a test called them directly:
+The halves these replaced were plain async functions, so a test called them directly:
 `await enforce_tool_authz(ctx, call_next)`. A `@wrap_tool_call` middleware is an `AgentMiddleware`
 *instance* with an `awrap_tool_call(request, handler)` method, so the same test needs three lines
 of adapter. They live here rather than in each file for the reason `tests/fakes_langgraph.py`

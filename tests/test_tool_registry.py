@@ -104,7 +104,7 @@ def test_duplicate_registration_is_a_loud_error() -> None:
 
 
 def test_decorator_registers_and_returns_function_unchanged() -> None:
-    """`@tool` registers by name and returns the same object MAF will wrap (identity)."""
+    """`@tool` registers by name and returns the same object the framework wraps (identity)."""
     try:
 
         @tool

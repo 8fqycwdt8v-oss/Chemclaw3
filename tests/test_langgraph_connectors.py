@@ -1,16 +1,17 @@
 """Connectors on the LangGraph engine: real sessions, real degradation, real task affinity (M7).
 
 Every test here drives a live `uvicorn` server over the same streamable-HTTP transport a
-deployment uses, for the reason `tests/test_connector_transport.py` gives for the MAF half: the
+deployment uses, for the reason `tests/test_connector_transport.py` gives: the
 things that broke in this seam — a deadlock between concurrent turns, an identity header that
 never landed, an `anyio` scope exited from the wrong task — are all properties of a real
 connection, and none of them is visible against a mock.
 
 **The load-bearing one is `test_connectors_opened_together_close_cleanly`.** The natural way to
 open several connectors at once is `asyncio.gather` over `AsyncExitStack.enter_async_context`,
-which is exactly what `open_reachable` does for MAF, and on this engine it raises
+which is the natural concurrent shape, and it raises
 `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in` — the
-MCP session is an `anyio` cancel scope and anyio pins a scope to the task that entered it. MAF
+MCP session is an `anyio` cancel scope and anyio pins a scope to the task that entered it. The
+framework this replaced
 never met this because it holds each connector's lifecycle on its own task internally. That test
 is what `HeldConnectorSession` exists for, and it fails without it.
 """
@@ -150,7 +151,8 @@ def test_a_reachable_connectors_tools_reach_the_graph_and_run(probe: int) -> Non
 def test_an_unreachable_connector_costs_its_tools_and_not_the_turn() -> None:
     """Degradation, on the engine that has no `connect()` to override.
 
-    Nothing is listening on this port, so the session never opens. The contract is the MAF one:
+    Nothing is listening on this port, so the session never opens. The contract is the long-standing
+    one:
     the connector contributes no tools, its name is reported so a surface can say the answer is
     partial, and the turn still runs.
     """
@@ -180,7 +182,7 @@ def test_a_real_turn_reaches_a_real_connector_on_the_graph_engine(
 
     Every other test in this file opens the specs itself and hands the tools to
     `build_langgraph_agent`, which is why they all passed while the path a chemist takes was
-    broken. `run_turn` built its connectors with `connector_specs` — MAF's — on *both* engines and
+    broken. `run_turn` once built its connectors with the *other* engine's representation and
     handed those objects to the graph factory, so the first graph turn with any connector enabled
     died at construction with `ValueError: The first argument must be a string or a callable …
     Got <class '…transport.DegradingHttpConnector'>`. Nothing caught it because every graph test
@@ -229,7 +231,7 @@ def test_connectors_opened_together_close_cleanly(probe: int) -> None:
     """Several connectors open concurrently and tear down without a cross-task scope error.
 
     **This is the regression test for the reason `HeldConnectorSession` exists.** Opening these
-    sessions the way `open_reachable` opens MAF's — `asyncio.gather` over
+    sessions the natural concurrent way — `asyncio.gather` over
     `AsyncExitStack.enter_async_context` — enters each `anyio` cancel scope on a child task and
     exits it on the caller's, which anyio refuses: `RuntimeError: Attempted to exit cancel scope
     in a different task than it was entered in`. Confining each session to a task of its own is
@@ -253,7 +255,7 @@ def test_connectors_opened_together_close_cleanly(probe: int) -> None:
 
 
 def test_the_manifest_allow_list_bounds_what_a_session_advertises(probe: int) -> None:
-    """`allowed_tools` narrows the live surface, as MAF's `_filtered_functions` did in the tool.
+    """`allowed_tools` narrows what the *server* advertises, not what a tool object was built with.
 
     The server offers two tools and the allow-list names one, so the model must be handed one.
     Without this the narrowing would stop at the process boundary — the server would happily
@@ -272,7 +274,7 @@ def test_the_manifest_allow_list_bounds_what_a_session_advertises(probe: int) ->
 
 
 def test_concurrent_turns_get_their_own_session_and_their_own_identity() -> None:
-    """Per-turn sessions, proven the way the MAF twin proves it: two overlapping turns, two actors.
+    """Per-turn sessions, proven directly: two overlapping turns, two actors.
 
     Every request must carry the identity of the turn that made it. A shared session would send
     the second turn's calls over a connection opened in the first turn's context, attributing
@@ -322,7 +324,8 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     """Per-turn compilation is what M7 costs; this measures it against D-123's ~90 ms baseline.
 
     LangGraph binds tools at construction, so a turn's connectors force a fresh compile — where
-    MAF built one `Agent` per process and appended run-scoped tools. D-123 measured MAF's build at
+    The framework this replaced built one agent per process and appended run-scoped tools. D-123
+    measured that build at
     ~90 ms and called it "not expensive enough to fear"; this asserts the graph is no worse, since
     that is the number the decision to compile per turn was taken against.
 
@@ -342,4 +345,4 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     per_compile_ms = (time.perf_counter() - started) / rounds * 1000
 
     assert per_compile_ms < 270, f"per-turn graph compile took {per_compile_ms:.0f} ms"
-    print(f"\nper-turn graph compile: {per_compile_ms:.0f} ms (MAF agent build baseline ~90 ms)")
+    print(f"\nper-turn graph compile: {per_compile_ms:.0f} ms (prior agent build baseline ~90 ms)")
