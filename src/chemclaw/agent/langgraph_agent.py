@@ -400,12 +400,26 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     though it were an answer. Governance must raise for a caller that has no model to read it.
     """
     return [
+        # Outside everything that *raises*, and inside both converters. Nesting is list order, so
+        # a middleware below this one cannot be seen by it: `announce_tool_failures` used to sit
+        # last — "innermost, closest to the tool body" — and that is exactly why a governance
+        # refusal never reached the chemist. `enforce_plan_approval` raises *before* calling its
+        # handler, so the announcer it wrapped never ran, and a gated call surfaced only as a
+        # `tool_result` whose text begins "Refused:". A surface renders that as a step that
+        # worked.
+        #
+        # Measured, because the opposite was written down and believed: `tests/test_m12_probes.py`
+        # asserted that a plan refusal and a broken tool "arrive on the stream as the same event
+        # type", and the live M12 plan-gate suite scored 0 refusals against a gate that had
+        # refused twice in the same run — the gate held, and nothing could see it hold.
+        # Innermost is the right place to catch a *tool body* raising and the wrong place to catch
+        # the chain above it; the announcement belongs where every refusal passes.
+        announce_tool_failures,
         audit,
         enforce_tool_authz,
         refuse_writes_on_dry_run,
         refuse_repeated_calls,
         *([enforce_plan_approval] if gate_applies(profile) else []),
-        announce_tool_failures,
     ]
 
 

@@ -1437,7 +1437,31 @@ own counter read `requests: 0`; after adding the route, 3/3 and `requests: 2` (t
 the answer after the tool result, which is `already_has_tool_results` correctly recognising the
 chat-completions shape rather than looping to the cap).
 
-**Still unrun:** the plan-gate suite. Nothing blocks it but time.
+**M12 suite A (plan gate), run live — and it found the day's fourth reading defect.** First run:
+0/5, with state-changing calls apparently running unrefused. The gate was innocent twice over. The
+lane needed `CHEMCLAW_HARNESS_ENABLED=true` as well as `harness_autonomy=plan_only` (the Makefile
+target documents only the second), which took it to 4/5. The remaining failure was real and was
+*not* in the gate: `announce_tool_failures` sat innermost, so it nested **inside**
+`enforce_plan_approval`, which raises before calling its handler. The announcer never ran, and a
+refusal reached the chemist only as a `tool_result` reading "Refused: …" — which a surface renders
+as a step that worked. The front-door log recorded two refusals in a run the suite scored as zero.
+Fixed by moving the announcer outside everything that refuses
+(`D-2026-08-11-a-refusal-nobody-can-see-is-not-a-gate`); the refusal check now PASSes.
+
+Across the two post-fix runs every one of the five checks has passed, and none has failed for a
+system reason. DARK-1 shows FAIL in the latest run only because haiku left the todo list unchanged
+on the third turn, so the scenario was never exercised — the harness reporting an un-taken
+measurement as a miss rather than a pass, which is the rule
+`test_a_script_that_never_changes_the_plan_cannot_report_dark_1_as_passed` exists to enforce. It
+PASSed with a genuine hash change in the preceding run.
+
+**The pattern across all four findings, which is the thing worth keeping.** The handoff, the
+attribution, the mock protocol and the announcer were every one of them a defect in *observation*
+rather than in mechanism — the specialist ran, the gate refused, the delegation happened, the
+behaviour catalogue was right. Each had passing unit tests, and each test supplied the observation
+by hand (an invented namespace, a hand-written SSE frame, a protocol nobody re-checked after the
+engine changed). None was reachable without a live stack. The rule now written into the tests: **a
+test whose subject is a reader of an external shape may not supply that shape by hand.**
 
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
