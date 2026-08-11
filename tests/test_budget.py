@@ -1,8 +1,8 @@
 """The runaway-cost guard: turn/token budgets and usage metering (budget #3).
 
 Proves the missing ceiling above the per-turn loop cap — `BudgetTracker` counts turns and meters
-tokens per session and per user and refuses a turn past a cap, `usage_tokens` reads MAF's usage
-content, and the whole thing is a no-op when `budget_enabled` is off (today's default behavior).
+tokens per session and per user and refuses a turn past a cap, `graph_usage_tokens` reads a
+streamed chunk's usage, and the whole thing is a no-op when `budget_enabled` is off (the default).
 """
 
 from types import SimpleNamespace
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
-from chemclaw.api.runner_usage import usage_tokens
+from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.core.config import settings
 
 
@@ -107,23 +107,24 @@ def test_anonymous_user_only_hits_session_caps(
     tracker.check("s1", None)  # no user counter to exceed
 
 
-def test_usage_tokens_reads_maf_usage_content() -> None:
-    """`usage_tokens` sums the usage content's tokens, preferring total, else input+output.
+def test_a_reported_total_is_preferred_and_a_missing_one_is_derived() -> None:
+    """`graph_usage_tokens` meters `total_tokens`, falling back to input+output when it is absent.
 
     The budget guard meters `total`, so this is the number that refuses a turn — unchanged by the
     priced split (REV-10), which only changed what is *published*.
     """
-    total = SimpleNamespace(usage_details={"total_token_count": 42})
-    split = SimpleNamespace(usage_details={"input_token_count": 10, "output_token_count": 5})
-    plain = SimpleNamespace(name="tool", arguments="{}")  # a non-usage content
-    update = SimpleNamespace(contents=[total, split, plain])
-    assert usage_tokens(update).total == 42 + 15
+    reported = SimpleNamespace(
+        usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 42}
+    )
+    derived = SimpleNamespace(usage_metadata={"input_tokens": 10, "output_tokens": 5})
+    assert graph_usage_tokens(reported).total == 42
+    assert graph_usage_tokens(derived).total == 15
 
 
-def test_usage_tokens_zero_without_usage() -> None:
-    """An update with no usage content meters 0 (the fake-agent / no-usage-provider path)."""
-    assert usage_tokens(SimpleNamespace(contents=[SimpleNamespace(text="hi")])).total == 0
-    assert usage_tokens(SimpleNamespace()).total == 0
+def test_a_chunk_that_is_not_a_usage_chunk_meters_zero() -> None:
+    """A chunk with no `usage_metadata` at all meters 0 — the scripted-model path in tests."""
+    assert graph_usage_tokens(SimpleNamespace(content="hi")).total == 0
+    assert graph_usage_tokens(SimpleNamespace()).total == 0
 
 
 def test_session_counters_are_bounded_by_live_session_cap(
@@ -205,12 +206,50 @@ def test_a_turn_that_metered_no_tokens_books_none(
     """Zero is booked as zero — the other half of `max(tokens, 0)`, and also a survivor.
 
     `max(tokens, 1)` survived too, which says the same thing from the opposite side: no test
-    distinguished a free turn from a one-token turn. It matters because a turn whose usage MAF
-    could not report meters as zero, and a guard that charged it anyway would make the token cap
-    a function of how many turns failed to report rather than of what they cost.
+    distinguished a free turn from a one-token turn. It matters because a turn whose usage the
+    provider did not report meters as zero, and a guard that charged it anyway would make the token
+    cap a function of how many turns failed to report rather than of what they cost.
     """
     tracker = BudgetTracker()
     for _ in range(50):
         tracker.record("s-free", None, tokens=0)
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1)
     tracker.check("s-free", None)  # fifty free turns must not have spent a single token
+
+
+def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
+    """A cached token is one token, however the provider chose to report it.
+
+    Anthropic's own API excludes cache reads from `input_tokens`, while the LangChain adapter
+    *includes* them and then breaks them out again under `input_token_details`. Reading both
+    without adjusting would bill every cached token as both a cheap read and a fresh input —
+    overstating the priced input of exactly the deployments that cache best, which is the
+    population the split exists to measure (REV-10).
+
+    So `input` here is the *residual*: what was neither read from nor written to the cache.
+    """
+    chunk = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+            "input_token_details": {"cache_read": 700, "cache_creation": 100},
+        }
+    )
+    usage = graph_usage_tokens(chunk)
+    assert (usage.input, usage.cache_read, usage.cache_write) == (200, 700, 100)
+    assert usage.output == 200
+    assert usage.total == 1200
+    # The priced dimensions still account for every input token exactly once.
+    assert usage.input + usage.cache_read + usage.cache_write == 1000
+
+
+def test_a_chunk_with_no_usage_meters_nothing_and_is_not_called_unreadable() -> None:
+    """Most chunks in a stream carry no usage; that is the normal case, not a missing-keys signal.
+
+    The distinction matters because `unreadable` is what would catch an upstream rename — the
+    failure that once booked 50 turns of 15,000 real tokens as zero while the budget guard went on
+    allowing the next one. A counter that fires on every ordinary chunk would say nothing.
+    """
+    assert graph_usage_tokens(SimpleNamespace()).total == 0
+    assert graph_usage_tokens(SimpleNamespace()).unreadable == 0

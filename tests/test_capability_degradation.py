@@ -17,13 +17,16 @@ import asyncio
 import json
 from collections.abc import Iterator
 from contextlib import AsyncExitStack
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 import chemclaw.api.runner as runner
-from chemclaw.connectors.registry import open_reachable
+from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
+from chemclaw.connectors.registry import _mcp_connection, open_connector_specs
 from chemclaw.core.metrics import METRICS
+from tests.conftest import _free_port
 from tests.test_service import _client, _FakeAgent
 
 
@@ -45,25 +48,17 @@ def _reachable_durable_subsystem(monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     yield
 
 
-class _DarkMcpTool:
-    """A connector whose host is down: it enters its context and stays unconnected.
+def _dark_connector(name: str) -> Any:
+    """A connector whose host is down: a spec pointing at a port nothing is listening on.
 
-    Deliberately not a raising stand-in. `open_reachable` catches nothing on purpose — MAF
-    re-connects an unconnected tool inside `Agent.run` and would raise there anyway — so the real
-    shape of an unreachable connector is exactly this: the context manager succeeds, `is_connected`
-    stays `False`, and the tool contributes nothing to the turn.
+    Pointed at a closed port rather than faked, deliberately. The degradation these tests pin is a
+    property of the real open path — `create_session` fails, `HeldConnectorSession` absorbs it, and
+    the name comes back in `unreachable`, the same three steps a dark host in a cluster produces —
+    and a stub that merely reported itself unreachable would keep passing over a runner that had
+    stopped opening connectors at all.
     """
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.is_connected = False
-        self.functions: list[Any] = []
-
-    async def __aenter__(self) -> "_DarkMcpTool":
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
+    endpoint = HttpEndpoint(url=f"http://127.0.0.1:{_free_port()}/mcp")
+    return _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
 
 
 def _stream_events(connectors: list[Any]) -> list[dict[str, Any]]:
@@ -89,7 +84,7 @@ def test_a_dark_connector_is_announced_before_the_answer_streams() -> None:
     who has already acted on it. Before the first token, a surface can render the answer as
     provisional from the start.
     """
-    events = _stream_events([_DarkMcpTool("eln")])
+    events = _stream_events([_dark_connector("eln")])
 
     kinds = [e["type"] for e in events]
     assert kinds == ["capability_degraded", "token", "token", "answer"]
@@ -102,7 +97,7 @@ def test_the_turn_still_answers_without_its_connectors() -> None:
     Worth pinning alongside the announcement, because the obvious over-correction for a silent
     failure is to start raising — which would turn one dark connector into a dead front door.
     """
-    events = _stream_events([_DarkMcpTool("eln"), _DarkMcpTool("qm")])
+    events = _stream_events([_dark_connector("eln"), _dark_connector("qm")])
 
     answers = [e for e in events if e["type"] == "answer"]
     assert len(answers) == 1
@@ -131,7 +126,7 @@ def test_each_unreachable_connector_moves_the_counter() -> None:
 
     async def _open() -> None:
         async with AsyncExitStack() as stack:
-            await open_reachable(stack, [_DarkMcpTool("eln"), _DarkMcpTool("qm")])
+            await open_connector_specs(stack, [_dark_connector("eln"), _dark_connector("qm")])
 
     before = METRICS.value("chemclaw_connectors_unreachable_total")
     asyncio.run(_open())

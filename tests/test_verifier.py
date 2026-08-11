@@ -29,22 +29,34 @@ from chemclaw.retrieval.evidence import EvidenceChunk
 
 
 class _FakeResponse:
-    """A stand-in for a MAF `ChatResponse`, carrying only the parsed structured `value`."""
+    """A stand-in for a structured-output response, carrying only the parsed `value`."""
 
     def __init__(self, value: Any) -> None:
         self.value = value
 
 
 class _FakeVerifierClient:
-    """A fake chat client whose `get_response` returns a preset structured value."""
+    """A fake chat model whose structured output is a preset value.
+
+    Shaped around `with_structured_output(schema).ainvoke(prompt)`, which is how the judge is asked
+    now — the schema is enforced by the provider rather than parsed out of prose, so a
+    `response_format` the caller passed and a `schema` the model was bound to are the same
+    decision seen from either side. `response_formats` keeps the old name because that is what the
+    assertions call it, and it records exactly the same thing.
+    """
 
     def __init__(self, value: Any) -> None:
         self._value = value
         self.response_formats: list[Any] = []
 
-    async def get_response(self, prompt: str, *, response_format: Any) -> _FakeResponse:
-        self.response_formats.append(response_format)
-        return _FakeResponse(self._value)
+    def with_structured_output(self, schema: Any) -> "_FakeVerifierClient":
+        """Record the schema the judge was bound to and keep replaying the preset value."""
+        self.response_formats.append(schema)
+        return self
+
+    async def ainvoke(self, prompt: str) -> Any:
+        """Return the preset structured value, as a provider-enforced schema would."""
+        return self._value
 
 
 def _chunk(note_id: str, content: str = "some evidence") -> EvidenceChunk:
@@ -108,7 +120,10 @@ def test_an_unreachable_judge_does_not_certify_an_uncited_answer(
     monkeypatch.setattr(settings, "verifier_enabled", True)
 
     class _Broken:
-        async def get_response(self, *_args: object, **_kwargs: object) -> object:
+        def with_structured_output(self, _schema: object) -> "_Broken":
+            return self
+
+        async def ainvoke(self, *_args: object, **_kwargs: object) -> object:
             raise RuntimeError("verifier endpoint unreachable")
 
     result = asyncio.run(verify_answer("A general remark with no citation.", [], client=_Broken()))

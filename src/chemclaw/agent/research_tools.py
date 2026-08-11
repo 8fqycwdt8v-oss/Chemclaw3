@@ -15,8 +15,6 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 `deep-research` skill, not here. This tool only gathers.
 """
 
-import asyncio
-from collections.abc import Coroutine
 from datetime import date
 from itertools import zip_longest
 from typing import Any
@@ -26,6 +24,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
+from chemclaw.retrieval.fanout import sweep_sources
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
@@ -42,6 +41,62 @@ def _text_retrievers() -> list[SourceRetriever]:
     unchanged until a deployment activates another source.
     """
     return list(active_retrieve_sources())
+
+
+def _sources(reaction_smiles: str | None) -> list[tuple[str, SourceRetriever]]:
+    """Every source this sweep asks, named, in the order the merge downstream expects.
+
+    The name is the *retriever's own* name rather than one invented here, because it labels the
+    per-source counter and the per-branch stream event, and both are read against the `retriever`
+    field on the chunks that come back. Two names for one source would make a starved leg look like
+    a missing one.
+
+    The fingerprint retriever is last and conditional: it answers a structural anchor rather than
+    the text query, so it exists only when a `reaction_smiles` was given. Appending it keeps the
+    text sources' relative order stable whether or not an anchor was passed.
+    """
+    sources: list[tuple[str, SourceRetriever]] = [
+        (retriever.name, retriever) for retriever in _text_retrievers()
+    ]
+    if reaction_smiles is not None:
+        # The anchor, not the query: this source searches structures. `sweep_sources` asks every
+        # branch the same question, so the anchor rides in as this source's own query via a
+        # retriever bound to it.
+        anchored = _AnchoredRetriever(_reaction_store(), reaction_smiles)
+        sources.append((anchored.name, anchored))
+    return sources
+
+
+class _AnchoredRetriever:
+    """A fingerprint retriever that answers the structural anchor rather than the text query.
+
+    The fan-out asks every source one question, which is right for text sources and wrong for this
+    one — a `reactants>>products` anchor is not the chemist's sentence. Binding the anchor here
+    keeps the fan-out uniform instead of teaching it that one source is special, and keeps the
+    substitution to the one place that knows why the two questions differ.
+    """
+
+    # The *inner* retriever's name, not one chosen here. The chunks this returns are built by
+    # `FingerprintReactionRetriever` and carry `retriever="reaction-fingerprint"`, and that same
+    # string is the key `settings.retrieval_source_weights` is looked up by in the fusion. A label
+    # invented here would have made the branch's counter and stream event name a source that
+    # appears nowhere in the evidence — a starved leg looking like a missing one, which is the
+    # exact confusion this phase exists to remove.
+    name = FingerprintReactionRetriever.name
+
+    def __init__(self, store: Any, reaction_smiles: str) -> None:
+        """Bind the store and the anchor this retriever will answer with."""
+        self._inner = FingerprintReactionRetriever(store)
+        self._anchor = reaction_smiles
+
+    async def retrieve(self, _query: str, _filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Search structures for the bound anchor, ignoring the sweep's text query and filters.
+
+        Filters are dropped rather than forwarded because the fingerprint store holds structures
+        and not dates — which `gather_evidence`'s own docstring already warns a caller about ("hits
+        from a `reaction_smiles` anchor come back unwindowed").
+        """
+        return await self._inner.retrieve(self._anchor, {})
 
 
 def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
@@ -142,18 +197,18 @@ async def gather_evidence(
 
     # One ordered hit-list per source; each retriever ranks its own hits (best first).
     #
-    # Gathered, not awaited in sequence. The sources are independent — the knowledge graph reads
-    # the note tree, the vector index and the fingerprint store each hit Postgres — so a list
-    # comprehension made this tool cost the *sum* of their latencies when it only needs the
-    # maximum. `gather` preserves argument order, which the fusion below relies on for its
-    # per-source weights.
-    searches: list[Coroutine[Any, Any, list[EvidenceChunk]]] = [
-        retriever.retrieve(query, filters) for retriever in _text_retrievers()
-    ]
-    if reaction_smiles is not None:
-        reaction_retriever = FingerprintReactionRetriever(_reaction_store())
-        searches.append(reaction_retriever.retrieve(reaction_smiles, {}))
-    ranked_lists: list[list[EvidenceChunk]] = list(await asyncio.gather(*searches))
+    # Swept as a `Send` fan-out — one branch per source, fanning into one `operator.add` field
+    # (`chemclaw.retrieval.fanout`, M10). This was already concurrent before, and the concurrency
+    # is *not* what changed: `asyncio.gather` cost the maximum of the sources' latencies rather
+    # than the sum, and still would. What a branch adds is that it reports what it contributed —
+    # so a source returning nothing is distinguishable from a source nobody asked, which is
+    # precisely what `D-2026-08-01-a-cap-that-starves-a-source` needed and did not have.
+    #
+    # Order is preserved by the fan-in, deliberately: both merge modes below read the lists in
+    # source order (RRF takes a note's representative chunk from the first list that found it, and
+    # the round-robin interleaves in list order), so completion order would make one sweep's
+    # evidence differ from the next for no visible reason.
+    ranked_lists = await sweep_sources(_sources(reaction_smiles), query, filters)
 
     # `hybrid` fuses the per-source rankings (a note any source ranks highly rises); `graph` (the
     # default) round-robins them. Both are cross-source-fair under the cap below, differing in

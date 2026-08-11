@@ -1,69 +1,71 @@
-"""How a connector is reached: the MAF MCP tools, built so an unreachable connector degrades.
+"""How a connector is reached, so an unreachable connector degrades instead of failing the turn.
 
 Out-of-process capability makes every connector a network dependency in the tool path, and the
-default MAF behavior for a connector that will not connect is to raise — which turns one dead
-sidecar into a dead conversation. That is the wrong trade: losing a capability is a much smaller
-failure than losing the turn, and it is the trade decision 7 of
-`docs/archive/plans/connector-plan.md` records.
+default behaviour for a connector that will not connect is to raise — which turns one dead sidecar
+into a dead conversation. That is the wrong trade: losing a capability is a much smaller failure
+than losing the turn, and it is the trade decision 7 of `docs/archive/plans/connector-plan.md`
+records.
 
-Making it non-fatal at the *caller* is not possible, and finding that out is what shaped this
-module: `Agent.run` re-enters any `mcp_tools` entry that is not connected
-(`agent_framework/_agents.py:1363`), so a caller that catches the failure just has it raised again
-from inside the run. The behavior has to belong to the tool.
+`absorb_connect_failure` is the whole policy — degrade, unless the caller is what cancelled us —
+and it is one function on purpose. A second copy of that sentence somewhere else would let a dead
+connector fail the turn on one path and cost only its tools on another, which is a difference a
+chemist would meet as an outage.
 
-`connect()` is the one choke point every path funnels through — the context manager calls it, and so
-does MAF's run loop — so overriding it is enough, and it leaves the rest of MAF's lifecycle
-untouched. A failed connect leaves `is_connected` False and the loaded tool set empty, which gives
-exactly the semantics wanted: the connector contributes no tools this turn, the turn proceeds
-without them, and the *next* turn tries again — so a connector that comes back needs no restart to
-be picked up.
+**Why a held session rather than a lazily-connecting tool object.** `langchain-mcp-adapters` has no
+tool object that can be handed out unconnected: `load_mcp_tools` needs a *live* session, so a
+connector's tools do not exist until it is open. `HeldConnectorSession` is therefore the unit, and
+it holds its session inside a task of its own for a measured reason, not a stylistic one. The MCP
+client's session is an `anyio` cancel scope, and anyio refuses to let a scope be exited by a task
+other than the one that entered it. Opening the sessions the natural concurrent way — `asyncio.
+gather` over `AsyncExitStack.enter_async_context` — enters each on a child task and exits it on the
+caller's, which raises `RuntimeError: Attempted to exit cancel scope in a different task than it
+was entered in` (measured; the sequential form of the same code passes). Holding the whole
+lifecycle on one task is what makes the concurrent form legal again, and concurrency is kept: every
+connector still opens in parallel, each in its own task.
+
+A failed open leaves the session not-connected and its tool set empty, which gives exactly the
+semantics wanted: the connector contributes no tools this turn, the turn proceeds without them, and
+the *next* turn tries again — so a connector that comes back needs no restart to be picked up.
 """
 
 import asyncio
+import contextlib
 import logging
-from typing import Any
+from dataclasses import dataclass
+from types import TracebackType
 
-from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
+from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.sessions import Connection, create_session
+from langchain_mcp_adapters.tools import load_mcp_tools
 
 logger = logging.getLogger(__name__)
 
 
-class _DegradeOnConnectFailure:
-    """Mixin: a failed connect logs and leaves the tool unconnected instead of raising.
+def absorb_connect_failure(connector: str, exc: BaseException) -> None:
+    """Treat `exc` as "this connector is absent this turn" — unless the caller cancelled us.
 
-    Deliberately broad in what it catches, and narrow in what it does. Broad, because the failure
-    family is wide — a refused TCP connection, a DNS miss, a TLS error, a timeout, MAF's own
-    `ToolException`, an `anyio` cancel-scope error from a half-finished handshake — and enumerating
-    them means the next unlisted one silently restores the fatal behavior. Nothing wider than
-    `Exception` plus `CancelledError` is caught, so `KeyboardInterrupt`/`SystemExit` propagate.
+    The one decision both engines make about an unreachable connector, extracted so neither can
+    drift from the other. Deliberately broad in what it absorbs and narrow in what it does: the
+    failure family is wide (a refused TCP connection, a DNS miss, a TLS error, a timeout, an MCP
+    `ToolException`, an `anyio` cancel-scope error from a half-finished handshake) and enumerating
+    it means the next unlisted member silently restores the fatal behaviour.
 
-    Narrow, because it does not retry, back off, or cache the failure: MAF asks again on the next
-    run, which is a natural retry cadence, and a connector that recovers is used again with no extra
-    machinery.
+    Args:
+        connector: The bundle's name, for the log line an operator reads.
+        exc: What the connector's open raised.
 
-    **A real cancellation is re-raised, and getting this wrong is not cosmetic.** MAF swallows
-    `CancelledError` in its own MCP paths on the grounds that an MCP-internal cancel scope cannot
-    be told apart from a genuine one — but at this layer it can, and must be: the front door bounds
-    a turn's wall-clock and cancels it (`service_turn_timeout_seconds`), and swallowing *that*
-    left a hung turn running to completion with its admission permit held — the exact failure the
-    bound exists to prevent. `Task.cancelling()` is non-zero only when cancellation was asked of
-    *this* task, which an `anyio` scope inside the MCP client never does — so it separates "the
-    connector is absent" from "the caller gave up".
+    Raises:
+        BaseException: `exc` itself, when it is the caller's own cancellation — see
+            `_is_really_cancelled` for why that case must not be absorbed.
     """
-
-    async def connect(self, **kwargs: Any) -> None:
-        """Connect, or log and stay disconnected — but never swallow the caller's cancellation."""
-        try:
-            await super().connect(**kwargs)  # type: ignore[misc]
-        except (Exception, asyncio.CancelledError) as exc:
-            if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
-                raise
-            logger.warning(
-                "connector %s is unreachable (%s: %s); its tools are unavailable this turn",
-                getattr(self, "name", "?"),
-                type(exc).__name__,
-                exc,
-            )
+    if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
+        raise exc
+    logger.warning(
+        "connector %s is unreachable (%s: %s); its tools are unavailable this turn",
+        connector,
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _is_really_cancelled() -> bool:
@@ -78,39 +80,128 @@ def _is_really_cancelled() -> bool:
     return task is not None and task.cancelling() > 0
 
 
-class DegradingHttpConnector(_DegradeOnConnectFailure, MCPStreamableHTTPTool):
-    """An HTTP connector whose unavailability costs its tools, not the turn.
+@dataclass(frozen=True, slots=True)
+class ConnectorSpec:
+    """How to reach one connector for one turn, on the LangGraph engine.
 
-    It also closes the `httpx.AsyncClient` it was handed, which nothing else does. Ownership of a
-    caller-supplied client is explicitly *not* taken by either layer below: the MCP library enters
-    its client into an exit stack only when it created the client itself (the SDK's
-    `mcp.client.streamable_http` — `client_provided = http_client is not None`), and MAF's `close()`
-    tears down the exit stack without touching `self._httpx_client`. Since a connector tool is built
-    fresh per turn (`chemclaw.connectors.registry.connector_tools`), that left one
-    abandoned
-    client with a live connection pool per connector per turn — six per turn, reclaimed only
-    whenever the garbage collector got to them. This is the same leak class D-119 fixed for
-    Postgres, on the connector side.
+    The LangChain twin of an unconnected `ConnectorMcpTool`, and it is a *description* rather than
+    an object with a lifecycle because that is the shape the library takes: `create_session` opens
+    a connection from a `Connection` mapping, and `load_mcp_tools` needs the live session before any
+    tool exists. So the thing built per turn is this, and the thing opened per turn is the session.
 
-    The client is kept on our own attribute rather than read back off MAF's private one, so this
-    cannot silently stop working when that internal name changes.
+    `allowed_tools` is carried here rather than applied at build time because it is the manifest's
+    agent-facing allow-list, narrowed again by a profile, and it has to be applied to what the
+    *server* advertises — which is not knowable until the session is open.
     """
 
-    def __init__(self, *args: Any, http_client: Any = None, **kwargs: Any) -> None:
-        """Record the client we own so `close` can release it."""
-        super().__init__(*args, http_client=http_client, **kwargs)
-        self._owned_http_client = http_client
+    name: str
+    connection: Connection
+    allowed_tools: tuple[str, ...] | None
 
-    async def close(self) -> None:
-        """Close the MCP session, then the client we supplied — even if the session close fails."""
+
+class HeldConnectorSession:
+    """One connector's MCP session, entered and exited inside a single task of its own.
+
+    **The task is the point, and it is a measured requirement rather than a style.** The MCP
+    client's session is an `anyio` cancel scope, and anyio refuses to let a scope be exited by a
+    task other than the one that entered it. The natural concurrent shape — `asyncio.gather` over
+    `AsyncExitStack.enter_async_context` — enters each session on a child task and exits it on the
+    caller's, and raises `RuntimeError: Attempted to exit cancel scope in a different task than it
+    was entered in`. The sequential form of the same code passes, which is what identifies the
+    cause as task affinity rather than the session.
+
+    So the session is opened, used and closed entirely within `_hold`, and the caller only ever
+    signals: `__aenter__` waits for the tools, `__aexit__` asks the task to stop. Both of those
+    happen on the caller's task, which is what makes this safe to `gather` — every connector still
+    opens in parallel, which must not be given back (a dark fleet otherwise costs the sum of its
+    connect timeouts before the model is called).
+
+    A connector that fails to open leaves `tools` empty and its name in `unreachable`: the turn
+    proceeds without it and the next turn tries again.
+    """
+
+    def __init__(self, spec: ConnectorSpec) -> None:
+        """Prepare a holder; nothing is opened until the session is entered."""
+        self._spec = spec
+        self._tools: list[BaseTool] = []
+        self._opened = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._failure: BaseException | None = None
+
+    @property
+    def name(self) -> str:
+        """The bundle's name, for the degradation report a surface shows."""
+        return self._spec.name
+
+    @property
+    def connected(self) -> bool:
+        """Whether the session came up, which is what the degradation report is derived from."""
+        return self._failure is None and self._task is not None
+
+    async def __aenter__(self) -> list[BaseTool]:
+        """Open the session on its own task and return the tools it advertises (`[]` if absent)."""
+        self._task = asyncio.create_task(self._hold(), name=f"connector:{self._spec.name}")
         try:
-            await super().close()
+            await self._opened.wait()
+        except BaseException:
+            # The caller was cancelled while we were connecting. The holder task owns a live cancel
+            # scope, so it must be told to unwind on its own task rather than abandoned — an
+            # orphaned task holding an MCP session is the leak this class exists to make impossible.
+            await self._shut_down()
+            raise
+        if self._failure is not None:
+            absorb_connect_failure(self._spec.name, self._failure)
+        return self._tools
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        """Ask the holder task to close its session, and wait for it to finish doing so."""
+        await self._shut_down()
+        return False
+
+    async def _shut_down(self) -> None:
+        """Signal the holder task and await its unwind, whatever it raises on the way out."""
+        self._stop.set()
+        task = self._task
+        self._task = None
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _hold(self) -> None:
+        """Own the session end to end: open it, publish its tools, then wait to be told to stop.
+
+        Everything that touches the cancel scope happens here, on this one task. The `finally` sets
+        `_opened` unconditionally so a caller waiting on it is released whether the connector came
+        up or not — a connector that hangs is bounded by the turn's own clock, but one that *fails*
+        must never leave the turn waiting on an event nobody will set.
+        """
+        try:
+            async with create_session(self._spec.connection) as session:
+                await session.initialize()
+                self._tools = _allowed(await load_mcp_tools(session), self._spec.allowed_tools)
+                self._opened.set()
+                await self._stop.wait()
+        except (Exception, asyncio.CancelledError) as exc:
+            self._failure = exc
+            self._tools = []
         finally:
-            client = self._owned_http_client
-            self._owned_http_client = None
-            if client is not None:
-                await client.aclose()
+            self._opened.set()
 
 
-class DegradingStdioConnector(_DegradeOnConnectFailure, MCPStdioTool):
-    """A stdio connector whose unavailability costs its tools, not the turn."""
+def _allowed(tools: list[BaseTool], allowed: tuple[str, ...] | None) -> list[BaseTool]:
+    """Keep only the tools a connector's allow-list names.
+
+    `load_mcp_tools` returns whatever the server advertises, so the allow-list has to be applied
+    here or a profile's narrowing would stop at the process boundary. `None` means the manifest
+    declared no allow-list, which is "everything this server offers".
+    """
+    if allowed is None:
+        return list(tools)
+    keep = set(allowed)
+    return [tool for tool in tools if tool.name in keep]

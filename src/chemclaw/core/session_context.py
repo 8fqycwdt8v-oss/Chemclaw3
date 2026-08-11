@@ -16,7 +16,7 @@ until the R2 layering move, which is exactly why `core/logging.py` had to reach 
 lazy import to stay off the agent layer; that is now an ordinary intra-`core` import.
 
 The other half of this ambient — the live `AgentSession` **object** — stayed behind in
-`agent/live_session.py`, because it needs `agent_framework` and so cannot be kernel material. They
+`agent/session.py`, because it needs `agent_framework` and so cannot be kernel material. They
 were always two separate contextvars, for the reason that module's docstring gives; the split runs
 along the line that was already there.
 """

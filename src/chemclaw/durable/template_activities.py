@@ -16,15 +16,15 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
-from agent_framework import Content
+from langchain_core.tools import tool as tool_decorator
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
-from chemclaw.agent.audit import make_audit_middleware
-from chemclaw.agent.tool_authz import enforce_tool_authz
+from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
-from chemclaw.connectors.registry import find_job, open_reachable
+from chemclaw.connectors.registry import find_job, open_connector_specs
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.registry import durable_activity
 
@@ -32,18 +32,21 @@ logger = logging.getLogger(__name__)
 
 
 def _agent_surface() -> Any:
-    """Import the agent builder lazily, at call time rather than at module import.
+    """Import the tool surface lazily, at call time rather than at module import.
 
     `chemclaw.agent.chemclaw_agent` reaches the template registry (a template becomes a tool like
-    any
-    other), which reaches the workflow, which reaches this module — a cycle at import time.
+    any other), which reaches the workflow, which reaches this module — a cycle at import time.
     Deferring it breaks the cycle and is what an activity should do regardless: it runs on a
     worker, long after import, and pulling the whole agent stack into every module that merely
     *mentions* an activity is how a worker's start-up cost quietly triples.
-    """
-    from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
 
-    return build_agent, connector_tools
+    Returns the two halves a step can name: the in-process capability tools and the connector
+    specs. Both are the *same* functions a chat turn's graph is built from, which is the property
+    that keeps a template's idea of "which tools exist" from drifting from a conversation's.
+    """
+    from chemclaw.agent.chemclaw_agent import _capability_tools, connector_specs
+
+    return _capability_tools, connector_specs
 
 
 class StepIdentity(BaseModel):
@@ -192,33 +195,34 @@ async def _audited(
     arguments: dict[str, Any],
     action: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Run a job step's pre-flight inside the audit middleware, so the launch leaves a GxP row.
+    """Run a job step's pre-flight through the governed chain, so the launch leaves a GxP row.
 
-    Through `make_audit_middleware` over a real `FunctionTool` rather than by emitting an
-    `AuditEvent` directly: there is exactly one place that decides what an audit record looks like,
-    and a second emitter would drift from it the first time that shape changed. The tool is named
-    for the job, so the row reads the same as the one a chat turn's launch of the same job writes —
-    which is the point, since the whole finding was that these two paths were governed differently.
+    Through the chain over a real tool rather than by emitting an `AuditEvent` directly: there is
+    exactly one place that decides what an audit record looks like, and a second emitter would
+    drift from it the first time that shape changed. The tool is named for the job, so the row
+    reads the same as the one a chat turn's launch of the same job writes — which is the point,
+    since the whole finding was that these two paths were governed differently.
+
+    The pre-flight is wrapped in a tool built on the spot rather than found on the surface, because
+    what is being audited is not a tool the model can call: it is the resolution and validation a
+    `job` step does before Temporal starts the workflow. Naming it after the job is what makes it
+    legible in the trail.
 
     A refusal propagates after being recorded as an `error` outcome, exactly as a denied chat tool
     call is.
     """
-    from agent_framework import FunctionInvocationContext, FunctionTool
 
-    async def _run() -> dict[str, Any]:
+    @tool_decorator(name_or_callable=tool, description=f"launch the {tool!r} job")
+    async def _launch(**_kwargs: Any) -> dict[str, Any]:
         return action()
 
-    context = FunctionInvocationContext(
-        function=FunctionTool(func=_run, name=tool, description=f"launch the {tool!r} job"),
-        arguments=arguments,
+    payload: dict[str, Any] = await invoke_governed(
+        _launch,
+        arguments,
+        correlation_id=identity.correlation_id,
+        actor=identity.actor,
+        profile=get_profile(None),
     )
-    audit = make_audit_middleware(correlation_id=identity.correlation_id, actor=identity.actor)
-
-    async def _invoke() -> None:
-        context.result = await _run()
-
-    await audit(context, _invoke)
-    payload: dict[str, Any] = context.result
     return payload
 
 
@@ -234,37 +238,27 @@ async def _audited(
 async def run_tool_step(step: ToolStepInput) -> Any:
     """Call one tool as the run's actor, through the same audit + authz chain a chat turn uses.
 
-    The tool is reached by building the agent's surface and finding it by name, rather than by a
-    second lookup path: "which tools exist" already has one answer (`build_agent` plus
-    `connector_tools`), and a template resolving names differently from a conversation is exactly
+    The tool is reached by assembling the surface and finding it by name, rather than by a second
+    lookup path: "which tools exist" already has one answer (`_capability_tools` plus
+    `connector_specs`), and a template resolving names differently from a conversation is exactly
     how the two drift.
+
+    **No agent is built.** It used to build a whole MAF `Agent` behind a `_NoChatClient` stand-in,
+    purely to read its assembled tool list — a model-less step demanding an LLM credential's worth
+    of construction. The two halves of the surface are ordinary functions; calling them is the
+    whole assembly.
     """
-    build_agent, connector_tools = _agent_surface()
+    capability_tools, connector_specs = _agent_surface()
     tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
     try:
         async with AsyncExitStack() as stack:
-            connectors = connector_tools()
-            unreachable = await open_reachable(stack, connectors)
-            agent = build_agent(
-                chat_client=_NoChatClient(), correlation_id=step.identity.correlation_id
-            )
-            return await _invoke(agent, connectors, step, unreachable)
+            connector_tools, unreachable = await open_connector_specs(stack, connector_specs())
+            return await _invoke([*capability_tools(), *connector_tools], step, unreachable)
     finally:
         reset_current_identity(tokens)
 
 
-class _NoChatClient:
-    """A stand-in chat client for the tool path, which never talks to a model.
-
-    `build_agent` is used here only to *assemble the tool surface* — the same assembly a chat turn
-    gets, so the two cannot drift — and building it would otherwise demand a live LLM credential for
-    a step that makes no model call at all.
-    """
-
-
-async def _invoke(
-    agent: Any, connectors: list[Any], step: ToolStepInput, unreachable: list[str]
-) -> Any:
+async def _invoke(tools: list[Any], step: ToolStepInput, unreachable: list[str]) -> Any:
     """Find `step.tool` on the assembled surface and call it, or raise naming what exists.
 
     `unreachable` is carried in only to make the failure legible (REV-6). A connector that did not
@@ -273,88 +267,73 @@ async def _invoke(
     retried activity that reads as a broken template rather than a broken host, which sends the
     operator to the wrong file.
     """
-    for tool in agent.default_options["tools"]:
+    # One list, one loop, and that is the fix D-168 argued for made structural. The two halves used
+    # to be searched separately and called differently — the connector half through
+    # `connector.call_tool`, which reaches the connector directly and skipped both the audit trail
+    # and `enforce_tool_authz`. The consequence was not theoretical: both tool steps of the shipped
+    # `hazard-briefing` template left no GxP audit row, and a template naming a role-gated tool ran
+    # it for anyone who could run the template. A connector tool is an ordinary LangChain tool, so
+    # there is no longer a second shape to tempt a second path.
+    for tool in tools:
         if getattr(tool, "name", None) == step.tool:
-            return await _call_function_tool(tool, step)
-    for connector in connectors:
-        for function in connector.functions:
-            if function.name == step.tool:
-                # Through the *same* governed path as the in-process branch above (D-168). This
-                # used to be `connector.call_tool(...)`, which reaches the connector directly and
-                # therefore skipped both `enforce_tool_authz` and the audit middleware — while the
-                # branch three lines up hand-applied both, and this module's own docstring said
-                # applying them was the point. The consequence was not theoretical: both tool steps
-                # of the shipped `hazard-briefing` template left no GxP audit row, and a template
-                # naming a role-gated tool ran it for anyone who could run the template.
-                #
-                # MAF's MCP tools are ordinary `FunctionTool`s, so nothing about the call shape has
-                # to change to route them through the middleware — only the decision to do it.
-                return await _call_function_tool(function, step)
-    available = sorted(
-        [t.name for t in agent.default_options["tools"]]
-        + [f.name for c in connectors for f in c.functions]
-    )
+            return await _call_governed(tool, step)
+    available = sorted(str(getattr(t, "name", "")) for t in tools)
     degraded = f" ({len(unreachable)} unreachable: {', '.join(unreachable)})" if unreachable else ""
     raise ValueError(
         f"template step names unknown tool {step.tool!r}{degraded}; available: {available}"
     )
 
 
-async def _call_function_tool(tool: Any, step: ToolStepInput) -> Any:
-    """Invoke one tool with the audit + authz middleware a chat turn would apply.
+async def _call_governed(tool: Any, step: ToolStepInput) -> Any:
+    """Invoke one tool through the same middleware chain a chat turn applies.
 
-    MAF applies the agent's middleware inside its own tool-calling loop, which a template does not
-    go through — so calling `tool.invoke(...)` directly would run the tool *ungoverned*. Applying
-    the same two middlewares by hand here is what keeps the template path identical to the chat
-    path in the way that matters: the call is audited, and an unauthorized one is refused.
+    LangChain composes that chain inside `create_agent`'s tool node, which a template does not go
+    through — so calling the tool directly would run it *ungoverned*. `invoke_governed` composes
+    the identical list, from the identical builder, which is what keeps the template path and the
+    chat path from drifting: not that both apply "the middlewares", but that there is one list and
+    both fold it.
 
-    Used for both halves of the surface since D-168. The connector half used to call
-    `connector.call_tool` and reach the connector directly, skipping both middlewares; MAF's MCP
-    tools are ordinary `FunctionTool`s, so nothing about the call had to change except the decision
-    to govern it.
+    **This used to be two of the six, hand-nested**: audit around authorization, with the dry-run
+    guard, the repeat guard, the plan gate and the failure announcer all absent. That was not a
+    stated attenuation, it was the reachable subset of a chain the framework owned.
 
-    **`skip_parsing=True`, and it is not a preference.** `invoke` otherwise wraps the result in
-    `list[Content]`, and a step's result crosses an activity boundary into Temporal history — where
-    the data converter refuses it outright: *"Unable to serialize unknown type:
-    agent_framework._types.Content"*. So a `tool` step could never return at all, on either branch,
-    which is why no template with one has ever completed. The raw value is what
-    `${steps.<id>.result}` should carry anyway: a chemist reading a run's trace wants the tool's
-    answer, not the framework's envelope around it.
+    Two workarounds went with the framework. `skip_parsing=True` existed because MAF's `invoke`
+    re-wrapped every result in `list[Content]`, which Temporal's data converter refuses outright
+    ("Unable to serialize unknown type: agent_framework._types.Content") — so a `tool` step could
+    never return at all, which is why no template with one had ever completed. And `_serializable`
+    unwrapped that envelope. What survives is `_mcp_text`, for the case that was never a framework
+    artifact: an MCP tool answers as content blocks on the wire whatever calls it.
     """
-    from agent_framework import FunctionInvocationContext
-
-    context = FunctionInvocationContext(function=tool, arguments=step.arguments)
-    audit = make_audit_middleware(
-        correlation_id=step.identity.correlation_id, actor=step.identity.actor
+    result = await invoke_governed(
+        tool,
+        step.arguments,
+        correlation_id=step.identity.correlation_id,
+        actor=step.identity.actor,
+        profile=get_profile(None),
     )
-
-    async def _run_tool() -> None:
-        context.result = await tool.invoke(arguments=context.arguments, skip_parsing=True)
-
-    async def _gated() -> None:
-        await enforce_tool_authz(context, _run_tool)
-
-    await audit(context, _gated)
-    return _serializable(context.result)
+    return _mcp_text(result)
 
 
-def _serializable(result: Any) -> Any:
-    """Render a tool result into something Temporal's converter can carry.
+def _mcp_text(result: Any) -> Any:
+    """Flatten an MCP tool's content blocks into the text a step's result should carry.
 
-    An MCP tool answers as `list[Content]` however it is invoked — `skip_parsing` skips MAF's
-    *re-wrapping*, not the MCP client's own parse — and `Content` is not a type the data converter
-    knows. Text parts are joined, because that is what an MCP tool's answer *is* on the wire; a
-    result with no text parts falls back to `str()` so a step never fails on the shape of a value
-    it managed to produce.
+    Not a framework artifact: an MCP tool answers as blocks on the wire however it is called, and
+    those blocks are not a type Temporal's data converter knows. Text parts are joined, because
+    that is what the answer *is*; a result with no text parts falls back to `str()` so a step never
+    fails on the shape of a value it managed to produce.
 
-    **Identified by `isinstance`, not by having a `.type` attribute.** Duck-typing here is wrong in
-    a way that is easy to miss: `find_notes` returns `list[NoteRef]`, and a `NoteRef` *has* a
-    `type` field (the note's kind). A `hasattr` test therefore matched it, found no `.text`, and
-    flattened a structured result into a Python repr — turning the in-process branch's perfectly
-    serializable answer into a string, silently, for every template step that named such a tool.
+    **Matched on being a list of blocks, not on having a `.type` attribute.** Duck-typing here is
+    wrong in a way that is easy to miss: `find_notes` returns `list[NoteRef]`, and a `NoteRef` *has*
+    a `type` field (the note's kind). A `hasattr` test therefore matched it, found no `.text`, and
+    flattened a structured result into a Python repr — silently, for every template step naming
+    such a tool.
     """
-    if isinstance(result, list) and result and all(isinstance(item, Content) for item in result):
-        texts = [str(item.text) for item in result if getattr(item, "text", None)]
+    if (
+        isinstance(result, list)
+        and result
+        and all(isinstance(item, dict) and "type" in item for item in result)
+    ):
+        texts = [str(item["text"]) for item in result if item.get("text")]
         return "\n".join(texts) if texts else str(result)
     return result
 
@@ -379,19 +358,52 @@ async def run_agent_step(step: AgentStepInput) -> str:
     template was written to remove — and, with the plan gate now enforced, would refuse every write
     inside it for want of a plan nobody can approve.
     """
-    build_agent, connector_tools = _agent_surface()
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+
+    _capability_tools, connector_specs = _agent_surface()
     tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
     try:
         async with AsyncExitStack() as stack:
-            connectors = connector_tools(step.profile)
-            await open_reachable(stack, connectors)
-            agent = build_agent(
-                profile=_classic(step.profile), correlation_id=step.identity.correlation_id
+            connectors, _unreachable = await open_connector_specs(
+                stack, connector_specs(step.profile)
             )
-            response = await agent.run(step.prompt, tools=connectors or None)
-            return str(response.text)
+            # Compiled here, with this step's connectors, for the reason `build_langgraph_agent`
+            # gives: a graph binds its tools at construction and a connector session belongs to
+            # exactly one caller. A step is that caller.
+            #
+            # No checkpointer. A template step is one bounded turn with no conversation before or
+            # after it — Temporal is what makes the *run* durable, and giving the step its own
+            # checkpointed thread would be a second durability mechanism inside the first (D-002).
+            graph = build_langgraph_agent(
+                profile=_classic(step.profile),
+                actor=step.identity.actor,
+                correlation_id=step.identity.correlation_id,
+                connectors=connectors,
+            )
+            result = await graph.ainvoke({"messages": [("user", step.prompt)]})
+            return _answer_text(result)
     finally:
         reset_current_identity(tokens)
+
+
+def _answer_text(result: Any) -> str:
+    """The final assistant text out of a completed graph turn.
+
+    The graph returns its whole message list rather than MAF's single `response.text`, so the
+    answer is the last message's content. Joined across content blocks because a model may answer
+    in parts, and coerced with `str` so a step never fails on a shape it managed to produce.
+    """
+    messages = result.get("messages") or []
+    if not messages:
+        return ""
+    content = messages[-1].content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content)
 
 
 def _classic(profile: str | None) -> Any:

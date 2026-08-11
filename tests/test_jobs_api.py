@@ -33,7 +33,7 @@ _DEV_OID = "dev-user"
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """The real app; the dev principal holds the privileged role."""
-    return TestClient(create_app(agent_factory=lambda _profile: object()))
+    return TestClient(create_app())
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def plain_user_client(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The app seen by an authenticated chemist holding no operator role."""
     monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     monkeypatch.setattr("chemclaw.core.config.settings.entra_privileged_roles", "operator")
-    app = create_app(agent_factory=lambda _profile: object())
+    app = create_app()
     app.dependency_overrides[require_principal] = lambda: Principal(oid=_DEV_OID)
     yield TestClient(app)
     app.dependency_overrides.clear()
@@ -195,35 +195,18 @@ def test_a_reload_recovers_what_the_agent_did_not_only_what_it_said() -> None:
     never missing from storage: a MAF message already holds `function_call`/`function_result`
     contents, and the route was flattening them away.
     """
-    from agent_framework import Message
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     from chemclaw.api.app import _transcript
 
     stored = [
-        Message.from_dict(
-            {"role": "user", "contents": [{"type": "text", "text": "pKa of ethanol?"}]}
+        HumanMessage(content="pKa of ethanol?"),
+        AIMessage(
+            content="Let me compute it.",
+            tool_calls=[{"name": "predict_pka", "args": {"smiles": "CCO"}, "id": "c1"}],
         ),
-        Message.from_dict(
-            {
-                "role": "assistant",
-                "contents": [
-                    {"type": "text", "text": "Let me compute it."},
-                    {
-                        "type": "function_call",
-                        "call_id": "c1",
-                        "name": "predict_pka",
-                        "arguments": {"smiles": "CCO"},
-                    },
-                ],
-            }
-        ),
-        Message.from_dict(
-            {
-                "role": "tool",
-                "contents": [{"type": "function_result", "call_id": "c1", "result": "pKa 15.9"}],
-            }
-        ),
-        Message.from_dict({"role": "assistant", "contents": [{"type": "text", "text": "15.9."}]}),
+        ToolMessage(content="pKa 15.9", tool_call_id="c1"),
+        AIMessage(content="15.9."),
     ]
 
     transcript = _transcript(stored)
@@ -243,24 +226,12 @@ def test_an_unanswered_tool_call_is_rendered_as_unanswered() -> None:
     An empty-string result would read as "it ran and returned nothing", which is a different and
     more reassuring claim than "it ran and we do not know how it ended".
     """
-    from agent_framework import Message
+    from langchain_core.messages import AIMessage
 
     from chemclaw.api.app import _transcript
 
     stored = [
-        Message.from_dict(
-            {
-                "role": "assistant",
-                "contents": [
-                    {
-                        "type": "function_call",
-                        "call_id": "orphan",
-                        "name": "predict_pka",
-                        "arguments": {},
-                    }
-                ],
-            }
-        )
+        AIMessage(content="", tool_calls=[{"name": "predict_pka", "args": {}, "id": "orphan"}])
     ]
 
     [entry] = _transcript(stored)
@@ -272,23 +243,20 @@ def test_a_transcript_bounds_what_one_call_can_carry() -> None:
 
     The same bound the audit trail applies, for the same reason.
     """
-    from agent_framework import Message
+    from langchain_core.messages import AIMessage
 
     from chemclaw.api.app import _TRANSCRIPT_ARG_CHARS, _transcript
 
     stored = [
-        Message.from_dict(
-            {
-                "role": "assistant",
-                "contents": [
-                    {
-                        "type": "function_call",
-                        "call_id": "big",
-                        "name": "suggest_next_experiment",
-                        "arguments": {"problem": "x" * 5000},
-                    }
-                ],
-            }
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "suggest_next_experiment",
+                    "args": {"problem": "x" * 5000},
+                    "id": "big",
+                }
+            ],
         )
     ]
 

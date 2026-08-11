@@ -174,7 +174,7 @@ def build_template_tool(template: Template) -> CapabilityTool:
 
     async def launch(params: params_model) -> str:  # type: ignore[valid-type]
         # **Validate here, because nothing upstream does.** The annotation above is a pydantic model
-        # and MAF publishes its JSON schema, but MAF hands the body the decoded JSON *object* — a
+        # and its JSON schema is published, but the body is handed the decoded JSON *object* — a
         # plain `dict`. The `cast` this replaces was a static no-op, so every template run died on
         # `'dict' object has no attribute 'model_dump'` the first time a chemist asked for one, and
         # the shipped `hazard-briefing` template had never once executed from a conversation.

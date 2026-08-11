@@ -14,28 +14,27 @@ that survived it are recorded side by side.
 import ast
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession, Content, Message
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ActivityError, ChildWorkflowError
 
-from chemclaw.agent.session_store import PostgresHistoryProvider
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import ToolCallEvent
 from chemclaw.api.runner import run_turn
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.connectors import jobs as jobs_module
-from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
-from tests.fakes import FakeUpdate, fed
-from tests.pg import migrated_db_or_skip
+from tests.fakes import fed
+from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
@@ -45,33 +44,22 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 # --------------------------------------------------------------------------------------------
 
 
-class _ResumingAgent:
+class _ResumingAgent(ScriptedTurn):
     """Two passes: the first launches a job and spends tokens, the second spends far more."""
-
-    mcp_tools: list[Any] = []
 
     def __init__(self, first_tokens: int, second_tokens: int) -> None:
         self._tokens = (first_tokens, second_tokens)
         self.calls = 0
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_options: Any
-    ) -> Any:
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        from chemclaw.core.turn_signals import record_job_started
+
         self.calls += 1
         tokens = self._tokens[min(self.calls, 2) - 1]
         first = self.calls == 1
-
-        async def _gen() -> Any:
-            if first:
-                from chemclaw.core.turn_signals import record_job_started
-
-                record_job_started("job-1", "calc")
-            yield FakeUpdate(
-                text="ok" if first else " and the answer",
-                contents=[SimpleNamespace(usage_details={"total_token_count": tokens})],
-            )
-
-        return _gen()
+        if first:
+            record_job_started("job-1", "calc")
+        yield Chunk("ok" if first else " and the answer", output_tokens=tokens)
 
 
 def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,10 +87,11 @@ def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPat
 
     async def _drive() -> None:
         async for _ in run_turn(
-            agent,
-            AgentSession(session_id="resume-usage"),
+            TurnSession(session_id="resume-usage"),
             "compute it",
             budget=_Recording(),
+            connectors=[],
+            graph_factory=agent.graph_factory,
         ):
             pass
 
@@ -135,8 +124,8 @@ def test_a_job_that_fails_inside_the_wait_is_framed_wherever_it_was_awaited() ->
     It was written at one of the two awaits. The freshly-started branch had it; the *re-joined*
     branch — a second chemist asking for a job already running — did not, so a rejoined run that
     failed handed MAF a raw `WorkflowFailureError`. That type is neither a `ChemclawError` nor a
-    `SubsystemUnavailableError`, so `agent.tool_authz.surface_domain_errors` passes it through and
-    the model reads "Error: Function failed." — the wordless failure that three earlier incidents
+    `SubsystemUnavailableError`, so `agent.tool_authz.surface_domain_errors` passes it through
+    and the model reads a wordless failure — which three earlier incidents
     established is read as *proceed*.
     """
     with pytest.raises(jobs_module.ConnectorJobError) as caught:
@@ -325,45 +314,6 @@ def test_an_empty_fragment_mid_document_does_not_split_one_call_into_two() -> No
 # --------------------------------------------------------------------------------------------
 
 
-class _UnparseableArgumentAgent:
-    """Streams a call whose arguments never parse as JSON, and then ends the stream."""
-
-    mcp_tools: list[Any] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_options: Any
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(
-                contents=[
-                    SimpleNamespace(call_id="c9", name="find_notes", arguments="not json at all")
-                ]
-            )
-
-        return _gen()
-
-
-def test_a_call_whose_arguments_never_parse_still_reaches_the_stream() -> None:
-    """`run_turn`'s closing `tool_trace.flush()`, which nothing exercised through a whole turn.
-
-    The trace announces a call the moment its arguments parse; a provider that streams something
-    other than JSON has no such moment, so the final flush is the only thing that keeps the call
-    from vanishing. Deleting those two lines from `run_turn` left 160 tests green — `flush()` was
-    tested on the object and never through the turn that has to call it.
-    """
-
-    async def _collect() -> list[Any]:
-        return [
-            e
-            async for e in run_turn(
-                _UnparseableArgumentAgent(), AgentSession(session_id="flush-1"), "find things"
-            )
-        ]
-
-    calls = [e for e in asyncio.run(_collect()) if isinstance(e, ToolCallEvent)]
-    assert [call.tool for call in calls] == ["find_notes"]
-
-
 # --------------------------------------------------------------------------------------------
 # The wire budgets, now settings rather than literals (G3)
 # --------------------------------------------------------------------------------------------
@@ -381,75 +331,6 @@ def test_the_two_wire_budgets_are_configuration_rather_than_literals() -> None:
     assert "settings.stream_max_result_numbers" in source
     assert settings.agent_audit_max_arg_chars > 0
     assert settings.stream_max_result_numbers > 0
-
-
-# --------------------------------------------------------------------------------------------
-# The compaction watermark (agent/session_store.py) — a guard whose deletion destroys the turn
-# --------------------------------------------------------------------------------------------
-
-
-def _bulky_turn(index: int) -> list[Message]:
-    """One turn's stored messages, with a payload large enough to force a compaction decision."""
-    return [
-        Message(role="user", contents=[Content.from_text(f"question {index}")]),
-        Message(
-            role="assistant",
-            contents=[
-                Content.from_function_call(call_id=f"w{index}", name="predict_pka", arguments={})
-            ],
-        ),
-        Message(
-            role="tool",
-            contents=[
-                Content.from_function_result(call_id=f"w{index}", result="payload " + "z" * 4000)
-            ],
-        ),
-        Message(role="assistant", contents=[Content.from_text(f"answer {index}")]),
-    ]
-
-
-def test_compaction_never_deletes_the_turn_that_triggered_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The `protected=` watermark, which three test files covered and none of them pinned.
-
-    `plan_compaction`'s `protected` parameter *is* tested directly; what was untested is the call
-    site's derivation of it from the watermark — the row ids this `save_messages` just inserted.
-    Replacing it with `protected=set()` left 31 tests green across the three files that name
-    compaction, and on a real database with a tight budget it deleted **every** row, including the
-    turn being stored: rows after = 0, the new turn survived = False. A conversation that answers
-    and then forgets the exchange it just had is the worst failure this store can have, and nothing
-    would have said so.
-    """
-    monkeypatch.setattr(settings, "agent_durable_compaction_enabled", True)
-    monkeypatch.setattr(settings, "agent_durable_compaction_min_rows", 4)
-    monkeypatch.setattr(settings, "agent_context_token_budget", 50)
-
-    async def _run() -> list[Message]:
-        await migrated_db_or_skip()
-        provider = PostgresHistoryProvider()
-        session_id = "review-watermark"
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
-                )
-            await conn.commit()
-        for index in range(4):
-            await provider.save_messages(session_id, _bulky_turn(index))
-        return await provider.get_messages(session_id)
-
-    remaining = asyncio.run(_run())
-    assert remaining, "compaction emptied the table, including the turn it was triggered by"
-    rendered = " ".join(
-        content.text or ""
-        for message in remaining
-        for content in message.contents
-        if getattr(content, "text", None)
-    )
-    assert "question 3" in rendered and "answer 3" in rendered, (
-        "the turn that triggered compaction was compacted away by it"
-    )
 
 
 def _agent_note(note_id: str, body: str) -> Note:

@@ -1,34 +1,44 @@
 [project]
 name = "chemclaw"
 version = "0.0.0"
-description = "AI agent for pharmaceutical/chemical process R&D: MAF + Temporal + Agent Skills + a Markdown knowledge graph."
+description = "AI agent for pharmaceutical/chemical process R&D: LangGraph + Temporal + Agent Skills + a Markdown knowledge graph."
 requires-python = ">=3.11"
 # Runtime deps are added per phase, only when a module actually imports them
 # (no speculative dependencies — see docs/adr/0001-python-runtime.md and CLAUDE.md).
 dependencies = [
-    "agent-framework-anthropic>=1.0.0b260709",
-    "agent-framework-core>=1.11.0",
-    "agent-framework-openai>=1.0.0b260709",
     # cheminfo pulls mordredcommunity, which bofire's feature models import
     # unconditionally (bofire.data_models.features.feature -> mordred); without it a
     # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
     "bofire[optimization,cheminfo]>=0.4.1",
+    "deepagents>=0.6.12",
     "drfp>=0.3.7",
     "fastapi>=0.139.2",
     # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
-    # direct dependency, not merely transitive (via fastapi/mcp/agent-framework).
+    # direct dependency, not merely transitive (via fastapi/mcp).
     "httpx>=0.28",
+    "langchain>=1.0",
+    "langchain-anthropic>=1.5.1",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-openai>=1.4.2",
+    "langgraph>=1.2.10",
+    "langgraph-checkpoint-postgres>=3.1.2",
     "mcp>=1.2.0",
     "networkx>=3.6.1",
     "numpy>=2.0",
-    # The OpenTelemetry SDK + OTLP exporter that `chemclaw.logging.configure_telemetry` needs.
+    # The OpenTelemetry SDK + OTLP exporter that `chemclaw.core.logging.configure_telemetry` needs.
     # Not speculative and not optional: the shipped Helm chart sets `CHEMCLAW_OTEL_ENABLED: "true"`
     # (`deploy/helm/chemclaw/values.yaml`), and without these the front door and every Temporal
-    # worker raise at startup and CrashLoopBackOff. Only `opentelemetry-api` came in transitively
-    # via agent-framework, which is the import that resolves — the SDK and the exporter are what
-    # `configure_otel_providers` actually loads. gRPC (4317) matches the endpoint the chart
+    # worker raise at startup and CrashLoopBackOff. gRPC (4317) matches the endpoint the chart
     # configures and the port its NetworkPolicy already opens.
+    #
+    # These two lines used to explain themselves by what the agent framework did or did not
+    # resolve, and both halves of that reading are now void: `configure_telemetry` builds the
+    # `TracerProvider`, the `BatchSpanProcessor` and the OTLP span exporter itself (no framework
+    # bootstrap left to load them), and `opentelemetry-api` — which arrived transitively through
+    # that framework — is a hard requirement of `opentelemetry-sdk`, so it survived the removal.
+    # Every `opentelemetry.*` import in `src/` is covered by these two distributions plus their own
+    # closure.
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
     "pandas>=2.2",

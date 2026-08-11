@@ -41,6 +41,16 @@ class LlmSettings(BaseSettings):
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
+
+    # Ask an OpenAI-compatible endpoint to report token usage while streaming.
+    #
+    # **On by default because the alternative failed silently.** `ChatOpenAI` only default-enables
+    # this when no custom base URL and no custom HTTP client are configured, and Chemclaw sets
+    # both — so the endpoint was never asked, no usage chunk arrived, and every turn on the graph
+    # engine metered zero while the budget guard went on admitting the next one. A setting rather
+    # than a hardcoded `True` because upstream's caution is real: an endpoint that rejects
+    # `stream_options` needs a way out that is not a code change.
+    llm_stream_usage: bool = True
     # Unset by default, and that default is load-bearing: current frontier models (the shipped
     # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
     # `400 invalid_request_error: temperature is deprecated for this model` — so a config that
@@ -54,7 +64,7 @@ class LlmSettings(BaseSettings):
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
     # the frontier model drives the main reasoning turn — without a second provider or a second
-    # import site (`build_chat_client(task)` stays the one place a client is built). Model ids
+    # import site (`build_chat_model(task)` stays the one place a model is built). Model ids
     # are for the *active* provider (an `openai_compatible` model name, or an Anthropic one); a
     # task with no entry falls back to the provider's default (`llm_model`/`agent_model`), so an
     # empty map (the default) is exactly today's single-model behavior. ENV override is JSON,

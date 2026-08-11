@@ -134,15 +134,15 @@ class TranscriptToolCall(BaseModel):
 class TranscriptMessage(BaseModel):
     """One stored message of a session's transcript, as a chat surface renders it.
 
-    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization, and
-    exposing it would make a MAF version bump a breaking change to the HTTP contract.
+    Role plus text rather than the stored row's own shape: that row is a library serialization,
+    and exposing it would make a dependency bump a breaking change to the HTTP contract.
 
     **`tool_calls` is the part that was missing, and it was never missing from storage.** The live
     SSE stream carries fourteen event types; a reload got `role` and `text`, so everything the
     agent *did* vanished and a UI could not render history at parity with the live view — the
-    largest single blocker for the frontend repo. But a MAF message already holds
-    `function_call`/`function_result` contents; the route was flattening them away. Nothing new is
-    persisted here: this reads what was always there.
+    largest single blocker for the frontend repo. But a stored message already holds its
+    `tool_calls` and the `tool_call_id` answering them; the route was flattening them away. Nothing
+    new is persisted here: this reads what was always there.
 
     `index` is the message's position in the transcript, so a client has a stable key without the
     HTTP contract having to expose a database row id.
@@ -264,8 +264,8 @@ def session_title(message: str) -> str:
 
     Here, in the pure-projections half of this module, because that is what it is: the turn route
     hands over the user's message as a plain string and gets back the string to store. Deriving it
-    from the *stored* message instead would mean reading the MAF payload out of `session_messages`,
-    which `infra/sql/008_sessions.sql` is explicit the store must not interpret.
+    from the *stored* message instead would mean interpreting the serialization in
+    `session_messages`, which `infra/sql/008_sessions.sql` is explicit the store must not do.
 
     Collapsed and bounded, not summarised. A title that paraphrases is a title that can be wrong,
     and this one names a row a chemist navigates by. The cap is generous — enough that a surface can
@@ -278,11 +278,11 @@ def session_title(message: str) -> str:
 def _transcript(
     stored: "Sequence[Any]", *, fetchable: "Collection[str]" = ()
 ) -> list[TranscriptMessage]:
-    """Flatten stored MAF messages into the transcript contract, pairing calls with their results.
+    """Flatten stored messages into the transcript contract, pairing calls with their results.
 
-    Results arrive in a *later* message than the call they answer — MAF emits the assistant's
-    `function_call` and then a `tool` message carrying the `function_result` — so pairing needs one
-    pass over the whole transcript before any message can be rendered. `call_id` is the join.
+    Results arrive in a *later* message than the call they answer — an assistant message carries
+    `tool_calls` and a following `ToolMessage` carries the answer — so pairing needs one pass over
+    the whole transcript before any message can be rendered. `tool_call_id` is the join.
 
     **What this recovers, and what it cannot.** Tool calls and their outcomes were always in
     storage and merely discarded by the route, so they come back for free. Plan snapshots,
@@ -293,13 +293,14 @@ def _transcript(
 
     **The ref is computed here, not looked up.** A stored result's handle is the SHA-256 of the
     result's own text (`api/tool_results.py::content_address`), and the text is sitting in the
-    message this is reading — the same string `api/runner_trace.py::_result_text` hashed when the
-    turn ran, because MAF coerces a function result to `str` once, at the content, and the durable
-    row is that content's JSON round trip. So the pairing is *identity of bytes*, not a guess from
-    `(session, tool, correlation_id, created_at)`: those four cannot separate two calls of one tool
-    in one turn, and a link row's timestamp is the last time those bytes were produced by anything,
-    which is not a key at all. A mispaired result would be worse than an absent one, and content
-    addressing is the reason there is no pairing step to get wrong.
+    message this is reading. The two sides agree by construction rather than by coincidence:
+    `api/graph_stream.py` hashes what `message_text` returns for the same `ToolMessage`, and the
+    durable row is that message's JSON round trip — so the read side is not reimplementing the
+    write side's flattening, it is calling it. That makes the pairing *identity of bytes* rather
+    than a guess from `(session, tool, correlation_id, created_at)`: those four cannot separate two
+    calls of one tool in one turn, and a link row's timestamp is the last time those bytes were
+    produced by anything, which is not a key at all. A mispaired result would be worse than an
+    absent one, and content addressing is the reason there is no pairing step to get wrong.
 
     `fetchable` is the set of refs the store can serve for this session
     (`tool_results.fetchable_refs`), and a computed ref outside it is reported as `""`. Passed in
@@ -308,55 +309,79 @@ def _transcript(
     """
     results: dict[str, tuple[str, str]] = {}
     for message in stored:
-        for content in getattr(message, "contents", []):
-            if content.type == "function_result" and content.call_id is not None:
-                # `or ""` rather than the raw attribute: MAF stores an absent result as the empty
-                # string, and that is also what `_result_text` treats as "nothing came back" and
-                # declines to store — so the two agree on which results have a ref.
-                #
-                # Coerced with `str()` before anything reads it, for the same reason
-                # `_truncate_for_transcript` is defensive about the same value one line down. A
-                # `result` that is not a `str` is unreachable through the MAF this pins — every
-                # result goes through `Content.from_function_result`, which JSON-dumps a non-string
-                # — but a *stored row* is not written by the running version: `get_messages`
-                # rebuilds it with `Message.from_dict` from JSONB another version wrote, and a row
-                # carrying `"result": {…}` reached `content_address` as a `dict` and raised
-                # `AttributeError: 'dict' object has no attribute 'encode'`. That is one uncaught
-                # exception on `GET /sessions/{id}/messages`, which is a 500 that costs a chemist
-                # their entire conversation rather than one result card. `str()` and not `repr()`
-                # because `_result_text` coerces the producer's side the same way, and the ref only
-                # means anything if both sides hash the same bytes.
-                raw = getattr(content, "result", "") or ""
-                text = raw if isinstance(raw, str) else str(raw)
-                ref = content_address(text) if text else ""
-                results[content.call_id] = (
-                    _truncate_for_transcript(text),
-                    ref if ref in fetchable else "",
-                )
+        call_id = getattr(message, "tool_call_id", None)
+        if not call_id:
+            continue
+        # `message_text`, not the raw attribute: it is the same flattening `graph_stream` hashed
+        # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
+        # result that came back empty gets no ref, matching `runner_trace._result_text`, which
+        # declines to store one — so the two agree on which results are fetchable.
+        text = message_text(message)
+        ref = content_address(text) if text else ""
+        results[str(call_id)] = (
+            _truncate_for_transcript(text),
+            ref if ref in fetchable else "",
+        )
     transcript: list[TranscriptMessage] = []
     for index, message in enumerate(stored):
         calls: list[TranscriptToolCall] = []
-        for content in getattr(message, "contents", []):
-            if content.type != "function_call":
-                continue
-            paired = results.get(content.call_id or "")
+        for call in getattr(message, "tool_calls", None) or []:
+            paired = results.get(str(call.get("id", "")))
             result, ref = paired if paired is not None else (None, "")
             calls.append(
                 TranscriptToolCall(
-                    tool=content.name or "",
-                    arguments=_truncate_for_transcript(getattr(content, "arguments", "")),
+                    tool=str(call.get("name", "")),
+                    arguments=_truncate_for_transcript(call.get("args", "")),
                     result=result,
                     result_ref=ref,
                 )
             )
-        # A `tool` message is the carrier for a result that has already been attached to its call,
+        # A tool message is the carrier for a result that has already been attached to its call,
         # so surfacing it as its own bubble would render every tool twice.
-        if message.role == "tool" and not calls:
+        role = message_role(message)
+        if role == "tool" and not calls:
             continue
         transcript.append(
-            TranscriptMessage(index=index, role=message.role, text=message.text, tool_calls=calls)
+            TranscriptMessage(index=index, role=role, text=message_text(message), tool_calls=calls)
         )
     return transcript
+
+
+# LangChain's message `type` to the role the transcript contract names. The two agree except for
+# `human`/`ai`, and the contract's names are the ones a surface already renders — changing them
+# would be a UI break for a rename.
+_ROLES = {"human": "user", "ai": "assistant"}
+
+
+def message_role(message: Any) -> str:
+    """The word a human reads for who said this, from LangChain's `type`.
+
+    Public because `chemclaw.cli.explain` renders the same conversation for the audit join and must
+    call it the same thing: a transcript that says `assistant` in the browser and `ai` in the audit
+    reconstruction makes two records of one turn look like two turns.
+    """
+    return str(_ROLES.get(message.type, message.type))
+
+
+def message_text(message: Any) -> str:
+    """The prose of one message, whether its content is a string or a list of blocks.
+
+    Public for two readers beyond this module, and the second one makes it load-bearing rather than
+    convenient: `chemclaw.cli.explain` renders the same rows, and `api/graph_stream.py` hashes what
+    this returns to name a stored tool result. A second implementation of the flattening would mean
+    a ref computed on read that no longer matches the one computed on write — a result that exists
+    and cannot be fetched.
+
+    Blocks carrying no `text` (an image, a tool-use block) contribute nothing rather than a `repr`.
+    """
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content)
 
 
 def _truncate_for_transcript(value: object) -> str:

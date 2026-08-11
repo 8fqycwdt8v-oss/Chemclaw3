@@ -1,4 +1,18 @@
-# Architektur: MAF + Temporal + Skills + Markdown-Knowledge-Graph
+# Architektur: Agent-Orchestrierung + Temporal + Skills + Markdown-Knowledge-Graph
+
+> **Stand dieses Dokuments.** Es ist der *Vorab-Entwurf* der Architektur, nicht ihre Beschreibung
+> (siehe `CLAUDE.md`): es kennt keine Connectors — die Naht, die heute jedes Tool, jeden Job und
+> jeden Skill trägt (D-118) — und die Reasoning-Schicht wurde inzwischen ausgetauscht. Sie lief
+> zunächst auf dem Microsoft Agent Framework; seit
+> [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](../decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+> läuft sie auf **LangGraph**, und der Grund war nicht Leistungsfähigkeit, sondern Fehlerlast: vier
+> Stellen dieses Baums existierten allein, um Framework-Defekte zu umgehen, zwei davon lautlos.
+>
+> Was hier über die **vier Schichten und ihre Trennung** steht, ist unverändert gültig — es hing
+> nie am Framework. Wo unten dennoch Framework-Eigenheiten benannt sind, sind sie als *damalige*
+> Begründung kenntlich gemacht statt gelöscht: die Argumente haben die Entscheidungen getragen und
+> gehören zur Nachvollziehbarkeit. Für den heutigen Stand: `docs/decisions/`, die Paket-READMEs
+> und `docs/guides/runbook.md`.
 
 ## 0. Kernidee
 
@@ -6,37 +20,38 @@ Vier klar getrennte Schichten, jede mit einer einzigen Verantwortung:
 
 | Schicht | Verantwortung | Technologie |
 |---|---|---|
-| **Reasoning/Orchestrierung** | Konversation führen, Skill/Tool auswählen, kurze Schritte ausführen | Microsoft Agent Framework (MAF) |
+| **Reasoning/Orchestrierung** | Konversation führen, Skill/Tool auswählen, kurze Schritte ausführen | LangGraph (ursprünglich: Microsoft Agent Framework) |
 | **Long-Running Execution** | Rechenintensive, Stunden/Tage dauernde Jobs (QM/DFT, HPC) durchhalten | Temporal |
 | **Tool-/Capability-Integration** | Domänenwissen "wie tue ich X" modular verpacken | Agent Skills (SKILL.md) |
 | **Persistentes Wissen** | Domänenwissen "was wissen wir über X" strukturiert & vernetzt speichern | Markdown-Knowledge-Graph (Git) |
 
-Diese Trennung ist bewusst: MAF und Temporal beide für Durability zu nutzen wäre redundant (in der MAF-Community selbst wird der Versuch, MAF-Workflows und Dapr/Temporal-Workflows zu verschmelzen, explizit als "a torturous path" beschrieben). Stattdessen: **MAF orchestriert die Konversation, Temporal übernimmt ausschließlich die Lebenszyklen der langlaufenden wissenschaftlichen Jobs**, entkoppelt als asynchroner Tool-Aufruf.
+Diese Trennung ist bewusst: **die Reasoning-Schicht orchestriert die Konversation, Temporal übernimmt ausschließlich die Lebenszyklen der langlaufenden wissenschaftlichen Jobs**, entkoppelt als asynchroner Tool-Aufruf. Zwei Durability-Systeme nebeneinander wären redundant – im Umfeld des damaligen Frameworks wurde der Versuch, dessen Workflows mit Dapr/Temporal-Workflows zu verschmelzen, explizit als "a torturous path" beschrieben, und das Argument ist framework-unabhängig geblieben. Die Regel selbst ist seither *strenger* geworden, nicht lockerer: Durability für lange oder teure Arbeit liegt bei Temporal, und die Konversationsschicht baut sich keine eigene mehr (D-2026-08-10 §3).
 
 ---
 
-## 1. Reasoning-Schicht: Microsoft Agent Framework
+## 1. Reasoning-Schicht: LangGraph
 
-MAF (GA seit April 2026) liefert zwei Bausteine, die hier beide genutzt werden:
+Ein Turn ist **ein kompilierter Graph** (`create_agent`), gebaut pro Turn, weil LangGraph Tools zur Konstruktionszeit bindet und die MCP-Session eines Connectors genau einem Turn gehört. Daran hängen:
 
-- **Agents**: LLM-gestützte Einzeleinheiten mit Instructions, Tools, Context-Providern.
-- **Graph-based Workflows**: expliziter Graph aus Executors/Agents mit typisiertem Routing, Fan-out/Fan-in, bedingten Kanten – für die *kurzen* Orchestrierungsschritte (Anfrage parsen → Skill wählen → Tool aufrufen → Antwort formulieren), nicht für Stunden/Tage laufende Berechnungen.
+- **Der Zustand als deklariertes Schema** (`ChemclawState`) statt eines Dictionaries mit von niemandem deklarierten Schlüsseln – Plan, Wartestand auf durable Jobs und der Modellaufruf-Zähler sind benannte Felder.
+- **Middleware statt Sonderpfaden**: die Tool-Kette (Audit, Autorisierung, Dry-Run, Wiederholungs-Bremse, Plan-Freigabe) sind `@wrap_tool_call`-Wrapper in fester Schachtelungsordnung; Skills kommen über `deepagents.SkillsMiddleware` über ein verengtes Backend.
+- **Ein Postgres-Checkpointer** für den Turn-Zustand, der einen Pod-Neustart überlebt.
 
-**Bewusst NICHT genutzt für diesen Zweck:** MAFs eigene *Durable Task Extension* (basiert auf Azure Durable Functions/Durable Task Scheduler, mit den "4 D's": durable, distributed, deterministic, discoverable). Diese ist wertvoll für Konversationszustände, die über Tage pausieren (z. B. wartet auf menschliche Freigabe), aber sie ist Azure-Functions-nativ und für *lange Nutzerkonversationen* gedacht – nicht der richtige Ort für einen 6-Stunden-DFT-Job. Empfehlung: MAF-Konversationszustand bleibt leichtgewichtig (Session-State in Redis/Postgres reicht meist); die schwere Durability wandert vollständig zu Temporal.
+**Bewusst NICHT genutzt:** die durable-execution-Fähigkeiten des Frameworks als Job-Store. Ein Connector-Job, der sechs Stunden auf einem Cluster läuft, gehört Temporal, und daran ändert der Checkpointer nichts – er hält Turn-Zustand, kein Job-Ergebnis. (Dieselbe Linie wurde schon dem Vorgänger-Framework gegenüber gezogen, dessen *Durable Task Extension* Azure-Functions-nativ und für tagelang pausierende Nutzerkonversationen gedacht war – nicht für einen 6-Stunden-DFT-Job.) Ebenso wenig übernommen: die generischen Batterien des Harness-Pakets – File Memory, File Access, Shell, Web Search. Fähigkeit kommt aus Connectors, nicht aus den Bordmitteln des Harness.
 
 ## 2. Long-Running-Execution-Schicht: Temporal
 
-**Warum getrennt von MAF:** Ein Temporal-Workflow ist deterministischer Python-Code, der Activities orchestriert – Activities sind der "unvorhersehbare" Teil (LLM-Aufruf, API-Call, **HPC-Job**) und können unabhängig fehlschlagen/retried werden. Bei Prozessabsturz spielt Temporal die Event-History ab und setzt exakt dort fort, wo abgebrochen wurde – ohne bereits abgeschlossene Activities zu wiederholen. Das ist genau das Verhalten, das ein 6-72-Stunden-DFT-Job auf einem HPC-Cluster braucht.
+**Warum getrennt von der Reasoning-Schicht:** Ein Temporal-Workflow ist deterministischer Python-Code, der Activities orchestriert – Activities sind der "unvorhersehbare" Teil (LLM-Aufruf, API-Call, **HPC-Job**) und können unabhängig fehlschlagen/retried werden. Bei Prozessabsturz spielt Temporal die Event-History ab und setzt exakt dort fort, wo abgebrochen wurde – ohne bereits abgeschlossene Activities zu wiederholen. Das ist genau das Verhalten, das ein 6-72-Stunden-DFT-Job auf einem HPC-Cluster braucht.
 
-**Integrationsmuster (MAF ↔ Temporal):**
+**Integrationsmuster (Reasoning-Schicht ↔ Temporal):**
 
-Es gibt *keinen* offiziellen MAF-Temporal-Adapter (anders als z. B. bei OpenAI Agents SDK, wo Temporal einen nativen `activity_as_tool`-Helper anbietet). Die Integration ist bewusst simpel gehalten:
+Dieses Projekt nutzt **keinen** Framework-Adapter zwischen Reasoning-Schicht und Temporal – weder gab es einen für das erste Framework, noch wird für das jetzige einer benutzt (anders als z. B. beim OpenAI Agents SDK, wo Temporal einen nativen `activity_as_tool`-Helper anbietet). Die Integration ist bewusst simpel gehalten und hat den Framework-Wechsel unverändert überstanden, was ein nachträglicher Beleg für den Schnitt ist:
 
 ```
-MAF Agent Tool "submit_qm_job"
+Agent-Tool "submit_qm_job"
   └─> startet einen Temporal Workflow (fire-and-forget)
        └─> gibt sofort eine workflow_id / job_id zurück
-  └─> MAF antwortet dem Nutzer sofort ("Screening läuft, DFT-Validierung gestartet, ID: qm-8f2a")
+  └─> der Agent antwortet dem Nutzer sofort ("Screening läuft, DFT-Validierung gestartet, ID: qm-8f2a")
 
 Temporal Workflow "QMJobWorkflow"
   ├─ Activity: prepare_input (Geometrie, Methode, Basissatz)
@@ -45,25 +60,27 @@ Temporal Workflow "QMJobWorkflow"
   │            gegen Preemption/Timeout-Detection)
   ├─ Activity: parse_qm_output (RDKit/cclib-Parsing)
   ├─ Activity: write_knowledge_node (siehe Abschnitt 4)
-  └─ Activity: notify_agent (Callback/Webhook zurück in MAF-Session
+  └─ Activity: notify_agent (Callback/Webhook zurück in die Agent-Session
                oder Teams-Notification via Copilot)
 
-MAF Agent Tool "get_qm_job_status(job_id)"
+Agent-Tool "get_qm_job_status(job_id)"
   └─> fragt Temporal Client nach Workflow-Status/-Result ab
 ```
 
 - **Caching**: Ein separater Temporal-Workflow-Typ `CachedQMLookup` prüft vor dem eigentlichen Submit einen Cache-Store (Hash aus Molekül+Methode+Basissatz); nur bei Cache-Miss wird `QMJobWorkflow` gestartet.
-- **Tiering**: Schnelle ML-Potentiale (MACE/NequIP) laufen synchron als normale MAF-Tools (Sekunden); nur die DFT-Eskalation bei niedriger Konfidenz geht an Temporal.
+- **Tiering**: Schnelle ML-Potentiale (MACE/NequIP) laufen synchron als normale Agent-Tools (Sekunden); nur die DFT-Eskalation bei niedriger Konfidenz geht an Temporal.
 - **Deployment**: Temporal Cluster (self-hosted oder Temporal Cloud) + Temporal Worker-Prozesse, die auf/nahe der HPC-Umgebung laufen und Zugriff auf den SLURM-Scheduler haben. Worker sind zustandslos, horizontal skalierbar, dürfen abstürzen.
 
 ## 3. Tool-Integrationsschicht: Skill-basierter Ansatz (Agent Skills / SKILL.md)
 
-MAF hat seit kurzem native Unterstützung für den offenen **Agent Skills**-Standard (SKILL.md, Dezember 2025 von Anthropic als offener Standard veröffentlicht, seither von Microsoft/Google/OpenAI übernommen). Für Python: `SkillsProvider`/`FileAgentSkillsProvider`, stabil/GA.
+Der offene **Agent Skills**-Standard (SKILL.md, Dezember 2025 von Anthropic veröffentlicht, seither von Microsoft/Google/OpenAI übernommen) wird von jedem hier ernsthaft erwogenen Framework getragen; die dreistufige Offenlegung ist deshalb eine Architektur-Eigenschaft und keine Framework-Wette. Heute liefert sie `deepagents.SkillsMiddleware` über ein *verengtes* Backend (`agent/skill_backend.py`).
 
 **Funktionsprinzip (Progressive Disclosure):**
 1. **Advertise** (~100 Token/Skill): Name + Kurzbeschreibung jedes Skills wird ins System-Prompt injiziert.
-2. **Load** (<5.000 Token): Bei Bedarf ruft der Agent `load_skill(name)` auf und bekommt die volle SKILL.md-Anleitung.
-3. **Read on demand**: `read_skill_resource(name, path)` lädt zusätzliche Referenzdateien/Skripte/Templates nur bei tatsächlichem Bedarf.
+2. **Load** (<5.000 Token): Bei Bedarf liest der Agent die volle SKILL.md über den im Prompt genannten Pfad.
+3. **Read on demand**: zusätzliche Referenzdateien/Skripte/Templates werden über denselben Weg nur bei tatsächlichem Bedarf geholt.
+
+**Und genau deshalb ist die Rollen-Verengung am Backend verankert, nicht an der Liste.** Weil Schritt 2 ein *Pfad* im Prompt ist und kein Provider-Aufruf, verbärge ein reiner Listen-Filter einen rollen-gegateten Skill und händigte ihn jedem aus, der den Pfad errät – den der Prompt bereits beigebracht hat. Verengt sind daher `ls`, `read`, `glob` und `grep`; die Schreibhälfte ist ganz verweigert, und der Lesepfad ist genau **ein** handgeschriebenes Tool statt einer generischen Dateisystem-Middleware.
 
 Das hält den Kontext schlank, selbst bei Dutzenden domänenspezifischer Fähigkeiten – und löst genau das Problem, das MCP-Server mit zu vielen gleichzeitig geladenen Tools haben.
 
@@ -98,7 +115,7 @@ skills/
                                # "AI schlägt vor" vs. "GxP-Ausführung"
 ```
 
-Jeder Skill kann intern sowohl direkten Python-Code als auch MCP-Tool-Aufrufe kapseln (Community-SDKs zeigen bereits Beispiele, die Skills mit LangChain, MAF *und* MCP kombinieren) – die Skill-Ebene ist also die "Bedienungsanleitung", MCP/Temporal/direkte Funktionsaufrufe sind die eigentliche Ausführung dahinter. Das erlaubt Fachexperten (Chemiker), SKILL.md-Dateien direkt zu pflegen, ohne Python-Code anzufassen – genau wie in Abschnitt 3 der MAF-Doku für HR-/Policy-Skills beschrieben, hier übertragen auf Reaktions- und Analytik-Wissen.
+Jeder Skill kann intern sowohl direkten Python-Code als auch MCP-Tool-Aufrufe kapseln – die Skill-Ebene ist also die "Bedienungsanleitung", MCP/Temporal/direkte Funktionsaufrufe sind die eigentliche Ausführung dahinter. Dass der Standard framework-übergreifend getragen wird, war schon bei der Recherche der Punkt und ist inzwischen belegt: die Skills dieses Repos sind beim Wechsel der Reasoning-Schicht **unverändert** mitgegangen. Das erlaubt Fachexperten (Chemiker), SKILL.md-Dateien direkt zu pflegen, ohne Python-Code anzufassen – hier übertragen auf Reaktions- und Analytik-Wissen.
 
 ## 4. Wissensschicht: Interlinked Markdown Knowledge Graph
 
@@ -136,17 +153,17 @@ Regioselektivität stimmt mit DFT-Vorhersage aus [[qm-job-8f2a]] überein.
 - **Von Menschen verfasste Notes** werden direkt committet.
 - **Von Agenten erzeugte Notes** (`created_by: agent`) landen zunächst auf einem Feature-Branch/als Pull-Request und benötigen eine menschliche Freigabe, bevor sie in den validierten Hauptzweig gemerged werden – das spiegelt exakt die zuvor diskutierte GxP-Trennung (AI schlägt vor, Mensch validiert, Git protokolliert) und macht den PR-Review-Schritt zum Human-in-the-Loop-Gate.
 - Temporal schreibt nach Abschluss eines QM-Jobs automatisch eine neue Note (`write_knowledge_node`-Activity) mit strukturiertem Ergebnis + Link auf Rohdaten – auch dieser Schreibvorgang läuft über den PR-Mechanismus.
-- Der `knowledge-graph-query`-Skill exponiert die Graph-Traversal-Funktion als Tool für den MAF-Agenten; der `knowledge-graph-write`-Skill kapselt Note-Template + Git-Workflow.
+- Der `knowledge-graph-query`-Skill exponiert die Graph-Traversal-Funktion als Tool für den Agenten; der `knowledge-graph-write`-Skill kapselt Note-Template + Git-Workflow.
 
 ## 5. End-to-End-Beispielfluss
 
 Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-Funktionalisierung von Verbindung X, und hatten wir schon ähnliche Substrate?"*
 
-1. MAF-Agent lädt `knowledge-graph-query`-Skill → traversiert den Graphen ausgehend von Verbindung X (Substruktur-Match) → liefert verwandte Reaktions-Notes, Bedingungen, historische Ausbeuten.
-2. MAF-Agent lädt `qm-regioselectivity`-Skill → führt zuerst schnellen ML-Potential-Screen synchron aus.
-3. Konfidenz niedrig → Agent ruft `submit_qm_job` → Temporal-Workflow startet DFT-Validierung auf HPC, MAF antwortet sofort mit Zwischenstand und Job-ID.
+1. Der Agent lädt den `knowledge-graph-query`-Skill → traversiert den Graphen ausgehend von Verbindung X (Substruktur-Match) → liefert verwandte Reaktions-Notes, Bedingungen, historische Ausbeuten.
+2. Der Agent lädt den `qm-regioselectivity`-Skill → führt zuerst schnellen ML-Potential-Screen synchron aus.
+3. Konfidenz niedrig → Agent ruft `submit_qm_job` → Temporal-Workflow startet DFT-Validierung auf HPC, der Agent antwortet sofort mit Zwischenstand und Job-ID.
 4. Temporal-Workflow läuft mehrere Stunden, überlebt Worker-Neustarts, Heartbeats verhindern Timeout-Fehlklassifikation.
-5. Bei Abschluss: `write_knowledge_node` legt strukturierte Note an (PR-Pflicht) und triggert eine Benachrichtigung zurück in die MAF-Session/Teams.
+5. Bei Abschluss: `write_knowledge_node` legt strukturierte Note an (PR-Pflicht) und triggert eine Benachrichtigung zurück in die Agent-Session/Teams.
 6. Chemiker erhält finale Antwort inkl. Link auf die neue, nach Freigabe gemergte Knowledge-Graph-Note.
 
 ## 6. Deployment-Übersicht
@@ -214,15 +231,15 @@ Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesam
 | **Chemiker → Copilot Studio/Teams** | Native Entra-ID-SSO (M365-Standard) | ✅ Nativ, keine Zusatzarbeit |
 | **Copilot Studio → MCP-Server** | OAuth 2.0 über Power-Platform-Connector, inkl. Dynamic-Client-Registration-Option | ✅ Nativ |
 | **Eigener MCP-Server (FastMCP)** | `AzureProvider`/`BearerAuthProvider` in FastMCP validiert Entra-JWTs direkt (JWKS-Endpoint des Tenants); On-Behalf-Of-Flow reicht die Nutzeridentität an nachgelagerte Systeme (Graph, interne APIs) weiter | ✅ Gut unterstützt, aber: Azure unterstützt keine Dynamic Client Registration → OAuth-Proxy-Pattern nötig; **Confused-Deputy-Risiko** beachten (MCP-Server als OAuth-Client *und* Service zugleich) – Consent-Screen/Audience-Checks konsequent implementieren |
-| **MAF-Agent-Hosting (Azure AI Foundry/Container Apps)** | Managed Identity / Entra-ID-App-Registration | ✅ Nativ |
+| **Agent-Hosting (Container-Plattform)** | Managed Identity / Entra-ID-App-Registration | ✅ Nativ |
 | **Skills-/Knowledge-Graph-Git-Repo** | Azure DevOps Repos (nativ Entra-ID) oder GitHub Enterprise Cloud mit Entra-ID-SAML-SSO + OIDC für Git-Operationen | ✅ Gut, Azure DevOps am nahtlosesten |
 | **Temporal (Human-Zugriff, Web-UI)** | SAML-SSO direkt mit Entra ID als IdP konfigurierbar ("Continue with Microsoft" oder eigene Entra-ID-Enterprise-App) | ✅ Nativ für Menschen |
 | **Temporal (Worker/SDK/Service-zu-Service)** | **Kein natives Entra-ID-Token-Auth.** Temporal Cloud authentifiziert Worker/Clients über **mTLS-Zertifikate oder API-Keys**, nicht über Entra-JWTs. Bei **self-hosted** Temporal lässt sich ein JWT-Authorizer/Claim-Mapper gegen den Entra-ID-JWKS-Endpoint (`login.microsoftonline.com/{tenant}/discovery/v2.0/keys`) konfigurieren – näher an "durchgängig Entra ID", aber Eigenbetrieb | ⚠️ Kompromiss nötig |
 | **HPC/SLURM-Zugriff** | Klassische Scheduler sprechen kein OIDC/Entra ID. Erfordert einen **Identity-Bridging-Service**: Entra-ID-Token (mit Nutzer-Claim) → intern gemappt auf HPC-Service-Account/Kerberos-Ticket, mit Logging der Zuordnung für Audit-Zwecke | ⚠️ Eigenentwicklung nötig, größte Lücke |
 
 **Empfehlung für die Umsetzung:**
-1. **Wo Entra ID nativ geht (MAF, Copilot Studio, MCP-Server, Git-Repos, Temporal-Web-UI): konsequent nutzen** – keine Extra-Rechtfertigung nötig, ist der Standardweg.
-2. **Für Temporal service-seitig**: mTLS-Zertifikate (Azure Key Vault-verwaltet) für Worker/Client-Authentifizierung nutzen; die *Autorisierung*, welcher Chemiker welchen Job ausgelöst hat, wird nicht auf Transport-Ebene, sondern als **Claim im Workflow-Input** mitgeführt (der Entra-ID-`oid`/`upn` des Nutzers wird beim `submit_qm_job`-Aufruf aus dem MAF-Kontext übernommen und als Teil des Workflow-Payloads persistiert) – das erhält die Audit-Fähigkeit, ohne Temporal-intern Entra-Tokens validieren zu müssen.
+1. **Wo Entra ID nativ geht (Agent-Hosting, Copilot Studio, MCP-Server, Git-Repos, Temporal-Web-UI): konsequent nutzen** – keine Extra-Rechtfertigung nötig, ist der Standardweg.
+2. **Für Temporal service-seitig**: mTLS-Zertifikate (Azure Key Vault-verwaltet) für Worker/Client-Authentifizierung nutzen; die *Autorisierung*, welcher Chemiker welchen Job ausgelöst hat, wird nicht auf Transport-Ebene, sondern als **Claim im Workflow-Input** mitgeführt (der Entra-ID-`oid`/`upn` des Nutzers wird beim `submit_qm_job`-Aufruf aus dem Agent-Kontext übernommen und als Teil des Workflow-Payloads persistiert) – das erhält die Audit-Fähigkeit, ohne Temporal-intern Entra-Tokens validieren zu müssen.
 3. **Für HPC**: einen schlanken Bridging-Service bauen, der ausschließlich Entra-ID→HPC-Identität mapped und jede Zuordnung protokolliert; dieser Service ist der einzige Punkt im System, der beide Identitätswelten kennt.
 4. **Für den MCP-Server**: OAuth-Proxy-Pattern (da Azure kein Dynamic Client Registration unterstützt) + On-Behalf-Of-Flow, damit Tools wie `extract_reaction_from_eln` mit der Berechtigung des anfragenden Chemikers (nicht mit einem generischen Service-Principal) auf das ELN zugreifen – wichtig für Data-Governance und Nachvollziehbarkeit.
 
@@ -248,18 +265,18 @@ Schicht für Schicht:
 
 | Schicht | Nebenläufigkeit (viele Nutzer gleichzeitig) | Differenzierte Rechte (unterschiedliche Rollen) |
 |---|---|---|
-| **MAF-Agents** | ✅ Zustandslos hostbar (Azure AI Foundry/Container Apps), horizontal skalierbar, eine Session pro Nutzer | ⚠️ **Damals nicht automatisch** (inzwischen gebaut, s. o.): `SkillsProvider` lädt standardmäßig alle Skills aus dem Verzeichnisbaum, unabhängig vom Nutzer. Braucht eine rollenbewusste Filterung (z. B. eigener Context-Provider, der aus den Entra-ID-Claims der Session – App-Rollen/Gruppenmitgliedschaft – ableitet, welche Skills überhaupt advertised werden) |
+| **Agents** | ✅ Zustandslos hostbar, horizontal skalierbar, eine Session pro Nutzer | ⚠️ **Damals nicht automatisch** (inzwischen gebaut, s. o.): jede Skills-Implementierung lädt von Haus aus *alle* Skills des Verzeichnisbaums, unabhängig vom Nutzer. Es braucht eine rollenbewusste Verengung, die aus den Entra-ID-Claims der Session ableitet, welche Skills überhaupt sichtbar sind – und zwar am Backend, nicht an der Liste (Abschnitt 3) |
 | **MCP-Server (eigen, FastMCP)** | ✅ Zustandslos, horizontal skalierbar | ✅ **Bester Ansatzpunkt**: Da jeder Tool-Call bereits das Entra-Token des aufrufenden Nutzers trägt (OBO-Flow), lässt sich hier pro Tool-Aufruf autorisieren (Rollen-/Gruppen-Claim prüfen, bevor z. B. `submit_qm_job` oder `extract_reaction_from_eln` ausgeführt wird). **Copilot Studios DLP wirkt nur serverweit, nicht pro Tool** – feingranulare Rechte dürfen sich nicht darauf verlassen, sondern müssen im eigenen MCP-Server implementiert sein |
-| **Temporal** | ✅ Für genau diesen Zweck gebaut: Namespaces isolieren Traffic/Konfiguration, Tausende gleichzeitige Workflow-Executions sind Standard | ⚠️ **Temporal-eigenes RBAC (Account-Rollen wie Developer/Read-Only/Custom Roles, per SCIM aus Entra ID synchronisierbar) regelt nur den *operativen* Zugriff** (wer darf Workflows im Temporal-Dashboard einsehen/verwalten) – **nicht**, ob ein bestimmter Chemiker einen bestimmten teuren DFT-Job auslösen darf. Diese fachliche Autorisierung muss *vor* dem `submit_qm_job`-Aufruf in MCP/MAF geprüft werden; die Entra-ID des auslösenden Nutzers wird danach nur noch als Claim im Workflow-Payload mitgeführt (Audit, nicht Zugriffskontrolle). Empfehlung: **Namespace pro Team/Projekt** (Temporals eigene Best Practice für Multi-Tenancy) plus HPC-seitige Quotas/QOS, damit ein Nutzer nicht das gemeinsame Compute-Budget anderer blockiert |
+| **Temporal** | ✅ Für genau diesen Zweck gebaut: Namespaces isolieren Traffic/Konfiguration, Tausende gleichzeitige Workflow-Executions sind Standard | ⚠️ **Temporal-eigenes RBAC (Account-Rollen wie Developer/Read-Only/Custom Roles, per SCIM aus Entra ID synchronisierbar) regelt nur den *operativen* Zugriff** (wer darf Workflows im Temporal-Dashboard einsehen/verwalten) – **nicht**, ob ein bestimmter Chemiker einen bestimmten teuren DFT-Job auslösen darf. Diese fachliche Autorisierung muss *vor* dem `submit_qm_job`-Aufruf in MCP bzw. der Agent-Schicht geprüft werden; die Entra-ID des auslösenden Nutzers wird danach nur noch als Claim im Workflow-Payload mitgeführt (Audit, nicht Zugriffskontrolle). Empfehlung: **Namespace pro Team/Projekt** (Temporals eigene Best Practice für Multi-Tenancy) plus HPC-seitige Quotas/QOS, damit ein Nutzer nicht das gemeinsame Compute-Budget anderer blockiert |
 | **Knowledge-Graph (Git)** | ✅ Git ist für viele gleichzeitige menschliche Autoren gebaut (Branches/PRs); bei vielen *agentengenerierten* Schreibzugriffen gleichzeitig ggf. Warteschlange vor dem PR-Merge einplanen | ⚠️ **Größte Lücke**: Git kennt nativ nur Repo-weite Zugriffsrechte, kein Note-Level-ACL. Wenn nicht jeder Chemiker jede Notiz sehen darf (z. B. projektvertrauliche Kampagnen), reicht ein einzelnes Repo nicht. Zwei Optionen: (a) Repos entlang Vertraulichkeitsgrenzen aufsplitten und Entra-ID-Gruppen repo-weise berechtigen (einfach, aber grob), oder (b) eine Serving-/Query-Schicht vor den Graphen setzen, die `visibility`-Metadaten im Frontmatter jeder Notiz gegen die Entra-Gruppen des anfragenden Nutzers prüft, bevor Ergebnisse an den Agenten zurückgehen (flexibler; das ist ohnehin der natürliche Ort, weil der `knowledge-graph-query`-Skill/Tool schon dort sitzt) |
-| **Skills-Repo** | ✅ Read-only Mount, unkritisch bei vielen Lesern | ⚠️ Falls manche Skills rollenspezifisch sein sollen (z. B. Freigabe-/Override-Skills nur für QA), braucht es dieselbe rollenbewusste Filterung wie bei MAF oben – sonst sieht jeder Nutzer jeden Skill |
+| **Skills-Repo** | ✅ Read-only Mount, unkritisch bei vielen Lesern | ⚠️ Falls manche Skills rollenspezifisch sein sollen (z. B. Freigabe-/Override-Skills nur für QA), braucht es dieselbe rollenbewusste Filterung wie bei den Agents oben – sonst sieht jeder Nutzer jeden Skill |
 
 **Zentrale Empfehlung:** Rechteprüfung nicht über die Komponenten verstreuen, sondern **so weit wie möglich an einer Stelle bündeln** – konkret im eigenen MCP-Server, weil dort ohnehin bei jedem Aufruf ein Entra-ID-Token mit Rollen-/Gruppen-Claims vorliegt. Von dort aus:
-- Tool-/Skill-Sichtbarkeit für MAF ableiten (welche Skills advertised werden),
+- Tool-/Skill-Sichtbarkeit für die Agent-Schicht ableiten (welche Skills advertised werden),
 - Tool-Ausführung autorisieren (darf dieser Nutzer diesen Job/Extraktionslauf auslösen),
 - Wissensgraph-Antworten filtern (welche Notes darf dieser Nutzer sehen).
 
-Das hält die Rollenlogik an einem Ort wartbar, statt sie in MAF, Temporal-Workflows und Git-Berechtigungen parallel pflegen zu müssen.
+Das hält die Rollenlogik an einem Ort wartbar, statt sie in der Agent-Schicht, Temporal-Workflows und Git-Berechtigungen parallel pflegen zu müssen.
 
 ## 9. Wissensmanagement: Episodisches, semantisches und prozedurales Gedächtnis
 
@@ -308,21 +325,21 @@ Bei einer projektspezifischen Frage oder einem Berichtsauftrag traversiert der A
 - **Episodisch** (dieses Projekt): konkrete Historie, Zahlen, Zitate aus den eigenen Experimenten.
 - **Semantisch** (andere Projekte): "Ein generelles Muster aus anderen Projekten legt nahe, dass…", mit Verweis auf das Playbook und optional die Ursprungsprojekte.
 
-Diese Trennung ist für wissenschaftliches Vertrauen entscheidend – ein Chemiker muss wissen, ob eine Aussage projektspezifisch belegt oder aus Analogie übertragen ist. Für Berichte übersetzt sich das eins zu eins in einen MAF-Workflow-Knoten pro Berichtsabschnitt, der jeweils explizit macht, aus welcher Ebene die Information stammt.
+Diese Trennung ist für wissenschaftliches Vertrauen entscheidend – ein Chemiker muss wissen, ob eine Aussage projektspezifisch belegt oder aus Analogie übertragen ist. Für Berichte übersetzt sich das eins zu eins in einen Workflow-Knoten pro Berichtsabschnitt, der jeweils explizit macht, aus welcher Ebene die Information stammt.
 
 ### Warum das trotzdem einfach bleibt
 
 Kein einziges neues Subsystem – nur:
 - **2 neue Notiz-Typen** (`campaign`, `playbook`) mit klaren Frontmatter-Feldern (Evidenzverweise, Validierungsstatus).
 - **2 neue Skills** (`campaign-narrative-synthesis`, `playbook-distillation`), die dieselbe Skill-Infrastruktur aus Abschnitt 3 nutzen.
-- **2 periodische Jobs auf einer eigenen Temporal-Task-Queue**, die bereits vorhandene Bausteine (Fingerprint-Tools aus Abschnitt 10, PR-Gate aus Abschnitt 4, LLM-Aufrufe über MAF) neu kombinieren.
+- **2 periodische Jobs auf einer eigenen Temporal-Task-Queue**, die bereits vorhandene Bausteine (Fingerprint-Tools aus Abschnitt 10, PR-Gate aus Abschnitt 4, LLM-Aufrufe über die Agent-Schicht) neu kombinieren.
 - **Kein neues Datenbanksystem, kein neues Auth-Modell, kein neuer Orchestrator.**
 
 Der "große Wurf" liegt nicht in neuer Infrastruktur, sondern darin, dem bereits gebauten Wissensgraphen eine **explizite Drei-Ebenen-Struktur mit einem automatischen Aufwärts-Destillationspfad** zu geben – vom Einzelexperiment über die Projekt-Erzählung bis zum projektübergreifenden Playbook, jede Stufe zitierfähig auf die darunterliegende.
 
 ## 10. Adaptionen aus chemclaw2 (externes Repo)
 
-Das Gründungsdokument von chemclaw2 (`chemclaw2_features.md`) verfolgt bewusst ein anderes Grundprinzip als unsere Architektur ("off-the-shelf over self-built", Postgres-first, Claude Agent SDK statt MAF) – trotzdem gibt es mehrere konkrete, kleine Bausteine, die sich **ohne Bruch mit den bisherigen Entscheidungen** übernehmen lassen und echte Lücken in unserem Design schließen.
+Das Gründungsdokument von chemclaw2 (`chemclaw2_features.md`) verfolgt bewusst ein anderes Grundprinzip als unsere Architektur ("off-the-shelf over self-built", Postgres-first, Claude Agent SDK als Orchestrierungs-Basis) – trotzdem gibt es mehrere konkrete, kleine Bausteine, die sich **ohne Bruch mit den bisherigen Entscheidungen** übernehmen lassen und echte Lücken in unserem Design schließen.
 
 ### Lohnenswert (niedrige Zusatzkomplexität, echter Mehrwert)
 
@@ -337,11 +354,11 @@ Das Gründungsdokument von chemclaw2 (`chemclaw2_features.md`) verfolgt bewusst 
 
 4. **Bi-temporale Felder** (`valid_from`/`valid_to`) als zusätzliche Frontmatter-Attribute auf Knowledge-Graph-Notes. Trivialer Zusatzaufwand, aber wichtig für GxP-adjacente Nachvollziehbarkeit ("was wussten wir zum Zeitpunkt X").
 
-5. **Arbeitsprinzip "off-the-shelf over self-built" + explizite Deferred-Liste mit Trigger-Bedingungen.** Keine Technologie, sondern eine Disziplin: Jede Fähigkeit muss durch eine gepflegte externe Library/einen Standard gedeckt sein; Eigenentwicklung nur, wenn eine klar benannte Bedingung eintritt. Lohnt sich als Leitplanke für das gesamte Projekt, gerade weil unsere Architektur (MAF + Temporal + Skills + Wissensgraph + RLS) sonst leicht zum Over-Engineering neigen kann.
+5. **Arbeitsprinzip "off-the-shelf over self-built" + explizite Deferred-Liste mit Trigger-Bedingungen.** Keine Technologie, sondern eine Disziplin: Jede Fähigkeit muss durch eine gepflegte externe Library/einen Standard gedeckt sein; Eigenentwicklung nur, wenn eine klar benannte Bedingung eintritt. Lohnt sich als Leitplanke für das gesamte Projekt, gerade weil unsere Architektur (Agent-Framework + Temporal + Skills + Wissensgraph + RLS) sonst leicht zum Over-Engineering neigen kann.
 
 ### Nicht übernehmen (würde Komplexität erhöhen oder widerspricht bereits getroffenen Entscheidungen)
 
-- **Claude Agent SDK statt MAF**: chemclaw2 nutzt eine andere Orchestrierungs-Basis. Kein Grund, die bereits getroffene MAF-Entscheidung zu revidieren – beide sind valide, aber ein Wechsel mitten in der Architektur würde nur Reibung erzeugen.
+- **Eine andere Orchestrierungs-Basis** (chemclaw2 nutzt das Claude Agent SDK): damals kein Grund, die getroffene Framework-Entscheidung zu revidieren – beide seien valide, und ein Wechsel mitten in der Architektur erzeuge nur Reibung. **Das ist die eine Position dieses Dokuments, die später gekippt ist**, und es lohnt sich, den Grund festzuhalten, weil er die damalige Argumentation nicht widerlegt: gewechselt wurde nicht, weil das andere Framework mehr konnte, sondern weil vier Stellen dieses Baums nur existierten, um Defekte des ersten zu umgehen — zwei davon so lautlos, dass jeder Unit-Test dabei grün war. Die "Reibung" war real und wurde bezahlt; sie war billiger als die Fehlerlast. Gelandet ist der Wechsel bei LangGraph, nicht beim Claude Agent SDK (D-2026-08-10).
 - **Der volle Wiki-Ansatz** (Next.js-App, Tiptap-Editor, Freshness-Tracking, Contradiction-Backlog, Auto-Regeneration): inhaltlich inspirierend, aber ein eigenes Produkt mit eigenem Frontend – deutliche Komplexitätssteigerung. Bezeichnend: **selbst chemclaw2 deferred die anspruchsvollsten Teile davon** (Auto-Regeneration-Daemon, Contradiction-Auto-Detection) im eigenen v1-Scope. Das bestätigt eher, unseren Git+Markdown-Ansatz schlank zu halten, als ihn zur Wiki-App auszubauen.
 - **Neo4j/dedizierte Graph-DB**: chemclaw2 verzichtet bewusst darauf ("Postgres + Foreign Keys reichen"), deckt sich mit unserer Entscheidung, ohne separate Graph-DB auszukommen.
 
@@ -354,7 +371,7 @@ Guter Einwand, und die Antwort ändert eine frühere Empfehlung: **Nein, sobald 
 - Temporal ist kein "Nur-für-lange-Jobs"-System – es wird produktiv für Sekunden- bis Tage-Workflows gleichermaßen eingesetzt. Ein "Re-Indexiere den Wissensgraphen nach diesem Merge"-Job ist ein völlig normaler, kurzer Temporal-Workflow.
 - **Trennung erfolgt über Task Queues, nicht über ein zweites System**: eine `hpc-jobs`-Queue mit Workern, die Zugriff auf SLURM haben (wenige, teure Worker), und eine `background-jobs`-Queue mit leichten, austauschbaren Workern für ELN-Sync, Re-Indexierung, Benachrichtigungen. Beide teilen sich Cluster, Observability, Auth-Setup (Abschnitt 7) und Namespace-Struktur (Abschnitt 8).
 - **Ergebnis**: ein Ausführungssystem weniger zu betreiben als in der vorherigen Version dieses Dokuments (kein pg-boss, keine zweite Postgres-Queue-Konfiguration, kein zweites Retry-/Monitoring-Setup). Einziger Nachteil: Temporal-Workflows haben etwas mehr Autoren-Ceremony (Workflow/Activity-Trennung, Determinismus-Regeln) als ein simpler Fire-and-Forget-Job – das ist ein kleiner Autoren-Mehraufwand pro Job, keine operative Mehrkomplexität.
-- Bleibt MAFs eigene Durable Extension überhaupt relevant? Nur noch für einen sehr schmalen Fall: sehr lange *Konversationspausen* (Chat wartet tagelang auf menschliche Rückmeldung), falls das MAF-Session-Handling das nicht schon ausreichend abdeckt. Für alles Job-artige gilt: Temporal, ein System, fertig.
+- Bleibt eine framework-eigene Durability-Fähigkeit überhaupt relevant? Nur noch für einen sehr schmalen Fall: sehr lange *Konversationspausen* (Chat wartet tagelang auf menschliche Rückmeldung). Auch der ist inzwischen erledigt, ohne dafür ein zweites Ausführungssystem zu holen – der Turn-Zustand liegt im Postgres-Checkpointer der Reasoning-Schicht und überlebt einen Pod-Neustart. Für alles Job-artige gilt unverändert: Temporal, ein System, fertig.
 
 ### 12.2 Lohnt sich das Postgres-Spiegeln des Wissensgraphen wirklich?
 
@@ -411,8 +428,8 @@ Sehr sinnvoll, und ein Fund, der gut in die bereits aufgebaute Wissensebene pass
 
 ## 15. Caveats
 
-- **Reifegrad**: MAF Agent Skills für Python ist erst seit sehr kurzer Zeit stabil (GA-Ankündigung nur wenige Tage/Wochen alt, Stand dieser Recherche); vor Produktivsetzung eigene Tests der `SkillsProvider`-API empfehlen, da sich Details noch ändern könnten.
-- **Kein offizieller MAF-Temporal-Adapter**: Die Integration ist DIY (Activities wrappen MAF-Tool-Aufrufe/HPC-Calls manuell) – mehr Eigenentwicklung als bei nativ unterstützten Frameworks (z. B. OpenAI Agents SDK), dafür maximale Kontrolle und Cloud-Unabhängigkeit gegenüber Azure Durable Functions.
-- **Zwei Infrastruktur-Systeme**: Temporal-Cluster zusätzlich zu Azure-Infrastruktur bedeutet mehr Betriebsaufwand als eine reine Azure-native Lösung (MAF Durable Extension). Die Entscheidung für Temporal lohnt sich vor allem, wenn Cloud-Unabhängigkeit oder bereits vorhandene Temporal-Expertise/Infrastruktur im Unternehmen eine Rolle spielen.
+- **Reifegrad der Reasoning-Schicht** – und dieser Caveat hat sich als der teuerste erwiesen. Er stand hier als Warnung vor einer frisch stabilisierten Skills-API; getroffen hat es dann andere Stellen desselben Frameworks (Streaming, Tool-Call-Identität, Loop-Deckel), und *zwei der vier Defekte waren lautlos* – der Harness funktionierte im Streaming-Betrieb nie, während jeder Unit-Test grün war. Die Lehre ist nicht "das Framework war das falsche", sondern **die Abnahme eines jungen Frameworks braucht einen Live-Lauf, keine Testsuite**. Sie gilt für das jetzige unverändert: LangChain 1.x hat offene Punkte beim dynamischen Hinzufügen von Tools und kennt keinen rein beobachtenden `before_tool`/`after_tool`-Hook.
+- **Kein Framework-Adapter zu Temporal**: Die Integration ist DIY (Activities wrappen Tool-Aufrufe/HPC-Calls manuell) – mehr Eigenentwicklung als bei nativ unterstützten Frameworks (z. B. OpenAI Agents SDK), dafür maximale Kontrolle und Cloud-Unabhängigkeit. Der Framework-Wechsel hat diese Naht nicht angefasst, was den Preis nachträglich rechtfertigt.
+- **Zwei Infrastruktur-Systeme**: ein Temporal-Cluster neben der übrigen Infrastruktur bedeutet mehr Betriebsaufwand als eine cloud-native Ein-System-Lösung. Die Entscheidung für Temporal lohnt sich vor allem, wenn Cloud-Unabhängigkeit oder bereits vorhandene Temporal-Expertise/Infrastruktur im Unternehmen eine Rolle spielen.
 - **Graph-Index ist Eigenentwicklung**: Es gibt keine "fertige" Standardlösung für Chemie-spezifische MD-Wissensgraphen; NetworkX + eigener Frontmatter-Parser ist pragmatisch, aber muss selbst gewartet werden (verglichen mit etablierten Tools wie Obsidian/Foam, die primär für menschliche Nutzung, nicht für programmatischen Graph-Zugriff gebaut sind).
-- Alle produktspezifischen Angaben (MAF-Versionen, Temporal-Integrationsmuster) spiegeln den Stand der Recherche zum Zeitpunkt dieser Antwort wider – bei einem sich schnell entwickelnden Feld vor Implementierung aktuelle Dokumentation gegenprüfen.
+- Alle produktspezifischen Angaben (Framework-Versionen, Temporal-Integrationsmuster) spiegeln den Stand der Recherche zum Zeitpunkt dieser Antwort wider – bei einem sich schnell entwickelnden Feld vor Implementierung aktuelle Dokumentation gegenprüfen.

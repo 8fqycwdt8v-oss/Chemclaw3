@@ -154,10 +154,10 @@ def referenced_note_types(text: str) -> set[str]:
 def referenced_tool_names(text: str) -> set[str]:
     """Every tool name `text` promises the model, in either form it can take.
 
-    Public because `tests/test_agent.py` asserts the same thing from the other direction — that
-    everything the prose names is actually *available* — and a second extractor there would let the
-    two disagree about what the prose even says. Allowlisted non-tools are excluded, so callers see
-    only names that are meant to resolve to a tool.
+    Public because `tests/test_langgraph_agent.py` asserts the same thing from the other
+    direction — that everything the prose names is actually *available* — and a second extractor
+    there would let the two disagree about what the prose even says. Allowlisted non-tools are
+    excluded, so callers see only names that are meant to resolve to a tool.
     """
     names = set(_CALL.findall(text)) | set(_BARE.findall(text))
     return names - _ALLOWED_NON_TOOLS

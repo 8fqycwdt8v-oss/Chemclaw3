@@ -8,6 +8,15 @@ CI runs exactly these targets, so a green `make` locally is a green CI.
 Temporal harnesses (their tests skip when the service is absent — that is why a local run reports
 skips and CI does not), `fixtures/` the sample data.
 
+Four modules hold shared **doubles**, and which one you want depends on how much of the engine you
+mean to exercise. `fakes.py` is the streamed-update double `runner_trace` is fed plus the ASGI
+client; `fakes_langgraph.py` is `ScriptedChatModel`, a model that replays a fixed script of tool
+calls and answers, for tests that drive a compiled graph directly; `fakes_turn.py` is
+`ScriptedTurn`, one turn's behaviour written once and injected through `run_turn`'s `graph_factory`
+— the seam a turn is driven through, so a test never needs a model credential; `legacy_rows.py`
+holds the stored-message payloads the previous framework wrote, frozen as literals because they are
+historical data a production table still contains.
+
 ## What is checked here that is not a behaviour
 
 A handful of these modules exist to catch **structural** drift — things that are true of the
@@ -31,7 +40,6 @@ repository rather than of a function, and that no type checker can see:
 | `test_metric_declarations.py` | every metric name a call site uses is declared |
 | `test_docstring_paths.py` | every module path a docstring or comment points at is a file that exists |
 | `test_prose_contract.py` | the agent's prose names only capability the agent actually has |
-| `test_harness_types.py` | the locally-declared MAF harness aliases still match MAF's, and no `src/` module imports its private loop module |
 
 ## A structural test must be shown failing
 

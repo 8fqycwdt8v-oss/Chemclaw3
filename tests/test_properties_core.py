@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.core.bounded import BoundedLru
@@ -198,7 +199,18 @@ _SLUGS = st.from_regex(r"\A[a-z0-9][a-z0-9._-]{0,20}\Z").filter(
 # are normalisations of characters Markdown does not distinguish, so neither is worth fixing — but
 # `render.py` stated the round trip as an unqualified equation, and it is not one. Its docstring
 # now says which two things it is up to.
-_BODIES = st.text(alphabet=st.characters(exclude_characters="\r"), max_size=120).map(str.strip)
+#
+# Surrogates are excluded for a different reason, and it is a rejection rather than a
+# normalisation: `Note._text_is_writable` refuses any string UTF-8 cannot encode, because a note is
+# stored as a UTF-8 file and an unpaired surrogate breaks every writer that touches it. This
+# generator produces *valid* notes to round-trip; `test_a_note_refuses_text_utf8_cannot_encode`
+# below is where the refusal itself is pinned. (It was this generator that found the gap — it drew
+# a body of `"\ud800"` and `Path.write_text` raised `UnicodeEncodeError` from inside the round
+# trip.)
+_TEXT = st.characters(exclude_categories=["Cs"])
+_BODIES = st.text(
+    alphabet=st.characters(exclude_characters="\r", exclude_categories=["Cs"]), max_size=120
+).map(str.strip)
 
 
 # A window that is never inverted, since `TemporalWindow` refuses those at construction and this
@@ -222,9 +234,9 @@ def _notes(draw: st.DrawFn) -> Note:
         id=draw(_SLUGS),
         type=draw(_SLUGS),
         body=draw(_BODIES),
-        tags=draw(st.lists(st.text(min_size=1, max_size=10), max_size=3)),
+        tags=draw(st.lists(st.text(alphabet=_TEXT, min_size=1, max_size=10), max_size=3)),
         created_by=draw(st.sampled_from(["human", "agent"])),
-        source=draw(st.none() | st.text(min_size=1, max_size=20)),
+        source=draw(st.none() | st.text(alphabet=_TEXT, min_size=1, max_size=20)),
         confidence=draw(st.none() | st.floats(min_value=0.0, max_value=1.0)),
         valid_from=valid_from,
         valid_to=valid_to,
@@ -253,6 +265,66 @@ def test_a_note_survives_the_write_read_round_trip(note: Note) -> None:
         path = Path(tmp) / "note.md"
         path.write_text(render_note(note), encoding="utf-8")
         assert parse_note(path) == note
+
+
+_SURROGATE = "\ud800"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("body", _SURROGATE),
+        ("source", _SURROGATE),
+        ("compound_smiles", _SURROGATE),
+        ("tags", [_SURROGATE]),
+    ],
+)
+def test_a_note_refuses_text_utf8_cannot_encode(field: str, value: object) -> None:
+    r"""Every *unconstrained* string a note carries is checked, not only the body.
+
+    An unpaired surrogate is reachable input rather than a curiosity: an agent-authored note
+    arrives as JSON, `json.loads('"\ud800"')` returns one without complaint, and the resulting
+    `str` then raises `UnicodeEncodeError` in whichever writer touches it first — the PR-gate's
+    `write_text`, the proposal store, or the index refresh. Refusing it at the schema boundary
+    turns three late crashes into one rejected proposal. Found by the round-trip generator above,
+    which drew a body of `"\ud800"`; the fixed examples had never supplied one.
+
+    Parametrized across the field *kinds* `_text_is_writable` walks — a plain string, two optional
+    ones, and a list — because the defect it replaces was exactly "one field was checked and its
+    neighbours were not".
+    """
+    with pytest.raises(ValidationError, match="UTF-8 cannot encode"):
+        Note(id="n", type="reaction", **{field: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"id": _SURROGATE}, id="id"),
+        pytest.param({"type": _SURROGATE}, id="type"),
+        pytest.param({"relations": [{"rel": "cites", "to": _SURROGATE}]}, id="relation"),
+        pytest.param({"calc_refs": [_SURROGATE]}, id="calc_refs"),
+        pytest.param({"artifact_refs": [_SURROGATE]}, id="artifact_refs"),
+    ],
+)
+def test_an_already_validated_field_is_refused_before_our_validator(
+    kwargs: dict[str, object],
+) -> None:
+    """The other half of the split `_text_is_writable` documents, pinned rather than assumed.
+
+    Two existing checks already refuse a surrogate before the model validator runs, which is why
+    it walks neither. Measured: pydantic's own constrained-string validation rejects `id`, `type`
+    and `Relation.rel`/`to` (all `min_length=1`) with `string_unicode`; and `_calc_ref_shape` /
+    `_artifact_ref_shape` reject the ref lists because a lone surrogate is not a calculation key.
+    Walking them anyway would be code that cannot run — which reads as coverage while proving
+    nothing.
+
+    This test is what makes that omission safe: it asserts the note is rejected without asserting
+    *who* rejects it, so if a pydantic upgrade or a loosened ref shape stops doing its half, the
+    gap fails here instead of reaching a writer.
+    """
+    with pytest.raises(ValidationError):
+        Note(**{"id": "n", "type": "reaction", **kwargs})  # type: ignore[arg-type]
 
 
 @given(

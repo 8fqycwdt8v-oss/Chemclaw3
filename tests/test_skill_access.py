@@ -12,35 +12,38 @@ Two seams, proven separately and then together:
   prose and only one of them leaves the shipped profiles usable.
 """
 
-import asyncio
-from typing import cast
-
-from agent_framework import FileSkillsSource, SkillsSourceContext
-from agent_framework._agents import SupportsAgentRun
-
 from chemclaw.agent.skill_access import (
-    EnabledSkillsSource,
-    RoleScopedSkillsSource,
-    ToolScopedSkillsSource,
+    EnabledSkills,
+    RoleScopedSkills,
+    ToolScopedSkills,
+    skill_permits,
 )
+from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+
+
+def _discovered() -> set[str]:
+    """Every skill name on disk, which is what the narrowings narrow.
+
+    `declared_tools`'s keys, because they *are* the discovered names — it walks the same tree the
+    skills backend walks, and reading them from the one first-party reader is what keeps the tests
+    from needing a second answer to "what skills exist".
+    """
+    return set(declared_tools(settings.skills_dirs))
 
 
 def _skill_names(
     gates: dict[str, list[str]] | None, roles: frozenset[str] | None = None
 ) -> set[str]:
     """Names advertised under a gate map, evaluated as a caller holding `roles` (None = no user)."""
-    source = RoleScopedSkillsSource(FileSkillsSource(settings.skills_dirs), gates)
-    # The file source ignores the context's agent; a cast keeps the stand-in strictly typed.
-    context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
+    narrowing = RoleScopedSkills(gates)
     token = set_current_identity("u-1", roles) if roles is not None else None
     try:
-        skills = asyncio.run(source.get_skills(context))
+        return {name for name in _discovered() if narrowing.permits(name)}
     finally:
         if token is not None:
             reset_current_identity(token)
-    return {skill.frontmatter.name for skill in skills}
 
 
 def test_no_gates_advertises_every_skill() -> None:
@@ -81,34 +84,43 @@ def test_no_shipped_skill_is_orphaned_on_the_full_surface() -> None:
     capability that was simply disabled. Asserted against the default profile, which narrows
     nothing, so any drop is real.
     """
-    from chemclaw.agent.chemclaw_agent import _capability_tools, skills_source
+    from chemclaw.agent import chemclaw_agent
     from chemclaw.agent.profiles import get_profile
 
     profile = get_profile(None)
-    source = skills_source(profile, _capability_tools(profile))
-    context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
-    advertised = {s.frontmatter.name for s in asyncio.run(source.get_skills(context))}
+    permits = skill_permits(
+        enabled=settings.skills_enabled_list,
+        declared=declared_tools([*settings.skills_dirs, *_bundle_dirs()]),
+        available=chemclaw_agent._advertised_names(
+            profile, chemclaw_agent._capability_tools(profile)
+        ),
+        gates=settings.skill_role_gates,
+    )
+    everything = _discovered() | _bundled_skill_names()
+    advertised = {name for name in everything if permits(name)}
 
     assert advertised == _skill_names({}) | _bundled_skill_names()
 
 
-def _bundled_skill_names() -> set[str]:
-    """The skills that ship inside an enabled connector bundle rather than in `skills/`."""
+def _bundle_dirs() -> list[str]:
+    """Each enabled connector bundle's own `skills/` directory."""
     from chemclaw.connectors.registry import skills_dirs
 
-    context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
-    source = FileSkillsSource(skills_dirs())
-    return {skill.frontmatter.name for skill in asyncio.run(source.get_skills(context))}
+    return list(skills_dirs())
+
+
+def _bundled_skill_names() -> set[str]:
+    """The skills that ship inside an enabled connector bundle rather than in `skills/`."""
+    return set(declared_tools(_bundle_dirs()))
 
 
 def _scoped_names(
     declared: dict[str, frozenset[str]], available: set[str], enabled: list[str] | None = None
 ) -> set[str]:
     """Names surviving capability scoping (optionally under an enable-list, to test composition)."""
-    inner = EnabledSkillsSource(FileSkillsSource(settings.skills_dirs), enabled)
-    source = ToolScopedSkillsSource(inner, declared, available)
-    context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
-    return {skill.frontmatter.name for skill in asyncio.run(source.get_skills(context))}
+    enablement = EnabledSkills(enabled)
+    scoping = ToolScopedSkills(declared, available)
+    return {name for name in _discovered() if enablement.permits(name) and scoping.permits(name)}
 
 
 def test_a_skill_declaring_no_tools_is_always_visible() -> None:
@@ -154,18 +166,16 @@ def test_the_narrowings_compose_and_only_ever_remove() -> None:
     advertised judgment and no combination of the three can widen it past what discovery found.
     """
     every = _skill_names({})
-    enabled = ["deep-research", "knowledge-graph-query"]
-    declared = {"deep-research": frozenset({"compute_dft_energy"})}
-    inner = EnabledSkillsSource(FileSkillsSource(settings.skills_dirs), enabled)
-    source = RoleScopedSkillsSource(
-        ToolScopedSkillsSource(inner, declared, {"predict_pka"}),
-        {"knowledge-graph-query": ["process-chemist"]},
+    permits = skill_permits(
+        enabled=["deep-research", "knowledge-graph-query"],
+        declared={"deep-research": frozenset({"compute_dft_energy"})},
+        available={"predict_pka"},
+        gates={"knowledge-graph-query": ["process-chemist"]},
     )
-    context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
 
     token = set_current_identity("u-1", frozenset({"process-chemist"}))
     try:
-        names = {skill.frontmatter.name for skill in asyncio.run(source.get_skills(context))}
+        names = {name for name in _discovered() if permits(name)}
     finally:
         reset_current_identity(token)
 

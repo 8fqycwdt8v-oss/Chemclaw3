@@ -79,6 +79,25 @@ class EvalSettings(BaseSettings):
     # comfortably: at 1024 the reply was truncated mid-JSON on long answers and the parse failure
     # was recorded as a verdict of `unserved`, mislabelling 65 of 190 probes in the first run.
     live_probe_judge_max_tokens: int = Field(default=4096, gt=0)
+    # The M12 re-validation suites (plan gate, durable-launcher ordering, team routing). Their own
+    # directory *under* the corpus, not beside it: `load_probes` globs one level, so a subdirectory
+    # is invisible to `make live-probes` — which is the point. These probes are scripted
+    # conversations and routing keys scored by their own suites, and folding them into the
+    # 190-question corpus would change what that run measures without changing what it reports.
+    live_m12_probe_dir: str = "data/evals/probes/m12"
+    # How long to wait for a turn's row to appear in `turn_costs`. The ledger's write is scheduled
+    # rather than awaited (D-130), so it lands shortly after the stream this harness reads closes;
+    # this bounds the wait rather than expressing an expectation about it. Exceeded, the turn is
+    # recorded as *unmeasured* rather than as free.
+    live_probe_cost_wait_seconds: float = Field(default=5.0, gt=0)
+    # Share of the team arm's delegated turns that must reach the specialist the routing corpus
+    # names, before a team is worth enabling. The M9 ADR shipped `agent_teams_enabled=false`
+    # precisely because a supervisor that mis-routes is *worse* than the single agent it replaces,
+    # so this is the number that decision was deferred to. 0.8 rather than 1.0: the five
+    # specialists partition the surface, but a question spanning two of them (a hazard question
+    # about a computed property) has a defensible second answer, and demanding perfection would
+    # grade the corpus's edges rather than the supervisor.
+    live_routing_accuracy_min: float = Field(default=0.8, ge=0.0, le=1.0)
     # Minimum share of the pinned hazard rules that must still fire on their reference molecules
     # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
     # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports

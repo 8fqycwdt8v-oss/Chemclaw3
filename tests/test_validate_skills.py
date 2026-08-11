@@ -161,7 +161,7 @@ def test_an_unknown_skill_role_gate_key_is_reported(
 ) -> None:
     """A typo'd gate key silently gates nothing — the one config map that fails open.
 
-    `RoleScopedSkillsSource` reads "absent from the map" as "ungated", so the restriction an
+    `RoleScopedSkills` reads "absent from the map" as "ungated", so the restriction an
     operator wrote is simply never applied and nothing at run time can say so. Its twin,
     `skills_enabled`, fails the other way (the skill vanishes, and someone notices), which is why
     only this one needed a test written against the *direction* of the failure.

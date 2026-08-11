@@ -192,7 +192,7 @@ def test_a_trail_spanning_the_migration_verifies_end_to_end() -> None:
     prev = old[-1].row_hash
     new: list[ChainRow] = []
     for i, event in enumerate([_event("predict_pka"), _event("gather_evidence")], start=3):
-        # v2 events carry the new fields; the chain continues from the v1 tip.
+        # Current-shape events carry the fields v1 lacked; the chain continues from the v1 tip.
         event = event.model_copy(update={"session_id": "s-1"})
         row_hash = chain_hash(prev, event)
         new.append(ChainRow(id=i, prev_hash=prev, row_hash=row_hash, event=event))
@@ -207,20 +207,199 @@ def test_tampering_with_a_v1_row_is_still_caught() -> None:
     assert any("tampered" in problem for problem in check_chain([rows[0], tampered]))
 
 
-def test_the_new_fields_are_covered_by_the_v2_hash() -> None:
+def test_the_new_fields_are_covered_by_the_current_hash() -> None:
     """`session_id` is audited data, not metadata — altering it must break the row's hash."""
     event = _event("find_notes").model_copy(update={"session_id": "s-1"})
     forged = event.model_copy(update={"session_id": "s-2"})
     assert chain_hash("", event) != chain_hash("", forged)
 
 
-def test_a_v1_row_rehashed_as_v2_does_not_verify() -> None:
+def test_a_v1_row_rehashed_under_the_current_shape_does_not_verify() -> None:
     """The versions are genuinely different hashes, so the switch is doing real work.
 
-    If v1 and v2 happened to agree, every test above would pass while the mechanism did nothing.
+    If v1 and the current shape happened to agree, every test above would pass while the mechanism
+    did nothing.
     """
     event = _event("find_notes")
     assert chain_hash("", event, version=1) != chain_hash("", event)
+
+
+# --- and again, for the second superseded shape ------------------------------------------
+# (D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor, invariant 3: `AuditEvent` grows an
+# `agent` column, so v2 becomes history the same way v1 did — and this is the first time the trail
+# holds *two* superseded shapes at once, which is what a single `version < CHAIN_VERSION` test
+# could not express.)
+
+
+# Reimplemented from the v2 source rather than called through `chain_hash`, for the same reason
+# `_V1_HASH_FIELDS` is: a helper built out of the function under test moves with it, so deleting the
+# freeze would leave both sides agreeing and these tests green while the mechanism did nothing.
+_V2_HASH_FIELDS = (
+    "correlation_id",
+    "session_id",
+    "purpose",
+    "actor",
+    "tool",
+    "arguments",
+    "outcome",
+    "detail",
+    "latency_ms",
+    "revision",
+)
+
+
+def _v2_chain_hash(prev_hash: str, event: AuditEvent) -> str:
+    """`chain_hash` exactly as it was between 026 and 044 — the bytes real v2 rows carry."""
+    payload = {field: getattr(event, field) for field in _V2_HASH_FIELDS}
+    return stable_hash({"prev": prev_hash, "event": payload}, chars=64)
+
+
+def test_the_versioned_hash_reproduces_the_v2_bytes_exactly() -> None:
+    """v2 must be the *v2* hash, not merely a distinct one — otherwise the middle of history fails.
+
+    The sharper form of the v1 assertion, because a naive freeze would hash a v2 row under v1's
+    eight fields: it would still be "a different hash", it would still not equal the current shape,
+    and every v2 row in the database would report as tampered with.
+    """
+    event = _event("find_notes").model_copy(
+        update={"session_id": "s-1", "purpose": "why", "agent": "computation"}
+    )
+    assert chain_hash("abc", event, version=2) == _v2_chain_hash("abc", event)
+    assert chain_hash("abc", event, version=2) != chain_hash("abc", event, version=1)
+
+
+def _linked_v2(events: list[AuditEvent], *, start: int = 1, prev: str = "") -> list[ChainRow]:
+    """Rows as the v2 writer produced them: hashed over the ten fields it knew about."""
+    rows: list[ChainRow] = []
+    for i, event in enumerate(events, start=start):
+        row_hash = _v2_chain_hash(prev, event)
+        rows.append(ChainRow(id=i, prev_hash=prev, row_hash=row_hash, event=event, chain_version=2))
+        prev = row_hash
+    return rows
+
+
+def test_a_v2_row_still_verifies_after_the_event_grew() -> None:
+    """The property the whole freeze exists for, at the shape most deployments' rows are in.
+
+    Every row written since migration 026 is v2. Adding `agent` changes what `model_dump()` returns,
+    so without the per-version freeze the first deployment to run migration 044 would report its
+    entire recent trail as tampered with — and "was it altered, or did we change the schema?" is
+    exactly the question an auditor asks and would no longer be able to answer.
+    """
+    rows = _linked_v2(
+        [
+            _event("find_notes").model_copy(update={"session_id": "s-1"}),
+            _event("predict_pka").model_copy(update={"session_id": "s-1"}),
+        ]
+    )
+    assert check_chain(rows) == []
+
+
+def test_a_trail_spanning_every_shape_verifies_end_to_end() -> None:
+    """A long-lived deployment's table holds all three: pre-026 rows, v2 rows, and v3 rows."""
+    v1 = _linked_v1([_event("find_notes"), _event("expand_note")])
+    v2 = _linked_v2(
+        [_event("predict_pka").model_copy(update={"session_id": "s-1"})],
+        start=3,
+        prev=v1[-1].row_hash,
+    )
+    prev = v2[-1].row_hash
+    v3: list[ChainRow] = []
+    for i, tool in enumerate(["gather_evidence", "screen_hazards"], start=4):
+        event = _event(tool).model_copy(update={"session_id": "s-1", "agent": "computation"})
+        row_hash = chain_hash(prev, event)
+        v3.append(ChainRow(id=i, prev_hash=prev, row_hash=row_hash, event=event))
+        prev = row_hash
+    assert check_chain([*v1, *v2, *v3]) == []
+
+
+def test_tampering_with_a_v2_row_is_still_caught() -> None:
+    """The freeze must not become a way to launder a modified row: v2 rows stay tamper-evident."""
+    rows = _linked_v2([_event("find_notes"), _event("predict_pka")])
+    tampered = rows[1]._replace(event=_event("predict_pka", actor="attacker"))
+    assert any("tampered" in problem for problem in check_chain([rows[0], tampered]))
+
+
+def test_the_specialist_is_covered_by_the_current_hash() -> None:
+    """`agent` is audited data, not metadata: rewriting which specialist ran a call must be caught.
+
+    A provenance field outside the hash is a provenance field anyone can edit, which would make the
+    new column worth less than not having it — the trail would name a specialist and be unable to
+    say the name had not been changed afterwards.
+    """
+    event = _event("find_notes").model_copy(update={"agent": "computation"})
+    forged = event.model_copy(update={"agent": "evidence"})
+    assert chain_hash("", event) != chain_hash("", forged)
+
+
+def test_a_v2_row_rehashed_under_the_current_shape_does_not_verify() -> None:
+    """v2 and v3 are genuinely different hashes, so the new freeze entry is doing real work."""
+    event = _event("find_notes").model_copy(update={"session_id": "s-1"})
+    assert chain_hash("", event, version=2) != chain_hash("", event)
+
+
+# The v2 writer's own INSERT, reproduced verbatim: the column list `agent/audit_store.py` used
+# before migration 044, so the row a real deployment already has is written the way it was written
+# — new column defaulted by the database, `chain_version` stamped 2, `row_hash` computed by
+# `_v2_chain_hash`. Nothing here goes through the current writer, which is the point.
+_V2_INSERT = """
+    INSERT INTO audit_events
+        (correlation_id, session_id, purpose, actor, tool, arguments, outcome, detail, latency_ms,
+         revision, prev_hash, row_hash, chain_version)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 2)
+"""
+
+
+def test_a_real_v2_row_in_the_table_still_verifies_beside_new_ones() -> None:
+    """The migration's acceptance test: yesterday's rows verify today, in the database.
+
+    The offline checks above prove the freeze; this proves the *reader* — `_chain_row` maps
+    `_SELECT_PAGE`'s columns by position, and adding `agent` to that projection shifted every index
+    after it. A silent off-by-one there would read `prev_hash` as an event field and report a clean
+    trail as tampered with, which is the failure this whole mechanism exists to prevent, arriving
+    through the one path no offline test touches.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        # As in `test_postgres_sink_writes_a_verifiable_chain`: `verify_chain` reads the whole
+        # table, so this needs one to itself — the `chemclaw_test` schema (tests/pg.py).
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE audit_events RESTART IDENTITY")
+            await conn.commit()
+
+            old = _event("find_notes").model_copy(update={"session_id": "s-1", "purpose": ""})
+            await conn.execute(
+                _V2_INSERT,
+                (
+                    old.correlation_id,
+                    old.session_id,
+                    old.purpose,
+                    old.actor,
+                    old.tool,
+                    old.arguments,
+                    old.outcome,
+                    old.detail,
+                    old.latency_ms,
+                    old.revision,
+                    "",  # the genesis row
+                    _v2_chain_hash("", old),
+                ),
+            )
+            await conn.commit()
+
+        assert await verify_chain() == [], "a pre-existing v2 row stopped verifying"
+
+        # And the current writer chains onto it: one table, two shapes, one intact chain.
+        sink = PostgresAuditSink()
+        await sink.record(_event("predict_pka").model_copy(update={"agent": "computation"}))
+        assert await verify_chain() == []
+
+        async with await connect(settings.postgres_dsn) as conn:
+            cursor = await conn.execute("SELECT chain_version, agent FROM audit_events ORDER BY id")
+            assert await cursor.fetchall() == [(2, ""), (3, "computation")]
+
+    asyncio.run(_run())
 
 
 def test_paging_the_walk_does_not_change_the_verdict() -> None:

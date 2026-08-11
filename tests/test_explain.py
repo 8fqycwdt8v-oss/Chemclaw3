@@ -13,7 +13,11 @@ because the Postgres-backed tests skip in an offline sandbox and a reconstructio
 exercised in CI is one nobody has actually read the output of.
 """
 
+from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
+
+from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
 from chemclaw.cli.explain import Job, ToolCall, _render, _speaker
+from tests.legacy_rows import legacy_text
 
 _SESSION = "s-42"
 
@@ -67,10 +71,10 @@ def test_a_turn_whose_words_were_compacted_away_is_still_shown() -> None:
 
     The limit belongs to D-2026-07-31-the-audit-chain-is-versioned.
 
-    `session_store._compact` rewrites message rows, retention prunes them, and `rollback_to` deletes
-    a turn's rows on disconnect — so the trail can outlive the conversation it points at. Dropping
-    such a turn would hide exactly the evidence an auditor needs; saying the transcript is gone is
-    the truthful rendering.
+    Retention prunes message rows by age, and a turn that ran its tools and then failed never
+    writes a transcript row at all — so the trail can outlive the conversation it points at.
+    Dropping such a turn would hide exactly the evidence an auditor needs; saying the transcript
+    is gone is the truthful rendering.
     """
     report = _report(order=[], calls={"c-3": [ToolCall("expand_note", "ok", "", 5.0, "u-1", "")]})
     assert "expand_note" in report
@@ -105,13 +109,32 @@ def test_pre_join_rows_are_labelled_rather_than_silently_grouped() -> None:
     assert "unattributed" in report
 
 
+def test_both_stored_shapes_are_read_because_the_table_holds_both() -> None:
+    """The defect this pins: the CLI read the legacy shape only, so every current row was blank.
+
+    `session_messages` holds two serializations — the framework layer 1 was first built on wrote
+    one, LangChain writes the other, and M6's conversion pass is resumable — so an audit
+    reconstruction that knows one of them silently shows an empty conversation for exactly the
+    sessions still in use. Asserted from both sides, because reading only the *new* shape would be
+    the same bug pointed at the archive.
+    """
+    assert _speaker(legacy_text("user", "hello")) == ("user", "hello")
+    assert _speaker(message_to_dict(HumanMessage(content="hello")), LANGCHAIN_SHAPE) == (
+        "user",
+        "hello",
+    )
+    assert _speaker(message_to_dict(AIMessage(content="hi")), LANGCHAIN_SHAPE) == (
+        "assistant",
+        "hi",
+    )
+
+
 def test_a_message_shape_this_tool_did_not_write_does_not_crash_it() -> None:
-    """`Message.to_dict()` is upstream's shape; a reconstruction must degrade, not fail.
+    """A stored shape is upstream's to change; a reconstruction must degrade, not fail.
 
     The row is still evidence that something was said, and reporting it as unparsed is more useful
     than a traceback that hides every other turn in the session.
     """
-    assert _speaker({"role": "user", "contents": [{"text": "hello"}]}) == ("user", "hello")
-    assert _speaker({"role": "assistant", "text": "hi"}) == ("assistant", "hi")
     assert _speaker("not a dict at all")[0] == "unknown"
-    assert _speaker({"role": "user", "contents": [{"image": "x"}]}) == ("user", "")
+    # A legacy row carrying no prose at all — an image part, say — has a role and nothing to say.
+    assert _speaker({"role": "user", "contents": [{"type": "text", "text": ""}]}) == ("user", "")

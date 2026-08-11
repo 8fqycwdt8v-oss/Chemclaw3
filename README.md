@@ -1,6 +1,6 @@
 # Chemclaw3
 
-AI agent for pharmaceutical/chemical process R&D: MAF conversation orchestration,
+AI agent for pharmaceutical/chemical process R&D: LangGraph conversation orchestration,
 Temporal durable jobs, Agent Skills, and a PR-gated Markdown knowledge graph.
 
 **`ARCHITECTURE.md` is the map** — the four layers and what every directory in this

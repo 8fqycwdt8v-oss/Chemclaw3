@@ -1,0 +1,45 @@
+# M12 · durable-launcher ordering — `capability_degraded` must precede the first token.
+#
+# **The claim under test is an ordering, not a count.** `evals/live.py` has recorded the event on
+# every outcome since the durable probes landed, and the corpus report prints how many turns carried
+# one. That answers a weaker question than the one REV-6 settled: the event exists so the model
+# plans against the surface it will actually get, which is only true if it arrives *before the first
+# token*. An announcement that lands after the answer has begun is, to the model, indistinguishable
+# from no announcement at all — and nothing checked the position, so a refactor moving the yield a
+# few lines down would have left every existing signal green.
+#
+# **Run it with the durable broker deliberately stopped** (`make live-down` on the workers, or
+# simply never starting `make live-infra`'s Temporal). The front door probes Temporal per turn and
+# announces `durable-jobs (Temporal)` when it cannot reach it, so an unreachable broker is the
+# condition, not a fault to work around.
+#
+# **`[[d-collide]]` is a mock selector and is inert to a real model.** `cli/mock_llm.py` picks a
+# behaviour by the `[[name]]` marker in the turn's message, so this one question drives a real
+# durable launcher with **zero LLM calls** when the lane points at the mock
+# (`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`) —
+# which is what makes this suite runnable without a model credential at all. Against a real model
+# the marker is four characters of noise in a question that already asks for the same calculation,
+# and the same assertions hold. Carrying the selector inside the message rather than beside it is
+# `cli/live_storm.storm`'s rule, for its reason: two places that can disagree about which scenario
+# a turn ran is how a harness comes to grade the wrong thing.
+
+probes:
+  - id: dg-01
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Run the ammonia synthesis reaction energy for me — N#N plus three H2 to two NH3, quick level,
+      symmetry numbers 2 for N#N, 2 for H2 and 3 for ammonia. [[d-collide]]
+    expects_tools: [compute_reaction_energy]
+    forbids_claims:
+      - "a reaction energy the calculation did not return"
+      - "that a job is running when the durable backend was unreachable"
+      - "that the calculation can be retrieved later from a job id that was never created"
+    direction: >-
+      With no broker the launch cannot succeed, and the whole point is that the turn knows this
+      before it starts writing. A good answer says the durable backend is down, names what that
+      costs, and does not invent a number or a job id. What the suite scores is narrower and
+      mechanical: that the outage was announced at all, that it was announced before the first
+      token, and that the turn actually reached the durable launcher rather than answering from
+      memory — a turn that never called the tool would satisfy the ordering check vacuously.

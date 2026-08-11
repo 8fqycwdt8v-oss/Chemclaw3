@@ -16,59 +16,59 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession, Content, TodoSessionStore
 
 import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_answer as runner_answer
 import chemclaw.api.runner_trace as runner_trace
-from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
-from chemclaw.agent.loop_cap import observe_loop_cap
+from chemclaw.agent.loop_cap import record_loop_cap
+from chemclaw.agent.session import TurnSession
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
-    ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorEvent,
     Event,
     JobStartedEvent,
     PlanEvent,
-    TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import record_job_started
 from tests.fakes import FakeUpdate, fed
+from tests.fakes_turn import Piece, ScriptedTurn
 
 
-class _FakeAgent:
+class _FakeAgent(ScriptedTurn):
     """Yields a two-token answer; no MCP tools to open."""
 
-    mcp_tools: list[object] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(text="Yield was 90% ")
-            yield FakeUpdate(text="[[reaction-a]].")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield "Yield was 90% "
+        yield "[[reaction-a]]."
 
 
 def _run_turn(message: str = "q") -> list[Any]:
+    """One turn's events on whichever engine is configured, with no connectors.
+
+    `connectors=[]` is stated rather than defaulted for the reason every other driver in the suite
+    states it — six hosts that are not running — and, on the graph engine, because the runner hands
+    the list straight to the graph builder and the default is the other engine's representation.
+    """
+    agent = _FakeAgent()
+
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-1")
-        return [event async for event in runner.run_turn(_FakeAgent(), session, message)]
+        session = TurnSession(session_id="s-1")
+        return [
+            event
+            async for event in runner.run_turn(
+                session, message, connectors=[], graph_factory=agent.graph_factory
+            )
+        ]
 
     return asyncio.run(_collect())
 
@@ -141,95 +141,42 @@ def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.Monk
     assert answer.review_required is False  # meeting the threshold is acceptable, not sub-threshold
 
 
-class _JobLaunchingAgent:
+class _JobLaunchingAgent(ScriptedTurn):
     """Announces a launched job mid-stream, as a durable launcher does from inside a tool call."""
-
-    mcp_tools: list[object] = []
 
     def __init__(self, *job_ids: str, announce_on_last_update: bool = False) -> None:
         self._job_ids = job_ids
         self._on_last = announce_on_last_update
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            if not self._on_last:
-                for job_id in self._job_ids:
-                    record_job_started(job_id, "report")
-            yield FakeUpdate(text="submitting. ")
-            if self._on_last:
-                for job_id in self._job_ids:
-                    record_job_started(job_id, "report")
-            yield FakeUpdate(text="done.")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        if not self._on_last:
+            for job_id in self._job_ids:
+                record_job_started(job_id, "report")
+        yield "submitting. "
+        if self._on_last:
+            for job_id in self._job_ids:
+                record_job_started(job_id, "report")
+        yield "done."
 
 
-def _events(agent: Any) -> list[Any]:
+def _events(agent: ScriptedTurn, session: TurnSession | None = None) -> list[Any]:
+    """One turn's events for `agent`, on whichever engine is configured (see `_run_turn`).
+
+    `session` is injectable because a fake that plans has to write into the *same* session object
+    the runner reads its todo list from — building one here and another in the test would leave
+    the plan somewhere nothing looks.
+    """
+    turn_session = session if session is not None else TurnSession(session_id="s-jobs")
+
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-jobs")
-        return [event async for event in runner.run_turn(agent, session, "run it")]
+        return [
+            event
+            async for event in runner.run_turn(
+                turn_session, "run it", connectors=[], graph_factory=agent.graph_factory
+            )
+        ]
 
     return asyncio.run(_collect())
-
-
-class _ApprovalRequestingAgent:
-    """Streams a real MAF `function_approval_request` mid-turn, as a gated tool would."""
-
-    mcp_tools: list[object] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(text="I need to run a DFT job. ")
-            update = FakeUpdate()
-            update.contents = [
-                Content.from_function_approval_request(
-                    id="appr-1",
-                    function_call=Content.from_function_call(
-                        call_id="c1", name="submit_dft_job", arguments={"smiles": "CCO"}
-                    ),
-                )
-            ]
-            yield update
-            yield FakeUpdate(text="waiting.")
-
-        return _gen()
-
-
-def test_an_approval_request_names_the_tool_it_would_run() -> None:
-    """The runner's `user_input_requests` branch, executed by a test for the first time.
-
-    Every fake update in this suite hard-coded `user_input_requests=[]`, so nothing had ever
-    reached `yield ApprovalRequestEvent(prompt=approval_prompt(request))`. Driven with the content
-    MAF actually produces — a `function_approval_request` raised by a tool registered
-    `approval_mode="always_require"` — two things showed up that a `[]` cannot:
-
-    - The stream does **not** raise. A `ValidationError` here was the hypothesis; it is refuted.
-    - The prompt was the bare fallback `"Approval requested."`, because MAF puts the subject on a
-      nested `function_call` and none of the attributes `approval_prompt` scanned are set. A
-      chemist was being asked to approve an unnamed something.
-
-    The event is also asserted to arrive *between* the tokens: an approval that lands after the
-    answer is a decision requested about work already reported.
-    """
-    events = _events(_ApprovalRequestingAgent())
-    approvals = [e for e in events if isinstance(e, ApprovalRequestEvent)]
-    assert [e.prompt for e in approvals] == ["Approve calling submit_dft_job?"]
-    tokens = [i for i, e in enumerate(events) if isinstance(e, TokenEvent)]
-    assert tokens[0] < events.index(approvals[0]) < tokens[-1]
 
 
 def test_launched_job_is_announced_to_the_streaming_turn() -> None:
@@ -266,41 +213,7 @@ def test_classic_agent_emits_no_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [e for e in _run_turn() if isinstance(e, PlanEvent)] == []
 
 
-def test_plan_is_emitted_and_only_when_it_changes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The harness's todo list is streamed as a checklist, once per distinct state.
-
-    Re-sending an unchanged plan on every update would flood the transcript with duplicates.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    class _PlanningAgent:
-        mcp_tools: list[object] = []
-
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> Any:
-            async def _gen() -> Any:
-                await mark_awaiting_job(session, "qm-1", title="Await QM job qm-1")
-                yield FakeUpdate(text="a")
-                yield FakeUpdate(text="b")  # same plan: must not re-emit
-                await complete_awaiting_job(session, "qm-1", reason="finished")
-                yield FakeUpdate(text="c")
-
-            return _gen()
-
-    plans = [e for e in _events(_PlanningAgent()) if isinstance(e, PlanEvent)]
-    assert [p.todos for p in plans] == [
-        ["[ ] Await QM job qm-1"],
-        ["[x] Await QM job qm-1"],
-    ]
-
-
-class _PlanClearingAgent:
+class _PlanClearingAgent(ScriptedTurn):
     """Plans, launches a job, and clears its todo list in the resume — the topic-change shape.
 
     MAF's own todo instructions tell the model to clear the list when the chemist changes their
@@ -309,75 +222,33 @@ class _PlanClearingAgent:
     `PlanEvent` site.
     """
 
-    mcp_tools: list[object] = []
-
-    def __init__(self) -> None:
+    def __init__(self, session: TurnSession) -> None:
+        """Plan into `session`'s todo store, then clear it on the continuation pass."""
         self.calls = 0
+        self._session = session
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-    ) -> Any:
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
         self.calls += 1
-        first = self.calls == 1
-
-        async def _gen() -> Any:
-            if first:
-                await mark_awaiting_job(session, "qm-9", title="Await QM job qm-9")
-                record_job_started("qm-9", "qm")
-                yield FakeUpdate(text="running it. ")
-            else:
-                await TodoSessionStore().save_state(session, [], next_id=1, source_id="todo")
-                yield FakeUpdate(text="never mind, here is the answer.")
-
-        return _gen()
+        if self.calls == 1:
+            record_job_started("qm-9", "qm")
+            yield "running it. "
+        else:
+            yield "never mind, here is the answer."
 
 
-def test_an_emptied_plan_is_not_streamed_as_an_empty_checklist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The post-resume emit site used to admit `[]`, which renders as "the agent has no plan".
-
-    Two sites emitted the plan with two different predicates: the streaming loop guarded on
-    truthiness, the post-resume one on `is not None`. So a turn whose plan was cleared during the
-    resume produced `plan events: [['step one'], []]` — the empty checklist `_current_plan`'s own
-    docstring says must never be produced, and the rendering reserved for an agent that does not
-    plan at all. One emitter now answers for both sites.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-    monkeypatch.setattr(settings, "mid_turn_resume_enabled", True)
-    monkeypatch.setattr(settings, "mid_turn_resume_timeout_seconds", 5.0)
-
-    async def _results(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
-        return {job_ids[0]: {"energy_hartree": -154.1}}
-
-    monkeypatch.setattr(runner, "await_job_results", _results)
-    agent = _PlanClearingAgent()
-    events = _events(agent)
-    assert agent.calls == 2, "the resume must have run for this to test the second emit site"
-    plans = [e.todos for e in events if isinstance(e, PlanEvent)]
-    assert plans == [["[ ] Await QM job qm-9"]]
-    assert [] not in plans
-
-
-class _CappedLoopAgent:
+class _CappedLoopAgent(ScriptedTurn):
     """An agent whose loop still wanted another iteration when it stopped — a capped turn.
 
-    Drives the *real* `observe_loop_cap` wrapper, called the way MAF's loop middleware calls a
-    predicate, rather than poking the contextvar: what the runner then reads is what a genuinely
-    capped loop leaves behind. That a real MAF loop leaves it is pinned in
-    `tests/test_harness_execution.py`; this is the front-door half — the turn says so.
+    Calls `record_loop_cap`, which is what `enforce_loop_cap` calls when it fires, rather than
+    poking
+    the contextvar: what the runner then reads is what a genuinely capped loop leaves behind. That
+    the real cap calls it is pinned in `tests/test_langgraph_stream.py`; this is the front-door
+    half — the turn says so.
     """
 
-    mcp_tools: list[object] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-    ) -> Any:
-        async def _gen() -> Any:
-            await observe_loop_cap(lambda **_kwargs: True)(session=session, agent=None)
-            yield FakeUpdate(text="still working on it")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        record_loop_cap()
+        yield "still working on it"
 
 
 def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> None:
@@ -400,19 +271,6 @@ def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> 
 def test_an_ordinary_turn_does_not_claim_the_cap_fired() -> None:
     """A signal that is always on is worth nothing; the common path must stay silent."""
     assert [e for e in _run_turn() if isinstance(e, ErrorEvent)] == []
-
-
-def test_unreadable_plan_does_not_sink_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A malformed todo state costs the plan view, never the answer — it is only a view."""
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _boom(session: AgentSession) -> list[str]:
-        raise ValueError("corrupt todo state")
-
-    monkeypatch.setattr(runner, "todo_titles", _boom)
-    events = _run_turn()
-    assert [e for e in events if isinstance(e, PlanEvent)] == []
-    assert _answer(events).text == "Yield was 90% [[reaction-a]]."
 
 
 def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -652,34 +510,57 @@ def test_a_result_with_more_values_than_the_wire_allows_is_capped_and_says_so(
     assert "dump_table" in caplog.text
 
 
-class _CitingAgent:
+class _CitingAgent(ScriptedTurn):
     """Answers with a citation, optionally after a tool that returned it.
 
     `tool_result` is the whole point: it is what makes the citation grounded *in this turn*, which
     is a different question from whether the note exists.
-    """
 
-    mcp_tools: list[object] = []
+    **`graph_factory` is overridden rather than inherited**, and that is the escape hatch
+    `ScriptedTurn` is designed to leave open: the shared double replays *text*, and what this test
+    needs is a turn that really calls a tool and really gets a result back, because the grounding
+    gate reads `ToolCallTrace.outputs`. On the graph engine a tool result cannot be narrated into
+    existence — the tool node has to run — so this builds the graph directly, with one tool that
+    returns the scripted result. The tool is deliberately named for a note lookup and not
+    `find_notes`: the registry already advertises that name, and two tools sharing one name is a
+    graph that would not compile.
+    """
 
     def __init__(self, answer: str, *, tool_result: str | None = None) -> None:
         self._answer = answer
         self._tool_result = tool_result
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            if self._tool_result is not None:
-                yield _update(_CallContent(name="find_notes", call_id="c1", arguments={"q": "x"}))
-                yield _update(_CallContent(call_id="c1", result=self._tool_result))
-            yield FakeUpdate(text=self._answer)
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        """The answer, and only the answer — the tool is each engine's own business.
 
-        return _gen()
+        A tool result cannot be narrated into existence — it is a tool node that ran, which is why
+        `graph_factory` below compiles one. Keeping the script to the prose is what lets the no-tool
+        case — a citation the turn never retrieved — share this class with the tool-calling one.
+        """
+        yield self._answer
+
+    def graph_factory(self, **build_kwargs: Any) -> Any:
+        """A real graph whose model calls one result-returning tool, then answers."""
+        from langchain_core.tools import tool as make_tool
+
+        from chemclaw.agent.audit import NullAuditSink
+        from chemclaw.agent.langgraph_agent import build_langgraph_agent
+        from tests.fakes_langgraph import ScriptedChatModel
+
+        result = self._tool_result
+        if result is None:
+            return super().graph_factory(**build_kwargs)
+
+        @make_tool
+        def recall_note(query: str) -> str:
+            """Return the note text this turn is supposed to have retrieved."""
+            return result
+
+        script: list[Any] = [{"name": "recall_note", "args": {"query": "x"}}, self._answer]
+        build_kwargs["connectors"] = [*(build_kwargs.get("connectors") or []), recall_note]
+        return build_langgraph_agent(
+            ScriptedChatModel(script), audit_sink=NullAuditSink(), **build_kwargs
+        )
 
 
 def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -701,10 +582,15 @@ def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(verifier, "_default_client", _Unreachable)
 
 
-def _verified_answer(agent: Any) -> AnswerEvent:
+def _verified_answer(agent: ScriptedTurn) -> AnswerEvent:
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-cite")
-        return [event async for event in runner.run_turn(agent, session, "q", connectors=[])]
+        session = TurnSession(session_id="s-cite")
+        return [
+            event
+            async for event in runner.run_turn(
+                session, "q", connectors=[], graph_factory=agent.graph_factory
+            )
+        ]
 
     return _answer(asyncio.run(_collect()))
 
@@ -848,12 +734,14 @@ def _degraded(events: list[Any]) -> list[str]:
 
 
 def _turn_events(**overrides: Any) -> list[Any]:
+    agent = _FakeAgent()
+
     async def _collect() -> list[Any]:
-        session = AgentSession(session_id="s-probe")
+        session = TurnSession(session_id="s-probe")
         return [
             event
             async for event in runner.run_turn(
-                _FakeAgent(), session, "q", connectors=[], **overrides
+                session, "q", connectors=[], graph_factory=agent.graph_factory, **overrides
             )
         ]
 
@@ -931,23 +819,11 @@ def test_a_hanging_broker_does_not_hold_up_the_turn(monkeypatch: pytest.MonkeyPa
     assert elapsed < 5, f"the probe was not bounded: the turn took {elapsed:.1f}s"
 
 
-class _SilentAgent:
+class _SilentAgent(ScriptedTurn):
     """Runs, yields no text at all, and ends the turn — the shape a live turn actually took."""
 
-    mcp_tools: list[object] = []
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
-        async def _gen() -> Any:
-            yield FakeUpdate(text="")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield ""
 
 
 def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> None:

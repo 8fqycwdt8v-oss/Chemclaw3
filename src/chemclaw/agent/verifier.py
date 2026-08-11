@@ -280,9 +280,9 @@ def _default_client() -> Any:
     building a fresh client per turn would redo TLS/transport setup and drop connection keep-alive
     on the answer hot path for no benefit.
     """
-    from chemclaw.agent.llm_provider import build_chat_client
+    from chemclaw.agent.llm_provider import build_chat_model
 
-    return build_chat_client("verifier")
+    return build_chat_model("verifier")
 
 
 async def verify_answer(
@@ -309,7 +309,7 @@ async def verify_answer(
     try:
         # **Building the client is inside the guard, not above it.** It was above, and a
         # deployment that flipped `verifier_enabled` without a reachable `"verifier"` route
-        # therefore got *no* verification rather than the offline one: `build_chat_client` raised,
+        # therefore got *no* verification rather than the offline one: `build_chat_model` raised,
         # the exception left this function, and the runner's own guard turned it into an unscored
         # answer. The documented promise — degrade to the citation gate, never drop verification —
         # covered a judge that answers badly but not a judge that could not be constructed, which
@@ -323,8 +323,11 @@ async def verify_answer(
         # committed its exchange. On expiry the `TimeoutError` lands in the degrade path below,
         # so a slow judge costs the score, never the answer.
         async with asyncio.timeout(settings.verifier_timeout_seconds):
-            response = await client.get_response(
-                _verifier_prompt(answer, evidence), response_format=VerificationResult
+            # `with_structured_output` rather than a free-text parse: the judge's whole output is a
+            # `VerificationResult`, and letting the provider enforce that is what makes the failure
+            # mode "no structured answer" (handled below) instead of "prose that almost parses".
+            response = await client.with_structured_output(VerificationResult).ainvoke(
+                _verifier_prompt(answer, evidence)
             )
     except Exception:
         # An unreachable/failing judge endpoint must not weaken verification below the offline
@@ -335,11 +338,10 @@ async def verify_answer(
         )
         record_metric(lambda metrics: metrics.increment("chemclaw_verifier_degraded_total"))
         return _deterministic_result(answer, evidence)
-    value = getattr(response, "value", None)
-    if isinstance(value, VerificationResult):
+    if isinstance(response, VerificationResult):
         # The judge does not author this field — it is a property of *which check ran*, not of what
         # the check concluded, and a model that emitted it would be asserting its own reliability.
-        return value.model_copy(update={"verified_by": "judge"})
+        return response.model_copy(update={"verified_by": "judge"})
     # The model returned nothing parseable: fall back to the deterministic gate so a flaky verifier
     # degrades to the citation check rather than dropping verification entirely.
     record_metric(lambda metrics: metrics.increment("chemclaw_verifier_degraded_total"))

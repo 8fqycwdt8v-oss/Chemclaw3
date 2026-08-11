@@ -107,8 +107,8 @@ class HttpEndpoint(BaseModel):
     `health_url` is optional and only used by the startup probe: a connector we wrote exposes
     `/healthz`, while a third-party MCP server may expose nothing, and reporting such a
     connector as "unprobed" is honest where guessing a path would produce a false alarm.
-    `request_timeout` (whole seconds, as MAF types it) keeps an unreachable host from hanging a
-    turn; `None` defers to MAF's own default rather than inventing a number here.
+    `request_timeout` (whole seconds) keeps an unreachable host from hanging a turn; `None` defers
+    to the MCP client's own default rather than inventing a number here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

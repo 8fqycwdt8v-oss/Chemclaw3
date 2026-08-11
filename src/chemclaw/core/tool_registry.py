@@ -28,8 +28,9 @@ function — a dependency on orchestration to name a callable.
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-# A capability tool is any callable MAF can advertise; MAF derives its schema from the signature
-# and docstring, so the registry stores the function unchanged (the decorator is identity).
+# A capability tool is any callable the agent can advertise; the framework derives its schema from
+# the signature and docstring, so the registry stores the function unchanged (the decorator is
+# identity).
 CapabilityTool = Callable[..., Any]
 _ToolT = TypeVar("_ToolT", bound=CapabilityTool)
 
@@ -40,10 +41,10 @@ _REGISTRY: dict[str, CapabilityTool] = {}
 def register_tool(fn: CapabilityTool) -> None:
     """Register one in-process capability tool under its function name.
 
-    The key is `fn.__name__` because that is exactly the name MAF advertises to the model —
+    The key is `fn.__name__` because that is exactly the name advertised to the model —
     deriving it here rather than passing it separately removes a whole drift class (see the
-    name-drift guard in `tests/test_agent.py`). A duplicate name is a programming error, as in
-    `chemclaw.evals.metric.register`.
+    name-drift guard in `tests/test_langgraph_agent.py`). A duplicate name is a programming
+    error, as in `chemclaw.evals.metric.register`.
     """
     name = fn.__name__
     if name in _REGISTRY:
@@ -54,7 +55,7 @@ def register_tool(fn: CapabilityTool) -> None:
 def tool(fn: _ToolT) -> _ToolT:
     """Decorator form of `register_tool` — the idiom a tool uses at its definition site.
 
-    Returns the function unchanged so the decorated object is exactly what MAF wraps as a tool.
+    Returns the function unchanged so the decorated object is exactly what gets wrapped as a tool.
     """
     register_tool(fn)
     return fn

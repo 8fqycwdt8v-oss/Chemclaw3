@@ -34,28 +34,20 @@ off, which is the worst outcome available. The line is drawn at state change
 session can research and propose and can do nothing else.
 """
 
-import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
-from agent_framework import AgentSession, FunctionInvocationContext, function_middleware
+from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
-from chemclaw.agent.harness_mode import (
-    EXECUTE_MODE,
-    PLAN_ONLY,
-    approvable_plan_hash,
-    autonomy_for,
-    harness_enabled_for,
-    revoke_execute,
-    session_mode,
-)
-from chemclaw.agent.harness_types import ShouldContinueCallable, ShouldContinueResult
-from chemclaw.agent.live_session import get_current_session
 from chemclaw.agent.plan_approval_store import plan_approval_store
+from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.core.config import settings
+from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.session_context import get_current_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -72,147 +64,121 @@ class PlanNotApprovedError(AuthorizationError):
     """
 
 
-async def plan_is_approved(session: AgentSession) -> bool:
-    """Whether a human has approved the plan this session is proposing *right now*, for this turn.
+# The identity of "no plan". A constant rather than a fact about any session, which is precisely
+# why `plan_identity` refuses to return it: a decision recorded against it would say "someone
+# approved the empty plan", and every session proposes that whenever it holds no todos. Exported
+# for the display route, which has to show *an* identity even when there is nothing to decide on.
+#
+# It lived in `harness_mode` while the mode did. It belongs beside the function that computes plan
+# identities, because the two are one rule read from either end.
+EMPTY_PLAN_HASH = stable_hash([])
 
-    Two conditions, and only the first is obvious:
 
-    0. there *is* a plan — a session proposing no work items has an identity nobody can approve
-       (`harness_mode.approvable_plan_hash`);
-    1. the store's *effective* verdict for that identity is a yes — which folds in "and it has not
-       already been spent", because consumption is recorded on the decision itself
-       (`plan_approvals.consumed_at`) rather than in session state. That fold is what makes this
-       function two lines instead of three, and it is the point of D-167's last fix: the spent-ness
-       of an approval used to live where a pod roll could drop it while the approval survived.
+def plan_identity(items: Sequence[str]) -> str | None:
+    """The hash a human decision is recorded against, or `None` when there is no plan.
 
-    Deliberately re-read per call rather than cached on the session: the question is about the plan
-    as it stands at this instant, and the whole defect being fixed is an authorization that outlived
-    the thing it authorized.
+    The decision, framework-free, so both engines bind an approval to the same identity. A second
+    hashing rule would be an approval that is valid under one engine and unrecognised under the
+    other — for a *durable* row that outlives the turn that wrote it, which is worse than a
+    divergence in wording.
+
+    `None` for an empty plan is D-167's first fix, and it is a rule rather than a guard: hashing
+    "nothing" yields a constant every session in every deployment also proposes, so a decision
+    recorded against it approves the empty plan globally rather than this session's work. An
+    identity nobody can distinguish is not something a person can meaningfully decide about.
     """
-    plan_hash = await approvable_plan_hash(session)
+    return stable_hash(list(items)) if items else None
+
+
+async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
+    """Whether a live, unspent human approval exists for this plan — the shared lookup.
+
+    Folds "and it has not already been spent" in, because consumption is recorded on the decision
+    itself (`plan_approvals.consumed_at`) rather than in session state. That fold is D-167's last
+    fix: the spent-ness of an approval used to live where a pod roll could drop it while the
+    approval survived.
+    """
     if plan_hash is None:
         return False
-    decision = await plan_approval_store().decision(session.session_id, plan_hash)
+    decision = await plan_approval_store().decision(session_id, plan_hash)
     return bool(decision and decision[0])
 
 
-@function_middleware
-async def enforce_plan_approval(
-    context: FunctionInvocationContext,
-    call_next: Callable[[], Awaitable[None]],
-) -> None:
-    """Refuse a state-changing tool whose session has no approval for its current plan.
-
-    Attach *inside* the audit middleware so a refusal is recorded, and inside
-    `surface_authorization_denials` so the model is told why in a sentence a chemist can act on —
-    the same layering `enforce_tool_authz` uses, for the same two reasons.
-
-    A session with no plan at all is a session with no approved plan, so the first state-changing
-    call in a fresh `plan_only` session is refused. That is the documented behaviour rather than an
-    edge case: the agent is supposed to propose before it acts.
-
-    Raises:
-        PlanNotApprovedError: When the harness's plan gate is in play and the session's current
-            plan has no recorded approval. The tool body never runs.
-    """
-    session = context.session or get_current_session()
-    # No session means no harness, so there is no plan to approve and no autonomous loop to gate —
-    # a template activity's tool step, or a one-shot CLI call. Not a hole: those paths still pass
-    # through `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
-    if session is None:
-        await call_next()
-        return
-    if context.function.name not in side_effecting_tools():
-        await call_next()
-        return
-    if await plan_is_approved(session):
-        await call_next()
-        return
-    # Demote before refusing, so the mode `GET /sessions/{id}/plan` reports stops disagreeing with
-    # what the session is actually allowed to do — a surface showing `execute` for a session that
-    # cannot execute is how this defect stayed invisible. Guarded only to avoid writing the
-    # external-change marker `set_agent_mode` leaves when there is no change to announce.
-    if session_mode(session) == EXECUTE_MODE:
-        revoke_execute(session)
-    raise PlanNotApprovedError(
-        f"{context.function.name} changes stored data or starts work, and the plan it is part of "
+def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
+    """The refusal an unapproved state-changing call earns — one sentence, both engines."""
+    return PlanNotApprovedError(
+        f"{tool_name} changes stored data or starts work, and the plan it is part of "
         "has not been approved yet; review the plan and approve it, then ask again"
     )
 
 
-def approved_todos_remaining(
-    inner: ShouldContinueCallable,
-) -> Callable[..., Awaitable[ShouldContinueResult]]:
-    """Wrap MAF's loop predicate so an unapproved session does not iterate autonomously.
+def gated_call(tool_name: str) -> bool:
+    """Whether this tool is one the plan gate governs at all."""
+    return tool_name in side_effecting_tools()
 
-    Returns an always-async predicate, which `ShouldContinueCallable` accepts (MAF awaits whatever
-    it gets) and which is stricter than declaring the union back — a caller that awaits the result
-    is then correct by type rather than by inspection.
 
-    The tool gate above is what stops an unapproved plan *doing* anything, and this is not a second
-    line of defence for the same thing — it stops a different waste. Without it an unapproved
-    session still loops: `todos_remaining` sees open todos, the model is re-invoked, every write it
-    reaches for is refused, and it spins until `harness_max_loop_iterations`. Burning a runaway
-    guard's whole budget to accomplish nothing is not a safe failure, it is an expensive one.
+# The autonomy setting that asks for the approval-first posture — the value `harness_autonomy`
+# takes when a human must approve the plan before anything executes. A constant because two
+# decisions compare against it (whether the tool gate is attached at all, and whether a finished
+# turn spends its approval), and a deployment that ran one of the two would be one that cannot do
+# anything or one that cannot be stopped.
+PLAN_ONLY = "plan_only"
 
-    Ordering matters twice. The inner predicate runs first, so a session that would not loop anyway
-    never pays for an approval lookup. And its *feedback* is preserved when it says continue — MAF
-    lets a predicate return `(bool, str | None)` and routes that string to `next_message`, so
-    dropping it would silently disable `todos_remaining_message`'s "these todos are still open"
-    reminder and leave the loop re-invoking the model with nothing new.
+
+def harness_enabled_for(profile: AgentProfile) -> bool:
+    """Whether the harness runs for `profile`: its own override, or the deployment's default."""
+    return bool(
+        settings.harness_enabled if profile.harness_enabled is None else profile.harness_enabled
+    )
+
+
+def autonomy_for(profile: AgentProfile) -> str:
+    """The autonomy `profile` runs under: its own override, or the deployment's default.
+
+    **One resolver, because every decision that reads it must agree.** The
+    `X if profile.X is None else profile.X` rule was written out three times — for whether to wire
+    the harness at all, for the starting mode and the loop predicate, and for whether the tool gate
+    is attached. That triplication cost a live defect once: `chemclaw.api.runner` read `settings`
+    directly instead, so a profile narrowed to `plan_only` under a global `execute` got the gate
+    attached and its approval never spent, and one decision authorized every later turn
+    (`gate_applies` records it). A rule spelled out in three places is a rule three places can
+    disagree about.
+
+    These two lived in `harness_mode.py` while that module existed to retract MAF's `mode_set`
+    tool from the model and hold the plan/execute mode beside the approval. Both are gone — nothing
+    advertises such a tool here, and the mode was a second answer to "may this session act" that
+    could and did disagree with the approval (DARK-1). What was left was these predicates, which
+    belong beside the gate that is their only reason to exist.
     """
-
-    async def _should_continue(**kwargs: Any) -> ShouldContinueResult:
-        # A predicate may be sync or async (MAF's own contract), so accept either rather than
-        # importing its private `_maybe_await` — three lines is cheaper than a dependency on an
-        # underscore-prefixed helper that upstream is free to rename.
-        raw = inner(**kwargs)
-        keep_going = await raw if inspect.isawaitable(raw) else raw
-        # Normalized exactly as MAF's own `_should_continue` does, so the tuple form keeps working.
-        proceed, feedback = (
-            (bool(keep_going[0]), keep_going[1])
-            if isinstance(keep_going, tuple)
-            else (bool(keep_going), None)
-        )
-        if not proceed:
-            return (False, feedback)
-        session = kwargs.get("session")
-        if not isinstance(session, AgentSession):
-            return (False, feedback)
-        if await plan_is_approved(session):
-            return (True, feedback)
-        return (
-            False,
-            "The plan has not been approved, so autonomous execution stops here. Present the plan "
-            "and wait for a human decision.",
-        )
-
-    return _should_continue
+    return str(
+        settings.harness_autonomy if profile.harness_autonomy is None else profile.harness_autonomy
+    )
 
 
 def gate_applies(profile: AgentProfile) -> bool:
     """Whether the plan gate governs an agent built for `profile` — the one predicate, twice used.
 
-    `build_agent` decides from it whether to attach the middleware, and `chemclaw.api.runner`
+    `build_langgraph_agent` decides from it whether to attach the middleware, and
+    `chemclaw.api.runner`
     decides from it whether a finished turn spends its approval. **They have to be the same
     question.** Reading `settings` directly in the runner was a real gap: a profile setting
     `harness_autonomy="plan_only"` under a global `execute` got the gate attached and its approval
     never spent, so one decision authorized every later turn — DARK-1 again, for exactly the
     sessions a deployment had narrowed on purpose.
 
-    The two dimensions are resolved by `chemclaw.agent.harness_mode`, which is also where
-    `build_agent` reads them — so "does the gate apply" and "does the harness start in plan mode"
-    can no longer be answered by two copies of the same fallback rule.
+    The two dimensions are resolved just above, which is also where `build_langgraph_agent` reads
+    them — so "does the gate apply" and "does the harness attach its todo list" can no longer be
+    answered by two copies of the same fallback rule.
     """
     return harness_enabled_for(profile) and autonomy_for(profile) == PLAN_ONLY
 
 
-async def consume_turn_approval(session: AgentSession) -> None:
+async def consume_turn_approval(session_id: str) -> None:
     """Spend the approval this turn ran under, so the next request needs its own.
 
     Called once when a turn finishes, from `chemclaw.api.runner.run_turn`. At the *end* rather than
-    the start because the harness loop is what executes an approved plan and it runs inside a
-    single `agent.run`: consuming on entry would refuse the plan's own second iteration.
+    the start because the graph's own loop is what executes an approved plan and it runs inside a
+    single turn: consuming on entry would refuse the plan's own second iteration.
 
     **Not from the runner's `finally`, and that is not a style preference.** `run_turn` is an async
     generator whose `finally` also runs on the disconnect path — which production reaches through
@@ -221,9 +187,8 @@ async def consume_turn_approval(session: AgentSession) -> None:
     metrics, `end_turn`, and all five context-var resets. Leaking the ambient identity of a
     disconnected turn into the next turn on that worker is a worse defect than the one this
     function exists to fix. So it is called on the two paths where awaiting is safe, and a turn torn
-    down *before* it answered deliberately does not spend the approval — that path rolls
-    `session.state` back to its pre-turn snapshot, which is where the consumed marker lives, so a
-    turn that was undone has not used its authorization.
+    down *before* it answered deliberately does not spend the approval: a turn that was undone has
+    not used its authorization.
 
     A turn torn down *after* it answered is not rolled back at all — its answer is committed
     history, and deleting that was a real defect (`chemclaw.api.runner`) — so the cancellation can
@@ -241,23 +206,66 @@ async def consume_turn_approval(session: AgentSession) -> None:
     an approval.
     """
     try:
-        plan_hash = await approvable_plan_hash(session)
+        plan_hash = plan_identity(await session_todos(session_id))
         if plan_hash is None:
             return
-        decision = await plan_approval_store().decision(session.session_id, plan_hash)
+        decision = await plan_approval_store().decision(session_id, plan_hash)
         if decision and decision[0]:
-            await plan_approval_store().consume(session.session_id, plan_hash)
-            # The mode represented the authorization, so it ends with it. Without this the surface
-            # keeps reporting `execute` for a session whose every state-changing call would now be
-            # refused — the same disagreement between the displayed mode and the enforced one that
-            # let the original defect go unnoticed.
-            if session_mode(session) == EXECUTE_MODE:
-                revoke_execute(session)
+            await plan_approval_store().consume(session_id, plan_hash)
+            # Nothing else to un-set. There used to be a session *mode* representing the same
+            # authorization, which had to be revoked here or the surface kept reporting `execute`
+            # for a session whose every state-changing call would now be refused — the same
+            # disagreement between the displayed state and the enforced one that let DARK-1 go
+            # unnoticed. The mode is gone; the route derives what it displays from this row.
     except Exception:  # noqa: BLE001 - a turn must not fail on its way out
         degraded(
             logger,
             "plan_approval",
             "could not spend the plan approval for session %s; the gate still refuses an "
             "unreadable decision, so this costs an extra approval rather than authorizing one",
-            session.session_id,
+            session_id,
         )
+
+
+# --- the LangGraph wiring ------------------------------------------------------------------------
+
+
+@wrap_tool_call
+async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """Refuse a state-changing tool whose session has no approval for its current plan.
+
+    The LangGraph twin of `enforce_plan_approval`, over the same identity (`plan_identity`), the
+    same durable store (`approval_stands`) and the same sentence (`plan_approval_refusal`). An
+    approval is a *durable row* that outlives the turn that wrote it, so the two engines agreeing on
+    what it identifies matters more here than anywhere else in the migration: a hash computed
+    differently would silently invalidate every decision a chemist has already made.
+
+    **The plan is read from graph state, not from an ambient session object.** `TodoListMiddleware`
+    owns `todos` and the `write_todos` tool that maintains them, and `request.state` is this turn's
+    view of it — so the gate asks the plan as it stands at this instant, which is the property
+    `plan_is_approved`'s docstring insists on and had to arrange deliberately under MAF.
+
+    **`awaiting_jobs` needs no exclusion here.** Under MAF a todo waiting on a durable job was
+    marked by prefixing its description, and the identity had to filter those out or an approved
+    plan revoked its own approval the moment it launched a job. Here they are a separate state
+    field (`chemclaw.agent.state.ChemclawState`), so they are not in `todos` and there is nothing to
+    filter.
+
+    Raises:
+        PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;
+            the audit middleware records the refusal and `surface_authorization_denials` relays
+            the reason to the model.
+    """
+    name = request.tool_call["name"]
+    if not gated_call(name):
+        return await handler(request)
+    session_id = get_current_session_id()
+    # No session means no plan to approve and no autonomous loop to gate — a template activity's
+    # tool step, or a one-shot CLI call. Not a hole: those paths still pass through
+    # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
+    if not session_id:
+        return await handler(request)
+    todos = (request.state or {}).get("todos") or []
+    if await approval_stands(session_id, plan_identity([todo["content"] for todo in todos])):
+        return await handler(request)
+    raise plan_approval_refusal(name)

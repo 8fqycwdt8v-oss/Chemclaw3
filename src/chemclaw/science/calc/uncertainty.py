@@ -79,7 +79,7 @@ class CalculationDomainError(ChemclawError):
     catch one — the inheritance runs the wrong way for that. The consequence was measured in the
     2026-08-02 live run: `predict_pka`'s carefully worded aliphatic-amine explanation, which names
     the Spearman -0.17 correlation and tells the chemist to measure it instead, reached the model
-    as MAF's opaque "Error: Function failed." The answer then guessed the reason and presented the
+    as an opaque "Error: Function failed." The answer then guessed the reason and presented the
     guess as a fact about system behaviour, which on the next substrate would be wrong.
 
     A message raised here is shown to the model verbatim, so it carries the same caller-safe

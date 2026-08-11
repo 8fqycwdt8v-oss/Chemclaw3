@@ -257,11 +257,23 @@ two headers are not redundant: the correlation id is what `audit_events` is keye
 no collector at all; `traceparent` is what makes a distributed trace a tree.
 
 These three paragraphs used to read "Spans cover a turn and a job; dashboards track loop iterations,
-tool latency, and job status." None of that existed — the only spans were MAF's own model calls,
-and there are no dashboards in this repo to track anything
+tool latency, and job status." None of that existed — the only spans were the agent framework's own
+model calls, and there are no dashboards in this repo to track anything
 (D-2026-08-01-a-turn-you-can-follow-across-a-process). What is *still* absent is named rather than
 implied: no span around a durable job (it spans two processes and a Temporal boundary, so it needs
 the workflow to carry the context), and no FastAPI/httpx/Temporal auto-instrumentation.
+
+**The pipeline is first-party now, and one thing went with the framework.** `configure_telemetry`
+builds the `TracerProvider`, the `BatchSpanProcessor` and the OTLP span exporter itself rather than
+calling `agent_framework.observability.configure_otel_providers`, so removing that package cannot
+silently stop tracing — spans carry `service.name=chemclaw` and `service.version=<revision>`, and
+`OTEL_SERVICE_NAME` splits the processes into separate services if you want that. What is genuinely
+lost, and is deliberately not faked: the framework's per-model `gen_ai.client.token.usage` histogram
+stops being exported the moment this pipeline replaces its own (a span pipeline exports no metrics),
+and its model-call spans stop being produced when the package itself goes. Nothing in
+`langchain`/`langgraph`/`langsmith` emits either (`docs/guides/runbook.md` § OpenTelemetry).
+Metrics and logs are unchanged and are deliberately not exported over OTLP — `/metrics` is scraped
+per pod and logs are JSON on stdout.
 
 **Metrics come from every process, not only the front door.** `templates/servicemonitor.yaml`
 collects the Services (the front door and each connector's MCP server, by their `http` port name);

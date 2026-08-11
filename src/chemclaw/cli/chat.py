@@ -38,8 +38,9 @@ from typing import Any
 
 from chemclaw.agent.audit import AuditSink
 from chemclaw.agent.audit_store import PostgresAuditSink
-from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
-from chemclaw.connectors.registry import open_reachable
+from chemclaw.agent.chemclaw_agent import connector_specs
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
@@ -82,14 +83,19 @@ def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[
     return actor or settings.cli_admin_actor, frozenset(settings.cli_admin_roles)
 
 
-def _build_cli_agent(args: argparse.Namespace, actor: str) -> Any:
-    """Build the agent for a CLI session from parsed args and the resolved build-time actor.
+def _build_cli_agent(args: argparse.Namespace, actor: str, connectors: Sequence[Any]) -> Any:
+    """Compile the graph for a CLI session from parsed args, the actor, and the open connectors.
 
     `actor` is only the build-time audit fallback (used if a code path runs outside the ambient
     identity `_run` stamps for the session, e.g. a background task); the ambient identity is what
-    audit/authz/skill-scoping actually read at call time. The default chat client reads
-    `ANTHROPIC_API_KEY` at construction and fails with a clear message if it is missing (D-037),
-    so a credential problem surfaces here, before the prompt.
+    audit/authz/skill-scoping actually read at call time. The chat model reads its credential at
+    construction and fails with a clear message if it is missing (D-037), so a credential problem
+    surfaces here, before the prompt.
+
+    **Takes the connectors, because a graph binds its tools at construction.** MAF appended them
+    per `agent.run`, so the agent could be built before they were open; a compiled graph cannot.
+    That is why `_run` now opens the connectors first and builds second — the ordering is the
+    engine's, and it applies here exactly as it does to a front-door turn.
     """
     # `--audit-postgres` now only *forces* the durable sink; omitting it no longer means log-only,
     # because `agents.audit.default_audit_sink` already gives a Postgres-configured deployment the
@@ -97,28 +103,42 @@ def _build_cli_agent(args: argparse.Namespace, actor: str) -> Any:
     # for the calculation cache who wants the audit chain written too, without switching
     # `session_store` for a terminal session.
     sink: AuditSink | None = PostgresAuditSink() if args.audit_postgres else None
-    return build_agent(actor=actor, audit_sink=sink)
+    return build_langgraph_agent(actor=actor, audit_sink=sink, connectors=list(connectors))
 
 
-async def converse(
-    agent: Any, prompt: str, connectors: Sequence[Any] = (), session: Any = None
-) -> str:
-    """Run one turn against the agent on `session` and return its text answer.
+async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -> str:
+    """Run one turn on the graph under `session_id` and return its text answer.
 
-    Reusing one `session` across successive `converse` calls is what makes the CLI a multi-turn
-    conversation; the session's history provider accumulates the thread. The connectors must
-    already be connected (see `_run`); they are passed per call because `Agent.run` is where
-    run-scoped tools attach.
+    Reusing one `session_id` across successive calls is what makes the CLI a multi-turn
+    conversation: it is the checkpointer's `thread_id`, so each turn continues the thread the last
+    one left. Under the CLI's in-memory checkpointer that lasts as long as the process, which is
+    the right lifetime for a terminal session.
 
-    **The session is not optional under `harness_enabled`** (D-152). The harness middleware stack
-    that flag installs raises `ToolApprovalMiddleware requires an AgentSession` on a session-less
-    `agent.run`, so the CLI — which used to rely on the agent's implicit thread — could not take a
-    single turn under the configuration the shipped Helm chart sets. The front door always passed a
-    session and never met this. It defaults to None only so the parameter stays additive for
-    callers that build their own; `_run` always supplies one.
+    **The `session=` parameter is gone, and so is the reason it was mandatory.** Under MAF the
+    harness middleware raised "ToolApprovalMiddleware requires an AgentSession" on a session-less
+    `agent.run`, so the CLI could not take a single turn under the configuration the shipped Helm
+    chart sets (D-152). A thread id is a string in a config dict; there is nothing to be absent.
     """
-    response = await agent.run(prompt, tools=list(connectors) or None, session=session)
-    return str(response.text)
+    result = await agent.ainvoke(
+        {"messages": [("user", prompt)]},
+        {"configurable": {"thread_id": session_id}},
+    )
+    return _answer_text(result)
+
+
+def _answer_text(result: Any) -> str:
+    """The final assistant text out of a completed graph turn."""
+    messages = result.get("messages") or []
+    if not messages:
+        return ""
+    content = messages[-1].content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content)
 
 
 async def _run(args: argparse.Namespace) -> None:
@@ -136,42 +156,38 @@ async def _run(args: argparse.Namespace) -> None:
     actor, roles = resolve_identity(admin=args.admin, actor=args.actor)
     identity_token = set_current_identity(actor, roles)
     try:
-        agent = _build_cli_agent(args, actor)
-        # One session for the whole CLI run — a CLI run *is* one conversation. It is also required,
-        # not merely tidy: the harness middleware refuses a session-less `agent.run` (D-152).
-        session = agent.create_session(session_id=_CLI_SESSION_ID)
-        # The default profile's connectors, matching `_build_cli_agent`, which builds the default
-        # agent. Per-profile CLI selection waits for the front door to grow it (plan Stage D).
-        connectors = connector_tools()
         async with contextlib.AsyncExitStack() as stack:
+            # Opened *before* the graph is built, because the graph binds its tools at
+            # construction — see `_build_cli_agent`. The default profile's connectors, matching the
+            # default agent; per-profile CLI selection waits for the front door to grow it
+            # (plan Stage D).
+            connectors, unreachable = await open_connector_specs(stack, connector_specs())
             # To stderr, with the answers on stdout: a piped `--message` run stays parseable while
             # a person at a terminal still learns the answer was assembled without those tools.
             # The docstring above has always claimed this warning; until REV-6 it was not emitted.
-            for name in await open_reachable(stack, connectors):
+            for name in unreachable:
                 print(
                     f"warning: connector {name!r} is unreachable; its tools are unavailable",
                     file=sys.stderr,
                 )
+            agent = _build_cli_agent(args, actor, connectors)
             if args.message is not None:
-                print((await converse(agent, args.message, connectors, session)).strip())
+                print((await converse(agent, args.message)).strip())
             else:
-                await _repl(agent, connectors, session, actor)
+                await _repl(agent, actor)
     finally:
         reset_current_identity(identity_token)
 
 
-async def _repl(agent: Any, connectors: Sequence[Any], session: Any, actor: str) -> None:
+async def _repl(agent: Any, actor: str) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
 
-    Every argument is required, unlike `converse`'s two, whose defaults keep that function additive
-    for a caller building its own agent. This one is private with a single caller that passes all
-    four, so the defaults were unreachable — and one of them was worse than dead: `actor: str = ""`
-    flows into `plan_approval_store().record(...)`, whose entire purpose is that the GxP record
-    names the identity that approved. An unreachable default that would write an anonymous approval
-    is not a safe fallback; it is a fallback that must never be taken, which is what "required"
-    says.
+    Both arguments are required. `actor` in particular must never default: it flows into
+    `plan_approval_store().record(...)`, whose entire purpose is that the GxP record names the
+    identity that approved, and a default that would write an anonymous approval is not a safe
+    fallback but one that must never be taken.
 
     Two lines are commands rather than questions, `/plan` and `/approve`, and they exist because
     the plan gate is now enforced rather than merely recorded (D-167). Under `harness_enabled` with
@@ -198,14 +214,14 @@ async def _repl(agent: Any, connectors: Sequence[Any], session: Any, actor: str)
             return
         try:
             if prompt.lower() in _PLAN_COMMANDS:
-                print(await _plan_command(prompt, session, actor), file=sys.stderr)
+                print(await _plan_command(prompt, actor), file=sys.stderr)
                 continue
-            print((await converse(agent, prompt, connectors, session)).strip())
+            print((await converse(agent, prompt)).strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 
 
-async def _plan_command(prompt: str, session: Any, actor: str) -> str:
+async def _plan_command(prompt: str, actor: str) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
 
     `/approve` binds to the plan as it stands *now*, exactly as
@@ -213,34 +229,29 @@ async def _plan_command(prompt: str, session: Any, actor: str) -> str:
     no window in which a plan could change between being shown and being approved, because the
     person reading it and the person approving it are the same terminal.
 
-    **Both commands ask `approvable_plan_hash`, not `current_plan_hash`, and that is the whole
-    difference.** `/approve` used to guard on `todo_titles` and record against `current_plan_hash`,
-    which are two different questions: `todo_titles` counts the `awaiting-job:` bookkeeping rows the
-    launcher writes, and `current_plan_hash` falls back to `EMPTY_PLAN_HASH` for a session with no
-    *work items*. So a session whose todo list held nothing but bookkeeping passed the guard and
-    recorded an approval against the empty-plan constant — an identity every session in every
-    deployment shares, which the gate then refuses. Harmless, and it told the person their plan was
-    approved when nothing had been. The route learned to refuse that; this is the same refusal here,
-    from the same function, so the two front doors cannot drift again.
+    **Both commands read the plan the same way the route does** — `plan_state.session_todos` off
+    the checkpointer, hashed by `plan_gate.plan_identity` — which is what keeps the two front doors
+    from drifting. They used to ask two different questions: `/approve` guarded on `todo_titles`
+    and recorded against `current_plan_hash`, and those disagreed about the `awaiting-job:`
+    bookkeeping rows, so a session whose list held nothing else passed the guard and recorded an
+    approval against the empty-plan constant — an identity every deployment shares, which the gate
+    then refuses. It told the person their plan was approved when nothing had been.
     """
-    from chemclaw.agent.harness_mode import approvable_plan_hash, grant_execute, session_mode
-    from chemclaw.agent.harness_todo import todo_titles
     from chemclaw.agent.plan_approval_store import plan_approval_store
+    from chemclaw.agent.plan_gate import plan_identity
+    from chemclaw.agent.plan_state import session_todos
 
-    if session is None:
-        return "no session; plan commands need a chat session"
-    plan_hash = await approvable_plan_hash(session)
+    plan = await session_todos(_CLI_SESSION_ID)
+    plan_hash = plan_identity(plan)
     if prompt.lower() == "/plan":
-        # Displayed, so it shows whatever the chemist is looking at — the checkboxes and the
-        # bookkeeping rows included. Only the *decision* is restricted to a real plan.
-        lines = await todo_titles(session) or ["(no plan yet)"]
+        lines = plan or ["(no plan yet)"]
         if plan_hash is None:
-            return "\n".join([*lines, f"[no approvable plan, mode={session_mode(session)}]"])
-        decision = await plan_approval_store().decision(session.session_id, plan_hash)
+            return "\n".join([*lines, "[no approvable plan]"])
+        decision = await plan_approval_store().decision(_CLI_SESSION_ID, plan_hash)
         # The store's verdict is already the effective one — a spent approval reports as not
         # approved — so this line says what the gate would do, not merely what was once recorded.
         verdict = "approved" if decision and decision[0] else "not approved"
-        return "\n".join([*lines, f"[{plan_hash} — {verdict}, mode={session_mode(session)}]"])
+        return "\n".join([*lines, f"[{plan_hash} — {verdict}]"])
     if plan_hash is None:
         return "there is no plan to approve yet; ask a question first"
     # `actor`, not `settings.cli_admin_actor`. The session runs under whatever `--actor` resolved
@@ -248,8 +259,10 @@ async def _plan_command(prompt: str, session: Any, actor: str) -> str:
     # made the durable approval record, which is the artifact of the "AI proposes, human signs off"
     # line, name an identity that took no action and disagree with the audit rows for its own
     # session.
-    await plan_approval_store().record(session.session_id, plan_hash, actor, True)
-    grant_execute(session)
+    await plan_approval_store().record(_CLI_SESSION_ID, plan_hash, actor, True)
+    # Recording is the whole grant. It used to also call `grant_execute` to flip MAF's session
+    # mode — a second piece of state saying the same thing on a different lifetime, which is what
+    # let a displayed mode outlive the approval it came from.
     return f"approved {plan_hash}; the session may now execute"
 
 

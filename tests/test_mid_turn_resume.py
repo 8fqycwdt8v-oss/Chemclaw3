@@ -12,55 +12,56 @@ error — a database blip must not cost a chemist an answer the model already pr
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
 
 import pytest
-from agent_framework import AgentSession
 
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import record_job_started
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Piece, ScriptedTurn
 from tests.pg import migrated_db_or_skip
 
 
-class _JobLaunchingAgent:
+class _JobLaunchingAgent(ScriptedTurn):
     """Streams a first pass that launches a job, then a continuation pass."""
-
-    mcp_tools: list[Any] = []
 
     def __init__(self, job_id: str) -> None:
         self._job_id = job_id
         self.messages: list[str] = []
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> Any:
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
         self.messages.append(message)
-        first = len(self.messages) == 1
-        job_id = self._job_id
-
-        async def _gen() -> Any:
-            if first:
-                record_job_started(job_id, "qm")
-                yield FakeUpdate(text="starting")
-            else:
-                yield FakeUpdate(text=" the energy is -154.1")
-
-        return _gen()
+        if len(self.messages) == 1:
+            record_job_started(self._job_id, "qm")
+            yield "starting"
+        else:
+            yield " the energy is -154.1"
 
 
-def _events(agent: Any) -> list[Any]:
+def _events(agent: ScriptedTurn) -> list[Any]:
+    """One turn's events, driven on whichever engine is configured.
+
+    `connectors=[]` is stated for the reason it is stated in `tests/test_turn_signals.py` and one
+    more: on the graph engine the runner hands this list to the graph builder, and the default is
+    the other engine's connector representation.
+    """
+
     async def _collect() -> list[Any]:
-        return [e async for e in run_turn(agent, AgentSession(session_id="s1"), "compute it")]
+        return [
+            e
+            async for e in run_turn(
+                TurnSession(session_id="s1"),
+                "compute it",
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            )
+        ]
 
     return asyncio.run(_collect())
 
@@ -146,25 +147,57 @@ def test_a_turn_that_starts_no_job_never_waits(
 
     monkeypatch.setattr("chemclaw.api.runner.await_job_results", _spy)
 
-    class _PlainAgent:
-        mcp_tools: list[Any] = []
-        messages: list[str] = []
+    class _PlainAgent(ScriptedTurn):
+        """A turn that answers without launching anything."""
 
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> Any:
-            async def _gen() -> Any:
-                yield FakeUpdate(text="an answer")
-
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            yield "an answer"
 
     _events(_PlainAgent())
     assert called == []
+
+
+def test_the_resume_continues_the_same_graph_with_the_job_results(
+    monkeypatch: pytest.MonkeyPatch, enabled: None
+) -> None:
+    """A turn that launched a job answers once, from both halves — the whole of AGT-2.
+
+    The continuation is a second `graph_events` over the *same* graph and the same `thread_id`,
+    which is why the assertion is two model calls and one answer carrying text from each: a
+    continuation that started a fresh graph would answer without having seen the first half, and a
+    continuation that never ran would answer without the number.
+
+    It was written as `test_the_graph_resume_never_reaches_for_the_turns_agent`, pinning that
+    `run_turn` did not call `.run` on the `None` the front door passed in the agent slot — a real
+    crash under `CHEMCLAW_MID_TURN_RESUME_ENABLED=true`, covered by nothing, on an
+    operator-settable knob. That slot no longer exists, so the defect has no surface and only the
+    behaviour it protected is left to pin.
+    """
+
+    async def _fake_wait(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
+        return {job_ids[0]: {"energy_hartree": -154.1}}
+
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _fake_wait)
+    agent = _JobLaunchingAgent("qm-1")
+
+    async def _collect() -> list[Any]:
+        return [
+            event
+            async for event in run_turn(
+                TurnSession(session_id="s-graph-resume"),
+                "compute it",
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    assert len(agent.messages) == 2, "the turn did not continue after the job completed"
+    answer = next(e for e in events if e.type == "answer")
+    assert "starting" in answer.text and "-154.1" in answer.text
+    assert not [e for e in events if e.type == "error"], [e for e in events if e.type == "error"]
 
 
 def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: None) -> None:
@@ -181,28 +214,19 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
 
     monkeypatch.setattr("chemclaw.api.runner.await_job_results", _fake_wait)
 
-    class _AlwaysLaunching:
-        mcp_tools: list[Any] = []
+    class _AlwaysLaunching(ScriptedTurn):
+        """A turn whose every pass launches another job."""
 
         def __init__(self) -> None:
             self.messages: list[str] = []
 
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> Any:
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
             self.messages.append(message)
             index = len(self.messages)
-
-            async def _gen() -> Any:
-                record_job_started(f"qm-{index}", "qm")
-                yield FakeUpdate(text=f"pass{index}")
-
-            return _gen()
+            record_job_started(f"qm-{index}", "qm")
+            yield f"pass{index}"
 
     agent = _AlwaysLaunching()
     _events(agent)

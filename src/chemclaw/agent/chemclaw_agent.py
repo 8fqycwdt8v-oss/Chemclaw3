@@ -1,41 +1,30 @@
-"""The Chemclaw MAF agent (plan step 1.5).
+"""What one profile advertises: the instructions, the tools, and the connectors (plan step 1.5).
 
-`build_agent` wires the conversation agent: the tools, a `SkillsProvider` over the `SKILL.md` files
-found under the configured skills directories (progressive disclosure — the model sees skill
-names/descriptions and loads a skill body only when it needs the judgment), narrowed to the ones
-this agent can actually act on (`skills_source`), an in-memory
-session history so a chat accumulates a thread, and a `CompactionProvider` that keeps that
-thread within a token budget (see `_build_compaction`). The chat client is injectable so the
-wiring can be built and tested without live credentials; the default is the config-selected
-provider (`chemclaw.agent.llm_provider.build_chat_client` — the internal OpenAI-compatible endpoint
-or
-the Anthropic dev path), so which LLM the agent talks to is a config change, not a code edit
-here.
+**The agent's surface, not the agent.** `langgraph_agent.build_langgraph_agent` compiles the graph;
+this module answers the three questions it asks first — which instructions this profile runs under
+(`instructions_for`), which in-process tools it may see (`_capability_tools`), and which connector
+bundles it may reach (`connector_specs`). They are here rather than in the builder because the
+answers are also what `make prose-validate`, the profile validator and the skill gate need, and
+none of those may build a graph to find out: doing so would need a model credential to ask a
+question about a YAML file.
+
+Tools come from the capability-tool registry, populated as a side effect of the imports below, so
+adding a tool is a `@tool` at its definition site rather than an edit here. Skills are not in this
+list at all — they reach the model through `skill_backend`, narrowed by the same predicates
+(`skill_access`) — which is why `available_tool_names` unions four name spaces rather than reading
+one (D-117 records what an omitted name space costs).
+
+**Every narrowing here attenuates and none widens.** A profile selects a subset of what the
+deployment enabled, and `_reject_unknown_tool_names` fails the build on a name nothing provides, so
+a typo is a startup error rather than a capability that silently vanishes from the surface. That
+property is what makes a specialist safe to define as a profile (`agent/team.py`): a subagent
+cannot be handed a tool its caller does not have.
 """
 
-import uuid
+from dataclasses import replace
 from typing import Any
 
-from agent_framework import (
-    Agent,
-    CharacterEstimatorTokenizer,
-    ChatOptions,
-    CompactionProvider,
-    FileSkillsSource,
-    HistoryProvider,
-    InMemoryHistoryProvider,
-    SkillsProvider,
-    SkillsSource,
-    SlidingWindowStrategy,
-    TokenBudgetComposedStrategy,
-    ToolResultCompactionStrategy,
-    create_harness_agent,
-    # The completion-loop predicate. This used to be imported from `agent_framework._harness._loop`
-    # under a comment saying it "is not re-exported at the package top level" — measured against
-    # 1.11.0, it is, and `agent_framework.todos_remaining is _harness._loop.todos_remaining`. The
-    # private import bought a hard dependency on an experimental module path for nothing.
-    todos_remaining,
-)
+from langchain.agents.middleware import TodoListMiddleware
 
 # Importing each tool module runs its `@tool` decorators, populating the capability-tool
 # registry (a registration side effect, exactly as `evals/__init__.py` seeds the metric
@@ -50,45 +39,16 @@ from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
 from chemclaw.agent import preferences as _preferences  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
-from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.framing import ENVELOPE_TAG
-from chemclaw.agent.harness_mode import (
-    EXECUTE_MODE,
-    PLAN_MODE,
-    PLAN_ONLY,
-    PlanApprovalModeProvider,
-    autonomy_for,
-    harness_enabled_for,
-)
-from chemclaw.agent.llm_provider import build_chat_client
-from chemclaw.agent.loop_cap import observe_loop_cap
-from chemclaw.agent.plan_gate import (
-    approved_todos_remaining,
-    enforce_plan_approval,
-    gate_applies,
-)
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.repeat_guard import refuse_repeated_calls
-from chemclaw.agent.skill_access import (
-    EnabledSkillsSource,
-    RoleScopedSkillsSource,
-    ToolScopedSkillsSource,
-)
-from chemclaw.agent.skill_manifest import declared_tools
-from chemclaw.agent.tool_authz import (
-    announce_tool_failures,
-    enforce_tool_authz,
-    refuse_writes_on_dry_run,
-    surface_authorization_denials,
-    surface_domain_errors,
-)
+from chemclaw.agent.skill_backend import SKILL_READ_TOOL
 from chemclaw.connectors.registry import (
     connector_tool_names,
     endpoint_tool_names,
     job_tools,
-    mcp_tools,
-    skills_dirs,
+    mcp_connections,
 )
+from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.templates.registry import template_tool_names, template_tools
@@ -242,298 +202,6 @@ _INSTRUCTIONS = (
 )
 
 
-def build_agent(
-    chat_client: Any | None = None,
-    *,
-    profile: str | AgentProfile | None = None,
-    actor: str = settings.service_actor_id,
-    correlation_id: str | None = None,
-    audit_sink: AuditSink | None = None,
-) -> Agent:
-    """Construct the Chemclaw agent with its tools and skills.
-
-    Capability comes from the enabled connectors (`connectors/`), and the agent holds only half
-    of it. Each connector's declared durable jobs become generated launch tools, which are
-    ordinary registry tools and are advertised here. Its *MCP* tools are deliberately **not**
-    attached: a connector's connection belongs to a single turn, and an agent is built once per
-    process, so the
-    turn's caller builds them with `connector_tools()` and passes them to `agent.run(tools=…)` after
-    connecting them (`chemclaw.api.runner.run_turn`, `chemclaw.agent.cli`). Construction here stays
-    lazy —
-    nothing is spawned, nothing is dialed — so this is a synchronous, resource-free constructor.
-
-    Args:
-        chat_client: A MAF chat client. Injected in tests; when omitted, the
-            config-selected provider client is built via `build_chat_client` (needs its
-            credential at run time, not here).
-        profile: The named agent profile to build (a name, an `AgentProfile`, or `None`
-            for the default). A profile *narrows* the instructions/tools/MCP/harness of the
-            one agent for a use case; it can only attenuate, never widen — the audit + authz
-            middleware and skill role-gates below run after any narrowing
-            (`chemclaw.agent.profiles`).
-            `None` reproduces today's global agent verbatim.
-        actor: Who the audit trail attributes tool calls to — the Phase-6 identity
-            seam. Defaults to the configured `service_actor_id` until Entra auth populates it.
-        correlation_id: Ties this conversation's audit events together; a fresh UUID
-            is generated when omitted, so each agent gets its own trail id.
-        audit_sink: Durable destination for the audit trail. Omitted means log-only
-            (the default `NullAuditSink`); pass a `PostgresAuditSink` for the GxP record.
-
-    Returns:
-        A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
-    """
-    prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
-    # Resolve each profile dimension against the global default (an unset override means "default").
-    # The two harness dimensions resolve through `harness_mode`, which is where the plan gate reads
-    # them too — one fallback rule, so "is the harness on" cannot be answered differently by the
-    # builder and by the gate that governs what it may do.
-    instructions = prof.instructions if prof.instructions is not None else _INSTRUCTIONS
-    client = chat_client if chat_client is not None else build_chat_client()
-    # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
-    # *about* tools, so which tools this profile advertises decides which judgment is worth
-    # offering (`_build_skills`).
-    tools = _capability_tools(prof)
-    skills = _build_skills(prof, tools)
-    history = history_provider()
-    audit = make_audit_middleware(
-        correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
-        actor=actor,
-        sink=audit_sink,
-    )
-    # Five function middlewares over every tool call, outermost first: `surface_authorization_
-    # denials` and `surface_domain_errors` turn the known-safe exception types (an authorization
-    # refusal; chemclaw's own `ChemclawError` bad-input contract and its `SubsystemUnavailableError`
-    # outage contract) into their own
-    # clear, safe result instead of MAF's opaque "Function failed." — audit records the call
-    # underneath both, so a denial or bad-input error is still logged as an `error` outcome
-    # exactly as before; per-tool authorization (F10-C) gates it next. `announce_tool_failures`
-    # sits innermost, closest to the tool body, because it is the only one that must see the raw
-    # exception from *every* failure — including the two the converters above turn into results —
-    # so the chemist's transcript shows the step that did not work (D-138). All five are no-ops on
-    # the dev path (log-only sink; authz open until `entra_required`; no ChemclawError raised, and
-    # no failure at all, on a happy path), so the classic path is unchanged by default. They are
-    # attached unconditionally, *after* the profile narrows the toolset — so a profile attenuates
-    # capability but can never bypass audit or authorization (the safety rubric, audit §7).
-    middleware = [
-        surface_authorization_denials,
-        surface_domain_errors,
-        audit,
-        enforce_tool_authz,
-        # Inside authz and inside audit, for the same reasons those two orderings exist: a dry-run
-        # refusal is a recorded outcome, and the model is told plainly that nothing ran. Attached
-        # unconditionally because `is_dry_run()` is False off the request path, so this is a no-op
-        # on every turn nobody asked to rehearse.
-        refuse_writes_on_dry_run,
-        # Beside it, and for the same three reasons: recorded by audit, surfaced to the model by
-        # `surface_domain_errors`, and a no-op off the request path (no counter, no limit). It
-        # stops a turn re-asking a tool the identical question it already answered — measured at
-        # `find_past_jobs` x7-8 in one turn, which cost the turn rather than the answer.
-        refuse_repeated_calls,
-        announce_tool_failures,
-    ]
-    # A sixth, conditionally: the harness's pre-execution approval (D-167). It goes *inside* audit,
-    # so a refusal is a recorded `error` outcome, and inside `surface_authorization_denials`, so the
-    # model is told why — the same layering `enforce_tool_authz` gets, because it is the same kind
-    # of decision. Conditional because it is meaningless otherwise: with no harness there is no
-    # plan, and under `harness_autonomy="execute"` the deployment has said it does not want an
-    # approval-first posture, so imposing one would refuse every write on a path nothing can
-    # approve. Inserted before `announce_tool_failures` to keep that one innermost.
-    if gate_applies(prof):
-        middleware.insert(-1, enforce_plan_approval)
-    # Default generation params from config (F0.3), applied to every turn unless a run overrides
-    # them — so temperature/length are a deployment setting, not a per-call literal.
-    #
-    # `temperature` is passed only when configured. Sending it unconditionally broke every turn on
-    # the default Anthropic path: claude-sonnet-5 answers `400 invalid_request_error: temperature
-    # is deprecated for this model`, so the shipped default config could not complete a single
-    # turn. Omitting the key is not the same as sending None — the wire payload must not carry the
-    # field at all — hence the dict rather than a literal `temperature=` argument.
-    options = ChatOptions(max_tokens=settings.llm_max_tokens)
-    if settings.llm_temperature is not None:
-        options["temperature"] = settings.llm_temperature
-    if harness_enabled_for(prof):
-        return _build_harness_agent(
-            client, skills, history, middleware, options, prof, tools, instructions
-        )
-    compaction = _build_compaction(history.source_id)
-    return Agent(
-        client=client,
-        name="chemclaw",
-        instructions=instructions,
-        default_options=options,
-        tools=tools,
-        # Order matters: history loads/stores the thread, then compaction trims it — so
-        # compaction runs last and sees the full context (before the model) and the freshly
-        # stored history (after the run).
-        context_providers=[history, skills, compaction],
-        # The shared tool middleware chain: GxP audit over every tool call + per-tool authorization.
-        middleware=middleware,
-    )
-
-
-def _build_harness_agent(
-    client: Any,
-    skills: SkillsProvider,
-    history: HistoryProvider,
-    middleware: list[Any],
-    options: ChatOptions,
-    profile: AgentProfile,
-    tools: list[Any],
-    instructions: str,
-) -> Agent:
-    """Wire MAF's Agent Harness over the *same* Chemclaw tools/skills/audit/compaction (F1).
-
-    The harness adds a self-managed todo list, a plan/execute mode, and a bounded completion
-    loop — the autonomous plan/execute experience — while capability stays ours: MAF's generic
-    batteries (file memory/access, web search, shell) are disabled, so the agent reaches
-    structure/property/ knowledge tools through our function tools + MCP servers, not the
-    harness built-ins.
-
-    The starting mode comes from the profile's `harness_autonomy` override, or
-    `settings.harness_autonomy` when the profile leaves it unset. `plan_only` starts in **plan**
-    mode: the agent proposes a plan and waits for human approval before executing, and because the
-    loop only continues in **execute** mode it does not auto-run until an approval switches it.
-
-    That approval is the pre-execution GxP gate, and it is enforced by
-    `PlanApprovalModeProvider` (D-137) rather than by the starting mode alone. Until that provider
-    existed this docstring described a gate the code did not implement: MAF advertises a `mode_set`
-    tool to the model, so the agent moved *itself* out of plan mode and the audit trail recorded
-    that under the asking chemist's identity. The provider retracts that tool; the only path into
-    execute mode is now `POST /sessions/{id}/plan/decision`, which is owner-scoped, records who
-    decided, and is bound to a hash of the plan they were shown.
-
-    `execute` starts in execute mode and loops through the todos immediately. Either way the
-    loop is capped by `harness_max_loop_iterations` (the runaway guard), which is passed
-    unconditionally — it bounds both modes, not only `execute`. Compaction reuses the classic
-    strategy so context is kept within budget on both paths. `instructions` and `tools` are
-    pre-resolved by `build_agent` from the profile, so this path advertises exactly the
-    profile's (possibly narrowed) surface. That sentence used to be half true: `tools` was passed
-    and `instructions` was re-derived here from the same fallback rule, so the prompt was resolved
-    twice and `build_agent`'s copy was dead on this branch.
-    """
-    strategy, tokenizer = compaction_strategy()
-    autonomy = autonomy_for(profile)
-    start_mode = PLAN_MODE if autonomy == PLAN_ONLY else EXECUTE_MODE
-    agent = create_harness_agent(
-        client,
-        name="chemclaw",
-        agent_instructions=instructions,
-        default_options=options,
-        tools=tools,
-        history_provider=history,
-        skills_provider=skills,
-        # Generic batteries off — capability is ours (MCP servers + function tools), not harness's.
-        disable_file_memory=True,
-        disable_file_access=True,
-        disable_web_search=True,
-        # Reuse the classic compaction strategy so the thread stays within budget here too.
-        before_compaction_strategy=strategy,
-        after_compaction_strategy=strategy,
-        tokenizer=tokenizer,
-        # Plan/execute mode: start in plan for approval-first autonomy, execute for autonomous runs.
-        mode_provider=PlanApprovalModeProvider(default_mode=start_mode),
-        # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
-        # Under `plan_only` the predicate is additionally conditioned on the plan actually being
-        # approved (D-167): without that an unapproved session still loops, has every write
-        # refused, and spends the whole runaway budget achieving nothing.
-        #
-        # `observe_loop_cap` sits outermost and decides nothing: it reads the decision the loop
-        # acts on so a capped turn can say so. The cap is otherwise silent — MAF stops and returns
-        # normally — which left a runaway indistinguishable from a finished turn both in production
-        # and in the eval layer (`chemclaw.agent.loop_cap`).
-        loop_should_continue=observe_loop_cap(
-            approved_todos_remaining(todos_remaining(looping_modes=[EXECUTE_MODE]))
-            if autonomy == PLAN_ONLY
-            else todos_remaining(looping_modes=[EXECUTE_MODE])
-        ),
-        loop_max_iterations=settings.harness_max_loop_iterations,
-        middleware=middleware,
-    )
-    # Two things `create_harness_agent` switches on are individually fine and jointly fatal on the
-    # *streaming* path — which is the only path the front door uses:
-    #
-    #   1. per-service-call history persistence, whose middleware replaces the outgoing messages
-    #      with history+input each model call and signals "stop resending the transcript" by
-    #      stamping a sentinel `conversation_id` on the finalized response;
-    #   2. `MessageInjectionMiddleware`, installed unconditionally, which while streaming returns a
-    #      *new* `ChatResponse` built by `ChatResponse.from_updates()`. The sentinel lived on the
-    #      inner response, never on a streamed update, so the rebuild drops it.
-    #
-    # The function-invocation loop reads that sentinel to decide whether to clear its accumulated
-    # transcript. With it gone the loop re-sent everything *while* history was independently
-    # re-injected, and the duplicate put a `user` block between a `tool_use` and its `tool_result`
-    # — which Anthropic rejects outright ("tool_use ids were found without tool_result blocks
-    # immediately after"). 100% of tool calls, both autonomy modes, so harness mode never worked.
-    #
-    # Turning (1) off breaks the chain at its start: nothing injects, so no sentinel is needed. The
-    # cost is that history is durable per *run* rather than per model call — exactly the classic
-    # path's behaviour, and `harness_enabled` is off by default, so this is not a regression for
-    # anyone. The real fix belongs upstream (preserve `conversation_id` across that finalizer);
-    # `tests/test_harness_execution.py` pins the behaviour so this cannot silently rot.
-    agent.require_per_service_call_history_persistence = False
-    return agent
-
-
-def skills_source(profile: AgentProfile, tools: list[Any]) -> SkillsSource:
-    """The agent's skill surface: discovered, then narrowed three ways, none of them widening.
-
-    Skills are discovered from the configured skills dirs *plus* every enabled connector's own
-    `skills/` dir — a capability's judgment ships with the capability (`connectors.registry`).
-    They are then narrowed in the order the request reads, each only ever removing:
-
-    1. `settings.skills_enabled` — which discovered skills this deployment turns on (empty = all,
-       today's behavior).
-    2. The **capability scope**: a skill whose every declared tool is absent from this profile's
-       advertised surface is dropped, because judgment about a tool the agent cannot call reads to
-       the model as an available path (`chemclaw.agent.skill_access.ToolScopedSkillsSource`,
-       D-2026-08-05). This is the narrowing a profile could not previously express: `tool_names`
-       cut the tools and left every skill about them advertised.
-    3. `settings.skill_role_gates` — hides gated skills from callers lacking the roles, against the
-       turn's ambient identity (`core.identity_context`; an empty gate map shows every skill).
-
-    Only (3) is per-turn; the first two are fixed for the process, which is why the declaration map
-    and the advertised set are read once here rather than on every turn.
-
-    Public, and separate from the `SkillsProvider` that wraps it, because the chain is the part
-    with behaviour and the provider is MAF plumbing around it — `SkillsProvider` exposes no reader
-    for its source, so a test of what an agent advertises would otherwise have to reach into a
-    private attribute of somebody else's object to ask.
-
-    Args:
-        profile: The resolved profile, whose `tool_names`/`mcp_server_names` decide the scope.
-        tools: This profile's in-process tools, already resolved by `_capability_tools` — passed in
-            rather than recomputed so the surface the skills are scoped by is byte-for-byte the one
-            the agent advertises.
-    """
-    dirs = [*settings.skills_dirs, *skills_dirs()]
-    return RoleScopedSkillsSource(
-        ToolScopedSkillsSource(
-            EnabledSkillsSource(FileSkillsSource(dirs), settings.skills_enabled_list),
-            declared_tools(dirs),
-            _advertised_names(profile, tools),
-        ),
-        settings.skill_role_gates,
-    )
-
-
-def _build_skills(profile: AgentProfile, tools: list[Any]) -> SkillsProvider:
-    """Wrap `skills_source` in the MAF provider, with the approval flags this deployment sets."""
-    return SkillsProvider(
-        skills_source(profile, tools),
-        # MAF registers `load_skill`/`read_skill_resource` with `approval_mode="always_require"`
-        # by default, and nothing here answers an approval (no `ToolApprovalMiddleware`, no
-        # front-door decision endpoint) — so every turn that reaches for a skill would otherwise
-        # stall on an unanswerable `user_input_requests` entry. `settings.skills_dirs` is always a
-        # deployer-configured, first-party path (the shipped `skills/` tree, never tenant/user-
-        # uploaded content), the same trust boundary the in-process tool registry already assumes
-        # — so these two read-only tools are the "trusted source" case the flags exist for.
-        # `run_skill_script` is left at its default (still gated): no `script_runner` is wired to
-        # `FileSkillsSource`, so a call fails fast with a clear error instead of running anything.
-        disable_load_skill_approval=True,
-        disable_read_skill_resource_approval=True,
-    )
-
-
 def advertised_tool_names(profile: str | AgentProfile | None = None) -> frozenset[str]:
     """Every tool name one profile's agent can actually call — both halves of the surface.
 
@@ -568,24 +236,37 @@ def _advertised_names(profile: AgentProfile, inprocess: list[Any]) -> frozenset[
     return frozenset({tool.__name__ for tool in inprocess} | mcp)
 
 
-def history_provider() -> HistoryProvider:
+def history_provider() -> Any:
     """The session-history provider selected by config (F3): durable Postgres or in-memory.
 
     `session_store="postgres"` persists each session's turns so a conversation survives a pod
     restart (the durability requirement); the default `memory` keeps the classic in-process provider
-    for dev and tests. Both satisfy the same `HistoryProvider` contract, so `build_agent` — and
-    compaction, which reads `history.source_id` — is identical on either path.
+    for dev and tests. Both offer the same two primitives, so the front door's transcript route and
+    the runner's projection write are identical on either path.
 
     Public because the front door reads transcripts back through it (`GET /sessions/{id}/messages`)
     rather than querying `session_messages` itself: one reader, so the write path and the read
     path cannot drift, and the route works unchanged under either store.
     """
-    if settings.session_store == "postgres":
-        # Imported lazily so the in-memory/dev path never imports psycopg for a store it won't use.
-        from chemclaw.agent.session_store import PostgresHistoryProvider
+    # Imported lazily so nothing pays for psycopg at import time on a path that may not use it.
+    from chemclaw.agent.session_store import InMemoryHistoryProvider, PostgresHistoryProvider
 
+    if settings.session_store == "postgres":
         return PostgresHistoryProvider()
     return InMemoryHistoryProvider()
+
+
+def instructions_for(profile: AgentProfile) -> str:
+    """This profile's system prompt: its own override, or the module default.
+
+    One line, extracted rather than repeated, because repeating it has already cost once. The
+    builders that once re-derived the same fallback from the same rule instead of taking the
+    resolved value, so the prompt was resolved twice and the two could disagree. The callers now
+    are `build_langgraph_agent`, the team's specialist builder and `tests/surface.py` — three
+    readers of one answer, which is the arrangement that keeps "what is the agent told" a single
+    fact rather than a rule copied three times.
+    """
+    return profile.instructions if profile.instructions is not None else _INSTRUCTIONS
 
 
 def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
@@ -626,7 +307,7 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     inprocess = registered_tools()
     if prof.tool_names is not None:
         _reject_unknown_tool_names(prof)
-        # Names belonging to a connector are not missing, just not *here* — `connector_tools`
+        # Names belonging to a connector are not missing, just not *here* — `connector_specs`
         # applies them to the allow-lists. So this half narrows without complaining about them.
         keep = prof.tool_names & set(registered_tool_names())
         inprocess = [tool for tool in inprocess if tool.__name__ in keep]
@@ -634,41 +315,61 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
 
 
 def skill_tool_names() -> set[str]:
-    """The tools MAF's `SkillsProvider` registers on every agent it is attached to.
+    """The tools an agent gains by having skills attached.
 
-    Read off MAF's own class constants rather than spelled out here, so an upstream rename becomes
-    a changed value instead of a silently stale allow-list.
+    One name now. It was four while both engines were live — the previous framework's three
+    skills-provider constants unioned with this one — because the callers are validators asking a
+    deployment-wide question ("does anything provide this name?"), and branching would have made
+    `make prose-validate` pass or fail depending on which engine happened to be configured.
+
+    Read off `skill_backend`'s own constant rather than spelled out here, so a rename becomes a
+    changed value instead of a silently stale allow-list. D-117 is why that is worth the care:
+    three validators once unioned only two of the four name spaces, so a correct reference to a
+    real tool failed validation.
     """
-    return {
-        SkillsProvider.LOAD_SKILL_TOOL_NAME,
-        SkillsProvider.READ_SKILL_RESOURCE_TOOL_NAME,
-        SkillsProvider.RUN_SKILL_SCRIPT_TOOL_NAME,
-    }
+    return {SKILL_READ_TOOL}
+
+
+def harness_tool_names() -> set[str]:
+    """The tools the plan/execute harness registers on an agent it wraps.
+
+    Read off `TodoListMiddleware`'s own tool objects rather than spelled out, for the reason
+    `skill_tool_names` reads its constants: an upstream rename becomes a changed value instead of a
+    silently stale allow-list.
+
+    Its own name space because it is one: a harness tool is neither an in-process `@tool`, nor a
+    connector's, nor a template launcher, nor a skill's. D-117 is the standing lesson — three
+    validators once unioned two of the then-four name spaces, so a correct reference to a real tool
+    failed validation. `write_todos` is exactly the sort of name a skill about planning would
+    reasonably cite.
+
+    """
+    return {tool.name for tool in TodoListMiddleware().tools}
 
 
 def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all four name spaces.
+    """Every tool name the agent can resolve, across all five name spaces.
 
-    The four are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    The five are genuinely separate — in-process `@tool` functions this process holds as symbols,
     connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
-    generated from step templates, and the skill tools MAF attaches — and only the union is
-    meaningful. Exposed rather than inlined because four other places need exactly this set: the
+    generated from step templates, the harness's own, and the skill read tool — and only the union
+    is meaningful. Exposed rather than inlined because four other places need exactly this set: the
     skill validator, the template validator, the prose-contract validator, and the test that checks
     the instructions against it. Three of those unioned only the first two name spaces, so a skill
     or template step naming a template launcher failed validation although the tool exists (D-117).
     One definition, one answer.
 
-    The skill name space was the same omission a second time. `build_agent` attaches a
-    `SkillsProvider` unconditionally, and a live run recorded `load_skill` on four turns and
-    `run_skill_script` on a fifth — while this function reported all three as absent, so every
-    validator built on it would have rejected a correct reference to a tool the agent had just
-    called.
+    The skill name space was the same omission a second time. Skills are attached
+    unconditionally, and a live run recorded skill tools on five turns while this function reported
+    them absent — so every validator built on it would have rejected a correct reference to a tool
+    the agent had just called.
     """
     return {
         *registered_tool_names(),
         *connector_tool_names(),
         *template_tool_names(),
         *skill_tool_names(),
+        *harness_tool_names(),
     }
 
 
@@ -689,58 +390,54 @@ def _reject_unknown_tool_names(profile: AgentProfile) -> None:
         )
 
 
-def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
-    """The connector MCP tools for one turn, narrowed by the profile — built fresh on every call.
+def connector_specs(profile: str | AgentProfile | None = None) -> list[ConnectorSpec]:
+    """This turn's connector connection specs, narrowed by the profile — the LangGraph twin.
 
-    **Per turn, deliberately, and it is a correctness requirement rather than a preference.** A
-    connector's MCP tool object owns a connection whose lifetime is a turn (the caller opens and
-    closes it around `agent.run`), so one shared object cannot serve two turns at once: measured
-    against a live server, two concurrent turns entering and leaving the same tool's context
-    **deadlock**, and the second turn's calls would in any case travel over a connection
-    established in the first turn's context — attributing them to the wrong user in the
-    connector's own log. Fresh instances give each turn its own connection, which fixes both at
-    once.
+    Identical policy to `connector_tools`, over the other engine's connector representation: both
+    profile dials apply, `mcp_server_names` selects whole bundles and `tool_names` narrows each
+    surviving bundle's allow-list, and a bundle left with no named tool is dropped rather than
+    attached with an empty surface. Sharing the *decision* matters more here than the shape does —
+    a profile that attenuates differently per engine would be a different security posture under
+    one config value, which is exactly the drift this migration forbids.
 
-    This is why connectors are *not* attached by `build_agent`: an `Agent` is built once per
-    process, which is exactly the lifetime a connector tool must not have. `Agent.run(tools=…)`
-    appends run-scoped tools to the configured ones, so the turn's caller passes these and the
-    model sees one combined surface (`chemclaw.api.runner.run_turn`).
-
-    Both profile dials apply here. `mcp_server_names` selects whole connectors; `tool_names`
-    additionally narrows each surviving connector's agent-facing allow-list, and a connector left
-    with no named tool is dropped rather than attached with an empty surface. That is what lets a
-    profile say "just the two solubility tools" now that those tools live out of process.
+    Built fresh per call for the same reason its twin is: a connection belongs to exactly one turn.
 
     Args:
         profile: The profile to narrow by (a name, an `AgentProfile`, or `None` for the default,
             which advertises every enabled connector's full allow-list).
 
     Returns:
-        Unconnected MCP tools, one per enabled connector with an endpoint. The caller connects them
-        for the turn (`chemclaw.connectors.registry.open_reachable`).
+        Unopened connection specs. The caller opens them for the turn
+        (`chemclaw.connectors.registry.open_connector_specs`), which is what the front door's
+        `connector_factory` default does once per turn.
     """
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
-    tools: list[Any] = list(mcp_tools())
+    specs: list[ConnectorSpec] = list(mcp_connections())
     if prof.mcp_server_names is not None:
-        tools = _narrow(tools, prof.mcp_server_names, prof.name, "connector")
+        specs = _narrow(specs, prof.mcp_server_names, prof.name, "connector")
     if prof.tool_names is not None:
-        tools = _narrow_allowed_tools(tools, prof.tool_names)
-    return tools
+        specs = _narrow_allowed_specs(specs, prof.tool_names)
+    return specs
 
 
-def _narrow_allowed_tools(tools: list[Any], keep: frozenset[str]) -> list[Any]:
-    """Restrict each connector's allow-list to `keep`, dropping connectors left with nothing.
+def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> list[ConnectorSpec]:
+    """Restrict each spec's allow-list to `keep`, dropping connectors left with nothing.
 
-    Mutating `allowed_tools` on the instance is safe precisely because these are per-turn objects
-    (`connector_tools`): there is no shared connector whose surface another turn could see change.
+    `dataclasses.replace` rather than the in-place mutation `_narrow_allowed_tools` uses: a
+    `ConnectorSpec` is frozen, and the mutation was only ever safe because those objects are
+    per-turn. Rebuilding is the same policy without needing that argument to hold.
+
+    A spec whose manifest declared *no* allow-list (`allowed_tools is None`, meaning "everything
+    this server offers") becomes bounded by `keep` here — a profile narrowing by tool name must
+    reach a connector that declined to enumerate its own surface, or the narrowing would be a
+    no-op on exactly the bundles with the widest surface.
     """
     narrowed = []
-    for tool in tools:
-        allowed = sorted(set(tool.allowed_tools or ()) & keep)
+    for spec in specs:
+        allowed = sorted(set(spec.allowed_tools) & keep) if spec.allowed_tools else sorted(keep)
         if not allowed:
             continue
-        tool.allowed_tools = allowed
-        narrowed.append(tool)
+        narrowed.append(replace(spec, allowed_tools=tuple(allowed)))
     return narrowed
 
 
@@ -767,7 +464,7 @@ def _narrow(
 ) -> list[Any]:
     """Keep only tools whose advertised name is in `keep`, raising if `keep` names an absent tool.
 
-    MAF advertises an in-process tool under its `__name__` and a connector's MCP tool under its
+    An in-process tool is advertised under its `__name__` and a connector's MCP tool under its
     `.name`; both expose the advertised name, so `getattr(t, "name", t.__name__)` reads either.
     A profile listing a name nothing provides is a configuration error surfaced at build time,
     not a tool that silently vanishes from the agent's surface.
@@ -780,69 +477,3 @@ def _narrow(
             f"known: {sorted(available)}"
         )
     return [tool for name, tool in available.items() if name in keep]
-
-
-def _build_compaction(history_source_id: str) -> CompactionProvider:
-    """Build the token-budget compaction that keeps a chat thread within context.
-
-    Compaction is triggered only when the included context exceeds the configured token budget
-    ("reduce when applicable"), then reclaims tokens cheapest-first without any LLM call:
-    collapse older tool-result payloads (the big evidence sweeps and full ELN recipes) into a
-    short cited trace, then slide the conversation window; the composed strategy's built-in
-    fallback drops the oldest groups if still over budget. System instructions and skills are
-    always preserved.
-
-    The same strategy is passed for `before_run` (guard the model input) and `after_run` (shrink
-    the persisted history so the next turn starts smaller) — **but the second half only runs under
-    `session_store="memory"`** (REV-4). MAF's `after_run` reads the thread from
-    `session.state[history_source_id]["messages"]`, which is where `InMemoryHistoryProvider` keeps
-    it and where `PostgresHistoryProvider` deliberately keeps nothing. Under the production default
-    it finds no messages and returns, so the persisted history is never trimmed and every turn
-    re-reads all of it. `agent/session_store.py` documents the whole shape, including why the
-    obvious fix — a `LIMIT` on the load — would corrupt stored tool-call pairings.
-
-    It is still wired for both, because the `before_run` half is what actually bounds the model
-    input and it works under either store; passing `after_strategy` costs one no-op lookup where it
-    does not apply and is correct where it does.
-
-    Args:
-        history_source_id: The history provider whose stored messages `after_run` compacts.
-
-    Returns:
-        A configured `CompactionProvider`.
-    """
-    strategy, tokenizer = compaction_strategy()
-    return CompactionProvider(
-        before_strategy=strategy,
-        after_strategy=strategy,
-        tokenizer=tokenizer,
-        history_source_id=history_source_id,
-    )
-
-
-def compaction_strategy() -> tuple[TokenBudgetComposedStrategy, CharacterEstimatorTokenizer]:
-    """The token-budget compaction strategy + tokenizer, shared by every path that compacts.
-
-    One definition of "reclaim tokens cheapest-first" (collapse stale tool-result dumps, then
-    slide the conversation window, within `agent_context_token_budget`) so the agent flavors
-    cannot drift in how they keep context bounded (DRY).
-
-    Public because the durable path is the third consumer (`agent/session_store.py`, D-151).
-    That one
-    matters more than the other two for sharing: it *deletes* what the strategy excludes, so a
-    second, tighter policy there would silently destroy context the model was still entitled to.
-    One budget, one answer, and the durable pass converges on exactly what `before_run` would have
-    produced anyway.
-    """
-    tokenizer = CharacterEstimatorTokenizer()
-    strategy = TokenBudgetComposedStrategy(
-        token_budget=settings.agent_context_token_budget,
-        tokenizer=tokenizer,
-        strategies=[
-            ToolResultCompactionStrategy(
-                keep_last_tool_call_groups=settings.agent_keep_last_tool_groups
-            ),
-            SlidingWindowStrategy(keep_last_groups=settings.agent_keep_last_conversation_groups),
-        ],
-    )
-    return strategy, tokenizer

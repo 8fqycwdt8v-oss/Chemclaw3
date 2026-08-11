@@ -3,7 +3,7 @@
 Why this exists: `record_confirmed_answer` proposes a note synchronously, inside one agent
 turn. A chat "Save this knowledge? [Yes] [No]" button is *asynchronous* — the human may click
 minutes later, after the turn (or session) has ended — so the pending candidate must outlive
-the conversation. The architecture puts durability in Temporal, never in MAF, so the candidate
+the conversation. The architecture puts durability in Temporal, never in layer 1, so the candidate
 is held by this workflow: it starts when the agent surfaces a candidate, waits (bounded) for a
 `decide` signal (the button click), and only on Yes runs the PR-gate activity. Reject or
 timeout ends the workflow without proposing anything.

@@ -43,6 +43,11 @@ _BAD_DATA_TYPES = [
     "PlaybookError",
     "NoteError",
     "EvalCaseError",
+    # A run scored against a baseline recorded on a *different* case-set
+    # (`chemclaw.evals.baseline`). Bad data by the same test as every entry here: the committed
+    # baseline file and the version the run declared are both facts, and the identical comparison
+    # stays impossible until a person refreshes one of them.
+    "CaseSetMismatchError",
     "SafetyRulesError",
     "ConnectorJobError",
     "GitSubmitError",

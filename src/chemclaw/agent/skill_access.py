@@ -1,14 +1,14 @@
 """Skill visibility: admin enablement, capability scoping, then Phase-6 RBAC (plan step 6.2).
 
-Three independent narrowings, deliberately kept as separate `SkillsSource` decorators because they
-answer different questions. `EnabledSkillsSource` answers *"is this skill turned on in this
-deployment?"* (an admin/config concern); `ToolScopedSkillsSource` answers *"can this agent do any
-of what the skill teaches?"* (a capability concern); `RoleScopedSkillsSource` answers *"may this
+Three independent narrowings, deliberately kept separate because they answer different questions.
+`EnabledSkills` answers *"is this skill turned on in this
+deployment?"* (an admin/config concern); `ToolScopedSkills` answers *"can this agent do any
+of what the skill teaches?"* (a capability concern); `RoleScopedSkills` answers *"may this
 caller see it?"* (an identity concern). All three only ever remove skills, so chaining them in any
 order is safe; `build_agent` wraps them in the order the request reads — what exists at all, then
 what this agent can do, then who may see it.
 
-All three are the same loop over a different predicate, which is what `_NarrowingSkillsSource`
+All three are the same short-circuit over a different predicate, which is what `_Narrowing`
 holds: await the inner source, return it untouched when this narrowing is unconfigured, otherwise
 filter. Extracted at the third copy (Rule of Three), and the short-circuit is the part worth
 sharing — it is what keeps an unconfigured decorator from paying for itself on every turn.
@@ -37,34 +37,34 @@ path (tests, the classic non-service caller) there are simply no roles, so only 
 """
 
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping
-
-from agent_framework import Skill, SkillsSource, SkillsSourceContext
+from collections.abc import Callable, Iterable, Mapping
 
 from chemclaw.core.identity_context import get_current_roles
 
 
-class _NarrowingSkillsSource(SkillsSource):
-    """Wrap a `SkillsSource` and drop the skills a subclass's predicate rejects.
+class _Narrowing:
+    """One reason a skill may be hidden, as a predicate over its name.
 
-    The shared half of the three decorators below: fetch, short-circuit, filter. A subclass says
-    only *whether it is configured to narrow at all* (`_narrows`) and *which skills survive*
-    (`_permits`), so a new narrowing is a predicate rather than another copy of this loop.
+    A subclass says only *whether it is configured to narrow at all* (`_narrows`) and *which skills
+    survive* (`_permits`), so a new narrowing is a predicate rather than another copy of the
+    short-circuit.
 
-    Args:
-        inner: The wrapped source (e.g. a `FileSkillsSource`, or another narrowing source).
+    **These used to be `SkillsSource` decorators**, because MAF reached skills by asking a source
+    for them and each narrowing wrapped the one beneath it. The plumbing is gone with that engine;
+    the decisions are not, and they were already the separable half — `skill_backend` has always
+    called `permits` rather than reimplementing it, since a second implementation of "may this
+    caller see this skill" is how a skill ends up hidden in one place and offered in another, which
+    is not a gate.
     """
 
-    def __init__(self, inner: SkillsSource) -> None:
-        """Hold the wrapped source; subclasses add their own pre-normalized configuration."""
-        self._inner = inner
+    def permits(self, name: str) -> bool:
+        """Whether the skill named `name` survives this narrowing (framework-free).
 
-    async def get_skills(self, context: SkillsSourceContext) -> list[Skill]:
-        """The inner source's skills, minus the ones this narrowing rejects."""
-        skills = await self._inner.get_skills(context)
-        if not self._narrows():
-            return skills
-        return [skill for skill in skills if self._permits(skill.frontmatter.name)]
+        The short-circuit lives here rather than in the caller because it is what keeps an
+        unconfigured decorator from paying for itself: an empty enable-list, an empty gate map and
+        an empty declaration map each mean "narrow nothing", which is the default this system ships.
+        """
+        return not self._narrows() or self._permits(name)
 
     @abstractmethod
     def _narrows(self) -> bool:
@@ -75,10 +75,10 @@ class _NarrowingSkillsSource(SkillsSource):
         """Whether the skill named `name` survives this narrowing."""
 
 
-class EnabledSkillsSource(_NarrowingSkillsSource):
+class EnabledSkills(_Narrowing):
     """Advertise only the explicitly enabled skills.
 
-    Discovery is not enablement: `FileSkillsSource` advertises every `SKILL.md` it finds, which
+    Discovery is not enablement: the backend advertises every `SKILL.md` it finds, which
     means adding a folder silently changes what the agent offers. An explicit enable-list lets a
     deployment ship the whole skills tree and turn on the subset it has validated.
 
@@ -89,13 +89,11 @@ class EnabledSkillsSource(_NarrowingSkillsSource):
     that typo is caught loudly, before deploy.
 
     Args:
-        inner: The wrapped source (e.g. a `FileSkillsSource`).
         enabled: The skill names to advertise; empty leaves every discovered skill visible.
     """
 
-    def __init__(self, inner: SkillsSource, enabled: Iterable[str] | None = None) -> None:
-        """Wrap `inner` and pre-normalize the enable-list to a frozenset for cheap lookups."""
-        super().__init__(inner)
+    def __init__(self, enabled: Iterable[str] | None = None) -> None:
+        """Pre-normalize the enable-list to a frozenset for cheap lookups."""
         self._enabled: frozenset[str] = frozenset(enabled or ())
 
     def _narrows(self) -> bool:
@@ -107,7 +105,7 @@ class EnabledSkillsSource(_NarrowingSkillsSource):
         return name in self._enabled
 
 
-class ToolScopedSkillsSource(_NarrowingSkillsSource):
+class ToolScopedSkills(_Narrowing):
     """Hide a skill whose declared capability this agent cannot reach at all.
 
     A skill is judgment *about tools* — "call `suggest_next_experiment` like this", "here is what a
@@ -128,22 +126,15 @@ class ToolScopedSkillsSource(_NarrowingSkillsSource):
     `make skill-validate` is what stops a declaration from being *silently* incomplete.
 
     Args:
-        inner: The wrapped source (e.g. a `FileSkillsSource`).
         declared: `{skill name: declared tool names}` (`chemclaw.agent.skill_manifest.
-            declared_tools`) — read from disk once, because MAF's `SkillFrontmatter` drops the
-            `tools:` key and a `Skill` object therefore cannot answer this question.
+            declared_tools`) — read from disk once, because a loaded skill's own frontmatter model
+            drops the `tools:` key and therefore cannot answer this question.
         available: The tool names this agent actually advertises, both halves of the surface
             (`chemclaw.agent.chemclaw_agent.advertised_tool_names`).
     """
 
-    def __init__(
-        self,
-        inner: SkillsSource,
-        declared: Mapping[str, frozenset[str]],
-        available: Iterable[str],
-    ) -> None:
-        """Wrap `inner` and pre-normalize the declaration map and the available tool set."""
-        super().__init__(inner)
+    def __init__(self, declared: Mapping[str, frozenset[str]], available: Iterable[str]) -> None:
+        """Pre-normalize the declaration map and the available tool set."""
         self._declared = dict(declared)
         self._available: frozenset[str] = frozenset(available)
 
@@ -157,18 +148,16 @@ class ToolScopedSkillsSource(_NarrowingSkillsSource):
         return not required or bool(required & self._available)
 
 
-class RoleScopedSkillsSource(_NarrowingSkillsSource):
+class RoleScopedSkills(_Narrowing):
     """Advertise a gated skill only to callers holding one of its roles.
 
     Args:
-        inner: The wrapped source (e.g. a `FileSkillsSource`).
         gates: Maps a skill name to the app-roles allowed to see it. A skill absent from the map
             is ungated (visible to all); an empty map leaves every skill visible.
     """
 
-    def __init__(self, inner: SkillsSource, gates: Mapping[str, list[str]] | None = None) -> None:
-        """Wrap `inner` and pre-normalize the gate map to frozensets for cheap lookups."""
-        super().__init__(inner)
+    def __init__(self, gates: Mapping[str, list[str]] | None = None) -> None:
+        """Pre-normalize the gate map to frozensets for cheap lookups."""
         self._gates: dict[str, frozenset[str]] = {
             name: frozenset(roles) for name, roles in (gates or {}).items()
         }
@@ -181,10 +170,52 @@ class RoleScopedSkillsSource(_NarrowingSkillsSource):
         """A skill is permitted if it is ungated, or the caller holds one of its gate roles.
 
         The turn's roles are read here rather than hoisted into `get_skills` and cached on `self`.
-        One `SkillsProvider` is built per *process* and serves every concurrent turn, so any
-        per-call state stored on this object would be another turn's identity a moment later — the
-        same lifetime rule that keeps connector MCP tools per-turn. A `contextvar` read is a dict
+        One predicate object can outlive a turn, so any per-call state stored on it would be
+        another turn's identity a moment later — the same lifetime rule that keeps connector MCP
+        sessions per-turn. A `contextvar` read is a dict
         lookup, and it is always this turn's.
         """
         required = self._gates.get(name)
         return required is None or bool(get_current_roles() & required)
+
+
+def skill_permits(
+    *,
+    enabled: Iterable[str] | None,
+    declared: Mapping[str, frozenset[str]],
+    available: Iterable[str],
+    gates: Mapping[str, list[str]] | None,
+) -> Callable[[str], bool]:
+    """The three narrowings as one predicate over a skill name — the engine-neutral form.
+
+    The one form now. It was one of two while MAF composed the same three as `SkillsSource`
+    decorators, because that framework reached skills by asking a source for them; the backend
+    `deepagents.SkillsMiddleware` reads has no source to decorate and needs the answer as a
+    function, and both called these same three `permits` methods.
+
+    That sharing was not tidiness. Role scoping is the one narrowing with a security posture, and a
+    second implementation of "may this caller see this skill" is how a skill ends up hidden in one
+    place and offered in another — which is not a gate, it is a coin flip with a config flag for a
+    coin. The plumbing that made it two forms is gone; the rule that keeps it one stands.
+
+    The order matches the request as it reads — what exists at all, then what this agent can do,
+    then who may see it — though all three only ever remove, so composing them in any order gives
+    the same answer.
+
+    Args:
+        enabled: The deployment's enable-list; empty means every discovered skill.
+        declared: `{skill name: declared tool names}` from `skill_manifest.declared_tools`.
+        available: The tool names this agent advertises, both halves of the surface.
+        gates: `{skill name: allowed roles}`; a skill absent from the map is ungated.
+
+    Returns:
+        A predicate answering "is this skill visible to the turn in flight". Evaluated per call,
+        never cached, because the role gate reads the turn's ambient identity and one agent serves
+        every concurrent turn.
+    """
+    narrowings = (
+        EnabledSkills(enabled),
+        ToolScopedSkills(declared, available),
+        RoleScopedSkills(gates),
+    )
+    return lambda name: all(narrowing.permits(name) for narrowing in narrowings)

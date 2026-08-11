@@ -12,12 +12,13 @@ have already drifted or are already boilerplate at the call site — not merely 
 similar. Both here qualify by measurement:
 
 `FakeUpdate` — twenty streamed-update fakes across fourteen files, each hard-coding
-`user_input_requests=[]`. That field is a *derived* property on MAF's `AgentResponseUpdate`, and
+`user_input_requests=[]`. That field is a *derived* property on the real update type, and
 hard-coding it empty meant no fake could ever carry an approval request, so the runner's approval
 branch was executed by no test in the suite until D-2026-08-08 fixed the single copy in
-`tests/test_runner.py`. Thirteen copies still asserted a shape MAF does not have. One class with
-the property derived fixes the *class* of defect: the next field the runner learns to read is
-either derived here once or wrong everywhere at once, and the first is a much shorter conversation.
+`tests/test_runner.py`. Thirteen copies still asserted a shape the real update does not have. One
+class with the property derived fixes the *class* of defect: the next field the runner learns to
+read is either derived here once or wrong everywhere at once, and the first is a much shorter
+conversation.
 
 `asgi_client` — the `ASGITransport` → `AsyncClient(base_url=…)` incantation, thirteen times in two
 files, five of them inside near-identical `async def _drive()` wrappers. It takes an already-built
@@ -36,10 +37,11 @@ import httpx
 
 
 class FakeUpdate:
-    """One streamed update, shaped as `chemclaw.api.runner` duck-types MAF's update type.
+    """One streamed update, shaped as `chemclaw.api.runner_trace` duck-types a real one.
 
-    `text` and `contents` are plain attributes because that is what MAF's are from a reader's point
-    of view. `user_input_requests` is not, and must not be: see the class docstring above.
+    `text` and `contents` are plain attributes because that is what a real update's are from a
+    reader's point of view. `user_input_requests` is not, and must not be: see the class docstring
+    above.
     """
 
     def __init__(self, text: str = "", contents: Sequence[object] = ()) -> None:
@@ -49,12 +51,12 @@ class FakeUpdate:
 
     @property
     def user_input_requests(self) -> list[object]:
-        """Derived from `contents`, exactly as MAF's `AgentResponseUpdate` derives it.
+        """Derived from `contents`, exactly as a real update derives it.
 
-        MAF filters on `content.user_input_request`; this uses `getattr` so a test's own content
-        double reaches the branch without having to subclass MAF's `Content`. An update carrying a
-        `function_approval_request` therefore lands in the approval branch by construction, rather
-        than because whoever wrote the fake remembered that the field exists.
+        The real filter is on `content.user_input_request`; this uses `getattr` so a test's own
+        content double reaches the branch without subclassing a concrete content class. An update
+        carrying a `function_approval_request` therefore lands in the approval branch by
+        construction, rather than because whoever wrote the fake remembered that the field exists.
         """
         return [
             content for content in self.contents if getattr(content, "user_input_request", False)

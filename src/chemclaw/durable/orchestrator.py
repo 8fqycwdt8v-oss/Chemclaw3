@@ -1,6 +1,6 @@
 """Generic child-workflow fan-out (plan F10-D1): run N independent sub-tasks as child workflows.
 
-Orchestration is a Temporal-layer concern (the layer rule: MAF stays the single conversational
+Orchestration is a Temporal-layer concern (the layer rule: layer 1 stays the single conversational
 agent; durability and fan-out live here). `fan_out` runs each input as its own child workflow with
 bounded concurrency and per-child isolation, so a report's sections or a memory job's groups each
 get independent retry + worker-restart durability instead of one monolithic activity where a single

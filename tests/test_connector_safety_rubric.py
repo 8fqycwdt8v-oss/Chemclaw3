@@ -2,19 +2,18 @@
 
 Moving capability out of process is only acceptable if it changes *where a tool runs* and
 nothing about *what governs it*. Two of the four safety-rubric invariants are the ones a process
-boundary could plausibly break, because both are MAF function middleware and a connector's tools
-are not MAF
-functions we wrote:
+boundary could plausibly break, because both are tool-call middleware and a connector's tools are
+not functions we wrote:
 
 1. **GxP audit** — every call recorded with the turn's actor, whether it succeeded or was denied.
 2. **Per-tool authorization** — `tool_role_gates` addresses a connector tool by the same name the
    model calls, and a denied call never runs on the connector.
 
-Neither can be shown by inspecting the wiring: MAF assembles MCP tools into the run's tool list
-at a different point from the configured ones, so "the middleware list is attached" proves
-nothing about whether it wraps *these*. So this drives the real thing — a real `Agent`, a real
-connector server over HTTP, MAF's own tool-calling loop — and asserts on what the audit sink
-recorded and what the server received.
+Neither can be shown by inspecting the wiring: a connector's tools reach the model by a different
+route from the configured ones, so "the middleware list is attached" proves nothing about whether
+it wraps *these*. So this drives the real thing — a real compiled graph, a real connector server
+over HTTP, a real tool node — and asserts on what the audit sink recorded and what the server
+received.
 
 The other two invariants need no test here because the boundary makes them structural: a
 connector has no PR-gate access (its only route into the graph is a job result core publishes)
@@ -24,30 +23,23 @@ is governance of the *call*, which is what this file pins.
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from typing import Any
 
 import pytest
 import uvicorn
-from agent_framework import (
-    BaseChatClient,
-    ChatResponse,
-    ChatResponseUpdate,
-    Content,
-    Message,
-    ResponseStream,
-)
-from agent_framework._tools import FunctionInvocationLayer
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
 from chemclaw.agent.audit import AuditEvent
-from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
+from chemclaw.agent.chemclaw_agent import connector_specs
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.connectors.identity import HEADER_ACTOR
-from chemclaw.connectors.registry import open_reachable
+from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from tests.conftest import _free_port
+from tests.fakes_langgraph import ScriptedChatModel
 
 _BUNDLE = """\
 name: governed
@@ -60,65 +52,6 @@ endpoint:
   read_only:
     - echo_subject
 """
-
-
-class _ScriptedChatClient(FunctionInvocationLayer, BaseChatClient):
-    """A real chat client with scripted replies, so MAF's own tool-calling loop does the calling.
-
-    Same shape as `tests/test_harness_execution.py`'s: only the model's replies are fake. The
-    tool execution path — including whatever middleware wraps it — is the framework's real one,
-    which is the entire point of testing governance here rather than against a stand-in context.
-    """
-
-    def __init__(self, script: Sequence[Callable[[], ChatResponse]]) -> None:
-        """Start with the given reply script, consumed one entry per model call."""
-        super().__init__()
-        self._script = list(script)
-
-    def _inner_get_response(
-        self,
-        *,
-        messages: Sequence[Message],
-        stream: bool,
-        options: Mapping[str, Any],
-        **kwargs: Any,
-    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
-        """Pop and return the next scripted reply."""
-        response = self._script.pop(0)()
-
-        async def _await_response() -> ChatResponse:
-            return response
-
-        return _await_response()
-
-
-def _call(name: str, arguments: dict[str, object]) -> Callable[[], ChatResponse]:
-    """A scripted turn that asks for one tool call."""
-
-    def _reply() -> ChatResponse:
-        return ChatResponse(
-            messages=[
-                Message(
-                    role="assistant",
-                    contents=[Content.from_function_call("c1", name, arguments=arguments)],
-                )
-            ],
-            response_id="r",
-        )
-
-    return _reply
-
-
-def _text(text: str) -> Callable[[], ChatResponse]:
-    """A scripted turn that replies with plain text, ending the loop."""
-
-    def _reply() -> ChatResponse:
-        return ChatResponse(
-            messages=[Message(role="assistant", contents=[Content.from_text(text)])],
-            response_id="r",
-        )
-
-    return _reply
 
 
 class _RecordingSink:
@@ -211,17 +144,19 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
 
 def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:
     """Drive one real agent turn whose scripted model calls `tool_name`, and return its text."""
-    agent = build_agent(
-        chat_client=_ScriptedChatClient([_call(tool_name, {"subject": "benzene"}), _text("done")]),
-        audit_sink=sink,
-    )
 
     async def _go() -> str:
         async with AsyncExitStack() as stack:
-            turn_connectors = connector_tools()
-            await open_reachable(stack, turn_connectors)
-            response = await agent.run("check the subject", tools=turn_connectors)
-            return str(response.text)
+            connectors, _unreachable = await open_connector_specs(stack, connector_specs())
+            graph = build_langgraph_agent(
+                model=ScriptedChatModel(
+                    [{"name": tool_name, "args": {"subject": "benzene"}}, "done"]
+                ),
+                audit_sink=sink,
+                connectors=connectors,
+            )
+            result = await graph.ainvoke({"messages": [("user", "check the subject")]})
+            return str(result["messages"][-1].content)
         raise AssertionError("unreachable")  # pragma: no cover - satisfies the type checker
 
     return asyncio.run(_go())
@@ -230,10 +165,10 @@ def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:
 def test_a_connector_tool_call_is_recorded_in_the_gxp_audit_trail(governed: _Observed) -> None:
     """Invariant 1: the audit middleware wraps a connector's tool, not just the in-process ones.
 
-    This is the assertion that could not be made by reading the wiring. MAF appends MCP-derived
-    functions to the run's tool list separately from the configured ones, so whether the agent's
-    middleware chain reaches them is a property of the framework, not of our construction — and
-    it is the property the whole out-of-process move depends on.
+    This is the assertion that could not be made by reading the wiring. A connector's tools are
+    loaded off a live MCP session rather than registered like the configured ones, so whether the
+    middleware chain reaches them is a property of how the framework binds tools, not of our
+    construction — and it is the property the whole out-of-process move depends on.
     """
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))

@@ -81,12 +81,17 @@ class WarehouseVectorRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return the warehouse's nearest reactions to `query`, best first.
 
-        **Every failure yields no evidence rather than raising, and that is load-bearing.**
-        `agent.research_tools.gather_evidence` fans the retrievers out through a plain
-        `asyncio.gather` with no `return_exceptions`, so one raising leg does not degrade a question
-        — it fails the whole thing. An unreachable warehouse would take down answers the graph and
-        the fingerprint index could have given between them. `ingest.sources.vendored_dataset` made
-        the same call for the same reason.
+        **Every failure yields no evidence rather than raising**, so an unreachable warehouse does
+        not take down answers the graph and the fingerprint index could have given between them.
+        `ingest.sources.vendored_dataset` made the same call for the same reason.
+
+        The justification this used to carry has expired and is corrected rather than deleted:
+        `gather_evidence` fanned its retrievers out through a plain `asyncio.gather` with no
+        `return_exceptions`, which made answering emptily the only thing preventing one outage from
+        failing the whole question. The sweep is now per-source graph branches that each degrade
+        alone (`chemclaw.retrieval.fanout`). Handling it here is still the better place — this is
+        where the difference between a transient outage and a missing driver is known, and the two
+        are logged differently below — but it is no longer load-bearing on its own.
 
         The cases are logged differently on purpose. A transient failure is a WARNING, because
         the next query may well succeed. A `BindingError` — a driver package the image does not

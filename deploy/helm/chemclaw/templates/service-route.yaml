@@ -22,13 +22,20 @@ metadata:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
     # Pin a browser to one front-door pod (D-121). Not a performance preference — a correctness
-    # one. The per-session turn guard is durable now (`session_turns`), but three things a
-    # conversation depends on still live in one process's memory and are invisible to a sibling
-    # replica: uploaded attachments (`agents.attachments`, session-scoped and in-memory by
-    # design), the harness todo list (MAF `session.state` on the live handle), and the live
-    # `AgentSession` itself. A chemist who uploads a CSV and then asks about it must reach the pod
-    # that holds it; without affinity that fails once per replica out of N, and it fails by the
-    # agent simply not seeing the file.
+    # one. The per-session turn guard is durable (`session_turns`), and since the conversation
+    # layer moved to LangGraph the turn's own state is durable too — the plan and the message
+    # history live in the Postgres checkpointer, not on a live in-process handle.
+    #
+    # **Affinity is still required, and the reason it survives is not the one that motivated it.**
+    # The LangGraph rebuild expected to retire this: two of the three things named here were
+    # framework state, and both are gone. What remains is the first one, which never had anything
+    # to do with the framework — uploaded attachments are session-scoped and held **in memory by
+    # design** (`chemclaw.agent.attachments`), with no table behind them anywhere in `infra/sql`.
+    # A chemist who uploads a CSV and then asks about it must reach the pod that holds it; without
+    # affinity that fails once per replica out of N, and it fails by the agent simply not seeing
+    # the file.
+    #
+    # So the way to remove this is to give attachments a durable home, not to change engines.
     #
     # The haproxy router sets its balancing cookie by default, so this is written down explicitly
     # rather than left to a default that a cluster-wide change could flip silently. `leastconn`

@@ -6,9 +6,12 @@
 
        `maxUnavailable: 1` rather than `minAvailable`, and the difference is not cosmetic once the
        HPA scales up: `minAvailable: 1` would permit five of six pods to be evicted simultaneously.
-       Every front-door pod holds session state a sibling cannot see (D-121 — attachments, harness
-       todos, the live `AgentSession`), so the number that matters is how many conversations one
-       drain can end, and that is what `maxUnavailable` bounds.
+       Every front-door pod still holds session state a sibling cannot see — now just the one thing
+       (D-121): a conversation's uploaded attachments, which are in memory by design. The harness
+       todos and the live session handle used to be on that list and are durable now, in the
+       LangGraph checkpointer; the attachments were never framework state and did not move. So the
+       number that matters is how many conversations one drain can end, and that is what
+       `maxUnavailable` bounds.
 
        **Deliberately not the workers.** `workers.background.replicas: 1` is a hard singleton — the
        PR-gate checkout lock is host-local (D-069) — and a PDB over a singleton is the classic

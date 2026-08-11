@@ -1,6 +1,6 @@
 """What travels with a connector call: the turn's identity as headers, and our own credential.
 
-Two separate concerns, deliberately carried by two different mechanisms, because MAF splits them:
+Two separate concerns, deliberately carried by two different mechanisms:
 
 - **Identity** (who is asking) is read from the turn's ambient ContextVars — the same ones audit and
   authorization read — by an `httpx` request hook on the connector's own client, so it lands on
@@ -9,22 +9,22 @@ Two separate concerns, deliberately carried by two different mechanisms, because
 - **Our credential** (who *we* are) is an `httpx.Auth` on that same client, because it must also be
   present on the MCP `session.initialize()` that happens when the connection opens.
 
-**Why a request hook and not MAF's `header_provider`.** MAF offers a `header_provider` callback
-that looks purpose-built for this, and it does not work over streamable HTTP. Measured against a
-live server: the provider *is* invoked, with the right values, and the server receives nothing.
-The reason is that MAF passes the headers through a `ContextVar` set inside `call_tool`
-(`agent_framework/_mcp.py:3104-3110`) while the HTTP request is actually issued by the MCP
+**Why a request hook and not a header-provider callback.** MCP clients typically offer a
+per-call header callback that looks purpose-built for this, and it does not work over streamable
+HTTP. Measured against a live server: the callback *is* invoked, with the right values, and the
+server receives nothing. The reason is that such a callback passes its headers through a
+`ContextVar` set inside `call_tool`, while the HTTP request is actually issued by the MCP
 transport's `post_writer` task — created when the connection opened, so it never sees a variable
-set afterwards. A hook on our own client runs *in* that task and reads the ambient identity
-there, which is why this works where the provider does not. (MAF's own `security.py:3425-3431`
-documents the sibling trap for auth: provider headers are absent during `initialize()`, so a
-credential passed that way 401s at connect.)
+set afterwards. A hook on our own client runs *in* that task and reads the ambient identity there,
+which is why this works where the callback does not. The sibling trap is auth: callback headers are
+absent during `initialize()` entirely, so a credential passed that way 401s at connect — which is
+why our credential is an `httpx.Auth` on the client instead.
 
 **Why this is correct per turn.** The transport's tasks inherit the context of whoever opened
 the connection, so the identity is only truthful if a connection belongs to exactly one turn —
-which is precisely why `chemclaw.agent.chemclaw_agent.connector_tools` builds fresh tools per turn
-rather than sharing one set process-wide. Sharing them is not merely inaccurate: two concurrent
-turns over one connector tool object deadlock.
+which is precisely why a turn opens its own `HeldConnectorSession` rather than sharing one
+process-wide, and why the graph itself is compiled per turn (D-2026-08-10). Sharing is not merely
+inaccurate: two concurrent turns over one connector session misattribute each other's calls.
 
 **The headers are advisory, never authorization.** Audit (`chemclaw.agent.audit`) and the per-tool
 gate
@@ -167,7 +167,7 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
 
     Registered on the connector's own client (`chemclaw.connectors.registry`), so it runs inside the
     task that issues the request — the one place that can see the turn's ambient context (see the
-    module docstring for why MAF's `header_provider` cannot).
+    module docstring for why a per-call header callback cannot).
 
     **Bound to the endpoint's origin, and it strips rather than merely skips.** A request hook runs
     on *every* hop of a redirect chain (httpx `_send_handling_redirects`), and httpx builds the

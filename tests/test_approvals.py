@@ -24,9 +24,9 @@ class _FakeAgent:
     mcp_tools: list[Any] = []
 
     def create_session(self, *, session_id: str) -> Any:
-        from agent_framework import AgentSession
+        from chemclaw.agent.session import TurnSession
 
-        return AgentSession(session_id=session_id)
+        return TurnSession(session_id=session_id)
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def seam(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 @pytest.fixture
 def client() -> TestClient:
     """The real app with a fake agent factory."""
-    return TestClient(create_app(agent_factory=lambda _profile: _FakeAgent()))
+    return TestClient(create_app())
 
 
 def test_a_pending_hold_can_be_listed(client: TestClient, seam: dict[str, Any]) -> None:
@@ -128,7 +128,7 @@ def test_unowned_hold_is_unreachable_once_entra_is_required(
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.core.config import settings
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = create_app()
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="stranger", upn="stranger@corp", roles=frozenset()
     )

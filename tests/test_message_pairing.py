@@ -1,141 +1,64 @@
 """The stored-history invariant: no tool call without its result (offline).
 
-An unmatched `tool_use` is not one bad turn — the model rejects the whole thread, so a durable
-history that acquires one replays it forever and the session is unusable until somebody edits the
-database. These pin the pure rule; `test_session_store.py` pins the storage layer that applies it.
+Deleting one half of a `tool_use`/`tool_result` pair leaves a thread the model rejects outright,
+and nothing repairs it — the read-time repair that used to heal one direction went with the MAF
+thread that needed it. So the rule is enforced where rows are *deleted*, and these pin the pure
+form of it; `test_retention.py` pins the sweep that applies it.
 """
 
-from agent_framework import Content, Message
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict
 
 from chemclaw.agent.message_pairing import (
     droppable_rows,
-    strip_unmatched_calls,
+    stored_call_ids,
     unmatched_call_ids,
     unmatched_result_ids,
+    unreadable_rows,
 )
+from tests.legacy_rows import legacy_call, legacy_result, legacy_text
 
 
-def _call(call_id: str, name: str = "screen_hazards") -> Content:
-    return Content.from_function_call(call_id=call_id, name=name, arguments={})
+def _calls(*call_ids: str) -> AIMessage:
+    """An assistant message carrying one tool call per id."""
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "screen_hazards", "args": {}, "id": call_id} for call_id in call_ids],
+    )
 
 
-def _result(call_id: str, result: str = "ok") -> Content:
-    return Content.from_function_result(call_id=call_id, result=result)
+def _answer(call_id: str, result: str = "ok") -> ToolMessage:
+    """The tool message answering `call_id`."""
+    return ToolMessage(content=result, tool_call_id=call_id)
 
 
-def test_a_matched_call_is_not_reported() -> None:
-    """The ordinary case: a call answered by its result is not an orphan."""
-    messages = [
-        Message(role="assistant", contents=[_call("c1")]),
-        Message(role="tool", contents=[_result("c1")]),
-    ]
-    assert unmatched_call_ids(messages) == set()
-    assert strip_unmatched_calls(messages) == messages
+def test_either_half_left_alone_is_reported_and_neither_is_repaired() -> None:
+    """Both directions are asked, and both stop at reporting — the reason `droppable_rows` exists.
 
+    The rest of this module answers "may I delete this?". These two answer "did somebody already
+    delete the wrong thing?", and deliberately stop there: healing either half would destroy
+    evidence and mask the bug that stranded it. That makes them a test's instruments rather than
+    production calls, so this is the test that says out loud what they are for — and that the
+    module offers no way to make either problem disappear quietly.
 
-def test_an_unanswered_call_is_reported_and_stripped() -> None:
-    """A call whose result never arrived — the disconnect/kill signature — is removed."""
-    messages = [
-        Message(role="user", contents=[Content.from_text("screen these")]),
-        Message(role="assistant", contents=[_call("c1")]),
-    ]
-    assert unmatched_call_ids(messages) == {"c1"}
-    stripped = strip_unmatched_calls(messages)
-    assert len(stripped) == 1  # the bare tool-call message is gone entirely
-    assert stripped[0].contents[0].text == "screen these"  # the user's turn is untouched
-
-
-def test_prose_alongside_an_orphan_call_survives() -> None:
-    """Only the offending content is dropped — discarding the assistant's words would rewrite it.
-
-    An assistant turn routinely carries text *and* a tool call; dropping the whole message to get
-    rid of the call would silently delete something the chemist was told.
+    The symmetry is worth pinning because it did not always hold. A read-time repair used to strip
+    an unanswered call, so that direction self-healed and only the stranded result was permanent;
+    the repair went with the MAF thread it served, and now nothing heals either.
     """
-    messages = [
-        Message(role="assistant", contents=[Content.from_text("Let me check that."), _call("c1")]),
-    ]
-    (kept,) = strip_unmatched_calls(messages)
-    assert [c.type for c in kept.contents] == ["text"]
-    assert kept.contents[0].text == "Let me check that."
+    stranded_result = [_answer("c1")]
+    assert unmatched_result_ids(stranded_result) == {"c1"}
+    assert unmatched_call_ids(stranded_result) == set()  # the mirror does not see it, by design
 
-
-def test_only_the_unanswered_call_is_stripped_from_a_parallel_batch() -> None:
-    """One missing result does not invalidate its siblings — parallel calls are judged per id."""
-    messages = [
-        Message(role="assistant", contents=[_call("c1"), _call("c2")]),
-        Message(role="tool", contents=[_result("c1")]),
-    ]
-    assert unmatched_call_ids(messages) == {"c2"}
-    stripped = strip_unmatched_calls(messages)
-    assert [c.call_id for c in stripped[0].contents] == ["c1"]
-    assert [c.call_id for c in stripped[1].contents] == ["c1"]
-
-
-def test_a_result_matches_its_call_wherever_it_sits() -> None:
-    """Matching is by id, not adjacency, so a valid pair is never reported over mere ordering."""
-    messages = [
-        Message(role="assistant", contents=[_call("c1")]),
-        Message(role="assistant", contents=[Content.from_text("thinking")]),
-        Message(role="tool", contents=[_result("c1")]),
-    ]
-    assert unmatched_call_ids(messages) == set()
-
-
-def test_message_metadata_rides_along_when_contents_are_trimmed() -> None:
-    """Trimming preserves the rest of the message; rebuilding it from scratch would drop these."""
-    messages = [
-        Message(
-            role="assistant",
-            contents=[Content.from_text("hi"), _call("c1")],
-            author_name="chemclaw",
-            message_id="m-1",
-            additional_properties={"turn": 3},
-        )
-    ]
-    (kept,) = strip_unmatched_calls(messages)
-    assert kept.author_name == "chemclaw"
-    assert kept.message_id == "m-1"
-    assert kept.additional_properties == {"turn": 3}
-
-
-def test_an_untouched_history_is_returned_unchanged() -> None:
-    """The clean path copies nothing — this runs on every single history read."""
-    messages = [Message(role="user", contents=[Content.from_text("hi")])]
-    assert strip_unmatched_calls(messages)[0] is messages[0]
-
-
-def test_empty_history_is_handled() -> None:
-    """A brand-new session reads back nothing at all."""
-    assert unmatched_call_ids([]) == set()
-    assert strip_unmatched_calls([]) == []
+    stranded_call = [_calls("c2")]
+    assert unmatched_call_ids(stranded_call) == {"c2"}
+    assert unmatched_result_ids(stranded_call) == set()
 
 
 # --- D-145: disposing of a row means disposing of the rows it is paired with -------------------
 
 
-def test_a_stranded_result_is_invisible_to_the_repair() -> None:
-    """The asymmetry that makes `droppable_rows` necessary, stated as a test.
-
-    `unmatched_call_ids` reports unanswered *calls* and `strip_call_ids` removes them, so an
-    orphaned call heals itself on the next read. A `tool_result` whose `tool_use` is gone is
-    reported by neither and removed by neither — and the API rejects that thread just as hard. So a
-    stranded result is a bricked session with no self-heal path, which is why nothing may create
-    one.
-    """
-    stranded = [Message(role="tool", contents=[_result("c1")])]
-    assert unmatched_call_ids(stranded) == set(), "the repair can see a stranded result after all"
-    assert strip_unmatched_calls(stranded) == stranded, "the repair removed it after all"
-    # Only the mirror sees it, and it exists to be asserted on rather than to heal anything.
-    assert unmatched_result_ids(stranded) == {"c1"}
-
-
 def test_neither_half_of_a_pair_may_be_dropped_alone() -> None:
     """The core guarantee: a call and its result survive or die together."""
-    rows = [
-        (1, Message(role="user", contents=[Content.from_text("hi")])),
-        (2, Message(role="assistant", contents=[_call("c1")])),
-        (3, Message(role="tool", contents=[_result("c1")])),
-    ]
+    rows = [(1, frozenset[str]()), (2, frozenset({"c1"})), (3, frozenset({"c1"}))]
     assert droppable_rows(rows, {2}) == set(), "the call was dropped without its result"
     assert droppable_rows(rows, {3}) == set(), "the result was dropped without its call"
     assert droppable_rows(rows, {2, 3}) == {2, 3}
@@ -149,11 +72,7 @@ def test_the_closure_is_transitive_across_parallel_calls() -> None:
     A single-pass "does this row's partner come along?" filter passes this case wrongly: row 2's
     partner row 3 is a candidate, so a naive check would drop {2, 3} and strand row 4's result.
     """
-    rows = [
-        (2, Message(role="assistant", contents=[_call("c1"), _call("c2")])),
-        (3, Message(role="tool", contents=[_result("c1")])),
-        (4, Message(role="tool", contents=[_result("c2")])),
-    ]
+    rows = [(2, frozenset({"c1", "c2"})), (3, frozenset({"c1"})), (4, frozenset({"c2"}))]
     assert droppable_rows(rows, {2, 3}) == set()
     assert droppable_rows(rows, {2, 3, 4}) == {2, 3, 4}
 
@@ -161,15 +80,11 @@ def test_the_closure_is_transitive_across_parallel_calls() -> None:
 def test_the_closure_is_order_independent() -> None:
     """A result stored before its call is still one component.
 
-    MAF's own grouping is positional; storage order is not guaranteed to match it once a prior
-    repair has removed an interleaving row. `unmatched_call_ids` is already order-independent for
-    the same reason, and the closure has to match it or the two would disagree about what a group
-    is.
+    A provider's own grouping is positional; storage order is not guaranteed to match it once
+    retention has removed an interleaving row. `unmatched_call_ids` is already order-independent
+    for the same reason, and the closure has to match it or the two would disagree about a group.
     """
-    rows = [
-        (1, Message(role="tool", contents=[_result("c1")])),
-        (2, Message(role="assistant", contents=[_call("c1")])),
-    ]
+    rows = [(1, frozenset({"c1"})), (2, frozenset({"c1"}))]
     assert droppable_rows(rows, {1}) == set()
     assert droppable_rows(rows, {1, 2}) == {1, 2}
 
@@ -181,41 +96,67 @@ def test_the_closure_contracts_rather_than_expanding() -> None:
     turn. Contracting can only return a subset, so the worst case is a straddling group surviving
     one more pass — harmless, and self-correcting once the partner also ages out.
     """
-    rows = [
-        (1, Message(role="assistant", contents=[_call("c1")])),
-        (2, Message(role="tool", contents=[_result("c1")])),
-    ]
+    rows = [(1, frozenset({"c1"})), (2, frozenset({"c1"}))]
     assert droppable_rows(rows, {1}) <= {1}
     assert droppable_rows(rows, set()) == set()
 
 
-def test_the_maf_discriminators_still_match_what_maf_emits() -> None:
-    """The two strings that decide which rows a data-destroying sweep may delete.
+# --- reading the ids out of a stored row, in either shape --------------------------------------
 
-    `durable/retention.py` prunes chat rows and asks this module which ones are safe to drop, and
-    the answer turns on `content.type == "function_call"` / `"function_result"`. Those are MAF's
-    strings, not ours. A rename upstream does not raise: it changes what a nightly sweep deletes.
-    Measured against a plausible rename, `droppable_rows([(1, call), (2, result)], {1})` went from
-    `set()` — the partner correctly protected — to `{1}`, deleting the call and stranding its
-    result, which this module calls "a bricked session with *no* self-heal path".
 
-    **This is not the guard, and the commit that added it overclaimed.** Mutating the two constants
-    fails eight tests in this file, seven of which predate it — every pairing assertion turns on
-    `content.type == _CALL`, so the coupling was already covered. What this adds is a *named*
-    failure: the other seven report "an unanswered call was not stripped", which sends a reader to
-    the pairing logic, while this one says the discriminator moved. Worth keeping for that reason
-    and not worth claiming as a closed risk.
+def test_a_legacy_row_is_read_by_the_shape_maf_actually_wrote() -> None:
+    """The MAF discriminators still decide which *stored* rows a sweep may delete.
+
+    Every `session_messages` row written before the M6 conversion is a `Message.to_dict()`, and the
+    conversion pass is resumable — so the sweep reads them whether or not it has run. A rename in
+    those two strings would not raise: it would change what a nightly sweep destroys, silently.
+
+    The payloads are frozen literals (`tests/legacy_rows.py`), captured from the real constructors
+    and verified byte-for-byte against them. They used to be *built* through MAF, which was right
+    while it was installed — the assertion is about what MAF wrote, so hand-writing the payload
+    would only prove this file agrees with itself. That inverts once the dependency is gone: these
+    bytes are historical data a production table still holds, and a fixture that needs the library
+    re-installed to exist is a fixture that cannot outlive it.
     """
-    from chemclaw.agent.message_pairing import _CALL, _RESULT
+    assert stored_call_ids(legacy_call("c1", "t")) == frozenset({"c1"})
+    assert stored_call_ids(legacy_result("c1")) == frozenset({"c1"})
+    assert stored_call_ids(legacy_text("user", "hi")) == frozenset()
 
-    # Built through MAF's own public constructors, which is the point: the assertion is about what
-    # MAF *emits*, so constructing the content any other way would only prove this file agrees with
-    # itself. (`FunctionCallContent` is not exported at the top level in 1.11.0 — it lives behind
-    # `agent_framework._types` — so the factory is also the only non-private route.)
-    assert Content.from_function_call(call_id="c1", name="t", arguments={}).type == _CALL, (
-        "MAF renamed the function-call discriminator; retention's droppable-row rule now "
-        "mis-classifies every tool exchange"
-    )
-    assert Content.from_function_result(call_id="c1", result="ok").type == _RESULT, (
-        "MAF renamed the function-result discriminator; retention can now strand a call's partner"
-    )
+
+def test_a_converted_row_is_read_by_the_shape_langchain_writes() -> None:
+    """The other half of the same obligation: a row the conversion has already rewritten.
+
+    Both shapes live in one table during a rollout, which is the whole reason `message_shape`
+    exists. The previous reader used MAF's `Message.from_dict` for every row and **raised**
+    `TypeError` on one of these — so the sweep crashed on any session that had taken a turn since
+    the conversion, Temporal retried it to exhaustion, and retention silently stopped for exactly
+    the sessions still in use.
+    """
+    call = message_to_dict(_calls("c1"))
+    assert stored_call_ids(call) == frozenset({"c1"})
+    assert stored_call_ids(message_to_dict(_answer("c1"))) == frozenset({"c1"})
+    assert stored_call_ids(message_to_dict(HumanMessage(content="hi"))) == frozenset()
+
+
+def test_a_row_in_neither_shape_is_unreadable_rather_than_pairing_free() -> None:
+    """`None`, not an empty set — and the difference is what stops a sweep stranding a partner.
+
+    Empty means "in no pairing, so disposable on its own". An unreadable row is not that: nothing
+    can be concluded about what it is paired with. Collapsing the two would make it look
+    pairing-free and therefore droppable, which is the one direction this module exists to prevent.
+    """
+    assert stored_call_ids({"something": "else"}) is None
+    assert stored_call_ids({"contents": "not a list"}) is None
+
+
+def test_an_unreadable_row_takes_its_whole_session_out_of_the_sweep() -> None:
+    """Refusing the row is not enough, and that is the subtle half.
+
+    An unreadable row links to nothing, so leaving it merely undroppable would let a partner it
+    *would* have protected stay eligible — the sweep then strands exactly the pairing this rule
+    exists to protect, reached by being careful about the wrong row. So the session is refused
+    whole, and the caller is told which rows to look at.
+    """
+    rows = [(1, frozenset({"c1"})), (2, None), (3, frozenset({"c1"}))]
+    assert unreadable_rows(rows) == [2]
+    assert droppable_rows(rows, {1, 3}) == set(), "a session with an unreadable row was pruned"

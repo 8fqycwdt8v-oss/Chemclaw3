@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.tools import tool as tool_decorator
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
@@ -199,7 +200,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
 
 
 def test_launching_accepts_the_raw_json_object_the_framework_hands_it(client: _FakeClient) -> None:
-    """MAF publishes the params model's schema but passes the body a decoded `dict`.
+    """The params model's schema is published, but the body is passed a decoded `dict`.
 
     Every test above this one checked the generated tool's *name*, *docstring* and *schema*; none
     ever called it. So `launch` carried `cast(BaseModel, params).model_dump(...)` — a `cast` is a
@@ -231,19 +232,22 @@ def test_launching_validates_rather_than_passing_the_object_through(client: _Fak
 
 
 def test_launching_survives_the_frameworks_own_invocation_path(client: _FakeClient) -> None:
-    """Driven through `agent_framework.tool(...).invoke()` rather than through our idea of it.
+    """Driven through the framework's own dispatcher rather than through our idea of it.
 
     The test above pins today's observed behaviour; this one pins the property that survives the
-    framework changing its mind — whatever MAF hands the body, a launch through MAF's own
-    dispatcher starts the run.
+    framework changing its mind — whatever the dispatcher hands the body, a launch through it
+    starts the run. MAF's `tool(...).invoke()` before the rebuild, LangChain's
+    `StructuredTool.ainvoke` now.
     """
-    from agent_framework import tool as as_tool
+    from langchain_core.tools import StructuredTool
 
     fn = build_template_tool(
         _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
     )
-    invocable = as_tool(fn, name=fn.__name__, description="Run the probe template.")
-    asyncio.run(invocable.invoke(arguments={"params": {"smiles": "CCO"}}))
+    invocable = StructuredTool.from_function(
+        coroutine=fn, name=fn.__name__, description="Run the probe template."
+    )
+    asyncio.run(invocable.ainvoke({"params": {"smiles": "CCO"}}))
     (call,) = client.calls
     assert call["input"].inputs == {"smiles": "CCO"}
 
@@ -524,47 +528,22 @@ class _Recorder:
         self.events.append(event)
 
 
-class _FakeMcpFunction:
-    """A stand-in for the `FunctionTool` MAF builds per MCP tool.
+def _fake_connector_tool(name: str, calls: list[dict[str, Any]]) -> Any:
+    """A connector tool as `open_connector_specs` now produces one: an ordinary LangChain tool.
 
-    Only two things matter about the real one and both are reproduced: it has a `name` the
-    middleware reads, and `invoke(arguments=..., skip_parsing=True)` returns the connector's raw
-    result. That is the whole interface the step uses.
+    That it is *ordinary* is the structural half of D-168's fix. There used to be two shapes on the
+    assembled surface — in-process `FunctionTool`s and MAF's MCP wrappers — searched by two loops
+    and called two ways, and the second way (`connector.call_tool`) reached the connector directly,
+    skipping the audit trail and the authorization gate. With one shape there is no second path to
+    tempt anyone, so the test can no longer plant a `call_tool` trap: there is nothing to trap.
     """
 
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.calls: list[dict[str, Any]] = []
-
-    async def invoke(self, *, arguments: Any = None, skip_parsing: bool = False, **_: Any) -> Any:
-        """Record the call and hand back a raw result, as `call_tool` used to."""
-        self.calls.append(dict(arguments or {}))
-        assert skip_parsing, (
-            "the connector branch must not re-wrap the result (see _call_function_tool)"
-        )
+    @tool_decorator(name_or_callable=name, description="screen a molecule for hazards")
+    async def _fake(smiles: list[str]) -> str:
+        calls.append({"smiles": smiles})
         return "hazard: none found"
 
-
-class _FakeConnector:
-    """A connector exposing one function, with the `call_tool` the step must no longer use."""
-
-    def __init__(self, function: _FakeMcpFunction) -> None:
-        self.functions = [function]
-        self.call_tool_used = False
-
-    async def call_tool(self, name: str, **kwargs: Any) -> Any:
-        """The ungoverned path. Reaching it is the defect, so reaching it fails the test."""
-        self.call_tool_used = True
-        raise AssertionError(
-            f"the template step called {name!r} through connector.call_tool, which skips both "
-            "enforce_tool_authz and the audit middleware"
-        )
-
-
-class _EmptyAgent:
-    """An agent whose in-process tool list is empty, so lookup falls through to the connector."""
-
-    default_options: dict[str, Any] = {"tools": []}
+    return _fake
 
 
 def _tool_step(tool: str, **arguments: Any) -> Any:
@@ -590,18 +569,13 @@ def test_a_connector_tool_step_is_audited_under_the_requester(
 
     sink = _Recorder()
     monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: sink)
-    function = _FakeMcpFunction("screen_hazards")
-    connector = _FakeConnector(function)
+    calls: list[dict[str, Any]] = []
+    tool = _fake_connector_tool("screen_hazards", calls)
 
-    result = asyncio.run(
-        _invoke(_EmptyAgent(), [connector], _tool_step("screen_hazards", smiles=["CCO"]), [])
-    )
+    result = asyncio.run(_invoke([tool], _tool_step("screen_hazards", smiles=["CCO"]), []))
 
-    # Rendered to text, because Temporal's converter refuses `agent_framework._types.Content` and
-    # a step result crosses an activity boundary — the reason no `tool` step ever completed.
     assert result == "hazard: none found"
-    assert function.calls == [{"smiles": ["CCO"]}]
-    assert not connector.call_tool_used
+    assert calls == [{"smiles": ["CCO"]}]
     (event,) = sink.events
     assert (event.tool, event.actor, event.outcome) == ("screen_hazards", "chemist-1", "ok")
     assert event.correlation_id == "template-run-1"
@@ -622,48 +596,57 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
     monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: sink)
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "tool_role_gates", {"screen_hazards": ["safety"]})
-    function = _FakeMcpFunction("screen_hazards")
-    connector = _FakeConnector(function)
+    calls: list[dict[str, Any]] = []
+    tool = _fake_connector_tool("screen_hazards", calls)
 
+    # **It raises**, and that is the difference between this caller and a chat turn. The chain's
+    # two outermost middlewares convert a denial into prose a *model* can act on; a template step
+    # has no model, and its result is interpolated into later steps — so a converted refusal would
+    # become the step's `${steps.<id>.result}` and a later step would read "you are not authorized"
+    # as though it were a hazard screening. `invoke_governed` therefore folds the governance half
+    # only. The first version of this test asserted the converted text and passed; the job-step
+    # tests are what caught it, because there the same conversion made a *refused* launch return a
+    # payload and start the workflow.
     with pytest.raises(AuthorizationError):
-        asyncio.run(
-            _invoke(_EmptyAgent(), [connector], _tool_step("screen_hazards", smiles=["CCO"]), [])
-        )
+        asyncio.run(_invoke([tool], _tool_step("screen_hazards", smiles=["CCO"]), []))
 
-    assert function.calls == [], "the tool body ran despite the refusal"
+    assert calls == [], "the tool body ran despite the refusal"
     (event,) = sink.events
     assert event.outcome == "error", "a denied connector step left no audit row"
 
 
 def test_a_step_result_is_something_temporal_can_carry() -> None:
-    """`list[Content]` is not, and a step result crosses an activity boundary (D-168).
+    """MCP content blocks are not, and a step result crosses an activity boundary (D-168).
 
-    Live, the shipped `hazard-briefing` template failed with "Unable to serialize unknown type:
-    agent_framework._types.Content" — after the missing worker registration was fixed and before
-    this was. Both branches were affected, so no template with a `tool` step had ever completed a
-    run. The offline tests could not see it: they call the activity in-process, where nothing
-    serializes anything.
+    Live, the shipped `hazard-briefing` template failed with "Unable to serialize unknown type" —
+    after the missing worker registration was fixed and before this was — so no template with a
+    `tool` step had ever completed a run. The offline tests could not see it: they call the
+    activity in-process, where nothing serializes anything.
+
+    Half of that failure was MAF's own envelope (`skip_parsing` and most of `_serializable` existed
+    for it) and went with the framework. This is the half that did not: an MCP tool answers as
+    content blocks on the wire whatever calls it.
     """
-    from agent_framework import Content
+    from chemclaw.durable.template_activities import _mcp_text
 
-    from chemclaw.durable.template_activities import _serializable
-
-    assert _serializable([Content.from_text("a"), Content.from_text("b")]) == "a\nb"
+    blocks = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+    assert _mcp_text(blocks) == "a\nb"
     # Anything the converter already understands is handed through untouched.
-    assert _serializable({"energy": -154.1}) == {"energy": -154.1}
-    assert _serializable("plain") == "plain"
+    assert _mcp_text({"energy": -154.1}) == {"energy": -154.1}
+    assert _mcp_text("plain") == "plain"
 
 
 def test_a_structured_tool_result_is_not_mistaken_for_mcp_content() -> None:
     """`NoteRef` has a `type` field, and duck-typing on that flattened it to a repr string.
 
-    The first version of `_serializable` asked `hasattr(item, "type")`. `find_notes` returns
-    `list[NoteRef]`, whose `type` is the note's *kind* — so the check matched, found no `.text`,
-    and replaced a perfectly serializable structured result with `str(...)`. Silently, for every
-    template step naming such a tool. `isinstance` against the real `Content` cannot do that.
+    The first version of this asked `hasattr(item, "type")`. `find_notes` returns `list[NoteRef]`,
+    whose `type` is the note's *kind* — so the check matched, found no `.text`, and replaced a
+    perfectly serializable structured result with `str(...)`. Silently, for every template step
+    naming such a tool. The check is now "a list of dicts carrying a `type` key", which a list of
+    pydantic models cannot satisfy however its fields are named.
     """
     from chemclaw.agent.graph_tools import NoteRef
-    from chemclaw.durable.template_activities import _serializable
+    from chemclaw.durable.template_activities import _mcp_text
 
     notes = [NoteRef(id="reaction-1", type="reaction", source="eln", confidence=0.9)]
-    assert _serializable(notes) is notes, "a structured result was flattened into a string"
+    assert _mcp_text(notes) is notes, "a structured result was flattened into a string"

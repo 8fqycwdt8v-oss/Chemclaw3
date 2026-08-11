@@ -9,42 +9,39 @@ chemists' tool calls were indistinguishable in the GxP record.
 """
 
 import asyncio
-from types import SimpleNamespace
-from typing import Any
+from collections.abc import AsyncIterator
 
 import pytest
-from agent_framework import AgentSession
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.runner import run_turn
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS, Metrics
-from tests.fakes import FakeUpdate
+from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 
-class _SilentAgent:
+class _SilentAgent(ScriptedTurn):
     """A fake agent that reads the ambient correlation id from inside its turn."""
-
-    mcp_tools: list[Any] = []
 
     def __init__(self) -> None:
         """Start with nothing observed."""
         self.seen: list[str | None] = []
 
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-    ) -> Any:
-        async def _gen() -> Any:
-            self.seen.append(get_current_correlation_id())
-            yield FakeUpdate(text="ok")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        self.seen.append(get_current_correlation_id())
+        yield "ok"
 
 
-def _drive(agent: _SilentAgent, session_id: str) -> None:
-    """Run one turn to completion, discarding its events."""
+def _drive(agent: ScriptedTurn, session_id: str) -> None:
+    """Run one turn to completion on whichever engine is configured, discarding its events."""
 
     async def _collect() -> None:
-        async for _ in run_turn(agent, AgentSession(session_id=session_id), "hi"):
+        async for _ in run_turn(
+            TurnSession(session_id=session_id),
+            "hi",
+            connectors=[],
+            graph_factory=agent.graph_factory,
+        ):
             pass
 
     asyncio.run(_collect())
@@ -83,24 +80,25 @@ def test_a_turn_records_its_duration() -> None:
 def test_a_failed_turn_is_still_timed() -> None:
     """Excluding failures would make the histogram look best exactly when the service is worst."""
 
-    class _BrokenAgent:
+    class _BrokenAgent(ScriptedTurn):
         """An agent whose turn raises partway through."""
 
-        mcp_tools: list[Any] = []
-
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-        ) -> Any:
-            async def _gen() -> Any:
-                raise RuntimeError("boom")
-                yield  # pragma: no cover - unreachable, makes this an async generator
-
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - unreachable, makes this an async generator
 
     before_count, _ = METRICS.observations("chemclaw_turn_duration_seconds")
+    broken = _BrokenAgent()
 
     async def _collect() -> None:
-        async for _ in run_turn(_BrokenAgent(), AgentSession(session_id="s-e"), "hi"):
+        async for _ in run_turn(
+            TurnSession(session_id="s-e"),
+            "hi",
+            connectors=[],
+            graph_factory=broken.graph_factory,
+        ):
             pass
 
     asyncio.run(_collect())
@@ -135,26 +133,24 @@ def test_a_sample_on_a_boundary_lands_in_that_bucket() -> None:
 def test_token_spend_is_counted_not_only_budgeted() -> None:
     """The budget guard metered spend only to refuse a turn; the same number is now a rate."""
 
-    class _MeteredAgent:
-        """An agent whose update reports usage the way MAF's does."""
+    class _MeteredAgent(ScriptedTurn):
+        """An agent whose update reports usage the way a provider's does."""
 
-        mcp_tools: list[Any] = []
-
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-        ) -> Any:
-            async def _gen() -> Any:
-                usage = {"input_token_count": 30, "output_token_count": 12}
-                yield FakeUpdate(
-                    text="ok", contents=[SimpleNamespace(usage_details=usage, name=None)]
-                )
-
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            yield Chunk("ok", input_tokens=30, output_tokens=12)
 
     before = METRICS.value("chemclaw_tokens_total")
+    metered = _MeteredAgent()
 
     async def _collect() -> None:
-        async for _ in run_turn(_MeteredAgent(), AgentSession(session_id="s-f"), "hi"):
+        async for _ in run_turn(
+            TurnSession(session_id="s-f"),
+            "hi",
+            connectors=[],
+            graph_factory=metered.graph_factory,
+        ):
             pass
 
     asyncio.run(_collect())
@@ -180,29 +176,23 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _CapturingSink)
 
-    class _MeteredAgent:
-        """The same shape as the agent above: one update carrying MAF-style usage."""
+    class _MeteredAgent(ScriptedTurn):
+        """The same shape as the agent above: one update carrying a split usage report."""
 
-        mcp_tools: list[Any] = []
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            yield Chunk("ok", input_tokens=7, output_tokens=3)
 
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-        ) -> Any:
-            async def _gen() -> Any:
-                yield FakeUpdate(
-                    text="ok",
-                    contents=[
-                        SimpleNamespace(
-                            usage_details={"input_token_count": 7, "output_token_count": 3},
-                            name=None,
-                        )
-                    ],
-                )
-
-            return _gen()
+    metered = _MeteredAgent()
 
     async def _collect() -> None:
-        async for _ in run_turn(_MeteredAgent(), AgentSession(session_id="s-cost"), "hi"):
+        async for _ in run_turn(
+            TurnSession(session_id="s-cost"),
+            "hi",
+            connectors=[],
+            graph_factory=metered.graph_factory,
+        ):
             pass
         # The write is scheduled rather than awaited (it is booked from a `finally` that also runs
         # on the disconnect path), so yield to the loop before reading it.
@@ -223,20 +213,24 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
     # not from the success path, because a turn that broke — or that a client hung up on — spent
     # real tokens, and a ledger holding only the tidy ones is wrong in the direction that hides a
     # runaway. This is the assertion that fails if the call moves onto the answered path.
-    class _BrokenAgent:
-        mcp_tools: list[Any] = []
+    class _BrokenAgent(ScriptedTurn):
+        """A turn whose model call raises before it says anything."""
 
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
-        ) -> Any:
-            async def _gen() -> Any:
-                raise RuntimeError("boom")
-                yield  # pragma: no cover - unreachable, makes this an async generator
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - unreachable, makes this an async generator
 
-            return _gen()
+    broken = _BrokenAgent()
 
     async def _collect_broken() -> None:
-        async for _ in run_turn(_BrokenAgent(), AgentSession(session_id="s-broken"), "hi"):
+        async for _ in run_turn(
+            TurnSession(session_id="s-broken"),
+            "hi",
+            connectors=[],
+            graph_factory=broken.graph_factory,
+        ):
             pass
         await asyncio.sleep(0)
         await asyncio.sleep(0)
@@ -257,15 +251,13 @@ def test_the_front_door_configures_logging_and_telemetry_at_startup(
     from fastapi.testclient import TestClient
 
     from chemclaw.api import app as service_app
-    from tests.test_service import _FakeAgent, _no_connectors
+    from tests.test_service import _no_connectors
 
     calls: list[str] = []
     monkeypatch.setattr(service_app, "configure_logging", lambda: calls.append("logging"))
     monkeypatch.setattr(service_app, "configure_telemetry", lambda: calls.append("telemetry"))
 
-    app = service_app.create_app(
-        agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
-    )
+    app = service_app.create_app(connector_factory=_no_connectors)
     with TestClient(app):
         pass
     assert calls == ["logging", "telemetry"]

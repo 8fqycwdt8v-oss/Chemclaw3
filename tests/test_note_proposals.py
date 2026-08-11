@@ -81,7 +81,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """The real app with the webhook secret set; the dev principal is a reviewer."""
     monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", _SECRET)
     monkeypatch.setattr("chemclaw.api.app.request_note_reindex", _fake_reindex)
-    return TestClient(create_app(agent_factory=lambda _profile: object()))
+    return TestClient(create_app())
 
 
 @pytest.fixture
@@ -89,7 +89,7 @@ def plain_user_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """The app seen by an authenticated chemist holding no review role."""
     monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     monkeypatch.setattr("chemclaw.core.config.settings.entra_privileged_roles", "note-reviewer")
-    app = create_app(agent_factory=lambda _profile: object())
+    app = create_app()
     app.dependency_overrides[require_principal] = lambda: Principal(oid=_DEV_OID)
     yield TestClient(app)
     app.dependency_overrides.clear()

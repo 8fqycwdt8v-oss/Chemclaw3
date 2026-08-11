@@ -1,7 +1,7 @@
 """Per-session and per-user turn/token budgets — the runaway-cost guard (plan F-budget).
 
-A single agent turn is already iteration-capped (`harness_max_loop_iterations`, or MAF's 40
-roundtrips for the classic agent), so one turn cannot loop forever. But nothing caps the *number* of
+A single agent turn is already iteration-capped (`harness_max_loop_iterations`), so one turn
+cannot loop forever. But nothing caps the *number* of
 turns, so a client — or an automated job→session push-back loop re-waking a session — could keep
 posting turns and accumulate unbounded LLM spend. This tracker is the missing ceiling above the
 per-turn loop cap: the front door meters each turn's reported token usage and counts turns per

@@ -7,16 +7,14 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 
 import asyncio
 
-import pytest
-from agent_framework import Content, InMemoryHistoryProvider, Message
+from langchain_core.messages import HumanMessage
 
 from chemclaw.agent.chemclaw_agent import history_provider
-from chemclaw.agent.message_pairing import unmatched_call_ids, unmatched_result_ids
 from chemclaw.agent.session_store import (
+    InMemoryHistoryProvider,
     PostgresHistoryProvider,
     SessionOwnerStore,
     SessionTurnClaims,
-    _crossed_new_compaction_bucket,
 )
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -37,174 +35,32 @@ async def _provider_or_skip() -> PostgresHistoryProvider:
     return PostgresHistoryProvider()
 
 
+async def _clear(session_id: str) -> None:
+    """Empty one session's rows, so a rerun starts from the state the test describes.
+
+    Written here rather than borrowed from the provider: the store used to expose `rollback_to`,
+    and these tests reached for it as a truncate because it happened to be there. It was the
+    disconnect rollback's delete, it is gone with that rollback, and a fixture concern should never
+    have been resting on a production method's side effect anyway.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM session_messages WHERE session_id = %s", (session_id,))
+
+
 def test_messages_survive_a_new_provider_instance() -> None:
     """Saved messages reload through a fresh provider over the same DSN (proxy for a restart)."""
 
     async def _run() -> None:
         writer = await _provider_or_skip()
         session_id = "sess-f3-roundtrip"
-        turn = [Message(role="user", contents=["what is the pKa of phenol?"])]
+        turn = [HumanMessage(content="what is the pKa of phenol?")]
         await writer.save_messages(session_id, turn)
 
         # A brand-new provider instance (as a restarted pod would build) sees the persisted turn.
         reader = PostgresHistoryProvider()
         loaded = await reader.get_messages(session_id)
-        assert any("phenol" in m.text for m in loaded)
-
-    asyncio.run(_run())
-
-
-def test_an_orphaned_tool_call_is_repaired_on_read() -> None:
-    """A stored call with no result is dropped *and* removed from the table, not just filtered.
-
-    This is the poison-pill case: the model rejects a thread whose `tool_use` has no
-    `tool_result`, so without this the session fails on every later turn — permanently, since a
-    `SIGKILL` or pod eviction between the two writes runs no rollback handler at all.
-    """
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        session_id = "sess-orphan-repair"
-        await provider.rollback_to(session_id, 0)  # a clean slate for a rerun
-        await provider.save_messages(
-            session_id,
-            [
-                Message(role="user", contents=["screen sodium azide"]),
-                Message(
-                    role="assistant",
-                    contents=[
-                        Content.from_text("Checking that now."),
-                        Content.from_function_call(
-                            call_id="c-orphan", name="screen_hazards", arguments={}
-                        ),
-                    ],
-                ),
-            ],
-        )
-
-        loaded = await provider.get_messages(session_id)
-        assert unmatched_call_ids(loaded) == set()  # the caller never sees the orphan
-        assert any("Checking that now." in m.text for m in loaded)  # the prose survived
-
-        # ...and it is gone from storage, so the repair is paid once rather than on every read.
-        fresh = PostgresHistoryProvider()
-        assert unmatched_call_ids(await fresh.get_messages(session_id)) == set()
-
-    asyncio.run(_run())
-
-
-def test_repair_rewrites_the_right_rows_when_an_earlier_one_is_dropped() -> None:
-    """A dropped row must not shift the rewrite onto a later row's message.
-
-    Regression guard: pairing the stored row ids against the repaired list *positionally* works
-    only while the two are the same length. The moment one message is discarded outright, every
-    row after it lines up against the wrong message — so a trimmed message would be written over
-    an unrelated row, corrupting history the repair was supposed to be saving.
-    """
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        session_id = "sess-orphan-shift"
-        await provider.rollback_to(session_id, 0)
-        await provider.save_messages(
-            session_id,
-            [
-                Message(role="user", contents=["first, a question"]),
-                # Dropped entirely (nothing but the orphan call) — this is what shifts the list.
-                Message(
-                    role="assistant",
-                    contents=[
-                        Content.from_function_call(
-                            call_id="c-gone", name="predict_pka", arguments={}
-                        )
-                    ],
-                ),
-                # Trimmed, not dropped: its prose must survive, on its own row.
-                Message(
-                    role="assistant",
-                    contents=[
-                        Content.from_text("and some prose worth keeping"),
-                        Content.from_function_call(
-                            call_id="c-trim", name="screen_hazards", arguments={}
-                        ),
-                    ],
-                ),
-            ],
-        )
-
-        await provider.get_messages(session_id)  # triggers the repair + write-back
-        reloaded = await PostgresHistoryProvider().get_messages(session_id)
-
-        assert [m.text for m in reloaded] == ["first, a question", "and some prose worth keeping"]
-        assert unmatched_call_ids(reloaded) == set()
-
-    asyncio.run(_run())
-
-
-def test_a_matched_pair_is_never_touched_by_the_repair() -> None:
-    """A complete call/result pair round-trips intact — the repair must not eat healthy history."""
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        session_id = "sess-orphan-healthy"
-        await provider.rollback_to(session_id, 0)
-        await provider.save_messages(
-            session_id,
-            [
-                Message(
-                    role="assistant",
-                    contents=[
-                        Content.from_function_call(call_id="c-ok", name="predict_pka", arguments={})
-                    ],
-                ),
-                Message(
-                    role="tool",
-                    contents=[Content.from_function_result(call_id="c-ok", result="9.95")],
-                ),
-            ],
-        )
-        loaded = await provider.get_messages(session_id)
-        assert [c.type for m in loaded for c in m.contents] == ["function_call", "function_result"]
-
-    asyncio.run(_run())
-
-
-def test_rollback_deletes_only_what_the_turn_wrote() -> None:
-    """The durable half of the disconnect rollback: rows past the watermark go, earlier ones stay.
-
-    `session.state` is not where this provider keeps messages — `save_messages` has already
-    committed them — so restoring the state alone left a half-written turn durably stored.
-    """
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        session_id = "sess-rollback"
-        await provider.rollback_to(session_id, 0)
-        await provider.save_messages(session_id, [Message(role="user", contents=["turn one"])])
-
-        watermark = await provider.latest_message_id(session_id)
-        assert watermark is not None
-        await provider.save_messages(session_id, [Message(role="user", contents=["turn two"])])
-
-        assert await provider.rollback_to(session_id, watermark) == 1
-        remaining = await provider.get_messages(session_id)
-        assert [m.text for m in remaining] == ["turn one"]  # the committed turn is untouched
-
-    asyncio.run(_run())
-
-
-def test_watermark_is_none_for_a_session_with_no_history() -> None:
-    """A first turn reads no watermark; the caller decides that means 0, the store never guesses.
-
-    `None` here is the store saying "no history yet" — and only that. The runner maps it to a
-    watermark of 0 itself, because `rollback_to` deliberately no longer accepts `None`: the same
-    value used to also mean "the read failed", and defaulting it to 0 turned a failed read plus a
-    disconnect into a full history wipe.
-    """
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        assert await provider.latest_message_id("sess-never-used") is None
+        assert any("phenol" in str(m.content) for m in loaded)
 
     asyncio.run(_run())
 
@@ -242,9 +98,7 @@ async def _spoke_in(session_id: str, text: str = "a turn") -> None:
     Through the real provider rather than a raw INSERT: the listing derives last-activity from
     `session_messages.created_at`, so the two have to agree about what a turn writes.
     """
-    await PostgresHistoryProvider().save_messages(
-        session_id, [Message(role="user", contents=[text])]
-    )
+    await PostgresHistoryProvider().save_messages(session_id, [HumanMessage(content=text)])
 
 
 def test_session_owner_lists_only_its_own_sessions_most_recently_used_first() -> None:
@@ -436,151 +290,43 @@ def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
     asyncio.run(_run())
 
 
-# --- R4.2: `_compact` replans only on a fresh floor-bucket crossing, not every turn above it ----
+def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
+    """`get_messages` still has no `LIMIT`, for a reason that changed under it.
 
+    It used to be a data-safety rule: the read repaired orphaned pairings and *wrote the repair
+    back*, so over a windowed read a `tool_result` whose `tool_use` merely fell outside the window
+    was indistinguishable from a real orphan and would be stripped and committed. That repair is
+    gone — nothing feeds this back to a model any more — and the previous version of this test said
+    in as many words that its own deletion should turn it into a different test. This is that test.
 
-def test_below_the_floor_never_crosses() -> None:
-    """Neither count sits at or past the floor: no replan, whatever the two counts are."""
-    assert _crossed_new_compaction_bucket(5, 9, floor=12) is False
+    The surviving reason is the reader. The one caller is `GET /sessions/{id}/messages`, rendered
+    for a person reloading a conversation, and a transcript that silently drops its own beginning
+    is worse than a slow one: it does not look truncated, it looks like the conversation started
+    later than it did. Compaction is what bounds this table, and it deletes whole pairing
+    components (`droppable_rows`, D-145) so what remains is always coherent.
 
-
-def test_first_time_reaching_the_floor_crosses() -> None:
-    """The turn whose insert pushes the count from under the floor to at/over it must replan."""
-    assert _crossed_new_compaction_bucket(195, 200, floor=200) is True
-
-
-def test_staying_in_the_same_bucket_above_the_floor_does_not_cross() -> None:
-    """This is the defect: growing from 201 to 202 must not repeat the full read + replan."""
-    assert _crossed_new_compaction_bucket(201, 202, floor=200) is False
-
-
-def test_growing_into_the_next_bucket_crosses_again() -> None:
-    """Once the count reaches the *next* multiple of the floor, it is due again."""
-    assert _crossed_new_compaction_bucket(399, 400, floor=200) is True
-
-
-def test_a_multi_message_turn_that_skips_straight_past_a_bucket_still_crosses() -> None:
-    """A multi-row turn can jump the count clean over a boundary; it must still trigger.
-
-    Bucket membership is what matters, not landing exactly on a multiple.
+    Asserted behaviorally rather than by grepping the SQL, which is what the old version had to do
+    (the write-back was unobservable without a database). A window would show up here as a short
+    list, however it were implemented.
     """
-    assert _crossed_new_compaction_bucket(190, 210, floor=200) is True
 
-
-def test_a_negative_before_count_clamps_rather_than_crashing() -> None:
-    """`inserted` could in principle exceed `count` under a racing write.
-
-    Must not raise or go negative through the bucket math.
-    """
-    assert _crossed_new_compaction_bucket(-5, 200, floor=200) is True  # bucket 0 -> bucket 1
-    assert _crossed_new_compaction_bucket(-5, 50, floor=200) is False  # both still bucket 0
-
-
-# --- D-151: the stored history stops growing without bound -------------------------------------
-
-
-# Long enough for the window to bind several times over, so the band is visible rather than a
-# single sample that could be a local peak.
-_TURNS = 60
-
-
-def _compaction_turn(index: int) -> list[Message]:
-    """One turn's worth of stored messages, with a payload big enough to matter."""
-    return [
-        Message(role="user", contents=[Content.from_text(f"question {index}")]),
-        Message(
-            role="assistant",
-            contents=[
-                Content.from_function_call(call_id=f"k{index}", name="predict_pka", arguments={})
-            ],
-        ),
-        Message(
-            role="tool",
-            contents=[
-                Content.from_function_result(call_id=f"k{index}", result="payload " + "z" * 800)
-            ],
-        ),
-        Message(role="assistant", contents=[Content.from_text(f"answer {index}")]),
-    ]
-
-
-def test_durable_compaction_bounds_a_long_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The defect: without this the row count grows by four per turn, forever.
-
-    Every turn re-reads and deserialises the whole history before the model call, so the cost of
-    turn N is O(all turns so far). Retention does not bound it — it prunes by age, is off by
-    default, and an age window does not cap one long-running session at all.
-
-    Asserted as *boundedness*, not as a monotone plateau. Measured over 60 turns the count sits in
-    a band (14 → 23 → 22 → 18) rather than settling on one number: the sliding window keeps a fixed
-    number of conversation groups, and a collapsed group leaves a summary row that is itself evicted
-    a few turns later, so the total breathes. A single before/after ratio would catch a local peak
-    and flake. What must be true is that the size is a function of the window and not of the number
-    of turns — so this compares the second half against the first and against the linear count.
-    """
-    monkeypatch.setattr(settings, "agent_durable_compaction_enabled", True)
-    monkeypatch.setattr(settings, "agent_durable_compaction_min_rows", 12)
-    monkeypatch.setattr(settings, "agent_context_token_budget", 2000)
-
-    async def _run() -> tuple[list[int], set[str], set[str]]:
+    async def _run() -> None:
         await migrated_db_or_skip()
         provider = PostgresHistoryProvider()
-        session_id = "d146-plateau"
+        session_id = "sess-no-window"
         async with db.connection(settings.postgres_dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
                 )
-            await conn.commit()
+        turns = 80  # comfortably past any plausible default window
+        for index in range(turns):
+            await provider.save_messages(session_id, [HumanMessage(content=f"question {index}")])
 
-        sizes: list[int] = []
-        for index in range(_TURNS):
-            await provider.save_messages(session_id, _compaction_turn(index))
-            if (index + 1) % 10 == 0:
-                sizes.append(len(await provider.get_messages(session_id)))
-
-        final_messages = await provider.get_messages(session_id)
-        return (
-            sizes,
-            unmatched_call_ids(final_messages),
-            unmatched_result_ids(final_messages),
+        loaded = await provider.get_messages(session_id)
+        assert [m.content for m in loaded] == [f"question {index}" for index in range(turns)], (
+            f"the transcript read returned {len(loaded)} of {turns} messages — a window would "
+            "make a reloaded conversation look like it began later than it did"
         )
 
-    sizes, orphan_calls, orphan_results = asyncio.run(_run())
-    linear = _TURNS * 4  # what the table would hold if nothing ever compacted
-    assert max(sizes) < linear // 2, (
-        f"the history never compacted: peaked at {max(sizes)} rows against {linear} uncompacted"
-    )
-    # The property that matters: size tracks the window, not the turn count. The second half must
-    # not be systematically larger than the first — a growing history fails here even though its
-    # absolute size might still be under the bound above.
-    half = len(sizes) // 2
-    assert max(sizes[half:]) <= max(sizes[:half]) + 12, (
-        f"the history is still growing with turn count: {sizes}"
-    )
-    # And every pass left a thread that can still be sent.
-    assert orphan_calls == set(), "compaction left a call without its result"
-    assert orphan_results == set(), "compaction stranded a result — the session is bricked"
-
-
-def test_durable_compaction_is_off_until_a_deployment_asks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Deleting conversation history is a stated policy, never one inherited on upgrade."""
-    monkeypatch.setattr(settings, "agent_durable_compaction_enabled", False)
-    monkeypatch.setattr(settings, "agent_durable_compaction_min_rows", 4)
-    monkeypatch.setattr(settings, "agent_context_token_budget", 500)
-
-    async def _run() -> int:
-        await migrated_db_or_skip()
-        provider = PostgresHistoryProvider()
-        session_id = "d146-off"
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
-                )
-            await conn.commit()
-        for index in range(6):
-            await provider.save_messages(session_id, _compaction_turn(index))
-        return len(await provider.get_messages(session_id))
-
-    assert asyncio.run(_run()) == 24, "rows went missing with compaction disabled"
+    asyncio.run(_run())

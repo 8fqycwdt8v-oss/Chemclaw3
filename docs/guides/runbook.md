@@ -31,8 +31,28 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   <host>: <cause>` (password redacted). It is a retryable infra fault, so Temporal retries the
   activity; fix the DSN/host and it recovers.
 - **OpenTelemetry (optional):** set `CHEMCLAW_OTEL_ENABLED=true` and point
-  `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector. Requires the OpenTelemetry SDK + OTLP exporter
+  `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector (or set `CHEMCLAW_OTEL_ENDPOINT`, which
+  `core/logging.py` bridges to it). Requires the OpenTelemetry SDK + OTLP exporter
   extras installed; enabling without them raises a directive error.
+  - **What the process installs**, since `configure_telemetry` stopped being one line into the
+    agent framework: a `TracerProvider` whose spans go through a `BatchSpanProcessor` to the OTLP
+    **span** exporter, tagged `service.name=chemclaw` and `service.version=<deployment revision>`.
+    Set the standard `OTEL_SERVICE_NAME` per Deployment if you want the front door and each worker
+    to appear as separate services — unset, they are one. Traces only, on purpose: metrics are
+    `/metrics` (Prometheus, scraped per pod) and logs are JSON on stdout, and neither needs a
+    second copy over OTLP.
+  - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` no longer does anything** and the process says so at
+    WARNING if you set it. Its only consumer was the agent framework's own instrumentation, which
+    attached prompts and results to *its* spans; no first-party span carries turn content.
+  - **A real regression, named rather than papered over: per-model token attribution is gone.**
+    The agent framework's chat-client instrumentation recorded `gen_ai.client.token.usage` — an
+    OTel *metric* (a histogram), despite a name that reads like a span attribute — labelled by
+    request model, response model, provider and token type. Measured across the installed venv,
+    exactly one module emits it — the agent framework's own observability module; nothing in
+    `langchain`, `langgraph` or `langsmith` does. It goes in two steps and neither is faked: it
+    stops being exported now (this is a span pipeline, and there is no metric pipeline), and it
+    stops being produced when the package is removed. What remains is `/metrics`'s token counters,
+    which carry `profile` rather than model; §(viii) is the place that reads them.
 
 ## Exposing the front door (the two settings that decide whether it boots)
 
@@ -590,6 +610,13 @@ Over the committed (deterministic) case-set this is a *deployment-consistency tr
 when the deployed code, cases, and `data/evals/baseline.json` are inconsistent. After a deliberate
 metric change, refresh the committed baseline — otherwise every scheduled run re-alerts.
 
+**You do not need the workflow (or a broker) to get this reading.** `make eval-baseline-check` runs
+the same comparison offline, prints every metric's baseline/current/delta/band, and exits non-zero
+only on a move in the *worsening* direction — so it is the one to run before refreshing the
+baseline, and the one that answers "did anything get worse?" on a laptop. It declares the case-set
+version it scored (`EVAL_CASE_SET_VERSION`) and refuses to report a number when that differs from
+the baseline's: aggregates over two different case-sets are different quantities.
+
 ## (viii) Answer "is prompt caching paying off?"
 
 The system prompt is large and largely identical turn to turn, so "cache the static prefix" is a
@@ -622,17 +649,25 @@ Two caveats that make the saving smaller than a naive prefix measurement suggest
 cost this review a wrong estimate:
 
 - **Measure the provider you actually run.** The ~14.6 k-token prefix figure that started REV-9 was
-  measured on the Anthropic dev path. Production is `openai_compatible`, where
-  `agent_framework_openai` contains **zero** occurrences of `cache_control` — the mechanism is not
-  reachable from there at all, so the fix is upstream work, not a config change here.
-- **The system half is not cacheable through `Agent` as it stands.** `SkillsProvider` merges the
-  skills manifest into the instructions with an f-string, which would `repr()` a structured block
-  list into a string. Marking that half cacheable needs a change in `agent_framework`, not in
-  Chemclaw.
+  measured on the Anthropic dev path. Production is `openai_compatible`, where `langchain_openai`
+  contains **zero** occurrences of `cache_control` — the mechanism is not reachable from there at
+  all, so the fix is upstream work, not a config change here. This survived the rebuild of layer 1
+  unchanged, and it was re-measured rather than assumed to: the previous framework's OpenAI client
+  had the same zero, and `langchain_anthropic` has 74 occurrences, which is why the dev path can
+  do what the production path cannot.
+- **The system half is not cacheable as the prompt is assembled.** `deepagents.SkillsMiddleware`
+  renders the skills manifest into a string with `system_prompt_template.format(...)` and appends
+  it to the system message, so the half that changes least is welded to the half that changes most.
+  Marking it cacheable needs a change upstream, not in Chemclaw — the same conclusion the previous
+  framework's `SkillsProvider` f-string forced, reached again for the same structural reason.
 
-Per-model attribution for the same spend is on the OTel side, not here: MAF emits
-`gen_ai.client.token.usage` labelled by request model, response model, provider and token type, and
-the shipped chart turns OTel on. These counters carry `profile`, which OTel has never heard of.
+Per-model attribution for the same spend **is not currently available**, and that is a regression
+worth naming rather than a gap that was always there: the old framework's own instrumentation
+emitted `gen_ai.client.token.usage` labelled by request model, response model, provider and token
+type, and it went out with the framework. Measured across the installed stack, the only package
+that emits that metric is the one that was removed — nothing in `langchain`, `langgraph` or
+`langsmith` does. So these counters are the whole picture today, and they carry `profile`, which
+OTel has never heard of.
 
 ## (ix) Work the PR-gate review queue
 

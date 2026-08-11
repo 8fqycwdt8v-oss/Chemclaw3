@@ -8,17 +8,14 @@ advertise a skill no directory provides, and the role gate still runs on top. Of
 `skills/` tree is the fixture. See `docs/archive/audit/10-config-extensibility.md` §9 item 5.
 """
 
-import asyncio
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from agent_framework import FileSkillsSource, SkillsSource, SkillsSourceContext
-from agent_framework._agents import SupportsAgentRun
 
 import chemclaw.cli.validate_skills as validate_skills
-from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
-from chemclaw.agent.skill_manifest import SkillManifest
+from chemclaw.agent.skill_access import EnabledSkills, RoleScopedSkills
+from chemclaw.agent.skill_manifest import SkillManifest, declared_tools
 from chemclaw.core.config import Settings, settings
 
 
@@ -38,12 +35,9 @@ def _skills_dir(tmp_path: Path, *names: str) -> str:
     return str(tmp_path)
 
 
-def _names(source: SkillsSource) -> set[str]:
-    """The skill names a source advertises (no ambient identity, so no role gating applies)."""
-    # The file source ignores the context's agent; a cast keeps the stand-in strictly typed.
-    context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
-    skills = asyncio.run(source.get_skills(context))
-    return {s.frontmatter.name for s in skills}
+def _names(directory: str, narrowing: Any) -> set[str]:
+    """The skill names in `directory` that survive `narrowing` (no identity, so no role gating)."""
+    return {name for name in declared_tools([directory]) if narrowing.permits(name)}
 
 
 def test_manifest_requires_name_and_description() -> None:
@@ -136,35 +130,30 @@ def test_gate_catches_an_enabled_skill_that_does_not_exist(
 
 def test_empty_enable_list_advertises_every_discovered_skill(tmp_path: Path) -> None:
     """The default is a no-op: no enable-list means today's behavior, every skill visible."""
-    source = EnabledSkillsSource(FileSkillsSource([_skills_dir(tmp_path, "a", "b", "c")]), [])
-    assert _names(source) == {"a", "b", "c"}
+    assert _names(_skills_dir(tmp_path, "a", "b", "c"), EnabledSkills([])) == {"a", "b", "c"}
 
 
 def test_enable_list_narrows_to_the_named_subset(tmp_path: Path) -> None:
     """A configured enable-list advertises exactly those skills."""
-    source = EnabledSkillsSource(
-        FileSkillsSource([_skills_dir(tmp_path, "a", "b", "c")]), ["a", "c"]
-    )
-    assert _names(source) == {"a", "c"}
+    assert _names(_skills_dir(tmp_path, "a", "b", "c"), EnabledSkills(["a", "c"])) == {"a", "c"}
 
 
 def test_enable_list_cannot_invent_a_skill(tmp_path: Path) -> None:
     """It attenuates only: naming an undiscovered skill adds nothing to the advertised set."""
-    source = EnabledSkillsSource(
-        FileSkillsSource([_skills_dir(tmp_path, "a")]), ["a", "not-discovered"]
-    )
-    assert _names(source) == {"a"}
+    assert _names(_skills_dir(tmp_path, "a"), EnabledSkills(["a", "not-discovered"])) == {"a"}
 
 
 def test_role_gate_still_applies_on_top_of_the_enable_list(tmp_path: Path) -> None:
     """Enablement does not bypass RBAC — a gated skill stays hidden from a caller without roles."""
-    chained = RoleScopedSkillsSource(
-        EnabledSkillsSource(
-            FileSkillsSource([_skills_dir(tmp_path, "open", "gated")]), ["open", "gated"]
-        ),
-        {"gated": ["process-chemist"]},
-    )
-    assert _names(chained) == {"open"}  # no ambient roles in this test context
+    enablement = EnabledSkills(["open", "gated"])
+    gate = RoleScopedSkills({"gated": ["process-chemist"]})
+    directory = _skills_dir(tmp_path, "open", "gated")
+    names = {
+        name
+        for name in declared_tools([directory])
+        if enablement.permits(name) and gate.permits(name)
+    }
+    assert names == {"open"}  # no ambient roles in this test context
 
 
 def test_skills_enabled_list_parses_the_pathsep_token() -> None:

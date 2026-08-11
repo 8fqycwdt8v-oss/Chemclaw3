@@ -18,7 +18,8 @@ counts as growth — which is the failure `D-2026-08-05-a-trend-needs-a-tail` re
 go through `fit`/`describe` unchanged: a slope inside its own standard error is reported as flat,
 and the two halves are compared to each other rather than to the whole.
 
-What it drives is the *real* path: `create_app()`, the real middleware stack, the real agent pool,
+What it drives is the *real* path: `create_app()`, the real middleware stack, the real per-turn
+graph,
 real MCP connectors over HTTP, and the real session store — against `cli/mock_llm`, so the only
 faked thing is the model. That matters because an earlier in-process repro that faked the agent and
 the connectors found **zero** retention across 900 turns, which is what narrowed the search to the
@@ -62,14 +63,6 @@ class Sample:
     turns: int
     rss_kb: float
     gc_objects: float
-    # `len(agent._async_exit_stack._exit_callbacks)` summed over every agent the pool has built.
-    # MAF re-enters a run-scoped MCP tool that is not connected into the *agent's* own
-    # process-lifetime stack, and `AgentPool` never uses an agent as a context manager, so that
-    # stack is never unwound. If this number climbs with turns, that is the leak.
-    #
-    # It did not: measured flat at 0 across 200 turns, which killed the hypothesis and sent the
-    # search to the type histogram below — where the answer was.
-    agent_exit_callbacks: float = 0.0
     tracked_kb: float = 0.0
     top_allocations: list[str] = field(default_factory=list)
     # How many live objects of each type the collector can see. The decisive series: RSS can rise
@@ -94,25 +87,6 @@ def _rss_kb() -> float:
         return float(handle.read().split()[1]) * _PAGE_KB
 
 
-def _pool_exit_callbacks(app: Any) -> float:
-    """How many callbacks the pooled agents' process-lifetime exit stacks are holding.
-
-    Duck-typed all the way down, deliberately: these are MAF internals, they are not a stable
-    surface, and a probe that raises because a private attribute moved is worse than one that
-    reports zero and lets the other signals decide.
-    """
-    pool = getattr(getattr(app, "state", None), "agent_pool", None)
-    queues = getattr(pool, "_free", None)
-    if not isinstance(queues, dict):
-        return 0.0
-    total = 0
-    for queue in queues.values():
-        for agent in list(getattr(queue, "_queue", []) or []):
-            stack = getattr(agent, "_async_exit_stack", None)
-            total += len(getattr(stack, "_exit_callbacks", ()) or ())
-    return float(total)
-
-
 def _drive(client: Any, turns: int) -> int:
     """Run `turns` complete turns through the front door; return how many answered."""
     answered = 0
@@ -127,14 +101,13 @@ def _drive(client: Any, turns: int) -> int:
     return answered
 
 
-def _sample(app: Any, turns: int, *, trace: bool, baseline: Any) -> Sample:
+def _sample(turns: int, *, trace: bool, baseline: Any) -> Sample:
     """Collect, then read every counter at once so they all describe the same moment."""
     gc.collect()
     sample = Sample(
         turns=turns,
         rss_kb=_rss_kb(),
         gc_objects=float(len(gc.get_objects())),
-        agent_exit_callbacks=_pool_exit_callbacks(app),
         types=_type_histogram(),
     )
     if trace:
@@ -164,7 +137,6 @@ def report(samples: Sequence[Sample]) -> str:
     for label, values, unit in (
         ("RSS", [s.rss_kb for s in samples], "KB"),
         ("gc objects", [s.gc_objects for s in samples], "objects"),
-        ("agent exit callbacks", [s.agent_exit_callbacks for s in samples], "callbacks"),
         ("tracemalloc", [s.tracked_kb for s in samples], "KB"),
     ):
         if not any(values):
@@ -271,18 +243,17 @@ def main(argv: list[str] | None = None) -> int:
         gc.collect()
         if args.trace:
             baseline = tracemalloc.take_snapshot()
-        samples.append(_sample(app, args.warmup, trace=args.trace, baseline=None))
+        samples.append(_sample(args.warmup, trace=args.trace, baseline=None))
         done = args.warmup
         while done < args.turns:
             batch = min(args.batch, args.turns - done)
             answered = _drive(client, batch)
             done += batch
-            samples.append(_sample(app, done, trace=args.trace, baseline=baseline))
+            samples.append(_sample(done, trace=args.trace, baseline=baseline))
             logger.info(
-                "%d turns: rss=%.0f MB, exit-callbacks=%.0f, answered=%d/%d",
+                "%d turns: rss=%.0f MB, answered=%d/%d",
                 done,
                 samples[-1].rss_kb / 1024,
-                samples[-1].agent_exit_callbacks,
                 answered,
                 batch,
             )

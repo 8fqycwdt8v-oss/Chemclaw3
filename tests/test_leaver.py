@@ -296,6 +296,13 @@ def test_the_erase_statements_are_valid_sql() -> None:
 
     Runs each delete inside a rolled-back transaction on an actor nobody has: the statements must
     be *executable*, which a string never proves on its own.
+
+    **The checkpointer's three tables are reported but not necessarily parsed here.** They are
+    created by `AsyncPostgresSaver.setup()` rather than by a migration, so `erase_actor` skips —
+    and reports zero for — any that this schema does not have. Their statements are executed
+    against real tables in `tests/test_message_migration.py`, which is where a typo in one would
+    fail. The keys stay asserted here because a table silently dropping out of the report is the
+    failure this test is for.
     """
 
     async def _run() -> None:
@@ -304,6 +311,9 @@ def test_the_erase_statements_are_valid_sql() -> None:
         assert report.erased_total == 0
         assert set(report.erased) == {
             "session_messages",
+            "checkpoints",
+            "checkpoint_blobs",
+            "checkpoint_writes",
             "session_events",
             "session_turns",
             "subscriptions",

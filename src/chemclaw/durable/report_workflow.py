@@ -1,6 +1,6 @@
 """Durable development-report workflow (plan steps 5b.5, 5b.6) on the background queue.
 
-The report is a MAF-style graph of sections; here each section is a Temporal activity, so a
+The report is a graph of sections; here each section is a Temporal activity, so a
 long report (hundreds of retrievals over years of data) is resumable and survives worker
 restarts — the same fire-and-forget durability as the QM spine (Phase 1). The workflow
 retrieves section by section, then a final activity renders the draft and proposes it through

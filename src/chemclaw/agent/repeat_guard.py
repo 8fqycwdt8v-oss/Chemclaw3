@@ -29,11 +29,11 @@ the agent's stream is driven from a task of its own.
 import json
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
-from agent_framework import FunctionInvocationContext, function_middleware
+from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -51,7 +51,7 @@ class RepeatedCallRefusal(ChemclawError):
 
     A `ChemclawError` so the two mechanisms that already exist do the work: the audit middleware
     records it as an `error` outcome, and `surface_domain_errors` hands the message to the model
-    verbatim instead of MAF's opaque "Function failed." — which matters more here than anywhere
+    verbatim instead of an opaque "Function failed." — which matters more here than anywhere
     else, since the whole point is to tell the model something it can act on.
     """
 
@@ -82,44 +82,49 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
     return (name, json.dumps(arguments, sort_keys=True, default=str))
 
 
-@function_middleware
-async def refuse_repeated_calls(
-    context: FunctionInvocationContext,
-    call_next: Callable[[], Awaitable[None]],
-) -> None:
-    """Let a tool call through unless this turn has already made the identical one too often.
+def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
+    """Count this call and return the refusal it has earned, or `None` to let it through.
 
-    Attached beside `refuse_writes_on_dry_run`: inside the audit middleware so the refusal is a
-    recorded outcome, inside `surface_domain_errors` so the model is told plainly, and outside
-    `announce_tool_failures` because nothing ran — a refusal is not a tool failure, and showing it
-    to the chemist as one would misdescribe a turn that is working correctly.
+    The decision, framework-free, so there is one counter, one threshold and one sentence however
+    the plumbing around it is written. Splitting it would let a turn's repeat budget drift — and the
+    number that matters here was measured (7–8 identical `find_past_jobs` calls in one turn, a
+    median of 128–142 s against 16.9 s), so a second copy free to drift from it would quietly undo
+    the finding.
 
-    A no-op off the request path (no counter, no limit) and on every turn that does not repeat
-    itself, which is nearly all of them.
-
-    Raises:
-        RepeatedCallRefusal: This exact call has already been made `max_identical_tool_calls`
-            times in this turn. The tool body never runs; the message names the tool, says how
-            many times it was asked, and says what to do instead.
+    **Counting is the side effect**, and it happens before the threshold test, so a call that is
+    let through is still recorded against the next one. Off the request path there is no counter
+    and this is a no-op — the CLI, the tests and the classic agent all take that branch.
     """
     counts = _calls.get()
     if counts is None:
-        await call_next()
-        return
-    name = context.function.name
-    key = _key(name, context.arguments)
+        return None
+    key = _key(name, arguments)
     counts[key] += 1
     seen = counts[key]
     if seen <= settings.max_identical_tool_calls:
-        await call_next()
-        return
+        return None
     logger.info("refusing repeat %d of %s in one turn", seen, name)
     record_metric(
         lambda m: m.increment("chemclaw_repeated_tool_calls_total", labels={"tool": name})
     )
-    raise RepeatedCallRefusal(
+    return RepeatedCallRefusal(
         f"{name} was already called with these exact arguments {seen - 1} time(s) in this turn "
         f"and returned the same thing each time, so it was not called again. It will not answer "
         f"differently — change the arguments, use a different tool, or answer from what you "
         f"already have (saying plainly if it is not enough)."
     )
+
+
+@wrap_tool_call
+async def refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """The LangGraph wiring of `refuse_repeated_calls` — same counter, same threshold, same words.
+
+    Raised rather than returned as a `ToolMessage`, unlike the gates in `tool_authz`: a
+    `RepeatedCallRefusal` is a `ChemclawError`, so `surface_domain_errors` is what turns it into
+    the message the model reads. That keeps one converter responsible for how a refusal reaches the
+    model, instead of this gate having its own opinion about it.
+    """
+    refusal = count_call(request.tool_call["name"], request.tool_call.get("args"))
+    if refusal is not None:
+        raise refusal
+    return await handler(request)

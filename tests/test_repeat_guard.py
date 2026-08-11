@@ -12,11 +12,9 @@ pinned stale), and it allows a real re-check before it starts refusing.
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from agent_framework import FunctionInvocationContext
 from pydantic import BaseModel
 
 from chemclaw.agent.repeat_guard import (
@@ -26,14 +24,12 @@ from chemclaw.agent.repeat_guard import (
     refuse_repeated_calls,
 )
 from chemclaw.core.config import settings
+from tests.middleware import run_middleware, tool_request
 
 
-def _ctx(name: str, **arguments: Any) -> FunctionInvocationContext:
-    """A minimal stand-in exposing the two fields the middleware reads."""
-    return cast(
-        FunctionInvocationContext,
-        SimpleNamespace(function=SimpleNamespace(name=name), arguments=arguments),
-    )
+def _ctx(name: str, **arguments: Any) -> Any:
+    """The call as the guard reads it: a name and its arguments, which together are its key."""
+    return tool_request(name, dict(arguments))
 
 
 class _Tool:
@@ -46,13 +42,13 @@ class _Tool:
         self.runs += 1
 
 
-def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]) -> None:
-    """Run the guard over a stand-in context to completion."""
+def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
+    """Run the guard over one call to completion."""
 
-    async def _run() -> None:
-        await refuse_repeated_calls(ctx, call_next)
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    asyncio.run(run_middleware(refuse_repeated_calls, ctx, _handler))
 
 
 @pytest.fixture

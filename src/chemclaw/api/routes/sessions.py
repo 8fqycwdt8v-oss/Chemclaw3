@@ -19,6 +19,7 @@ from chemclaw.agent.attachments import (
 )
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.session import TurnSession
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
 from chemclaw.api.schemas import (
@@ -57,14 +58,11 @@ async def create_session(
             get_profile(profile)
         except ValueError as exc:  # a caller error, not a server fault
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    agent = front.agent(profile)
     # Persist ownership first (durable path only), so the session reattaches after a restart
     # even if the pod dies before the first turn writes any history.
     if front.session_owners is not None:
         await front.session_owners.record(session_id, principal.oid, profile)
-    front.live_sessions.add(
-        session_id, agent.create_session(session_id=session_id), principal.oid, profile
-    )
+    front.live_sessions.add(session_id, TurnSession(session_id=session_id), principal.oid, profile)
     return SessionOut(session_id=session_id)
 
 

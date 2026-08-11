@@ -6,6 +6,13 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
+# The case-set version `eval-baseline-check` declares it is scoring. It must equal the
+# `case_set_version` recorded in `data/evals/baseline.json`, or the check refuses to compare:
+# aggregates over two different case-sets are different quantities, and a delta between them looks
+# like a result while meaning nothing. Bump this together with a `make eval-baseline` refresh
+# whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
+EVAL_CASE_SET_VERSION ?= autonomy-2026-08-01
+
 # The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
 # recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings
 # the target uses, instead of a second copy that can drift from it. There are no scratch-path
@@ -29,7 +36,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain user-erase reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain user-erase reindex reindex-full up down deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-routing live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -97,6 +104,9 @@ eval:  ## Score the versioned eval case-set and print the citable report (Phase 
 
 eval-strict:  ## Score the case-set and FAIL on a science regression (what CI gates on).
 	uv run python -m chemclaw.evals.harness --strict
+
+eval-baseline-check:  ## Score the case-set against data/evals/baseline.json and FAIL on a worsening drift.
+	uv run python -m chemclaw.evals.harness --case-set-version $(EVAL_CASE_SET_VERSION) --baseline
 
 eval-baseline:  ## Regenerate data/evals/baseline.json from a scoring run (after a reviewed change).
 	uv run python -m chemclaw.cli.refresh_baseline
@@ -277,6 +287,21 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+# The three M12 re-validation suites. Separate targets rather than one, because each needs the
+# stack configured a *different* way and no single invocation can hold all three: the plan gate
+# needs `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, the ordering check needs the durable broker
+# deliberately stopped, and routing has to run twice against two differently-configured front doors.
+# Each exits non-zero on a failed check or on one it could not take.
+
+live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
+	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)
+
+live-degradation:  ## M12: capability_degraded must precede the first token (run with Temporal stopped).
+	uv run python -m chemclaw.cli.live_probes --suite degradation $(ARGS)
+
+live-routing:  ## M12: team routing accuracy + per-specialist token cost. ARM=team|single.
+	uv run python -m chemclaw.cli.live_probes --suite routing --arm $(or $(ARM),team) $(ARGS)
 
 live-storm:  ## Stress, chaos and adversarial pass against the live stack — mock model, no LLM calls.
 	uv run python -m chemclaw.cli.live_storm $(ARGS)

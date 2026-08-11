@@ -35,6 +35,23 @@ class PlanEvent(BaseModel):
     todos: list[str]
 
 
+# Which agent raised an event, when it was not the one the chemist is talking to (M9).
+#
+# **Empty means the main agent**, and that is what keeps the field additive: every event emitted
+# before teams existed came from the single agent, so an existing consumer that ignores this reads
+# exactly what it read before. A specialist's name is its profile name (`evidence`, `safety`, …),
+# which is the same string the `handoff` event carries and the same one the audit trail records —
+# one name for one actor, across the stream, the trail and the profile that defined it.
+#
+# Only the events a specialist can actually raise carry it. A `queued` or `capability_degraded`
+# event is a property of the *turn*, decided before any routing happens, so attributing it to an
+# agent would be inventing a fact.
+_AGENT_FIELD = Field(
+    default="",
+    description="The specialist that raised this event; empty for the main agent.",
+)
+
+
 class ToolCallEvent(BaseModel):
     """A single tool invocation in the turn's trace (name + a short argument preview).
 
@@ -47,6 +64,7 @@ class ToolCallEvent(BaseModel):
     type: Literal["tool_call"] = "tool_call"
     tool: str
     arguments: str = ""
+    agent: str = _AGENT_FIELD
 
 
 class TokenEvent(BaseModel):
@@ -203,6 +221,7 @@ class ToolFailedEvent(BaseModel):
     type: Literal["tool_failed"] = "tool_failed"
     tool: str
     message: str
+    agent: str = _AGENT_FIELD
 
 
 class ToolResultEvent(BaseModel):
@@ -267,6 +286,7 @@ class ToolResultEvent(BaseModel):
     note_ids: list[str] = Field(default_factory=list)
     numbers: list[float] = Field(default_factory=list)
     result_ref: str = ""
+    agent: str = _AGENT_FIELD
 
 
 # The closed taxonomy. Each member is a *different thing for the user to do* — retry, wait, fix the
@@ -326,6 +346,51 @@ class ErrorEvent(BaseModel):
     correlation_id: str = ""
 
 
+class EvidenceSourceEvent(BaseModel):
+    """One retrieval source reported what it contributed to a sweep (M10).
+
+    `gather_evidence` asks every configured source at once and merges what comes back, and in the
+    merged list a source that returned nothing is indistinguishable from a source nobody asked.
+    That is not hypothetical: `D-2026-08-01-a-cap-that-starves-a-source` is a defect in which one
+    leg contributed **zero** surviving chunks while the sweep looked healthy in aggregate, it went
+    unnoticed until someone counted by hand, and both competing explanations for it turned out to
+    be wrong. This is the per-branch arithmetic, emitted while the sweep runs.
+
+    `chunks` is what the source *found*, before the cross-source cap — so a surface can tell "this
+    source had nothing to say" from "this source was crowded out of the budget", which are
+    different problems with different fixes.
+
+    Emitted only where a consumer is draining the graph's custom stream — the front door is, the
+    CLI and a Temporal activity are not. Those still run the same branches and record the same
+    counter; they simply have no channel to say so. A surface must therefore treat the absence of
+    these as "not reported", never as "no sources".
+    """
+
+    type: Literal["evidence_source"] = "evidence_source"
+    source: str
+    chunks: int
+
+
+class HandoffEvent(BaseModel):
+    """The turn was routed to a specialist, or handed back (M9).
+
+    A team's work is only legible if the routing is. Without this, a chemist watching a turn sees
+    a supervisor fall silent and a different set of tools start running, with nothing saying why —
+    and the GxP record has the same gap, because the trace *is* the record. That is the whole
+    argument for a supervisor over a swarm (the subagent ADR of 2026-08-10): every delegation
+    decision passes through one node and is therefore observable.
+
+    `to` is the specialist being entered, or empty when control returns to the main agent — so a
+    surface can render a turn's routing as a path rather than as a set of disconnected arrivals.
+    `reason` is the supervisor's own stated reason where it gave one; it is prose for a human and
+    nothing branches on it.
+    """
+
+    type: Literal["handoff"] = "handoff"
+    to: str
+    reason: str = ""
+
+
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
@@ -343,5 +408,7 @@ Event = (
     | AnswerEvent
     | ToolFailedEvent
     | ToolResultEvent
+    | EvidenceSourceEvent
+    | HandoffEvent
     | ErrorEvent
 )

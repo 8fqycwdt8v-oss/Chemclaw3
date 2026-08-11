@@ -81,7 +81,7 @@ def test_readyz_reuses_its_connector_sweep_inside_the_window(
     from fastapi.testclient import TestClient
 
     from chemclaw.api import app as service_app
-    from tests.test_service import _FakeAgent, _no_connectors
+    from tests.test_service import _no_connectors
 
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
     sweeps = 0
@@ -94,9 +94,7 @@ def test_readyz_reuses_its_connector_sweep_inside_the_window(
     monkeypatch.setattr(service_app, "probe_connectors", _counting_probe)
     monkeypatch.setattr(service_app, "check_connectors_at_startup", _counting_probe)
 
-    app = service_app.create_app(
-        agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
-    )
+    app = service_app.create_app(connector_factory=_no_connectors)
     with TestClient(app) as client:
         before = sweeps  # the lifespan's own startup probe
         for _ in range(5):
@@ -111,7 +109,7 @@ def test_readyz_probes_every_request_when_the_window_is_zero(
     from fastapi.testclient import TestClient
 
     from chemclaw.api import app as service_app
-    from tests.test_service import _FakeAgent, _no_connectors
+    from tests.test_service import _no_connectors
 
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
     sweeps = 0
@@ -124,9 +122,7 @@ def test_readyz_probes_every_request_when_the_window_is_zero(
     monkeypatch.setattr(service_app, "probe_connectors", _counting_probe)
     monkeypatch.setattr(service_app, "check_connectors_at_startup", _counting_probe)
 
-    app = service_app.create_app(
-        agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
-    )
+    app = service_app.create_app(connector_factory=_no_connectors)
     with TestClient(app) as client:
         before = sweeps
         for _ in range(3):

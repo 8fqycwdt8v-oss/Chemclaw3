@@ -97,36 +97,33 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
 
     Input, output and cache-read carry different prices — a cache read is roughly an order of
     magnitude cheaper than a fresh input token — so a deployment that caches well and one that does
-    not published *identical* `chemclaw_tokens_total` while their bills differed several-fold. MAF
-    has reported all four dimensions since the beginning; nothing read past the sum.
+    not published *identical* `chemclaw_tokens_total` while their bills differed several-fold. The
+    provider had reported all four dimensions all along; nothing read past the sum.
 
-    Driven through `usage_tokens` on a MAF-shaped update rather than by calling the counters
+    Driven through `graph_usage_tokens` on a real chunk shape rather than by calling the counters
     directly, because the defect was in the reading, not the publishing.
     """
-    from chemclaw.api.runner_usage import usage_tokens
+    from chemclaw.api.runner_usage import graph_usage_tokens
 
-    update = SimpleNamespace(
-        contents=[
-            SimpleNamespace(
-                usage_details={
-                    "input_token_count": 100,
-                    "output_token_count": 20,
-                    "cache_read_input_token_count": 900,
-                    "cache_creation_input_token_count": 50,
-                    "total_token_count": 1070,
-                }
-            )
-        ]
+    chunk = SimpleNamespace(
+        usage_metadata={
+            # LangChain reports `input_tokens` *including* the cached tokens and breaks them out
+            # again below, which is why 1050 is the reported input for 100 priced ones.
+            "input_tokens": 1050,
+            "output_tokens": 20,
+            "total_tokens": 1070,
+            "input_token_details": {"cache_read": 900, "cache_creation": 50},
+        }
     )
-    usage = usage_tokens(update)
+    usage = graph_usage_tokens(chunk)
 
     assert (usage.input, usage.output) == (100, 20)
     # The two that were never read at all. Without them, the 900 cheap tokens above are invisible
     # and the deployment looks like it is paying full price for every one of them.
     assert (usage.cache_read, usage.cache_write) == (900, 50)
-    # And the cache counts are *not* folded into `input`: a provider that reports them has already
-    # excluded cache reads from `input_token_count`, so adding them would re-price the cheap
-    # tokens as expensive ones — the opposite of the mistake this fixes.
+    # And the cache counts are *not* left inside `input`: counting them twice — once cheap, once
+    # expensive — overstates the priced input of exactly the deployments that cache best, which is
+    # the opposite of the mistake this fixes.
     assert usage.input == 100
 
 
@@ -134,18 +131,17 @@ def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> N
     """A fabricated zero is indistinguishable from a genuinely uncached deployment.
 
     The same rule `chemclaw.core.metrics` states for gauges — it refuses to emit an unbound one
-    because
-    "a fabricated zero would be indistinguishable from a genuinely idle service" — and the exact
-    failure REV-19 found in the counters. An `openai_compatible` endpoint that reports no cache
-    fields must leave those two counters untouched, not publish 0.
+    because "a fabricated zero would be indistinguishable from a genuinely idle service" — and the
+    exact failure REV-19 found in the counters. An `openai_compatible` endpoint that reports no
+    cache fields must leave those two counters untouched, not publish 0.
     """
-    from chemclaw.api.runner_usage import usage_tokens
+    from chemclaw.api.runner_usage import graph_usage_tokens
     from chemclaw.core.metrics import METRICS
 
-    update = SimpleNamespace(
-        contents=[SimpleNamespace(usage_details={"input_token_count": 7, "output_token_count": 3})]
+    chunk = SimpleNamespace(
+        usage_metadata={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
     )
-    usage = usage_tokens(update)
+    usage = graph_usage_tokens(chunk)
     assert (usage.cache_read, usage.cache_write) == (0, 0)
 
     before = METRICS.value("chemclaw_cache_read_tokens_total")

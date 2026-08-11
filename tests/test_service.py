@@ -14,13 +14,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import LiveSession, _LiveSessions, create_app
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
-from tests.fakes import FakeUpdate, asgi_client
+from tests.fakes import asgi_client
+from tests.fakes_turn import Piece, ScriptedTurn
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -62,28 +64,16 @@ class _SpyMcpTool:
         self.exited += 1
 
 
-class _FakeAgent:
+class _FakeAgent(ScriptedTurn):
     """Fake agent: yields two tokens per turn. Connectors are the front door's business, not its."""
 
-    def __init__(self) -> None:
-        self.mcp_tools: list[object] = []
+    def create_session(self, *, session_id: str) -> TurnSession:
+        """The one non-streaming method the front door calls on an agent."""
+        return TurnSession(session_id=session_id)
 
-    def create_session(self, *, session_id: str) -> AgentSession:
-        return AgentSession(session_id=session_id)
-
-    def run(  # noqa: D102 - a fake agent's run, documented by its class
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: AgentSession,
-        **_run_options: Any,
-    ) -> object:
-        async def _gen() -> object:
-            yield FakeUpdate(text="hi ")
-            yield FakeUpdate(text="there")
-
-        return _gen()
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        yield "hi "
+        yield "there"
 
 
 def _no_connectors(_profile: str | None = None) -> list[Any]:
@@ -95,14 +85,25 @@ def _no_connectors(_profile: str | None = None) -> list[Any]:
     return []
 
 
+def _app(agent: _FakeAgent | None = None, **kwargs: Any) -> FastAPI:
+    """The app under test, wired to one fake through the seam a turn is driven by.
+
+    `graph_factory` is how the fake gets in (see `tests.fakes_turn.ScriptedTurn`), so a test never
+    needs a model credential and never builds a graph of its own. Connectors default to none for
+    the reason `_no_connectors` records; a test that does want one passes a spec
+    (`tests.test_capability_degradation._dark_connector`).
+    """
+    fake = agent if agent is not None else _FakeAgent()
+    kwargs.setdefault("connector_factory", _no_connectors)
+    return create_app(graph_factory=fake.graph_factory, **kwargs)
+
+
 def _client(
     agent: _FakeAgent,
     connector_factory: Callable[[str | None], list[Any]] = _no_connectors,
 ) -> TestClient:
-    """The app under test, with no connectors by default (see `_no_connectors`)."""
-    return TestClient(
-        create_app(agent_factory=lambda _profile: agent, connector_factory=connector_factory)
-    )
+    """The app under test as a `TestClient`, with no connectors by default."""
+    return TestClient(_app(agent, connector_factory=connector_factory))
 
 
 def test_healthz_is_ok() -> None:
@@ -249,7 +250,7 @@ def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
     the connection) rather than being converted into a response. Counterfactual: with the old
     `BaseHTTPMiddleware` this raises `RuntimeError`, not `CancelledError`.
     """
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors)
+    app = _app()
 
     @app.get("/drained")
     async def drained() -> dict[str, str]:
@@ -276,33 +277,6 @@ def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
     assert sent == [], f"a cancelled handler still emitted a response: {sent}"
 
 
-def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
-    """Create a session, post a message, stream the turn; the turn's connector opens once."""
-    agent = _FakeAgent()
-    spy = _SpyMcpTool()
-    with _client(agent, connector_factory=lambda _profile: [spy]) as client:
-        session_id = client.post("/sessions").json()["session_id"]
-        events = []
-        with client.stream(
-            "POST", f"/sessions/{session_id}/messages", json={"message": "hello"}
-        ) as res:
-            assert res.status_code == 200
-            for line in res.iter_lines():
-                if line.startswith("data:"):
-                    events.append(json.loads(line[len("data:") :].strip()))
-
-    # Without the capability announcement: no Temporal broker runs in a test process, so every
-    # turn truthfully opens by saying the durable subsystem is down. This test is about the turn
-    # streaming at all and its connector opening once, which that announcement is not part of.
-    kinds = [e["type"] for e in events if e["type"] != "capability_degraded"]
-    assert kinds == ["token", "token", "answer"]
-    assert "".join(e["text"] for e in events if e["type"] == "token") == "hi there"
-    # The connector lifecycle is the service's, and it is per *turn*: one connect and one teardown
-    # for this turn, from the factory the app calls each time (not a set held on the agent, which
-    # would be shared across concurrent turns — see `agents.chemclaw_agent.connector_tools`).
-    assert spy.entered == 1 and spy.exited == 1
-
-
 def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     """A job announced by a tool is serialized into the turn's SSE stream, before the answer.
 
@@ -312,19 +286,13 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     from chemclaw.core.turn_signals import record_job_started
 
     class _JobAgent(_FakeAgent):
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> object:
-            async def _gen() -> object:
-                record_job_started("qm-sse", "report")
-                yield FakeUpdate(text="submitted")
+        """A fake whose turn announces a durable job before it says anything."""
 
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            record_job_started("qm-sse", "report")
+            yield "submitted"
 
     with _client(_JobAgent()) as client:
         session_id = client.post("/sessions").json()["session_id"]
@@ -375,7 +343,7 @@ def test_a_waiting_turn_says_so_and_is_shed_on_the_stream(monkeypatch) -> None: 
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = _app()
     # Zero permits → the turn can only wait and then be shed (deterministic, no concurrency).
     app.state.turn_semaphore = asyncio.Semaphore(0)
     with TestClient(app) as client:
@@ -415,7 +383,7 @@ def test_a_queued_turn_runs_once_a_permit_frees(monkeypatch) -> None:  # type: i
     queued_before = METRICS.value("chemclaw_turns_queued_total")
 
     async def _run() -> None:
-        app = create_app(agent_factory=lambda _profile: _FakeAgent())
+        app = _app()
         semaphore = asyncio.Semaphore(0)  # nothing free yet
         app.state.turn_semaphore = semaphore
 
@@ -461,7 +429,7 @@ def test_permit_is_released_after_each_turn(monkeypatch) -> None:  # type: ignor
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 1.0)
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = _app()
     app.state.turn_semaphore = asyncio.Semaphore(1)
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
@@ -497,7 +465,7 @@ def test_a_session_is_owner_scoped() -> None:
     """A user cannot post into or stream a session another user created (review finding)."""
     from chemclaw.api.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = _app()
     alice = Principal(oid="alice", upn="alice@corp", roles=frozenset())
     bob = Principal(oid="bob", upn="bob@corp", roles=frozenset())
     client = TestClient(app)
@@ -528,7 +496,7 @@ def test_null_owner_session_is_unreachable_once_entra_is_required(
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.core.config import settings
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = _app()
     stranger = Principal(oid="stranger", upn="stranger@corp", roles=frozenset())
     app.dependency_overrides[require_principal] = lambda: stranger
     client = TestClient(app)
@@ -578,91 +546,6 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
             "summary": {"job_id": "qm-1", "converged": True},
         }
     ]
-
-
-def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A `job_completed` push-back flips the harness todo waiting on it (F3-T3 follow-up).
-
-    Flipped at the *next turn's start*, not by the events stream itself: the stream runs
-    concurrently with whatever turn the session has in flight, so applying the flip there raced
-    the turn's own state writes and was silently discarded by a disconnect's snapshot restore
-    (A4). Both halves are pinned here — the stream records without touching live state, and the
-    next turn applies the recording.
-    """
-    import asyncio
-
-    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
-
-    import chemclaw.api.app as app_module
-    from chemclaw.agent.harness_todo import mark_awaiting_job
-    from chemclaw.agent.session_events import SessionEvent
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _fake_stream(session_id: str, **_: object) -> object:
-        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
-
-    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
-
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
-    with TestClient(app) as client:
-        session_id = client.post("/sessions").json()["session_id"]
-        live_session = app.state.live_sessions.get(session_id).session
-        asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
-
-        with client.stream("GET", f"/sessions/{session_id}/events") as res:
-            assert res.status_code == 200
-            for _line in res.iter_lines():  # drain so the handler actually runs
-                pass
-
-        # The stream recorded the completion but must not have written live session state.
-        items = asyncio.run(
-            TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-        )
-        assert items[0].is_complete is False, "the push-back stream mutated live state (A4)"
-
-        # The next turn applies it at turn start, where nothing else writes.
-        _stream_events(client, session_id)
-
-    items = asyncio.run(
-        TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-    )
-    assert items[0].is_complete is True
-
-
-def test_job_pushback_does_not_touch_todos_when_harness_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """With the harness off, a push-back never touches the (harness-only) todo list."""
-    import asyncio
-
-    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
-
-    import chemclaw.api.app as app_module
-    from chemclaw.agent.harness_todo import mark_awaiting_job
-    from chemclaw.agent.session_events import SessionEvent
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "harness_enabled", False)
-
-    async def _fake_stream(session_id: str, **_: object) -> object:
-        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
-
-    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
-
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
-    with TestClient(app) as client:
-        session_id = client.post("/sessions").json()["session_id"]
-        live_session = app.state.live_sessions.get(session_id).session
-        asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
-
-        with client.stream("GET", f"/sessions/{session_id}/events") as res:
-            for _line in res.iter_lines():
-                pass
-
-    items = asyncio.run(
-        TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-    )
-    assert items[0].is_complete is False
 
 
 def test_pushback_for_unknown_session_is_404() -> None:
@@ -760,12 +643,7 @@ def test_a_turn_running_on_another_worker_is_a_409_not_a_second_turn() -> None:
     running turn and answers 200.
     """
     claims = _SharedTurnClaims()
-    app = create_app(
-        agent_factory=lambda _profile: _FakeAgent(),
-        owner_store=_FakeOwnerStore(),
-        connector_factory=_no_connectors,
-        turn_claims=claims,
-    )
+    app = _app(owner_store=_FakeOwnerStore(), turn_claims=claims)
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
         claims.holders[session_id] = "another-worker"  # a turn is in flight over there
@@ -783,12 +661,7 @@ def test_a_finished_turn_hands_its_cross_process_claim_back() -> None:
     durable version of the bug that once bricked a session's turns until the pod restarted.
     """
     claims = _SharedTurnClaims()
-    app = create_app(
-        agent_factory=lambda _profile: _FakeAgent(),
-        owner_store=_FakeOwnerStore(),
-        connector_factory=_no_connectors,
-        turn_claims=claims,
-    )
+    app = _app(owner_store=_FakeOwnerStore(), turn_claims=claims)
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
         for _ in range(2):  # a second turn proves the first genuinely released
@@ -826,11 +699,7 @@ def test_a_failed_postgres_checkout_sheds_with_503_and_is_counted() -> None:
     `TestClient` re-raises it (a 500 in production), and the counter stays at 0.
     """
     before = METRICS.value("chemclaw_db_unavailable_total")
-    app = create_app(
-        agent_factory=lambda _profile: _FakeAgent(),
-        owner_store=_UnreachableOwnerStore(),
-        connector_factory=_no_connectors,
-    )
+    app = _app(owner_store=_UnreachableOwnerStore())
     with TestClient(app) as client:
         res = client.post("/sessions")
     assert res.status_code == 503
@@ -861,7 +730,7 @@ def test_session_list_is_owner_scoped_and_most_recently_used_first() -> None:
 
     alice = Principal(oid="alice", upn="a@corp", roles=frozenset())
     bob = Principal(oid="bob", upn="b@corp", roles=frozenset())
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore())
+    app = _app(owner_store=_FakeOwnerStore())
     client = TestClient(app)
 
     app.dependency_overrides[require_principal] = lambda: alice
@@ -895,7 +764,7 @@ def test_session_list_names_each_conversation_after_its_opening_question() -> No
     """
     from chemclaw.api.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore())
+    app = _app(owner_store=_FakeOwnerStore())
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="a@corp", roles=frozenset()
     )
@@ -903,7 +772,7 @@ def test_session_list_names_each_conversation_after_its_opening_question() -> No
     session_id = client.post("/sessions").json()["session_id"]
 
     _turn(client, session_id, "  What is   the pKa\nof acetic acid? ")
-    # Collapsed, not summarised, and not re-derived from the stored MAF payload.
+    # Collapsed, not summarised, and not re-derived from the stored serialization.
     assert client.get("/sessions").json()[0]["title"] == "What is the pKa of acetic acid?"
 
     # A conversation is named by how it started, so a later turn must not rename it — otherwise the
@@ -922,7 +791,7 @@ def test_session_list_omits_a_session_nobody_ever_spoke_in() -> None:
     """
     from chemclaw.api.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore())
+    app = _app(owner_store=_FakeOwnerStore())
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="a@corp", roles=frozenset()
     )
@@ -944,9 +813,7 @@ def test_session_list_is_empty_without_a_durable_registry() -> None:
     """
     from chemclaw.api.auth import Principal, require_principal
 
-    app = create_app(
-        agent_factory=lambda _profile: _FakeAgent()
-    )  # owner_store None under the memory store
+    app = _app()  # owner_store None under the memory store
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="a@corp", roles=frozenset()
     )
@@ -961,14 +828,14 @@ def test_transcript_reads_back_the_stored_thread() -> None:
 
     History is seeded through `app.state.history` — the very provider a real turn stores through —
     rather than by running the fake agent, which yields updates without persisting anything. That
-    keeps the test on the route's own behavior (ownership gate, ordering, MAF-shape flattening)
-    instead of re-implementing MAF's storage in a fake and asserting the fake.
+    keeps the test on the route's own behavior (ownership gate, ordering, message flattening)
+    instead of re-implementing storage in a fake and asserting the fake.
     """
-    from agent_framework import Message
+    from langchain_core.messages import AIMessage, HumanMessage
 
     from chemclaw.api.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = _app()
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="a@corp", roles=frozenset()
     )
@@ -980,7 +847,7 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     asyncio.run(
         app.state.history.save_messages(
             session_id,
-            [Message("user", ["hello"]), Message("assistant", ["hi there"])],
+            [HumanMessage(content="hello"), AIMessage(content="hi there")],
             state=session.state,
         )
     )
@@ -988,6 +855,46 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     transcript = client.get(f"/sessions/{session_id}/messages").json()
     assert [row["role"] for row in transcript] == ["user", "assistant"]
     assert transcript[0]["text"] == "hello"
+    assert transcript[1]["text"] == "hi there"
+
+
+def test_a_turn_writes_itself_into_the_transcript() -> None:
+    """A turn that ran is readable afterwards — the half the seeded test cannot see.
+
+    `test_transcript_reads_back_the_stored_thread` seeds `session_messages` by calling
+    `save_messages` itself, deliberately and for a stated reason: it pins the route's ordering,
+    flattening and ownership gate without re-implementing storage in a fake. The cost is that it
+    asserts over rows it wrote itself, so it passes whether or not a turn writes anything — and for
+    a while none did. `session_messages` was
+    filled as a side effect of MAF's history provider; the graph keeps its thread in the
+    checkpointer and calls no such hook, so when the MAF branch went the table stopped being
+    written. Measured at the time: one complete turn, 0 rows, while the same session accumulated 8
+    checkpoint rows. The conversation was intact and the transcript route returned `[]`.
+
+    So this one seeds nothing. It posts a message, lets the turn run, and reads the route back —
+    which is the only shape of test that can fail when the writer disappears again.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = _app()
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+
+    with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": "what is the pKa?"}
+    ) as res:
+        assert res.status_code == 200
+        for _line in res.iter_lines():
+            pass
+
+    transcript = client.get(f"/sessions/{session_id}/messages").json()
+    assert [row["role"] for row in transcript] == ["user", "assistant"], transcript
+    assert transcript[0]["text"] == "what is the pKa?"
+    # `_FakeAgent` streams "hi " then "there"; the transcript stores the assembled answer, not the
+    # fragments, because that is what a chemist reading back is owed.
     assert transcript[1]["text"] == "hi there"
 
 
@@ -1007,7 +914,7 @@ def test_session_rehydrates_after_a_restart() -> None:
     from chemclaw.core.config import settings
 
     owners = _FakeOwnerStore()
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
+    app = _app(owner_store=owners)
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="alice@corp", roles=frozenset()
     )
@@ -1031,7 +938,7 @@ def test_rehydration_is_owner_scoped() -> None:
     from chemclaw.core.config import settings
 
     owners = _FakeOwnerStore()
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
+    app = _app(owner_store=owners)
     client = TestClient(app)
 
     app.dependency_overrides[require_principal] = lambda: Principal(
@@ -1064,7 +971,7 @@ def test_null_owner_rehydration_is_blocked_once_entra_is_required(
     owners.profiles[session_id] = None
     owners.created[session_id] = datetime(2026, 1, 1, tzinfo=UTC)
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
+    app = _app(owner_store=owners)
     stranger = Principal(oid="stranger", upn="stranger@corp", roles=frozenset())
     app.dependency_overrides[require_principal] = lambda: stranger
     client = TestClient(app)
@@ -1086,9 +993,7 @@ def test_no_rehydration_without_durable_store() -> None:
     """
     from chemclaw.core.config import settings
 
-    app = create_app(
-        agent_factory=lambda _profile: _FakeAgent()
-    )  # owner_store None under the memory store
+    app = _app()  # owner_store None under the memory store
     assert app.state.session_owners is None
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
@@ -1147,9 +1052,7 @@ def test_a_concurrent_burst_cannot_overrun_the_budget_by_more_than_the_permits(
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 10.0)
 
     async def _drive() -> None:
-        app = create_app(
-            agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors
-        )
+        app = _app()
         app.dependency_overrides[require_principal] = lambda: Principal(oid="u1", upn="u1@corp")
         async with asgi_client(app, timeout=30) as client:
             sessions = [(await client.post("/sessions")).json()["session_id"] for _ in range(10)]
@@ -1224,10 +1127,8 @@ def test_live_sessions_never_exceeds_capacity() -> None:
     assert sum(reg.get(f"s{i}") is not None for i in range(100)) == 3
 
 
-def _gated_agent_factory(
-    gate: asyncio.Event, started: asyncio.Event, blocked_message: str
-) -> Callable[[str | None], _FakeAgent]:
-    """An agent factory whose turn for `blocked_message` parks on `gate` (concurrency tests).
+def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: str) -> _FakeAgent:
+    """A fake whose turn for `blocked_message` parks on `gate` (concurrency tests).
 
     The sync TestClient runs each request to completion before returning, so it cannot hold one
     turn open while another is issued — these tests drive the app over httpx's ASGI transport on
@@ -1235,29 +1136,23 @@ def _gated_agent_factory(
     """
 
     class _GatedAgent(_FakeAgent):
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> object:
-            async def _gen() -> object:
-                if message == blocked_message:
-                    started.set()
-                    await gate.wait()
-                yield FakeUpdate(text="done")
+        """A fake whose turn parks until the test releases it."""
 
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            if message == blocked_message:
+                started.set()
+                await gate.wait()
+            yield "done"
 
-    return lambda _profile: _GatedAgent()
+    return _GatedAgent()
 
 
 def test_concurrent_turn_on_same_session_is_409() -> None:
     """While one turn runs, a second POST to the same session is rejected with 409.
 
-    Two concurrent turns would drive `agent.run` against the same AgentSession at once,
+    Two concurrent turns would drive `agent.run` against the same TurnSession at once,
     interleaving two turns' messages into one conversation thread — so the second is shed
     (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
     the running turn's stream ends.
@@ -1266,7 +1161,7 @@ def test_concurrent_turn_on_same_session_is_409() -> None:
     async def _run() -> None:
         gate = asyncio.Event()
         started = asyncio.Event()
-        app = create_app(agent_factory=_gated_agent_factory(gate, started, "first"))
+        app = _app(_gated_agent(gate, started, "first"))
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             first = asyncio.create_task(
@@ -1290,7 +1185,7 @@ def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
     async def _run() -> None:
         gate = asyncio.Event()
         started = asyncio.Event()
-        app = create_app(agent_factory=_gated_agent_factory(gate, started, "blocked"))
+        app = _app(_gated_agent(gate, started, "blocked"))
         async with asgi_client(app) as client:
             first = (await client.post("/sessions")).json()["session_id"]
             second = (await client.post("/sessions")).json()["session_id"]
@@ -1315,25 +1210,17 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
     from chemclaw.core.config import settings
 
     class _HungAgent(_FakeAgent):
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self,
-            message: str,
-            *,
-            stream: bool,
-            session: AgentSession,
-            **_run_options: Any,
-        ) -> object:
-            async def _gen() -> object:
-                import asyncio
+        """A fake standing in for a hung LLM endpoint: one token, then nothing."""
 
-                yield FakeUpdate(text="partial")
-                await asyncio.sleep(60)  # a hung LLM endpoint: never yields again
-                yield FakeUpdate(text="never")
-
-            return _gen()
+        async def stream(  # noqa: D102 - see `ScriptedTurn`
+            self, message: str
+        ) -> AsyncIterator[Piece]:
+            yield "partial"
+            await asyncio.sleep(60)  # a hung LLM endpoint: never yields again
+            yield "never"
 
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
-    app = create_app(agent_factory=lambda _profile: _HungAgent())
+    app = _app(_HungAgent())
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
         events = []
@@ -1368,7 +1255,7 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
 
     async def _run() -> None:
-        app = create_app(agent_factory=lambda _profile: _FakeAgent())
+        app = _app()
         # Zero permits: the turn parks on the semaphore *after* taking the session's slot.
         app.state.turn_semaphore = asyncio.Semaphore(0)
         async with asgi_client(app) as client:
@@ -1391,78 +1278,11 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
     asyncio.run(_run())
 
 
-def test_a_mid_turn_job_completion_survives_a_disconnect_rollback(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A push-back landing while a turn streams is not undone by that turn's rollback (A4).
-
-    The events stream used to call `complete_awaiting_job` on the live session the moment the
-    push-back arrived — a load-modify-save over `session.state` under a running turn. `run_turn`
-    snapshots that state at turn start and restores it when the client disconnects before the
-    answer, so a completion that landed in between was silently un-completed by an unrelated
-    teardown: the job was done, durably claimed, and the plan showed it open forever. The stream
-    now only *records* the completion; the next turn applies it at turn start, before its own
-    snapshot, where nothing else writes.
-
-    Counterfactual: revert the events route to flipping the todo directly (and drop the
-    turn-start apply) and the final assertion fails — the disconnect's snapshot restore discards
-    the flip.
-    """
-    import contextlib
-
-    import httpx
-    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
-
-    import chemclaw.api.app as app_module
-    from chemclaw.agent.harness_todo import mark_awaiting_job
-    from chemclaw.agent.session_events import SessionEvent
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _fake_stream(session_id: str, **_: object) -> object:
-        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
-
-    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
-
-    async def _run() -> None:
-        gate = asyncio.Event()
-        started = asyncio.Event()
-        app = create_app(agent_factory=_gated_agent_factory(gate, started, "park"))
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            live_session = app.state.live_sessions.get(session_id).session
-            await mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1")
-
-            turn = asyncio.create_task(
-                client.post(f"/sessions/{session_id}/messages", json={"message": "park"})
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)  # the turn is mid-stream
-            # The job finishes now: its push-back is delivered while the turn is in flight.
-            await client.get(f"/sessions/{session_id}/events")
-            # ...and the client then vanishes, cancelling the turn — the teardown that restores
-            # the pre-turn state snapshot (`chemclaw.api.runner`).
-            turn.cancel()
-            with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
-                await turn
-            async with asyncio.timeout(5):
-                while session_id in app.state.active_turns:  # the slot is back
-                    await asyncio.sleep(0.01)
-
-            res = await client.post(f"/sessions/{session_id}/messages", json={"message": "next"})
-            assert res.status_code == 200
-
-        items = await TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
-        assert items[0].is_complete is True, (
-            "the mid-turn job completion was discarded by the disconnect's snapshot restore (A4)"
-        )
-
-    asyncio.run(_run())
-
-
 def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Capacity pressure must not evict a mid-turn session and mint a second live handle (A5).
 
     The live cache is a pure-capacity LRU with no notion of "in use": evicting a session does not
-    stop its running turn — the turn holds the `AgentSession` object directly — it makes the next
+    stop its running turn — the turn holds the `TurnSession` object directly — it makes the next
     request rehydrate a brand-new handle over the same durable history, and the two then diverge
     in `session.state`. So a session whose turn is in flight (an unexpired `active_turns` lease)
     is pinned, and the cache briefly holds over capacity instead.
@@ -1478,11 +1298,7 @@ def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch)
     async def _run() -> None:
         gate = asyncio.Event()
         started = asyncio.Event()
-        app = create_app(
-            agent_factory=_gated_agent_factory(gate, started, "long"),
-            owner_store=_FakeOwnerStore(),
-            connector_factory=_no_connectors,
-        )
+        app = _app(_gated_agent(gate, started, "long"), owner_store=_FakeOwnerStore())
         async with asgi_client(app) as client:
             first = (await client.post("/sessions")).json()["session_id"]
             original = app.state.live_sessions.get(first).session
@@ -1530,7 +1346,7 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
     monkeypatch.setattr(settings, "service_max_event_streams_per_user", 1)
 
     async def _run() -> None:
-        app = create_app(agent_factory=lambda _profile: _FakeAgent())
+        app = _app()
         async with asgi_client(app) as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
             first = asyncio.create_task(client.get(f"/sessions/{session_id}/events"))
@@ -1663,7 +1479,7 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
 
     from chemclaw.api.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app = _app()
     session_routes = [
         route
         for route in app.routes

@@ -10,11 +10,13 @@ that a deployment must opt in before anything is deleted.
 """
 
 import asyncio
+from typing import Any
 
 import pytest
-from agent_framework import Content, Message
+from langchain_core.messages import HumanMessage, message_to_dict
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent.message_migration import to_langchain
 from chemclaw.agent.message_pairing import droppable_rows, unmatched_result_ids
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -25,6 +27,7 @@ from chemclaw.durable.retention import (
     _window_days,
     prune_expired_rows,
 )
+from tests.legacy_rows import legacy_call, legacy_result, legacy_text
 from tests.pg import migrated_db_or_skip
 
 
@@ -78,12 +81,19 @@ def test_a_stated_window_is_read_per_table(monkeypatch: pytest.MonkeyPatch) -> N
 # --- D-145: an age cutoff alone cannot dispose of a conversation row ---------------------------
 
 
-def _call(call_id: str) -> Content:
-    return Content.from_function_call(call_id=call_id, name="predict_pka", arguments={})
+def _call(call_id: str) -> dict[str, Any]:
+    """A stored assistant row with one tool call — MAF-shaped, because a real table holds those.
+
+    Seeded as a *legacy* row on purpose: the pairing rule's whole job here is to protect pairs, and
+    only rows written before M6's conversion contain any. A row the projection writes today is
+    plain user text and an answer, with no call to strand.
+    """
+    return legacy_call(call_id, "predict_pka")
 
 
-def _result(call_id: str) -> Content:
-    return Content.from_function_result(call_id=call_id, result="ok")
+def _result(call_id: str) -> dict[str, Any]:
+    """The stored tool row answering `call_id`, MAF-shaped for the same reason."""
+    return legacy_result(call_id)
 
 
 def test_a_pair_straddling_the_cutoff_survives_intact() -> None:
@@ -110,14 +120,14 @@ def test_a_pair_straddling_the_cutoff_survives_intact() -> None:
                         "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
                     )
                     for age_days, message in (
-                        (400, Message(role="assistant", contents=[_call("c1")])),
+                        (400, _call("c1")),
                         # The answer arrived inside the window — the pair straddles the cutoff.
-                        (1, Message(role="tool", contents=[_result("c1")])),
+                        (1, _result("c1")),
                     ):
                         await cur.execute(
                             "INSERT INTO session_messages (session_id, message, created_at) "
                             "VALUES (%s, %s, now() - make_interval(days => %s))",
-                            (session_id, Jsonb(message.to_dict()), age_days),
+                            (session_id, Jsonb(message), age_days),
                         )
                 await conn.commit()
 
@@ -131,7 +141,10 @@ def test_a_pair_straddling_the_cutoff_survives_intact() -> None:
                         (session_id,),
                     )
                     rows = await cur.fetchall()
-            surviving = [Message.from_dict(row[1]) for row in rows]
+            # Converted rather than read as MAF objects: the assertion is about pairing, which is
+            # a LangChain-message question now, and `to_langchain` is the same conversion the read
+            # path applies to a legacy row.
+            surviving = [to_langchain(row[1]) for row in rows]
             return [int(row[0]) for row in rows], unmatched_result_ids(surviving)
         finally:
             monkeypatch.undo()
@@ -141,6 +154,63 @@ def test_a_pair_straddling_the_cutoff_survives_intact() -> None:
         "retention split a tool-call pairing across the cutoff; the surviving half is unusable"
     )
     assert stranded == set(), f"retention stranded {stranded} — the session is now bricked"
+
+
+def test_a_session_holding_both_stored_shapes_is_pruned_rather_than_crashing() -> None:
+    """The sweep reads a table mid-migration, which a rollout is in for as long as it takes.
+
+    M6's conversion pass is resumable and a rollout is not atomic, so one session's rows can be
+    part MAF and part LangChain. The reader was MAF's `Message.from_dict`, which does not merely
+    mis-read a LangChain payload — it raises `TypeError: unexpected keyword argument 'data'`. So
+    the activity failed, Temporal retried it to exhaustion, and retention stopped entirely for
+    every session that had taken a turn since the conversion: the sessions still in use, which are
+    exactly the ones a retention window is for.
+
+    Loud in the logs and invisible in effect, which is the combination that makes it survive — the
+    job reports failure, the table quietly stops shrinking.
+    """
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            session_id = "m13-mixed-shapes"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    for shape, message, age_days in (
+                        ("maf", legacy_text("user", "an old question"), 400),
+                        ("langchain", message_to_dict(HumanMessage(content="a new one")), 1),
+                    ):
+                        await cur.execute(
+                            "INSERT INTO session_messages "
+                            "(session_id, message, message_shape, created_at) "
+                            "VALUES (%s, %s, %s, now() - make_interval(days => %s))",
+                            (session_id, Jsonb(message), shape, age_days),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT message_shape FROM session_messages "
+                        "WHERE session_id = %s ORDER BY id",
+                        (session_id,),
+                    )
+                    return [str(row[0]) for row in await cur.fetchall()]
+        finally:
+            monkeypatch.undo()
+
+    # The expired legacy row went; the recent converted one stayed. Neither held a tool call, so
+    # the pairing rule had nothing to protect and the age cutoff decided alone — which is the
+    # ordinary case, and the one that used to raise before reaching any of that.
+    assert asyncio.run(_run()) == ["langchain"]
 
 
 def test_an_expired_pair_is_removed_whole() -> None:
@@ -158,14 +228,11 @@ def test_an_expired_pair_is_removed_whole() -> None:
                     await cur.execute(
                         "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
                     )
-                    for message in (
-                        Message(role="assistant", contents=[_call("c9")]),
-                        Message(role="tool", contents=[_result("c9")]),
-                    ):
+                    for message in (_call("c9"), _result("c9")):
                         await cur.execute(
                             "INSERT INTO session_messages (session_id, message, created_at) "
                             "VALUES (%s, %s, now() - make_interval(days => 400))",
-                            (session_id, Jsonb(message.to_dict())),
+                            (session_id, Jsonb(message)),
                         )
                 await conn.commit()
 
@@ -257,12 +324,12 @@ async def _seed_expired_sessions(count: int, prefix: str) -> str:
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM session_messages")
-            message = Message(role="user", contents=[Content(type="text", text="old")])
+            message = legacy_text("user", "old")
             for index in range(count):
                 await cur.execute(
                     "INSERT INTO session_messages (session_id, message, created_at) "
                     "VALUES (%s, %s, now() - make_interval(days => 400))",
-                    (f"{prefix}{index:03d}", Jsonb(message.to_dict())),
+                    (f"{prefix}{index:03d}", Jsonb(message)),
                 )
         await conn.commit()
     return f"{prefix}%"

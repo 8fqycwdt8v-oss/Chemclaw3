@@ -316,3 +316,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-09-a-twin-rule-is-one-string](D-2026-08-09-a-twin-rule-is-one-string.md) | A twin rule is one string, and a guard must be measured |
 | [D-2026-08-09-a-valid-prefix-is-not-a-molecule](D-2026-08-09-a-valid-prefix-is-not-a-molecule.md) | A valid prefix is not a molecule, so a hazard screen refuses it |
 | [D-2026-08-10-a-list-of-ids-is-not-a-conversation-list](D-2026-08-10-a-list-of-ids-is-not-a-conversation-list.md) | A list of ids is not a conversation list, so the service names and orders its own sessions |
+| [D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor](D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md) | A specialist inherits the caller's authority, narrowed |
+| [D-2026-08-10-basestore-is-not-where-this-systems-memory-lives](D-2026-08-10-basestore-is-not-where-this-systems-memory-lives.md) | BaseStore is not adopted; the memory package emits notes, not rows |
+| [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md) | Layer 1 is rebuilt on LangGraph, and turn state stops being hand-built |
+| [D-2026-08-11-what-the-removal-found](D-2026-08-11-what-the-removal-found.md) | Deleting the framework is what exposed the readers that only knew one shape |

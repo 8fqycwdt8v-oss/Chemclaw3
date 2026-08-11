@@ -170,6 +170,33 @@ _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CALC_REF = re.compile(r"^[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+$")
 
 
+def _reject_unencodable(value: str, field: str) -> str:
+    r"""Refuse a string UTF-8 cannot encode — a lone surrogate is not text a note can hold.
+
+    Reachable rather than theoretical. An agent-authored note arrives as JSON, and JSON *can*
+    carry an unpaired surrogate (`json.loads('"\ud800"')` returns one happily), so a model that
+    emits a truncated escape puts a `str` in this field that no UTF-8 consumer can accept. The
+    field itself then looks fine and every write of it fails: `path.write_text` raises
+    `UnicodeEncodeError` in the PR-gate's commit, and psycopg and the vector index raise the same
+    way on the proposal store and the index refresh.
+
+    So the check belongs on the note, not on the file writer. A `Note` is by definition something
+    that gets written to a UTF-8 file in Git; a value that cannot be is not a note field that
+    happens to fail late, it is invalid input — and rejecting it here fails one proposal loudly at
+    the boundary instead of crashing whichever writer reaches it first. Found by
+    `tests/test_properties_core.py`'s round-trip generator, which is exactly the kind of input a
+    hand-written example never supplies.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            f"{field} contains a character UTF-8 cannot encode (a lone surrogate at position "
+            f"{exc.start}); a note is stored as a UTF-8 file, so this value cannot be written"
+        ) from exc
+    return value
+
+
 # Every note type this system mints, with what it means. Previously `type` was an unconstrained
 # slug written from nine different call sites, so a typo minted a *new* type silently and any
 # retrieval filter keyed on type (the committed `retrieval-coupling-playbook-filter` eval case does
@@ -387,6 +414,35 @@ class Note(TemporalWindow):
                     "'<calculation key>#<name>', as ArtifactRef.as_str() writes)"
                 )
         return values
+
+    @model_validator(mode="after")
+    def _text_is_writable(self) -> Self:
+        """Every *unconstrained* string this note carries must survive UTF-8.
+
+        Walked off `model_fields` rather than spelled out, for the reason `skill_tool_names` reads
+        the framework's own constants: a note that grows another string field would otherwise
+        gain an unchecked one silently, and the whole point is that any unencodable value breaks
+        every writer rather than the one that happened to be tested.
+
+        **Four fields are deliberately not walked, because something already refuses them.**
+        Measured: pydantic's own constrained-string validation rejects a surrogate in `id`, `type`
+        and `Relation.rel`/`to` (all `min_length=1`) with `string_unicode` before this validator
+        runs, and `_calc_ref_shape`/`_artifact_ref_shape` reject the ref lists because a lone
+        surrogate is no calculation key. What actually reaches here is the unconstrained set —
+        `body`, `source`, `compound_smiles`, `tags` — so walking the rest would be code that cannot
+        run, which reads as coverage while proving nothing. `tests/test_properties_core.py` pins
+        both halves without pinning *who* rejects what, so the split fails loudly if either of the
+        other two checks ever stops covering its part.
+        """
+        for name in type(self).model_fields:
+            value = getattr(self, name)
+            if isinstance(value, str):
+                _reject_unencodable(value, name)
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    if isinstance(item, str):
+                        _reject_unencodable(item, f"{name}[{index}]")
+        return self
 
     def outgoing_links(self) -> list[str]:
         """The ids this note links to, from its body `[[wikilinks]]` and its `relations:`.

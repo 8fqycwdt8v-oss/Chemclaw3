@@ -112,7 +112,6 @@ async def readyz(request: Request, response: Response) -> dict[str, str]:
     connector signal (reported, never gating) and bounds the database one to at most one round trip
     per window per pod. Set 0 to probe every time.
     """
-    state(request).agent()
     health = await _connector_health(request)
     ready = True
     if settings.session_store == "postgres":

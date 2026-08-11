@@ -11,11 +11,9 @@ enough — no live agent run or model call is needed.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from types import SimpleNamespace
-from typing import cast
+from typing import Any
 
 import pytest
-from agent_framework import FunctionInvocationContext
 
 from chemclaw.agent.audit import (
     AuditEvent,
@@ -24,17 +22,21 @@ from chemclaw.agent.audit import (
     make_audit_middleware,
 )
 from chemclaw.core.config import settings
+from tests.middleware import run_middleware, tool_request
 
 
-def _ctx(name: str, arguments: object, result: object = None) -> FunctionInvocationContext:
-    """A minimal stand-in exposing only the fields the middleware reads."""
-    return cast(
-        FunctionInvocationContext,
-        SimpleNamespace(function=SimpleNamespace(name=name), arguments=arguments, result=result),
-    )
+def _ctx(name: str, arguments: object, result: object = None) -> Any:
+    """The call as the audit middleware reads it: a name and its arguments.
+
+    `result` is accepted and ignored. A `wrap_tool_call` middleware records what the *handler*
+    returns rather than what the caller pre-set on a context, so the tests that care pass it back
+    from their `call_next` instead — which is the more honest arrangement, since the trail is
+    supposed to record what the tool produced.
+    """
+    return tool_request(name, dict(arguments) if isinstance(arguments, dict) else {})
 
 
-def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]) -> None:
+def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
     """Run the middleware with no explicit sink over a stand-in context.
 
     Log-only in practice because the test config leaves `session_store="memory"`, which is what
@@ -43,10 +45,10 @@ def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[Non
     """
     mw = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
 
-    async def _run() -> None:
-        await mw(ctx, call_next)
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    asyncio.run(run_middleware(mw, ctx, _handler))
 
 
 async def _ok() -> None:
@@ -104,15 +106,22 @@ class _BrokenSink:
         raise RuntimeError("audit store down")
 
 
-def _drive_mw(
-    mw: object, ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
-) -> None:
-    """Run an arbitrary middleware over a stand-in context to completion."""
+def _as_handler(call_next: Callable[[], Awaitable[Any]]) -> Callable[[Any], Awaitable[Any]]:
+    """Adapt a zero-arg tool body to the `handler(request)` a middleware calls."""
 
-    async def _run() -> None:
-        await mw(ctx, call_next)  # type: ignore[operator]
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
 
-    asyncio.run(_run())
+    return _handler
+
+
+def _drive_mw(mw: Any, ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
+    """Run an arbitrary middleware over one call to completion."""
+
+    async def _handler(_request: Any) -> Any:
+        return await call_next()
+
+    asyncio.run(run_middleware(mw, ctx, _handler))
 
 
 def test_ambient_identity_overrides_the_static_actor() -> None:
@@ -134,6 +143,105 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
     assert sink.events[0].actor == "u-entra-oid"  # ambient user, not the "unknown" fallback
 
 
+def test_a_specialist_is_recorded_beside_the_human_actor() -> None:
+    """The trail names both: which person authorized the turn, and which agent made the call.
+
+    Invariant 3 of D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor. A subagent is an
+    attenuation of its caller's authority, not a new actor, so recording only the specialist would
+    make the trail worthless under GxP and recording it *as* the actor would repeat the D-040
+    failure — an agent's act attributed to a chemist's Entra oid. Both fields, or neither is true.
+    """
+    from chemclaw.core.identity_context import (
+        reset_current_identity,
+        reset_current_specialist,
+        set_current_identity,
+        set_current_specialist,
+    )
+
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-sub", actor="unknown", sink=sink)
+
+    async def _ok_call() -> None:
+        return None
+
+    identity = set_current_identity("u-entra-oid", frozenset({"compute"}))
+    specialist = set_current_specialist("computation")
+    try:
+        _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok_call)
+    finally:
+        reset_current_specialist(specialist)
+        reset_current_identity(identity)
+
+    event = sink.events[0]
+    assert event.actor == "u-entra-oid", "the human authorization was lost"
+    assert event.agent == "computation", "the specialist that ran the call was lost"
+
+
+def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -> None:
+    """Outside a subgraph the field is empty — and every other audited field is untouched.
+
+    Empty is the honest record for the turn's own agent, not a gap. The second half is the one that
+    matters for the trail already in the database: widening the event must not perturb what a call
+    with no specialist records, so the row a main-agent call produces is field-for-field what it was
+    before `agent` existed. `test_the_versioned_hash_reproduces_the_v2_bytes_exactly`
+    (`tests/test_audit_chain.py`) is the same claim at the level of the bytes that get hashed.
+    """
+    from chemclaw.core.identity_context import (
+        get_current_specialist,
+        reset_current_specialist,
+        set_current_specialist,
+    )
+
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
+
+    async def _ok_call() -> None:
+        return None
+
+    _drive_mw(mw, _ctx("find_notes", {"q": "x"}), _ok_call)
+
+    event = sink.events[0]
+    assert event.agent == ""
+    assert event.model_dump(exclude={"agent"}) == {
+        "correlation_id": "conv-main",
+        "session_id": "",
+        "purpose": "",
+        "actor": "alice@corp",
+        "tool": "find_notes",
+        "arguments": "{'q': 'x'}",
+        "outcome": "ok",
+        "detail": "",
+        "latency_ms": event.latency_ms,
+        "revision": settings.deployment_revision,
+    }
+    # And the binding is scoped to the subgraph, not leaked into the turn that followed it.
+    token = set_current_specialist("safety")
+    reset_current_specialist(token)
+    assert get_current_specialist() == ""
+
+
+def test_a_nested_specialist_restores_its_caller_rather_than_clearing_it() -> None:
+    """A specialist that delegates further leaves its own name behind, not an empty string.
+
+    `reset_current_specialist` restores the previous value precisely so a two-level delegation
+    attributes the outer specialist's own later calls to it — clearing instead would silently
+    re-attribute them to the main agent, which is a false record rather than a missing one.
+    """
+    from chemclaw.core.identity_context import (
+        get_current_specialist,
+        reset_current_specialist,
+        set_current_specialist,
+    )
+
+    outer = set_current_specialist("design")
+    inner = set_current_specialist("safety")
+    assert get_current_specialist() == "safety"
+    reset_current_specialist(inner)
+    assert get_current_specialist() == "design"
+    reset_current_specialist(outer)
+    assert get_current_specialist() == ""
+
+
 def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every recorded event carries the process's deployment revision (AG-14, GxP provenance)."""
     monkeypatch.setattr(settings, "deployment_revision", "sha-abc123")
@@ -153,10 +261,13 @@ def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-1", actor="alice@corp", sink=sink)
 
-    async def _returns_ref() -> None:
-        return None
+    async def _returns_ref() -> str:
+        return "pr://note/insight-1"
 
-    ctx = _ctx("propose_knowledge_note", {"type": "insight"}, result="pr://note/insight-1")
+    # Returned by the tool rather than pre-set on the context, which is the shape the trail
+    # actually records: `wrap_tool_call` middleware sees what the *handler* produced, where MAF's
+    # wrote its result onto the invocation context for the middleware to read afterwards.
+    ctx = _ctx("propose_knowledge_note", {"type": "insight"})
     _drive_mw(mw, ctx, _returns_ref)
 
     assert len(sink.events) == 1
@@ -236,10 +347,7 @@ def test_an_omitted_sink_no_longer_silently_means_log_only(
     middleware = make_audit_middleware(correlation_id="c", actor="a")
     context = _ctx("compute_xtb_energy", {"smiles": "CCO"})
 
-    async def _run() -> None:
-        await middleware(context, _ok)
-
-    asyncio.run(_run())
+    _drive_mw(middleware, context, _ok)
 
     assert recorded == ["compute_xtb_energy"], "the default sink was not consulted"
 
@@ -265,7 +373,7 @@ class _SlowSink:
         self.written.set()
 
 
-def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[None]]:
+def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[Any]]:
     """A tool body that announces it is running and then never returns."""
 
     async def _call() -> None:
@@ -290,7 +398,11 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     async def _run() -> None:
         started = asyncio.Event()
         task = asyncio.ensure_future(
-            middleware(_ctx("compute_xtb_energy", {"smiles": "CCO"}), _hangs_until(started))
+            run_middleware(
+                middleware,
+                _ctx("compute_xtb_energy", {"smiles": "CCO"}),
+                _as_handler(_hangs_until(started)),
+            )
         )
         await started.wait()
         task.cancel()
@@ -325,7 +437,11 @@ def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     async def _run() -> None:
         started = asyncio.Event()
         task = asyncio.ensure_future(
-            middleware(_ctx("gather_evidence", {"query": "biaryl"}), _hangs_until(started))
+            run_middleware(
+                middleware,
+                _ctx("gather_evidence", {"query": "biaryl"}),
+                _as_handler(_hangs_until(started)),
+            )
         )
         await started.wait()
         task.cancel()

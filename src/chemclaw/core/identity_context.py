@@ -14,6 +14,15 @@ what a correlation id is for: the audit trail could not separate two chemists' t
 "show me everything that happened in this conversation" returned the pod's entire history. It is
 per-turn state, so it belongs in a task-local like the actor, not on a cached object.
 
+The **running specialist** rides here too, for the third time and the same reason. A subagent is an
+attenuation of its caller's authority, not a new actor
+(`docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md`), so the trail has to
+name two things at once — which person authorized the turn and which agent made the call — and lose
+neither. Attribution to "the agent" is what makes a GxP trail worthless; attribution of an agent's
+act to a person is the D-040 failure repeated. The specialist is therefore recorded *beside* the
+actor, never instead of it, which is why it is a separate carrier here rather than a value written
+over `_current_actor`.
+
 **Plain `str`/`frozenset` values and nothing but `contextvars`**, which is what makes this kernel
 material: seven packages read the turn's actor — audit, the authz gate, the PR-gate, connector
 identity headers, template activities, the CLI, and `core.logging`'s own `ContextFilter`. It sat
@@ -50,6 +59,9 @@ _current_roles: ContextVar[frozenset[str]] = ContextVar(
 _current_correlation_id: ContextVar[str | None] = ContextVar(
     "chemclaw_current_correlation_id", default=None
 )
+# "" rather than None, because "the main agent ran this" is a real, complete answer — there is no
+# third state to distinguish, and an `Optional` would make every consumer decide what None means.
+_current_specialist: ContextVar[str] = ContextVar("chemclaw_current_specialist", default="")
 
 
 def set_current_identity(actor: str, roles: frozenset[str]) -> tuple[object, object]:
@@ -82,6 +94,43 @@ def set_current_correlation_id(correlation_id: str) -> object:
 def reset_current_correlation_id(token: object) -> None:
     """Restore the previous correlation id, undoing a `set_current_correlation_id` (teardown)."""
     _current_correlation_id.reset(token)  # type: ignore[arg-type]
+
+
+def set_current_specialist(name: str) -> object:
+    """Bind the running specialist; returns a token for `reset_current_specialist`.
+
+    **Ambient rather than a parameter, for three reasons that all point the same way.** Identity
+    already travels this way — the actor, the roles and the correlation id an audit row needs are
+    all read off this module, and the specialist is the fourth field of the same record. A subagent
+    runs *inside* the turn's context rather than beside it, so the value it needs to publish is
+    scoped exactly like a contextvar is: task-local, set on entry to the subgraph, restored on exit,
+    and never visible to a concurrent turn. And the alternative is the one this system cannot pay
+    for: an audit row that depended on a parameter would make every tool signature grow a field it
+    has no use for, and a trail whose completeness rests on ~13 tools each remembering to forward an
+    argument is a trail with holes in it. `chemclaw.agent.audit` reads it in one place instead.
+
+    `name` is the specialist's `AgentProfile` name (`data/profiles/*.yaml` or a connector bundle's
+    own), which is the id the attenuation was declared under and therefore the one worth recording.
+    """
+    return _current_specialist.set(name)
+
+
+def reset_current_specialist(token: object) -> None:
+    """Restore the previous specialist, undoing a `set_current_specialist` (subgraph exit).
+
+    Restoring rather than clearing is what makes nesting correct: a specialist that delegates
+    further must leave its own name behind when the inner subgraph returns, not an empty string.
+    """
+    _current_specialist.reset(token)  # type: ignore[arg-type]
+
+
+def get_current_specialist() -> str:
+    """The profile name of the specialist running this call; empty for the main agent.
+
+    Empty is a statement, not a gap: it means the turn's own agent made the call, which is the
+    honest record for every call outside a subgraph.
+    """
+    return _current_specialist.get()
 
 
 def get_current_correlation_id() -> str | None:

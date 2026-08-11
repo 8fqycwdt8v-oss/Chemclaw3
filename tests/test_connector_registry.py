@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     ConnectorError,
@@ -25,10 +26,8 @@ from chemclaw.connectors.registry import (
     enabled,
     health_url,
     job_tools,
-    mcp_tools,
     skills_dirs,
 )
-from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, known_note_types
 from chemclaw.kg.relations import KNOWN_RELATIONS, known_relations
 
@@ -161,9 +160,14 @@ def test_each_transport_builds_its_matching_maf_tool(
         "  tools:\n    - compute\n  read_only:\n    - compute\n",
     )
     _use(monkeypatch, tmp_path)
-    built = {tool.name: tool for tool in mcp_tools()}
-    assert isinstance(built["remote"], DegradingHttpConnector)
-    assert isinstance(built["local"], DegradingStdioConnector)
+    # Both transports as specs, which is the one shape now. It used to be two classes — a
+    # `DegradingHttpConnector` and a `DegradingStdioConnector`, distinguished by `isinstance` —
+    # because MAF took a live tool object per transport. `open_connector_specs` opens a session
+    # from a `Connection` mapping, so what a registry builds is a description either way and the
+    # transport shows up in the connection rather than in the type.
+    built = {spec.name: spec for spec in connector_specs()}
+    assert built["remote"].connection["transport"] == "streamable_http"
+    assert built["local"].connection["transport"] == "stdio"
     assert list(built["remote"].allowed_tools or []) == ["search"]
     assert list(built["local"].allowed_tools or []) == ["compute"]
 
@@ -177,8 +181,8 @@ def test_connector_urls_override_the_manifest_address(
     monkeypatch.setattr(
         "chemclaw.core.config.settings.connector_urls", {"alpha": "http://alpha.svc:8080/mcp"}
     )
-    (tool,) = mcp_tools()
-    assert tool.url == "http://alpha.svc:8080/mcp"
+    (spec,) = connector_specs()
+    assert spec.connection.get("url") == "http://alpha.svc:8080/mcp"
 
 
 def test_the_health_probe_follows_the_address_override(
@@ -239,7 +243,7 @@ def test_a_jobs_only_connector_contributes_a_tool_and_no_mcp_server(
     """Durable capability needs no endpoint: the launcher is the whole agent-facing surface."""
     _bundle(tmp_path, "thing", f"name: thing\ndescription: durable only\n{_JOB_BLOCK}")
     _use(monkeypatch, tmp_path)
-    assert mcp_tools() == []
+    assert connector_specs() == []
     (tool,) = job_tools()
     assert tool.__name__ == "run_thing"
 

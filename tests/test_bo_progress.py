@@ -258,7 +258,7 @@ def test_assay_noise_must_be_positive() -> None:
 
 
 def test_the_tool_accepts_plain_dicts_as_maf_delivers_them() -> None:
-    """MAF hands this function JSON, never model instances — the bridge the sibling tool has."""
+    """This function is handed JSON, never model instances — the bridge the sibling tool has."""
     problem = {
         "parameters": [
             {"kind": "continuous", "name": "equiv", "lower": 1.0, "upper": 3.0},

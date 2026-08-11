@@ -71,7 +71,7 @@ def test_proposes_from_observations() -> None:
 
 
 def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
-    """Regression: MAF calls this tool with plain dicts, not `OptimizationProblem`/`Observation`.
+    """Regression: the tool is called with plain dicts, not `OptimizationProblem`/`Observation`.
 
     The agent-framework function-tool boundary validates a call's arguments against the JSON
     schema derived from this signature, then invokes the function with that payload
@@ -100,7 +100,7 @@ def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
 def test_accepts_observations_json_encoded_as_a_string() -> None:
     """Regression: on a large call, the model sometimes emits `observations` JSON-encoded.
 
-    A single string instead of a real array — a live e2e finding on a 6-parameter problem. MAF's
+    A single string instead of a real array — a live e2e finding on a 6-parameter problem. The
     schema validation rejected the whole call before this function ever ran, with no detail
     reaching the model to self-correct from ("Error: Argument parsing failed.", no exception
     text). Accepting the string here and decoding it makes the tool robust to that formatting

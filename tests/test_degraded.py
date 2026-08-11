@@ -35,15 +35,13 @@ _COUNTER = "chemclaw_degraded_total"
 # space: a label whose values are not enumerable is how a registry ends up with unbounded series.
 _EXPECTED_SUBSYSTEMS = {
     "cost_ledger",
-    "history_compaction",
-    "history_repair",
     "job_resume",
     "log_redaction",
-    "mode_display",
     "plan_approval",
     "preferences",
     "skill_manifest",
     "tool_result_store",
+    "transcript_projection",
 }
 
 

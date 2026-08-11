@@ -15,6 +15,14 @@ the system does not have — equally mechanical to raise, though it takes a judg
 `bucket` records what we knew before asking, so a run reports coverage honestly. A `C` probe that
 is answered with a clear refusal is a **pass**: the system behaving correctly at its own edge.
 Grading a known-absent capability as a failure would make the score a measure of the tool list.
+
+**A probe was one question until M12, and three of that milestone's five measurements cannot be
+made in one.** Whether a plan gate works is a property of a *conversation*: the same session must
+refuse a write, be approved by a human, execute the write, and then be re-gated when the plan
+changes underneath the approval (DARK-1). No single turn distinguishes "the gate holds" from "the
+model never tried". So `follow_ups` was added — later turns of the same session, each naming the
+human act that precedes it. Everything else here is unchanged, and a probe that declares no
+follow-up is byte-for-byte the single-question probe the corpus has always held.
 """
 
 from typing import Literal
@@ -22,6 +30,28 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 Persona = Literal["lab_technician", "lab_leader", "manager"]
+
+# What a human does *between* two turns of a scripted probe.
+#
+# `approve_plan` reads the session's current plan (`GET /sessions/{id}/plan`) and posts a yes
+# against the hash it reports. It is deliberately the hash the *server* names rather than one the
+# probe carries: an approval is bound to a plan identity (`agent/plan_gate.plan_identity`), and a
+# probe that supplied its own would be asserting what the plan is instead of approving what it is.
+#
+# `none` is the ordinary case and is what makes the DARK-1 turn expressible: the third turn of the
+# plan-gate probe changes the plan and takes **no** human action, which is exactly the sequence
+# that used to execute a knowledge-graph write under a decision made about different work.
+Intervention = Literal["none", "approve_plan"]
+
+
+class Turn(BaseModel):
+    """One later turn of a scripted probe: what is said, and what a human did first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1)
+    before: Intervention = "none"
+
 
 # A = the capability exists and the probe should exercise it.
 # B = a substrate exists but the specific ask does not; a good answer is partial and says so.
@@ -60,6 +90,21 @@ class Probe(BaseModel):
     expects_job: bool = False
     forbids_claims: list[str] = Field(default_factory=list)
     direction: str = Field(min_length=1)
+    # Later turns of the *same* session, in order, each naming the human act that precedes it.
+    # Empty for every probe in the shipped corpus, which is why adding this changed nothing there.
+    follow_ups: list[Turn] = Field(default_factory=list)
+    # The specialist a supervisor should delegate this question to (`agent/team.py::SPECIALISTS`).
+    #
+    # A single name rather than the any-of `expects_tools` is, and the asymmetry is the point:
+    # several tools can legitimately serve one question, but routing has exactly one right answer
+    # by construction — the specialists partition the surface, so a question the `safety` agent
+    # should hold is not also the `design` agent's. That is what makes accuracy a number rather
+    # than a judgement, and it is the number M9 deferred its default to (`agent_teams_enabled`).
+    #
+    # Validated against the live specialist set by the corpus test, not here, for the same reason
+    # `expects_tools` is: a schema that imported the agent layer would make loading a probe file
+    # depend on building an agent.
+    expects_specialist: str | None = None
 
 
 class ProbeSet(BaseModel):

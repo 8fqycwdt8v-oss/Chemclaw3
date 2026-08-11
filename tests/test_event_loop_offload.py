@@ -124,6 +124,11 @@ def test_gather_evidence_runs_its_sources_concurrently() -> None:
         """A retriever that reports how many of its peers were in flight alongside it."""
 
         source_id = "slow"
+        # `SourceRetriever` declares `name`, and the fan-out reads it to label each branch's
+        # contribution. This double predated that read and omitted it, which made it not actually a
+        # `SourceRetriever` — filled in here rather than by making the sweep tolerant, because a
+        # production path defending against an incomplete test double hides the incompleteness.
+        name = "slow"
 
         async def retrieve(self, query: str, filters: dict[str, str]) -> list[Any]:
             """Sleep like a real I/O-bound source, tracking concurrent occupancy."""

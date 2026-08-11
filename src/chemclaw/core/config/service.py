@@ -78,8 +78,9 @@ class ServiceSettings(BaseSettings):
     # restart, so a session is resumable. `memory` keeps the classic in-process provider
     # (dev/test); `postgres` persists each turn's messages to `session_messages` keyed by
     # session id, so a fresh process over the same DSN resumes the thread. **Session state is
-    # not Temporal job state** — it is the conversation layer (D-002), and compaction still runs
-    # on top. `session_store_dsn` lets the session store point at a different database than the
+    # not Temporal job state** — it is the conversation layer (D-002), and the table is a read
+    # model rather than the turn's state. `session_store_dsn` lets it point at a database other
+    # than the
     # calculation/fingerprint DSN; empty falls back to `postgres_dsn` (one database in the
     # simple deployment).
     session_store: Literal["memory", "postgres"] = "memory"
@@ -182,7 +183,7 @@ class ServiceSettings(BaseSettings):
     # stall.
     service_turn_timeout_seconds: float = Field(default=600.0, gt=0)
     # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
-    # iteration-capped (`harness_max_loop_iterations` / MAF's 40), but nothing caps the *number*
+    # iteration-capped (`harness_max_loop_iterations`), but nothing caps the *number*
     # of turns, so a client or an automated push-back loop could accumulate unbounded LLM spend.
     # When `budget_enabled`, the front door meters each turn's reported token usage and counts
     # turns per session and per user, refusing (HTTP 429) a turn that would exceed a cap. Caps
@@ -190,8 +191,8 @@ class ServiceSettings(BaseSettings):
     # runaway (the missing ceiling above the per-turn loop cap), not a durable rolling-window
     # quota (deferred). A cap of 0 means unlimited on that dimension, so a deployment can enable
     # just the guard it wants; the defaults are generous for a real chemist but finite against a
-    # loop. Token metering reads MAF's usage content, so a provider reporting no usage meters 0
-    # and the turn caps bind. Off by default (today's behavior).
+    # loop. Token metering reads each streamed chunk's `usage_metadata`, so a provider reporting
+    # no usage meters 0 and the turn caps bind. Off by default.
     budget_enabled: bool = False
     budget_max_turns_per_session: int = Field(default=100, ge=0)
     budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)

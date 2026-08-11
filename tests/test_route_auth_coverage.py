@@ -121,7 +121,7 @@ def _built_app() -> FastAPI:
     `agent_factory` is a stub because building the app is what is under test, not running a turn
     through it — no route in this test is ever called.
     """
-    return create_app(agent_factory=lambda _profile: object())
+    return create_app()
 
 
 def test_every_route_outside_the_probe_allowlist_requires_a_principal() -> None:

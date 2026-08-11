@@ -196,7 +196,11 @@ def test_cli_reports_failing_gate_but_exits_zero(
     which cases must pass/fail is pinned by this suite, and only an unloadable or
     unscorable case-set exits non-zero.
     """
-    monkeypatch.setattr(sys, "argv", ["chemclaw.evals.harness", settings.eval_case_dir, "v1"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["chemclaw.evals.harness", settings.eval_case_dir, "--case-set-version", "v1"],
+    )
     assert main() == 0
     assert "**FAIL**" in capsys.readouterr().out  # the report still shows the red gate
 

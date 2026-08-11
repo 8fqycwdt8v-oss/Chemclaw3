@@ -1,5 +1,16 @@
 # Implementation Tickets: the foundation build, ticket by ticket
 
+> **Standing of this document: historical.** It is the ticket-by-ticket record of the F0–F9
+> foundation build as it was executed, against the tree as it stood then — including a layer 1 on
+> the Microsoft Agent Framework and pre-D-148 module paths (`agents/…`). Layer 1 has since been
+> rebuilt on **LangGraph**
+> ([`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](../decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)),
+> so the framework symbols named in the F0/F1 tickets below no longer exist. They are left as
+> written: a ticket's value here is the record of what was decided and why, and rewriting the
+> symbols would make the record describe a build nobody did. For what is true today read
+> `docs/decisions/`, the package READMEs and `docs/guides/runbook.md`; for the harness specifically,
+> `docs/guides/harness-konzept.md`.
+
 > **Companion to** `docs/archive/plans/foundation-plan.md` (the staged *how*) and `docs/archive/foundation-assessment.md`
 > (the *what/why*). This document is the **executable backlog**: every phase F0–F9 broken into
 > small, individually-shippable tickets grounded in the **real symbols in this repo**. Each ticket
@@ -45,7 +56,7 @@
 
 Goal of the phase: the agent talks to the internal OpenAI-compatible endpoint with a **single
 generic API credential** (not Entra), and we have a documented verdict on whether the internal model
-can drive MAF tool-calling + the harness todo tools.
+can drive framework tool-calling + the harness todo tools.
 
 ### F0-T1 — Provider config block
 - **Goal:** add the provider-selection config the adapter reads; keep Anthropic as a dev fallback.
@@ -99,13 +110,16 @@ can drive MAF tool-calling + the harness todo tools.
 - **Deps:** F0-T2.
 
 ### F0-T4 — Tool-calling capability spike (the H0 risk) 🔬
-- **Goal:** **evidence** that the internal model can (a) select+call MAF function tools, (b) drive the
-  harness todo tools and plan/execute transition, (c) return the structured outputs the agent needs.
+- **Goal:** **evidence** that the internal model can (a) select+call the agent's function tools,
+  (b) drive the harness todo tool (`write_todos`) and the plan→approve→execute transition,
+  (c) return the structured outputs the agent needs. *Still open, and the engine underneath it
+  changed while it waited: the probe now points at `build_chat_model()` and drives the compiled
+  graph, which is what makes it a fidelity test of the endpoint rather than of a client library.*
 - **Touch:** ＋`scripts/spike_toolcalling.py` (a runnable probe, not shipped in the request path),
   ＋`docs/spikes/f0-toolcalling.md` (the verdict).
-- **Build:** a script that points `build_chat_client()` at the internal endpoint and runs a scripted
+- **Build:** a script that points `build_chat_model()` at the internal endpoint and runs a scripted
   battery: single tool call (`compute_xtb_energy`), a 3-tool chain, a forced-structured-output call, and
-  a mock todo add/list/complete cycle. Emit pass/fail + failure taxonomy (wrong-tool, malformed-args,
+  a todo add/list/complete cycle. Emit pass/fail + failure taxonomy (wrong-tool, malformed-args,
   no-call, bad-structured-output).
 - **Test:** the spike is the test; `docs/spikes/f0-toolcalling.md` records model id, prompt shims tried,
   and the verdict. If weak → record the mitigation chosen (constrained/grammar decoding, a tool-call
@@ -115,7 +129,7 @@ can drive MAF tool-calling + the harness todo tools.
   mitigation (if any) is a config knob, not a code fork.
 - **Deps:** F0-T2 (needs a live endpoint; may run against a stand-in OpenAI-compatible server first).
 
-> **CHECKMATE F0:** `Agent.run` completes end-to-end against the internal endpoint with ≥1 real tool
+> **CHECKMATE F0:** a turn completes end-to-end against the internal endpoint with ≥1 real tool
 > call; provider switch is one config change (no hardcoded Anthropic outside `llm_provider.py`); the
 > spike verdict is documented with a mitigation if weak; endpoint/token/CA all config from env.
 > **ADR D-A1** (internal LLM adapter, generic credential).

@@ -1,5 +1,15 @@
 # Implementierungs-Plan: Chemclaw3 (stufenweise, mit Quality-Gates)
 
+> **Stand dieses Dokuments: historisch.** Es ist die *ursprüngliche Baureihenfolge* und beschreibt
+> die Schritte so, wie sie damals gegangen wurden — einschließlich der Reasoning-Schicht, die
+> zunächst auf dem Microsoft Agent Framework gebaut und später auf **LangGraph** neu aufgesetzt
+> wurde
+> ([`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](../decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)).
+> Die Schrittnamen unten werden deshalb *nicht* umgeschrieben: "Phase 1 — MAF-+-Temporal-Spine"
+> heißt so, weil das der gebaute Spine war. Was heute gilt, steht in `docs/decisions/`, den
+> Paket-READMEs und `docs/guides/runbook.md`; die **Prinzipien** dieses Plans (Abschnitt unten)
+> haben den Wechsel unverändert überstanden, weil keines von ihnen am Framework hing.
+
 ## Kontext
 
 Das Repository `Chemclaw3` startet leer. Es existiert ein Architektur-Dokument
@@ -44,8 +54,10 @@ einem Review vollständig durchdacht werden kann.
    keine "für später"-Platzhalter ohne Verwendung. Was existiert, wird benutzt oder gelöscht.
 6. **Test = Verhalten, nicht Struktur** — jeder Schritt liefert genau die Tests, die sein
    Abnahmekriterium beweisen. Keine Tests, die nur Mocks spiegeln.
-7. **Vier-Schichten-Trennung strikt** — MAF (Konversation), Temporal (lange Jobs),
-   Skills ("wie tue ich X"), Markdown-Graph ("was wissen wir"). Nie vermischen.
+7. **Vier-Schichten-Trennung strikt** — Reasoning-Schicht (Konversation), Temporal (lange Jobs),
+   Skills ("wie tue ich X"), Markdown-Graph ("was wissen wir"). Nie vermischen. Dass Schicht 1
+   inzwischen ein anderes Framework trägt und die Trennung unverändert hält, ist der nachträgliche
+   Beleg für dieses Prinzip.
 
 ---
 
@@ -356,7 +368,8 @@ Abschnitt 12.4): ein *stabiler* Harness-Kern mit *pluggable* Source-Retrievern.
 - **5b.4** Adversarial-Verify-Schritt: jede synthetisierte Aussage muss durch ≥1
   `EvidenceChunk` belegt sein; **unbelegte numerische Trends werden verworfen** (keine
   erfundene Statistik in einem Entwicklungsbericht).
-- **5b.5** MAF-**Graph-Workflow** `development-report`: ein Knoten pro Berichtsabschnitt,
+- **5b.5** **Graph-Workflow** `development-report` (geplant als Framework-Graph, **gebaut** als
+  deterministischer Pure-Function-Kern plus Temporal-Workflow, D-020): ein Knoten pro Berichtsabschnitt,
   jeder deklariert explizit seine Gedächtnisebene (episodisch/semantisch, Abschnitt 9) —
   die Provenienz-Trennung wird damit *strukturell* erzwungen, nicht nur per Konvention.
 - **5b.6** Lange Läufe (Bericht über Jahre an Daten = hunderte Retrievals/LLM-Calls) laufen
@@ -415,7 +428,7 @@ in Phase 1c/1d.)
 | Postgres-RLS-Mirror des Graphen | **weglassen** | echte kombinatorische Projekt-Vertraulichkeit |
 | `knowledge/` eigenes Git-Repo | **Unterordner** | Governance-/Vertraulichkeitstrennung nötig |
 | Zweites Queue-System (pg-boss) | **nein**, nur Temporal-Task-Queues | — (revidiert) |
-| MAF Durable Extension | **nicht** für Jobs | nur sehr lange Konversationspausen |
+| Framework-eigene Durability | **nicht** für Jobs | — (erledigt: der Turn-Zustand liegt im Postgres-Checkpointer der Reasoning-Schicht, Jobs unverändert bei Temporal) |
 | Universelle ELN-Abstraktion | **nein**, Adapter pro Quelle | ab dritter ELN-Quelle |
 
 > **Vorgezogen** (nicht mehr „später"): **xTB/GFN2** und **ML-Prädiktoren** → Phase 1c;

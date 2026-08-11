@@ -128,21 +128,6 @@ spec:
               A turn's lease could not be refreshed, so it may expire while the turn is still
               running and admit a second turn on the same session.
 
-        - alert: ChemclawRollbackWatermarkUnavailable
-          expr: >-
-            increase(chemclaw_rollback_watermark_unavailable_total[5m])
-            > {{ .Values.monitoring.alerts.rollbackWatermarkWarning }}
-          for: 0m
-          labels:
-            severity: warning
-          annotations:
-            summary: The disconnect-rollback guard could not read its watermark
-            description: >-
-              A turn rolled back on client disconnect without a watermark, which risks leaving an
-              orphaned `tool_use` behind — the failure mode that bricks a session permanently,
-              because `message_pairing`'s repair only self-heals the other half of the pair. The
-              threshold carries the "more than the odd one" judgement its `for: 5m` used to claim
-              and could not make: the range window is 5m too, so one increment satisfied it.
 
     - name: chemclaw.availability
       rules:

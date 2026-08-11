@@ -4,8 +4,9 @@
 re-index, reports, memory synthesis, approvals), the one generic wrapper every
 connector job runs inside (`connector_job.py`), and the worker process that hosts
 them. Workflow code is deterministic and replayable; all I/O and non-determinism
-lives in **activities**. Durability lives here and **only** here, never in the MAF
-layer.
+lives in **activities**. Durability for long or expensive work lives here and **only**
+here, never in the conversation layer's own stores — layer 1's checkpointer holds one
+turn's state and no job's (D-2026-08-10 §3).
 
 One core task queue (its name comes from `chemclaw.core.config`): `background-jobs`
 (D-006). See `docs/reference/architektur.md` §2, §15.

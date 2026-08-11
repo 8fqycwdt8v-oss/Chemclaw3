@@ -35,8 +35,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from chemclaw.agent.agent_pool import AgentPool
-from chemclaw.agent.chemclaw_agent import build_agent, connector_tools, history_provider
+from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.interaction_tools import (
@@ -45,6 +44,7 @@ from chemclaw.agent.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.session_events import stream_new_events
@@ -157,49 +157,35 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-def _default_agent_factory(profile: str | None) -> Any:
-    """Build the agent for one profile — `build_agent` with the profile passed by keyword.
-
-    A named adapter rather than a lambda so the app's default factory has the same one-argument
-    shape a test's fake does, and so the signature is somewhere a reader can find it.
-
-    No `audit_sink` argument, deliberately: `chemclaw.agent.audit.default_audit_sink` supplies the
-    durable
-    GxP trail wherever a database is configured. This line used to be the whole of the finding —
-    it passed no sink, so the compliance record was log-only in the one process chemists use.
-    Fixing it *here* would have left the same trap set for the Temporal template activities and
-    every future entry point, so the default moved to the one place that decides.
-    """
-    return build_agent(profile=profile)
-
-
 def create_app(
-    agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
-    connector_factory: Callable[[str | None], list[Any]] = connector_tools,
+    connector_factory: Callable[[str | None], list[Any]] = connector_specs,
     turn_claims: SessionTurns | None = None,
+    graph_factory: Callable[..., Any] = build_langgraph_agent,
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
     Args:
-        agent_factory: Builds the agent for one profile name (`None` = the default profile). Called
-            once per distinct profile and cached, since an agent is configuration rather than
-            per-conversation state. Tests pass a factory returning a fake streaming agent so the
-            whole HTTP surface is exercised without a live model.
         owner_store: The durable session-ownership registry used to reattach a client to its session
             after a pod restart. Defaults to the config-gated store (present only under
             `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
             without a database.
-        connector_factory: Builds *this turn's* connector tools for one profile name. A factory
-            rather than a list because a connector's connection must belong to a single turn
-            (see `chemclaw.agent.chemclaw_agent.connector_tools`), so the app calls it per turn; and
+        connector_factory: Builds *this turn's* connector specs for one profile name
+            (`chemclaw.agent.chemclaw_agent.connector_specs`). A factory rather than a list because
+            a connector's connection must belong to a single turn, so the app calls it per turn; and
             per-profile because the profile narrows the connector surface as well as the
-            in-process one. Injectable for the same reason `agent_factory` is: a test drives the
+            in-process one. Injectable for the same reason `graph_factory` is: a test drives the
             whole HTTP surface without a connector server running.
         turn_claims: The durable "one turn at a time per session" claim, which is what makes that
             guard hold across processes rather than only within one (D-121). Defaults to the
             config-gated store (present only under `session_store="postgres"`); tests inject an
             in-memory fake to exercise the cross-process conflict without a database.
+        graph_factory: Builds *this turn's* compiled graph, given the profile, the turn's identity
+            and its already-open connectors. It is the seam a test injects a credential-free turn
+            through, and the only one: without it the front door's own surface would need a live
+            model to exercise at all. A factory rather than an instance because a graph binds its
+            tools at construction and therefore belongs to one turn
+            (`chemclaw.agent.langgraph_agent`) — nothing here is cached per process.
 
     Returns:
         A configured `FastAPI` application.
@@ -222,15 +208,12 @@ def create_app(
     # difference. See `_database_unavailable`.
     app.add_exception_handler(ConnectionError, _database_unavailable)
     app.add_exception_handler(SubsystemUnavailableError, _subsystem_unavailable)
-    # One agent per process, built lazily on first use so importing the app needs no
-    # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
-    # session map with a durable store and wires job→session push-back. One agent per profile
-    # name, built lazily on first use so importing the app needs no credentials. `None` is the
-    # default profile — the key a session gets when it names none.
-    app.state.agents = {}
-    app.state.agent_factory = agent_factory
-    # Called once per turn, not once per process — a connector connection belongs to a single turn.
+    # Both called once per *turn*, not once per process. A connector's session belongs to a single
+    # turn, and a graph binds its tools at construction — so the graph's lifetime is pinned to its
+    # connectors' (`chemclaw.agent.langgraph_agent`). There used to be an `agents` dict beside
+    # these, holding one process-lived agent per profile; nothing outlives a turn now.
     app.state.connector_factory = connector_factory
+    app.state.graph_factory = graph_factory
 
     def _turn_in_flight(session_id: str) -> bool:
         """Whether `session_id` holds an unexpired in-process turn lease — the eviction pin.
@@ -266,11 +249,6 @@ def create_app(
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
     app.state.history = history_provider()
-    # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
-    # per-profile agent above still serves everything that does not stream; only a streaming turn
-    # needs exclusivity, because that is where the Anthropic client keeps tool-call identity on
-    # itself.
-    app.state.agent_pool = AgentPool(app.state.agent_factory, settings.service_max_concurrent_turns)
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
     # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it

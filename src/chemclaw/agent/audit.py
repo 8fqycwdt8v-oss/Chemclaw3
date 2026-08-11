@@ -3,12 +3,13 @@
 Why this exists: in a pharma/GxP setting "who ran what, with which inputs, when, did it
 succeed, and to what effect" must be answerable, and it is the first thing needed to
 troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 tools
-(duplication that would drift), one MAF **function middleware** wraps *every* registered
+(duplication that would drift), one **tool-call middleware** wraps *every* registered
 tool uniformly — the audit trail is a single reusable piece (DRY), like the PR-gate.
 
 It is observe-only: it never alters the arguments or the result. Each call records the
 correlation id (which conversation), the actor (who — a Phase-6 seam, the configured
-`service_actor_id` until Entra identity lands), the tool name, its truncated arguments, the
+`service_actor_id` until Entra identity lands), which specialist ran it (beside the human, never
+instead — empty for the main agent), the tool name, its truncated arguments, the
 outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
 supplied (the Postgres append-only trail) — the log is the floor, the sink is the GxP record.
@@ -31,14 +32,19 @@ contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail 
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any, Protocol, runtime_checkable
 
-from agent_framework import FunctionInvocationContext, function_middleware
+from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
-from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.core.identity_context import (
+    get_current_actor,
+    get_current_correlation_id,
+    get_current_specialist,
+)
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tracing import start_span
@@ -80,6 +86,20 @@ class AuditEvent(BaseModel):
     # authored honestly.
     purpose: str = ""
     actor: str
+    # Which specialist made this call — the `AgentProfile` name of the running subagent, empty for
+    # the main agent (D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor, invariant 3).
+    #
+    # **Beside `actor`, never instead of it**, and deliberately not folded into either neighbouring
+    # field. Overloading `actor` — the human's Entra oid — would produce exactly the D-040 failure
+    # this system has already been bitten by: the trail recorded an agent's self-authorization under
+    # the chemist's identity, which is worse than an unrecorded act because it *looks* attributable.
+    # And `purpose` is reserved for why a call was made, which is a different question with a
+    # different (still unanswerable) answer; filling it with an agent name would spend the one
+    # column that is honest about being empty.
+    #
+    # A trail that names only the person cannot say which of five specialists ran a tool; a trail
+    # that names only the agent is worthless under GxP. It has to carry both, so it does.
+    agent: str = ""
     tool: str
     arguments: str
     # "ok" | "error" | "cancelled". Deliberately a plain string with no CHECK behind it: the column
@@ -157,122 +177,167 @@ def make_audit_middleware(
     correlation_id: str,
     actor: str,
     sink: AuditSink | None = None,
-) -> Callable[[FunctionInvocationContext, Callable[[], Awaitable[None]]], Awaitable[None]]:
-    """Build the tool-audit middleware bound to one conversation's identity.
+) -> AgentMiddleware[Any, Any]:
+    """The trail as tool-call middleware — the wiring, with the recording itself in `_recording`.
 
-    `correlation_id` and `actor` are both *fallbacks*, used only when the call has no ambient one
-    (`chemclaw.core.identity_context`): the turn's real Entra user takes precedence per call
-    (F4-T5), and
-    so does the turn's correlation id. The id has to work that way because agents are cached per
-    profile for the process's lifetime — an id bound here would be shared by every turn from every
-    user on the pod, which would make the audit trail unable to separate two conversations. The
-    build-time value still serves the callers that bind a meaningful one and stamp nothing per turn
-    (the Temporal template activities pass the workflow id).
+    Split that way on purpose. `_recording` is where an audit row is decided and written, and it
+    takes plain values; this reads the tool's name, arguments and result off the request and hands
+    them over. Keeping the decision framework-free is what let the engine underneath be replaced
+    without an audit row's contents depending on which engine ran (D-2026-08-10 §4), and it is
+    what a second caller — a template step, a job replay — reuses instead of re-deriving.
 
-    `sink` is the durable trail. Omitted means `default_audit_sink()` — durable wherever a
-    database is configured — so a caller that forgets downgrades nothing; pass `NullAuditSink()`
-    explicitly to opt out. A sink failure is logged and swallowed: the audit store must never
-    break a tool call.
+    The result recorded as the `ok` detail is the `ToolMessage`'s content rather than a raw return
+    value, because that is what the model is actually handed: an audit row saying what the tool
+    computed, where the model read something else, would be a record of the wrong event.
     """
     audit_sink: AuditSink = sink if sink is not None else default_audit_sink()
-    # The revision in effect for this process, captured once at build time (AG-14) — every event
-    # this middleware records carries it, so a result ties to the exact version that produced it.
     revision = settings.deployment_revision
 
-    @function_middleware
-    async def audit_tool_calls(
-        context: FunctionInvocationContext,
-        call_next: Callable[[], Awaitable[None]],
-    ) -> None:
+    @wrap_tool_call
+    async def audit_tool_calls(request: Any, handler: Callable[[Any], Any]) -> Any:
         """Record one audit event per tool invocation (observe-only)."""
-        name = context.function.name
-        args = _truncate(context.arguments)
-        # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
-        # `actor` bound at build time when there is none (tests, the non-service caller).
-        event_actor = get_current_actor() or actor
-        # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
-        event_cid = get_current_correlation_id() or correlation_id
-        # The conversation, read ambiently for the same reason the actor is: a tool has no request
-        # context, and an agent is cached per profile for the process's life, so anything bound at
-        # build time would be shared by every user on the pod. Empty off the request path.
-        event_session = get_current_session_id() or ""
-        start = time.perf_counter()
+        async with _recording(
+            request.tool_call["name"],
+            request.tool_call.get("args"),
+            actor=actor,
+            correlation_id=correlation_id,
+            sink=audit_sink,
+            revision=revision,
+        ) as recorded:
+            result = await handler(request)
+            recorded.result = getattr(result, "content", result)
+            return result
 
-        def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
-            """This call's record under `outcome` — the identity fields resolved once, above."""
-            return AuditEvent(
-                correlation_id=event_cid,
-                session_id=event_session,
-                actor=event_actor,
-                tool=name,
-                arguments=args,
-                outcome=outcome,
-                detail=detail,
-                latency_ms=elapsed_ms,
-                revision=revision,
-            )
+    return audit_tool_calls
 
-        try:
-            # One span per tool call, which with the turn span above it is the whole first-party
-            # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
-            # question an operator actually asks, and nothing could answer it. Deliberately not a
-            # span per loop iteration or per retriever — the finding was that the docs *overstate*
-            # the tracing, and answering that with more unread spans is the same mistake mirrored.
-            with start_span("chemclaw.tool", **{"tool.name": name}):
-                await call_next()
-        except asyncio.CancelledError:
-            # The turn was torn down while this tool was still running — a client disconnect or the
-            # front door's wall-clock deadline, which both deliver exactly this (D-130). Its own
-            # clause because `CancelledError` derives from `BaseException`, so the handler below
-            # never saw it and an interrupted attempt left no row in the trail at all.
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            _observe_tool_latency(elapsed_ms)
-            logger.warning(
-                "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
-                name,
-                elapsed_ms,
-                event_cid,
-                event_actor,
-                args,
-            )
-            await _emit_shielded(
-                audit_sink,
-                event_for(
-                    "cancelled",
-                    "the turn was torn down while this tool was running (client disconnect or "
-                    "turn deadline); whether its side effect completed is not known here",
-                    elapsed_ms,
-                ),
-            )
-            raise
-        except Exception as exc:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            _observe_tool_latency(elapsed_ms)
-            logger.warning(
-                "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
-                name,
-                elapsed_ms,
-                event_cid,
-                event_actor,
-                exc,
-                args,
-            )
-            await _emit(audit_sink, event_for("error", _truncate(exc), elapsed_ms))
-            raise
+
+class _Recorded:
+    """The one value the caller must hand back: what the tool returned, for the `ok` detail.
+
+    A mutable holder rather than a return value because `_recording` is a context manager, and the
+    result is only known inside the block — the wrapper assigns what `handler` returned before the
+    block exits and the row is written.
+    """
+
+    result: object | None = None
+
+
+@asynccontextmanager
+async def _recording(
+    name: str,
+    arguments: object,
+    *,
+    actor: str,
+    correlation_id: str,
+    sink: AuditSink,
+    revision: str,
+) -> AsyncIterator[_Recorded]:
+    """The GxP trail itself, with no framework in it — both engines' middlewares are wrappers.
+
+    Everything that makes this the *record* lives here: the identity precedence, the span, the
+    latency histogram, the three outcomes, and the shielded write that survives a teardown. A
+    second copy of it for the second engine would be the one duplication this system cannot
+    afford — an audit trail that disagrees with itself depending on a config flag is not a trail,
+    and the `cancelled` outcome exists precisely because a subtle omission here went unnoticed
+    until it was measured (D-130).
+
+    What each engine supplies is only the three things it alone knows: the tool's name, its
+    arguments, and — inside the block — its result.
+    """
+    args = _truncate(arguments)
+    # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
+    # `actor` bound at build time when there is none (tests, the non-service caller).
+    event_actor = get_current_actor() or actor
+    # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
+    event_cid = get_current_correlation_id() or correlation_id
+    # The conversation, read ambiently for the same reason the actor is: a tool has no request
+    # context, and an agent is cached per profile for the process's life, so anything bound at
+    # build time would be shared by every user on the pod. Empty off the request path.
+    event_session = get_current_session_id() or ""
+    # Which specialist is running, read here and once, so the trail names the agent beside the human
+    # without any tool signature growing a field. Empty means the main agent, which is a complete
+    # answer rather than a missing one. No fallback: unlike the actor and the correlation id there
+    # is nothing sensible to bind at build time — an agent is cached per profile for the process's
+    # life, so a build-time specialist would label every turn on the pod with whichever subgraph
+    # happened to be built first.
+    event_agent = get_current_specialist()
+    start = time.perf_counter()
+
+    def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
+        """This call's record under `outcome` — the identity fields resolved once, above."""
+        return AuditEvent(
+            correlation_id=event_cid,
+            session_id=event_session,
+            actor=event_actor,
+            agent=event_agent,
+            tool=name,
+            arguments=args,
+            outcome=outcome,
+            detail=detail,
+            latency_ms=elapsed_ms,
+            revision=revision,
+        )
+
+    recorded = _Recorded()
+    try:
+        # One span per tool call, which with the turn span above it is the whole first-party
+        # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
+        # question an operator actually asks, and nothing could answer it. Deliberately not a
+        # span per loop iteration or per retriever — the finding was that the docs *overstate*
+        # the tracing, and answering that with more unread spans is the same mistake mirrored.
+        with start_span("chemclaw.tool", **{"tool.name": name}):
+            yield recorded
+    except asyncio.CancelledError:
+        # The turn was torn down while this tool was still running — a client disconnect or the
+        # front door's wall-clock deadline, which both deliver exactly this (D-130). Its own
+        # clause because `CancelledError` derives from `BaseException`, so the handler below
+        # never saw it and an interrupted attempt left no row in the trail at all.
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         _observe_tool_latency(elapsed_ms)
-        detail = _truncate(context.result) if context.result is not None else ""
-        logger.info(
-            "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
+        logger.warning(
+            "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
             name,
             elapsed_ms,
             event_cid,
             event_actor,
             args,
         )
-        await _emit(audit_sink, event_for("ok", detail, elapsed_ms))
-
-    return audit_tool_calls
+        await _emit_shielded(
+            sink,
+            event_for(
+                "cancelled",
+                "the turn was torn down while this tool was running (client disconnect or "
+                "turn deadline); whether its side effect completed is not known here",
+                elapsed_ms,
+            ),
+        )
+        raise
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        _observe_tool_latency(elapsed_ms)
+        logger.warning(
+            "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
+            name,
+            elapsed_ms,
+            event_cid,
+            event_actor,
+            exc,
+            args,
+        )
+        await _emit(sink, event_for("error", _truncate(exc), elapsed_ms))
+        raise
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    _observe_tool_latency(elapsed_ms)
+    detail = _truncate(recorded.result) if recorded.result is not None else ""
+    logger.info(
+        "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
+        name,
+        elapsed_ms,
+        event_cid,
+        event_actor,
+        args,
+    )
+    await _emit(sink, event_for("ok", detail, elapsed_ms))
 
 
 async def _emit_shielded(sink: AuditSink, event: AuditEvent) -> None:

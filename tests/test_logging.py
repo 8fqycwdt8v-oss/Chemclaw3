@@ -5,6 +5,7 @@ changes the root logger's threshold — and is case-insensitive, without asserti
 specific handler wiring (which `logging.basicConfig` owns).
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -102,11 +103,11 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
     *executed*, not type-checked. Any regression that drops the SDK from the dependency closure
     fails here instead of in the cluster.
 
-    **In a subprocess, deliberately.** `configure_otel_providers` installs *global* tracer and
-    meter providers and starts a background export loop. Run in-process, this test would leave
-    every later test in the session exporting spans to a collector that is not there — which it
-    did, filling the run with `Failed to export traces` errors. The thing under test is a process
-    startup path, so a process is the honest place to test it.
+    **In a subprocess, deliberately.** `configure_telemetry` installs a *global* tracer provider
+    and starts a background export loop. Run in-process, this test would leave every later test in
+    the session exporting spans to a collector that is not there — which it did, filling the run
+    with `Failed to export traces` errors. The thing under test is a process startup path, so a
+    process is the honest place to test it.
     """
     result = subprocess.run(
         [
@@ -124,6 +125,126 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
         timeout=120,
     )
     assert result.returncode == 0, f"startup failed under the shipped OTel config:\n{result.stderr}"
+
+
+# --- the span pipeline this module now builds itself ------------------------------------------
+#
+# `configure_telemetry` used to be one line into the agent framework
+# (`agent_framework.observability.configure_otel_providers`), and removing that framework would
+# have stopped tracing for the whole process **without failing a single test**: every helper in
+# `core/tracing.py` degrades to a no-op when no provider is installed, which is right for a turn and
+# is exactly what makes the silence undetectable. The three tests below are what makes it audible: a
+# span reaches the exporter carrying the service that produced it, a second call does not build a
+# second pipeline, and the missing-extras path still names the dependency. ("Off stays off" is the
+# pair above, which predates this and is unchanged.)
+
+
+def test_a_span_reaches_the_exporter_carrying_the_service_that_produced_it() -> None:
+    """The bootstrap has to *work*, not merely import: span in, span out, named by service.
+
+    Driven against a real in-memory exporter rather than a mock, because the failure this replaces
+    is "nothing is exported at all" — and a mock asserting that `BatchSpanProcessor` was constructed
+    would pass against a pipeline whose spans go nowhere. `service.name` is asserted because it is
+    what a collector groups by: a provider that exports spans attributed to `unknown_service` is a
+    trace nobody can find, which is the shape the previous bootstrap actually shipped (it named
+    every Chemclaw process `agent_framework`).
+
+    In-process is safe here precisely because `_build_tracer_provider` is the half that installs
+    nothing globally.
+    """
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from chemclaw.core.logging import _build_tracer_provider
+
+    exporter = InMemorySpanExporter()
+    provider = _build_tracer_provider(exporter)
+    with provider.get_tracer("chemclaw-test").start_as_current_span("chemclaw.turn"):
+        pass
+    assert provider.force_flush(), "the batch processor did not flush within its timeout"
+
+    exported = exporter.get_finished_spans()
+    assert [span.name for span in exported] == ["chemclaw.turn"]
+    assert exported[0].resource.attributes["service.name"] == "chemclaw"
+    assert exported[0].resource.attributes["service.version"] == settings.deployment_revision
+
+
+def test_a_second_configure_telemetry_does_not_install_a_second_pipeline() -> None:
+    """Called twice it must be a no-op — the CLI, the workers and the tests all call it.
+
+    The observable cost of getting this wrong is not a warning: `trace.set_tracer_provider` refuses
+    the second provider and logs, but the *building* of it has already started a second
+    `BatchSpanProcessor` export thread and opened a second gRPC channel, both of which the API then
+    discards and neither of which anything closes. So the assertion is on threads — a real,
+    countable consequence — rather than on whether a flag was read.
+
+    The same subprocess also pins the two things a first-party bootstrap has to get right and that
+    nothing else would notice: the installed provider is the real SDK one (not the API's no-op
+    default, which is what "tracing silently stopped" looks like), and `CHEMCLAW_OTEL_ENDPOINT` is
+    bridged to the standard `OTEL_EXPORTER_OTLP_ENDPOINT` the OTLP exporter resolves itself.
+    """
+    probe = (
+        "import json, os, threading;"
+        "from chemclaw.core.logging import configure_telemetry;"
+        "configure_telemetry();"
+        "from opentelemetry import trace;"
+        "from opentelemetry.sdk.trace import TracerProvider;"
+        "provider = trace.get_tracer_provider();"
+        "first = [t for t in threading.enumerate() if 'OtelBatchSpan' in t.name];"
+        "configure_telemetry();"
+        "second = [t for t in threading.enumerate() if 'OtelBatchSpan' in t.name];"
+        "print(json.dumps({"
+        "'is_sdk_provider': isinstance(provider, TracerProvider),"
+        "'provider_unchanged': trace.get_tracer_provider() is provider,"
+        "'service_name': provider.resource.attributes['service.name'],"
+        "'endpoint': os.environ.get('OTEL_EXPORTER_OTLP_ENDPOINT'),"
+        "'export_threads': [len(first), len(second)]}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env={
+            **os.environ,
+            "CHEMCLAW_OTEL_ENABLED": "true",
+            "CHEMCLAW_OTEL_ENDPOINT": "http://otel-collector.observability.svc:4317",
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout.strip().splitlines()[-1])
+    assert observed["is_sdk_provider"], (
+        "the global provider is not the SDK's — spans are being dropped by the API's default, "
+        "which is exactly what removing the framework's bootstrap would look like"
+    )
+    assert observed["provider_unchanged"]
+    assert observed["service_name"] == "chemclaw"
+    assert observed["endpoint"] == "http://otel-collector.observability.svc:4317"
+    assert observed["export_threads"] == [1, 1], (
+        f"a second configure_telemetry() left {observed['export_threads'][1]} export threads "
+        "running; the second pipeline is unreachable and nothing shuts it down"
+    )
+
+
+def test_enabling_telemetry_without_the_extras_names_the_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admin who flips the flag on an install without the extras gets a directive error.
+
+    The OTLP exporter is blocked by putting `None` in `sys.modules` — the import system's own way
+    of making a module unimportable — rather than by patching a fake over it, so the code under
+    test takes the identical path it would on a machine where the distribution is absent.
+    """
+    from chemclaw.core import logging as core_logging
+
+    monkeypatch.setattr(core_logging, "_TRACING_INSTALLED", False)
+    monkeypatch.setattr(settings, "otel_enabled", True)
+    # No endpoint, so nothing is written into this process's environment on the way to the raise.
+    monkeypatch.setattr(settings, "otel_endpoint", "")
+    monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", None)
+
+    with pytest.raises(RuntimeError, match="OpenTelemetry SDK/OTLP exporter is not installed"):
+        configure_telemetry()
+    assert not core_logging._TRACING_INSTALLED, "a failed bootstrap must not latch as installed"
 
 
 # --- what a log line has to carry, and what it must never carry -------------------------------

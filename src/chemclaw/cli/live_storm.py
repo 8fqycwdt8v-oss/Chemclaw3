@@ -692,7 +692,7 @@ async def _chaos_client_disconnect() -> Finding:
 async def _chaos_worker_killed_mid_job() -> Finding:
     """E2 · SIGKILL the connector worker mid-job; Temporal must still finish the job.
 
-    The whole reason durability lives in Temporal rather than in MAF (`CLAUDE.md`, layer 2), and
+    The whole reason durability lives in Temporal rather than in layer 1 (`CLAUDE.md`), and
     until now asserted rather than shown: the thirteen Temporal test modules run against the
     time-skipping test server, where no worker is ever killed. `make live-jobs` freezes a worker
     with SIGSTOP and resumes it, which tests a *stall*; this kills the process outright and starts

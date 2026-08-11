@@ -3,6 +3,33 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the LangGraph rebuild (2026-08-11, D-2026-08-11-what-the-removal-found)
+
+- [ ] **The three M12 probes are still unrun, and nothing in M13 measured them** — [M].
+      Each needs a credential or a tenant this environment does not have, and the migration shipped
+      without them on purpose rather than by oversight:
+      **(a) concurrency** — 8 simultaneous turns against a compiled graph. D-123's *defect* has no
+      surface left (its parser went with the dependency, which is why `agent_pool.py` could be
+      deleted), but LangGraph's own behaviour under that load is unmeasured, so this is a new
+      question rather than the old one re-asked. **(b) plan → approve → execute, end to end, live**
+      — historically this *silently* did not work, and every unit test passed while it did not.
+      **(c) team routing accuracy and per-specialist token cost** against the single-agent
+      baseline; `agent_teams_enabled` is off by default for exactly this reason, and a team that
+      mis-routes is worse than no team.
+      **Trigger**: a live model credential in a deployment, whichever arrives first. Use the
+      cheapest model available for (a) and (b); (c) needs the real one to mean anything.
+
+- [ ] **Per-model token attribution is gone from the metrics surface and only the ledger has it** —
+      [S]. The framework's chat-client instrumentation emitted `gen_ai.client.token.usage` labelled
+      by request model, response model, provider and token type; the LangChain stack ships no
+      equivalent (measured — `docs/guides/runbook.md` §(viii)). `turn_costs` still carries model
+      attribution per turn, which is where D-2026-08-01-spend-is-a-ledger-not-a-label decided it
+      belongs, so nothing is *lost* that a query cannot answer — but a dashboard that read the OTel
+      histogram now reads nothing, and `core/metrics.py`'s counters deliberately carry `profile`
+      only.
+      **Trigger**: an operator asking a per-model question of a Grafana panel rather than of the
+      database.
+
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
 - [ ] **`tool_result_blobs` has no bound on a deployment that has not stated one** — [S].
@@ -318,8 +345,8 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       `agent/interaction_tools.py`, `templates/registry.py`, and two in `connectors/`), and they are
       what makes `chemclaw.agent → temporalio` and `chemclaw.templates → temporalio` real edges in
       the tree — the clearest textual violation of CLAUDE.md's "durability lives only in Temporal,
-      never in MAF", now recorded in `tests/test_third_party_layering.py::_KNOWN_LEAKS` so it cannot
-      grow. The copies have already diverged once: `start_approval` omits the `id_reuse_policy` the
+      never in the conversation layer's own ad-hoc stores", now recorded in
+      `tests/test_third_party_layering.py::_KNOWN_LEAKS` so it cannot grow. The copies have already diverged once: `start_approval` omits the `id_reuse_policy` the
       others pass. The blocker is not the extraction, it is the policy —
       `D-2026-08-08-an-outage-is-not-a-missing-job` reverted an attempt to unify it because "closed
       with a decision" and "closed without one" need different `WorkflowIDReusePolicy` values, so a
@@ -350,10 +377,11 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       The argument check resolves parameters from the in-process `@tool` registry and each bundle's
       own server tools module: **50 of the 61 advertised tools**. "Covers every tool the shipped
       templates call" is true and worth little — one template ships, with two steps. A `run_<name>`
-      template launcher takes a single generated pydantic model (`params`), and how MAF maps a
-      call's argument keys onto that has not been measured here, so those steps are skipped rather
-      than guessed at; skill tools are MAF's and not knowable offline at all. The eleven
-      unresolvable ones include every job-launcher — the most expensive things to fail at run time.
+      template launcher takes a single generated pydantic model (`params`), and how the framework
+      maps a call's argument keys onto that has not been measured here, so those steps are skipped
+      rather than guessed at; the skills read tool is bound to a per-profile backend, so its
+      arguments are not knowable from a static registry either. The eleven unresolvable ones
+      include every job-launcher — the most expensive things to fail at run time.
 
 - [ ] **`prose-validate` resolves a *bare* metric name only in the operator corpus, not in
       `docs/decisions/`** — [S].
@@ -389,18 +417,18 @@ the new tests now *record* as debt rather than something they fixed; each is a l
 
 - [ ] **`_ALLOWED_MODULE_STACKS` rows are package-keyed while `_KNOWN_LEAKS` rows are
       file-keyed** — [S].
-      Measured: a new `connectors/safety/server/_zz.py` importing `agent_framework`, `temporalio`
-      *and* `fastapi` at module scope passes all 8 stack tests, because `chemclaw.connectors` owns
-      all three. One row covers 54 files; `chemclaw.agent` covers 43. Where a row's stated *reason*
-      names one file — `("chemclaw.connectors", "maf")` says "connectors/transport.py builds the
-      MAF tool objects — the one adapter point" — the row licenses 54 and the sentence is true of
-      one. The distinction is defensible (an allowed edge is a design decision about a *layer*; a
+      Measured: a new `connectors/safety/server/_zz.py` importing the conversation framework,
+      `temporalio` *and* `fastapi` at module scope passes all 8 stack tests, because
+      `chemclaw.connectors` owns all three. One row covers 54 files; `chemclaw.agent` covers 43.
+      Where a row's stated *reason* names one file — the framework row for `chemclaw.connectors`
+      justifies itself by `connectors/transport.py` being the one adapter point that builds tool
+      objects — the row licenses 54 and the sentence is true of one. The distinction is defensible (an allowed edge is a design decision about a *layer*; a
       leak is debt about a *file*) and is now written into the module docstring, so this row is
       about whether the two or three rows whose reason names specific files should be narrowed to
       them. Not done here because narrowing them makes ordinary growth *inside* a layer that owns
       a stack fail the build, and that trade needs a case rather than an argument.
-      *Trigger:* the first second file in a bundle that reaches for MAF, or the first review that
-      finds a package-keyed row hiding a violation.
+      *Trigger:* the first second file in a bundle that reaches for the conversation framework, or
+      the first review that finds a package-keyed row hiding a violation.
       *Trigger:* the first template whose step calls another template's launcher.
 ## Open — Left by the science lane of the 2026-08-08 review campaign
 
@@ -1552,9 +1580,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       tampered with — indistinguishable from the tampering the chain exists to detect.
 - [ ] **The reasoning a `correlation_id` now reaches is still erodible** — [M], and it is what makes the
       audit-chain join necessary-but-not-sufficient. The join lands on `session_messages`, whose rows
-      `session_store._compact` rewrites, `durable/retention.py` prunes by age, and `rollback_to`
-      deletes on client disconnect. So a trail can point at a conversation that has since been
-      compacted out of recognisability. Wants a decision about what a GxP deployment must retain,
+      `durable/retention.py` prunes by age — and which a
+      failed or abandoned turn never reaches at all, since the projection is written once, after
+      the answer. So a trail can point at a conversation that has since been compacted out of
+      recognisability, or at one whose words were never written down. Wants a decision about what a GxP deployment must retain,
       not more plumbing.
 - [ ] **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
       `ConnectorJobInput` a required `rationale`; D-2026-07-31-the-audit-chain-is-versioned added an `AuditEvent.purpose` column and
@@ -1564,10 +1593,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       one — a reader cannot tell which rows are which. D-157's `rationale` works because a job launch
       is a discrete, deliberate act with an obvious author; an inline tool call is not. Needs a
       decision, not code.
-- [ ] **The reasoning that does exist is compacted, pruned and rolled back** — [M]. The only durable
-      trace of intent is the raw MAF message blob in `session_messages`, and three mechanisms erode
-      it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and
-      `rollback_to` deletes a turn's rows on client disconnect.
+- [ ] **The reasoning that does exist is pruned, or never written at all** — [M]. The only durable
+      trace of intent is the raw message blob in `session_messages`, and two things erode it:
+      `durable/retention.py` prunes rows by age, and a turn that ran its tools and then failed or
+      was abandoned writes no row at all.
 - [ ] **The approved plan's text is still not durable** — [M]. D-157 made the authorization bind to
       the plan, but the plan itself lives in an in-process `TodoSessionStore`, so a `plan_approvals`
       row still points at a `plan_hash` whose subject exists nowhere durable — a signature on a
@@ -2360,6 +2389,7 @@ claim about the world is to run it.
       orphan, so the repair would strip and commit a pairing that was intact on disk. Both
       docstrings that promised the opposite are corrected, and
       `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
+      (That file is gone; see the superseding note below.)
       **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the
       load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call
       groups from `session_messages`. Either is a design change to a durable path with a data-loss
@@ -2371,6 +2401,15 @@ claim about the world is to run it.
       (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching
       `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads
       a partial history and so sidesteps the corruption class rather than accepting it.
+      **Superseded by D-2026-08-10-langgraph-rebuild-of-the-conversation-layer, which deleted the
+      whole problem rather than the fix.** The defect was that the stored history was re-read
+      before every model call; the graph reads its checkpointer instead, so nothing re-reads it at
+      all. Durable compaction, its two settings, `agent/history_compaction.py` and the read-repair
+      that made a `LIMIT` unsafe are all gone. The `LIMIT` still stays out, for a new reason: the
+      one reader left is the transcript route, and a window makes a reloaded conversation look like
+      it began later than it did. `durable/retention.py` is now the only thing bounding the table,
+      by age — which is the policy statement a deployment actually makes, where a context-window
+      heuristic quietly editing a GxP record was not.
 
 - [x] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
       so the only metrics that run a live retriever have zero drift coverage — verified by
@@ -2435,16 +2474,20 @@ claim about the world is to run it.
       **measure before building** (D-152), and this entry as first written overstated how reachable
       the saving is. Two corrections from verifying it:
       **(a) the ~14.6 k prefix was measured on the wrong provider.** That figure came from the
-      Anthropic dev path. Production is `openai_compatible`, where `agent_framework_openai` contains
+      Anthropic dev path. Production is `openai_compatible`, where `langchain_openai` contains
       **zero** occurrences of `cache_control` — the mechanism is not reachable from production at
-      all, so this is upstream work in MAF, not a knob here.
-      **(b) "the ~3.5 k system half is cacheable" is false through `Agent`.** `SkillsProvider`
-      merges
-      the skills manifest into the instructions with an f-string, which would `repr()` a structured
-      block list into a string. Marking that half cacheable is also an upstream change.
-      Still true: MAF exposes no `cache_control` hook for `tools` (the 11 k that dominates), and the
-      prefix is not byte-stable because `tools/list` is re-fetched per turn, so one flapping
-      connector invalidates it.
+      all, so this is upstream work, not a knob here. Re-measured after the LangGraph rebuild rather
+      than assumed to carry over, and it did carry over unchanged: the previous framework's OpenAI
+      client had the same zero, while `langchain_anthropic` has 74 occurrences, which is exactly why
+      the dev path can do what production cannot.
+      **(b) "the ~3.5 k system half is cacheable" is false as the prompt is assembled.**
+      `deepagents.SkillsMiddleware` renders the skills manifest into a string with
+      `system_prompt_template.format(...)` and appends it to the system message, so the half that
+      changes least is welded to the half that changes most. Marking it cacheable is also an
+      upstream change — the same conclusion the previous framework's f-string forced, reached again
+      for the same structural reason.
+      Still true: the prefix is not byte-stable because `tools/list` is re-fetched per turn, so one
+      flapping connector invalidates it.
       **What to do now instead of building:** read `chemclaw_cache_read_tokens_total` against
       `chemclaw_input_tokens_total` on `/metrics` — the provider may already be caching the prefix
       unasked, in which case there is nothing to build. `docs/guides/runbook.md` §(viii) has the
@@ -2461,12 +2504,16 @@ claim about the world is to run it.
       would re-price cheap tokens as expensive), and a counter stays untouched rather than
       publishing a fabricated `0` when the provider reports nothing — the REV-19 rule.
       **Done (D-152), the attribution half — and half of it turned out to be already solved.**
-      Per-*model* attribution needs nothing built: MAF emits `gen_ai.client.token.usage` labelled by
-      request model, response model, provider and token type, and the shipped chart turns OTel on.
-      Duplicating that axis in this registry would mean two systems to reconcile, so it is
-      deliberately not done — with two gaps recorded: MAF records only the `input`/`output` token
-      types, so D-144's cache-read/cache-write dimensions are *not* in that histogram, and OTel has
-      no notion of a Chemclaw `profile`. Per-*profile* attribution is the real gap and is what
+      Per-*model* attribution needed nothing built *at the time*: the then-framework emitted
+      `gen_ai.client.token.usage` labelled by request model, response model, provider and token
+      type, and the shipped chart turns OTel on. Duplicating that axis in this registry would have
+      meant two systems to reconcile, so it was deliberately not done — with two gaps recorded: that
+      histogram carried only the `input`/`output` token types, so D-144's cache-read/cache-write
+      dimensions were never in it, and OTel has no notion of a Chemclaw `profile`.
+      **That premise expired with the framework.** Measured across the installed stack after the
+      LangGraph rebuild, the only package that emitted the metric is the one that was removed —
+      nothing in `langchain`, `langgraph` or `langsmith` does — so per-model attribution is now an
+      open gap rather than a solved half (`docs/guides/runbook.md` §(viii)). Per-*profile* attribution is the real gap and is what
       shipped: the registry gained declared labels (an undeclared label name raises exactly as an
       undeclared metric does, because a label typo's failure mode is a second silent time series
       rather than a crash), a per-counter series cap against the unbounded-map leak this codebase
@@ -2768,11 +2815,14 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       Two real things survive it, both smaller than the retracted claim:
 
 - [ ] **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
-      `_auto_invoke_function` returns the parse error before reaching the middleware pipeline, so
-      "the model asked for `find_notes` with arguments it could not satisfy" leaves no trace in
-      `audit_events`. Authorization not running is harmless (nothing executed); the *audit* gap is
-      not, for a GxP trail whose purpose is to answer "what did the agent attempt". Upstream
-      behaviour in `agent_framework._tools`, so the fix is either a wrapper or an upstream change.
+      Measured against the *previous* engine: argument validation returned the parse error before
+      the call reached the middleware pipeline, so "the model asked for `find_notes` with arguments
+      it could not satisfy" left no trace in `audit_events`. Authorization not running is harmless
+      (nothing executed); the *audit* gap is not, for a GxP trail whose purpose is to answer "what
+      did the agent attempt". **The first step is now a re-measurement, not a fix**: whether
+      LangChain's tool node runs `wrap_tool_call` around argument validation or short-circuits
+      ahead of it decides whether this gap still exists at all, and that is one probe rather than
+      an argument.
 
 - [x] **LOAD-1 Re-state the load-test tool claim.** Closed by the re-run with the stub fixed (150/150, 2.08 turns/s, 100 tool bodies actually executing, cross-checked against `audit_events`). The runs reported "100 tool calls" and "the
       tool path genuinely exercised". Both are wrong for the same reason: those calls were
@@ -2806,10 +2856,14 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
 - [ ] **SCALE-3 `service_max_concurrent_turns` is still a guess (8).** At 50 users it shed 75% of
       turns; at 64 it shed none but p50 went to 37 s. The measured value depends on the fixes in
       D-119, so it should be re-derived from the next load test, not from this one.
-- [ ] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud.** Having
-      `save_messages` remember the ids it inserted would remove the pre-turn read entirely, but the
-      history provider is shared across every session on the pod, so it needs per-turn state that
-      does not collide. Counted for now (`chemclaw_rollback_watermark_unavailable_total`).
+- [x] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud** — closed by
+      D-2026-08-10-langgraph-rebuild-of-the-conversation-layer, and not the way this row proposed.
+      The suggestion was to have `save_messages` remember the ids it inserted; what actually
+      removed the pre-turn read was removing the thing it guarded. The watermark existed because
+      MAF committed the thread incrementally, so a disconnect could leave half an exchange. The
+      graph reads its own checkpointer and the transcript is projected in one call after the
+      answer, so there is no half-written state to bound — watermark, rollback, counter and alert
+      all deleted rather than made cheaper.
 - [ ] **SCALE-5 A turn still opens and tears down one MCP session per connector.**
       `connectors.registry.open_reachable` enters every connector tool for the turn and closes it
       after, because a connector's connection must belong to exactly one turn
@@ -3307,7 +3361,7 @@ tickets + disposition table: `docs/archive/plans/parity-plan.md`.
 
 ## Now — Foundation build (docs/archive/plans/foundation-plan.md + docs/planning/implementation-tickets.md)
 
-The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
+The target-stack foundation: the plan/execute harness experience on OpenShift + HPC/Nextflow, internal
 OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
 user-specific, a generic data-source seam (first source ELN — a **custom Snowflake connector via
 an internal data pipeline, no vendor**). Full ticket breakdown: `docs/planning/implementation-tickets.md`.
@@ -3330,8 +3384,12 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/planning/i
       `tests/test_harness_execution.py`, D-058. Only the endpoint's own fidelity is still unknown.)
 
 ### Phase F1 — Harness backbone (autonomous plan/execute)
-MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentModeProvider`/
-`todos_remaining`), so F1 is *wiring* it, not reimplementing providers.
+The framework of the day shipped a harness natively, so F1 was *wiring* it rather than
+reimplementing providers. That premise did not survive the rebuild: today's harness is assembled
+from parts rather than switched on — `TodoListMiddleware` for the plan, `lg_loop_cap` for the
+runaway bound, `lg_enforce_plan_approval` for the gate, hung on the graph by
+`agent/langgraph_agent.py` (D-2026-08-10, `docs/guides/harness-konzept.md`). The tickets below are
+the record of the original wiring.
 - [x] **F1-T1** Harness config (`harness_enabled`/`harness_autonomy`/`harness_max_loop_iterations`).
       Test: `test_config.py`.
 - [x] **F1-T2** `build_agent` branch → `_build_harness_agent` wires `create_harness_agent` over the
@@ -3542,22 +3600,26 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       the executing gate ran `make test`. The floor is now enforced by the root workflow, and
       measured over the shipped package set rather than one that omitted `connectors/`.)*
 
-### MAF out-of-the-box features (analysis done)
-- [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
-      (`agents/audit.py::make_audit_middleware`: name/args/outcome/latency, observe-only) over all
-      agent tools, on the logging floor. Attached via `Agent(..., middleware=[...])` (D-027).
+### Framework out-of-the-box features (analysis done on the pre-rebuild engine)
+- [x] **Tool-call middleware** — one DRY GxP tool-audit trail (name/args/outcome/latency,
+      observe-only) over all agent tools, on the logging floor (D-027). The shape survived the
+      rebuild intact: it is now a `@wrap_tool_call` middleware over the same extracted decision
+      functions, which is what keeps an audit row from depending on which engine ran.
 - [x] **OpenTelemetry** — opt-in `chemclaw.logging.configure_telemetry()` gated on
-      `CHEMCLAW_OTEL_ENABLED`; calls MAF's `configure_otel_providers` at each worker's entrypoint.
-      Ships as a config toggle (default off) because the OTel SDK/OTLP exporter extras are not
-      installed and are only useful with a collector — enabling it requires adding those extras
-      (D-027).
-- [ ] **Structured outputs** (`response_format` + `resp.value`) — force validated pydantic
-      payloads for agent proposals instead of parsing prose. Deferred to the first call site that
-      needs a validated payload (changes call sites, not startup wiring).
+      `CHEMCLAW_OTEL_ENABLED`, at each worker's entrypoint. Ships as a config toggle (default off)
+      because the OTel SDK/OTLP exporter extras are only useful with a collector (D-027). *The
+      provider wiring and the per-model `gen_ai.client.token.usage` metric came from the framework
+      that was removed, and the LangChain stack ships no equivalent — measured; see
+      `docs/guides/runbook.md` §(viii) for what attribution is left.*
+- [ ] **Structured outputs** — bind a validated pydantic payload for agent proposals instead of
+      parsing prose. Deferred to the first call site that needs one (changes call sites, not
+      startup wiring); the framework binding to use is the current engine's, not the analysed one's.
 - Do-not-adopt / defer: Redis/mem0 history (durability belongs to Temporal, and neither extra is
-      installed), the MAF `_harness` providers (duplicate the memory layer + background queue),
-      the wholesale MAF eval harness (have `evals/`; cherry-pick only its tool-call checks). FIDES
-      security layer is `@experimental` → a DEFERRED candidate for untrusted ELN/literature text.
+      installed); the framework's own harness/memory batteries, which duplicate the memory layer and
+      the background queue; a wholesale third-party eval harness (have `evals/`; cherry-pick only
+      its tool-call checks). The same judgement was re-applied to deepagents' generic batteries —
+      file memory, file access, shell, web search — in D-2026-08-10, for the same reason:
+      capability comes from connectors, not from the harness's built-ins.
 
 
 ## Done — Whole-repo production-readiness review (post-5b; commit d51f0b5, D-021)
@@ -3595,7 +3657,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (F4) `load_notes` resilient to a malformed note (no longer aborts retrieval); + docstring
       honesty on substring matching and the verify gate. **Phase 5b complete.**
 
-## Done — Agent-harness backbone core (MAF Agent Harness — D-038, docs/guides/harness-konzept.md)
+## Done — Agent-harness backbone core (D-038, superseded by D-2026-08-10; docs/guides/harness-konzept.md)
 - [x] H0 spike: verified `create_harness_agent` in the installed `agent-framework-core` 1.11
       constructs with no LLM call; providers reduce to `TodoProvider`+`AgentModeProvider` when the
       generic batteries are off; default modes are `plan`/`execute`; `todos_remaining(looping_modes=
@@ -3873,7 +3935,11 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] **Phase 1 spine (1.1–1.6, 1.9)** — hpc worker; `QMJobWorkflow` + activities (mock HPC, heartbeat poll,
       parse); agent tools `submit_qm_job`/`get_qm_job_status`; MAF agent + `qm-job-submission` skill;
       `requested_by` audit field; shared Temporal client + result models. Server-backed tests run in CI.
-- [x] **Orchestrator** — reconsidered MAF vs LangGraph → keep MAF (D-013).
+- [x] **Orchestrator** — reconsidered MAF vs LangGraph → keep MAF (D-013). **Reversed by
+      D-2026-08-10**, and not on the axis this row argued: LangGraph did not win a capability
+      comparison, it was that four pieces of the tree existed to work around framework defects, two
+      of them silent. D-013's own mitigation — "keep the agent layer thin and framework-swappable" —
+      is what made the reversal affordable.
 - Folded/deferred Phase-1 tails: **1.7** notify callback (defer until an async result must reach a live
   session); **1.8** background-jobs worker — **DONE** (`workers/background_worker.py`, hosts the BO
   campaign); **1.10** → generalized into **Phase 1b**. **CHECKMATE 1** (worker-restart durability spike)

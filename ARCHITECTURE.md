@@ -11,9 +11,11 @@ data, configuration or documents.**
 Four layers, each with one responsibility. The rule that matters is that their concerns never
 merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the parts a machine can check.
 
-1. **MAF** (Microsoft Agent Framework) — conversation orchestration and short reasoning steps.
-2. **Temporal** — durable execution of long or expensive jobs. Durability lives here and *only*
-   here, never in MAF. Two kinds of task queue: `background-jobs` (light: sync, re-index, reports)
+1. **LangGraph** — conversation orchestration and short reasoning steps.
+2. **Temporal** — durable execution of long or expensive jobs. Durability for that work lives here
+   and *only* here, never in the conversation layer's own ad-hoc stores; layer 1's checkpointer
+   holds turn state and nothing else, which is the line D-2026-08-10 §3 draws once layer 1 has a
+   checkpointer at all. Two kinds of task queue: `background-jobs` (light: sync, re-index, reports)
    and one per connector bundle that owns durable work, each sized for that work. Once a result is
    persisted it is never recomputed — but the store's lookup-before-compute is a check-then-act, so
    concurrent misses on the *same* key all compute: eight together measured eight computes, and
@@ -30,8 +32,8 @@ generates enters the graph through a **PR-gate**, so a human signs off before it
 | Subpackage | Layer | What it is |
 | --- | --- | --- |
 | `core/` | — | The shared kernel: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client, the process metrics registry, the bounded-LRU (`bounded.py`, the one eviction policy the R3.2 consolidation gave the four call sites that used to hand-roll it — the front door's session/budget/rate-limiter state and the agent's attachment store), and the ambient-turn primitives every layer stamps or reads (identity, session id, turn signals, the capability-tool registry). Everything imports it; it has zero module-scope import of a sibling, and exactly one declared *lazy* (function-scope) exception — `core/logging.py`'s redaction filter, which resolves connector bearer-token env-var names by importing `connectors.registry` inside a function so the value can be redacted from logs. `tests/test_layering.py` enforces both halves. |
-| `agent/` | 1 (MAF) | Conversation orchestration: the agent, its tool surface, sessions, identity, authorization, the plan/execute harness. |
-| `api/` | 1 (MAF) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. `create_app` (`api/app.py`) is the sole composition root; the routes themselves live one level down in `api/routes/`, one module per resource (R3.2 split of a ~1100-line closure — see `api/routes/README.md`). |
+| `agent/` | 1 (LangGraph) | Conversation orchestration: the compiled graph (`agent/langgraph_agent.py`), its tool surface, the Postgres turn-state checkpointer, sessions, identity, authorization, the plan/execute harness and the specialist team. |
+| `api/` | 1 (LangGraph) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. `create_app` (`api/app.py`) is the sole composition root; the routes themselves live one level down in `api/routes/`, one module per resource (R3.2 split of a ~1100-line closure — see `api/routes/README.md`). |
 | `durable/` | 2 (Temporal) | Workflows, activities, and the `background-jobs` worker that hosts them. |
 | `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its MCP tool server, its Temporal worker, and its own `skills/`. Adding a capability is adding a directory here — no core edit. |
 | `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `safety` (hazard screening), `fingerprints` (ECFP4/DRFP + Tanimoto). No Temporal, no MCP. |
