@@ -311,3 +311,134 @@ def test_binding_a_config_keeps_the_specialists_name() -> None:
 def test_the_team_is_off_by_default() -> None:
     """A capability M12 has not yet shown to help is not what a deployment gets by accident."""
     assert settings.agent_teams_enabled is False
+
+
+# --- the handoff the trace shows -----------------------------------------------------------------
+
+
+def _turn_events(graph: Any) -> list[Any]:
+    """Drive one turn through the front door's translator and collect what it emitted."""
+    from chemclaw.api.graph_stream import graph_events
+    from chemclaw.api.runner_trace import ToolCallTrace
+
+    class _Usage:
+        def add(self, _usage: Any) -> None:
+            """The ledger's shape; these tests do not assert on tokens."""
+
+    async def _run() -> list[Any]:
+        return [
+            event
+            async for event in graph_events(
+                graph,
+                "is palladium residue a problem here?",
+                config={"configurable": {"thread_id": "t-handoff"}},
+                trace=ToolCallTrace(),
+                on_signal=lambda _s: None,
+                usage=_Usage(),
+            )
+        ]
+
+    return asyncio.run(_run())
+
+
+def _delegating_turn(monkeypatch: pytest.MonkeyPatch, answer: str) -> list[Any]:
+    """A supervisor that delegates once to `safety`, with every specialist on a scripted model.
+
+    `build_chat_model` is patched rather than the specialists being injected, because
+    `_team_middleware` deliberately does not forward the supervisor's model — so the seam that
+    exists for "assemblable and testable without live credentials" is the one to use, and using it
+    means this runs the *production* wiring rather than a hand-assembled stand-in.
+    """
+    monkeypatch.setattr(settings, "agent_teams_enabled", True)
+    monkeypatch.setattr(
+        "chemclaw.agent.langgraph_agent.build_chat_model",
+        lambda *_args, **_kwargs: ScriptedChatModel([answer]),
+    )
+    graph = build_langgraph_agent(
+        ScriptedChatModel(
+            [
+                {
+                    "name": "task",
+                    "args": {
+                        "description": "check palladium residue for hazards",
+                        "subagent_type": "safety",
+                    },
+                },
+                "done",
+            ]
+        ),
+        audit_sink=NullAuditSink(),
+    )
+    return _turn_events(graph)
+
+
+def test_a_delegated_turn_announces_the_handoff_and_the_hand_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gap this closes: `HandoffEvent` was in the contract and nothing produced one.
+
+    Driven through the whole path — supervisor, `task` tool, `_AttributedSpecialist`, the writer,
+    the translator — rather than by calling the emitter directly, because the part that was in
+    doubt is whether a handoff raised *inside a tool call* reaches the turn's stream at all. A test
+    of the mapping alone would have passed against the shipped code, which is the whole problem.
+
+    `reason` is the supervisor's own `description`, which is what makes the event answer "why" and
+    not merely "who": a trace that records a route without its justification is the GxP gap M9's
+    argument for a supervisor was about.
+    """
+    from chemclaw.api.events import HandoffEvent
+
+    events = _delegating_turn(monkeypatch, "no genotoxic alert matched")
+    assert [(e.to, e.reason) for e in events if isinstance(e, HandoffEvent)] == [
+        ("safety", "check palladium residue for hazards"),
+        ("", ""),
+    ]
+
+
+def test_the_specialists_own_output_falls_between_its_handoff_and_its_hand_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pair is a span, not two announcements, and only the order makes it one.
+
+    Without this a handoff emitted at the wrong moment — after the specialist returned, say — would
+    still produce both events and still pass the test above, while a surface rendering the trace as
+    a timeline would attribute the specialist's work to the supervisor. That is the same
+    misattribution invariant 3 exists to prevent in the audit trail, one layer up.
+    """
+    from chemclaw.api.events import HandoffEvent
+
+    events = _delegating_turn(monkeypatch, "no genotoxic alert matched")
+    kinds = [
+        event.type if not isinstance(event, HandoffEvent) else f"handoff:{event.to or 'back'}"
+        for event in events
+    ]
+    enter, back = kinds.index("handoff:safety"), kinds.index("handoff:back")
+    specialist_output = [i for i, k in enumerate(kinds) if k == "token"]
+    assert enter < back
+    assert any(enter < i < back for i in specialist_output), kinds
+    # The tool result closes the delegation, so it must land after the hand back — the supervisor
+    # is only back in control once the `task` call has returned.
+    assert back < kinds.index("tool_result"), kinds
+
+
+def test_a_specialist_that_raises_still_hands_control_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `finally` the audit stamp already relied on now closes the trace's span too.
+
+    A handoff that never closes leaves a surface showing a turn stuck inside a specialist it left,
+    and leaves the GxP record implying the specialist authored everything that followed. Exercised
+    on the raising path for the reason the unstamp assertion is: nobody reaches it by hand.
+    """
+    from chemclaw.core import turn_signals
+
+    published: list[Any] = []
+    monkeypatch.setattr(turn_signals, "get_stream_writer", lambda: published.append)
+
+    with pytest.raises(RuntimeError), running_specialist("evidence", "look it up"):
+        raise RuntimeError("the specialist failed")
+
+    assert [
+        (signal.to, signal.reason)
+        for signal in (payload[turn_signals._KEY] for payload in published)
+    ] == [("evidence", "look it up"), ("", "")]

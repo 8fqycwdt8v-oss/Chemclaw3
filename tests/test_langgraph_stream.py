@@ -22,8 +22,10 @@ import pytest
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.api.events import HandoffEvent, ToolCallEvent, ToolResultEvent
-from chemclaw.api.graph_stream import _agent_of, graph_events
+from chemclaw.api.graph_stream import _agent_of, _custom_event, graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
+from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
+from chemclaw.core.turn_signals import HandoffSignal
 from tests.fakes_langgraph import ScriptedChatModel
 
 
@@ -183,6 +185,27 @@ def test_the_handoff_event_round_trips_with_its_discriminator() -> None:
         "to": "safety",
         "reason": "hazard check",
     }
+
+
+@pytest.mark.parametrize(
+    ("signal", "expected"),
+    [
+        (HandoffSignal(to="safety", reason="hazard check"), ("safety", "hazard check")),
+        (HandoffSignal(to=""), ("", "")),
+    ],
+)
+def test_a_handoff_signal_becomes_the_handoff_event_in_both_directions(
+    signal: HandoffSignal, expected: tuple[str, str]
+) -> None:
+    """Entering a specialist and leaving it are the same event with a different `to`.
+
+    Pinned as a pair because the hand back is the half that looks like a bug: `to=""` is a
+    *declared* value — "control returned to the agent above" — and a reader that treated it as an
+    unset field would drop exactly the event that closes a specialist's span in the trace.
+    """
+    event = _custom_event({_SIGNAL_KEY: signal}, lambda _s: None)
+    assert isinstance(event, HandoffEvent)
+    assert (event.to, event.reason) == expected
 
 
 def test_an_event_from_the_main_agent_carries_no_attribution() -> None:

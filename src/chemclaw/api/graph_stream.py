@@ -45,6 +45,7 @@ from chemclaw.api.events import (
     ApprovalRequestEvent,
     Event,
     EvidenceSourceEvent,
+    HandoffEvent,
     JobStartedEvent,
     NoteProposedEvent,
     PlanEvent,
@@ -58,6 +59,7 @@ from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
     ApprovalSignal,
+    HandoffSignal,
     JobSignal,
     QuestionSignal,
     Signal,
@@ -257,4 +259,8 @@ def _signal_event(signal: Signal) -> Event:
         return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     if isinstance(signal, ToolFailureSignal):
         return ToolFailedEvent(tool=signal.tool, message=signal.message)
+    if isinstance(signal, HandoffSignal):
+        # Raised by `agent/team.running_specialist`, so the pair brackets exactly the interval the
+        # audit trail attributes to the specialist. `to=""` is the hand back, not a missing field.
+        return HandoffEvent(to=signal.to, reason=signal.reason)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)

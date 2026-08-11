@@ -232,8 +232,11 @@ never what a deployment gets.
 - [ ] Supervisor routing measured. `SubAgentMiddleware`'s `task` tool is the delegation path;
       `Command(goto=…, graph=Command.PARENT)` and a routing *node* are the alternative the ADR
       prefers for trace legibility, and choosing between them is an M12 measurement, not a guess.
-- [ ] Emitting `HandoffEvent` from the stream — the event exists and `graph_stream` already
-      attributes by subgraph namespace; nothing raises the handoff itself yet.
+- [x] Emitting `HandoffEvent` from the stream — raised as a pair by `team.running_specialist`
+      (enter, then `to=""` in the `finally`), so the trace's span and the audit trail's span are
+      the same `try`/`finally`. Observed at the *invocation* rather than at the dispatch, which is
+      what un-entangles it from the routing row above: both candidate mechanisms invoke the
+      compiled specialist. `D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`.
 
 ### M10 — `Send` fan-out
 - [x] `chemclaw/retrieval/fanout.py` — one `Send` branch per source into an `operator.add` field,
@@ -1356,11 +1359,12 @@ middle of the trail as tampered with. It is now a version→shape table, so addi
 
 **What is not done.** Supervisor *routing quality* is unmeasured, and that is the whole reason the
 team ships disabled: a supervisor that mis-routes is worse than the single agent it replaces, and no
-unit test can establish which a deployment gets. `HandoffEvent` exists and `graph_stream` already
-attributes by subgraph namespace, but nothing raises the handoff itself yet. Whether delegation
-stays `SubAgentMiddleware`'s `task` tool or becomes a routing *node* with
-`Command(goto=…, graph=Command.PARENT)` — which the ADR prefers for trace legibility — is an M12
-measurement rather than a guess to make now.
+unit test can establish which a deployment gets. Whether delegation stays `SubAgentMiddleware`'s
+`task` tool or becomes a routing *node* with `Command(goto=…, graph=Command.PARENT)` — which the
+ADR prefers for trace legibility — is an M12 measurement rather than a guess to make now, though
+*trace legibility* is no longer part of what it has to settle: `HandoffEvent` is now raised from
+`team.running_specialist`, which both mechanisms pass through, so the comparison is down to routing
+accuracy and per-specialist cost (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
 
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 

@@ -155,8 +155,11 @@ def test_the_plan_gate_marker_is_still_a_substring_of_the_live_refusal() -> None
 def test_a_specialists_name_is_read_off_the_events_it_raised() -> None:
     """Routing is observed from the `agent` field, in first-seen order.
 
-    Not from a handoff event: `HandoffEvent` exists and nothing raises it yet (M9's own open row),
-    so a suite waiting for one would measure nothing on a deployment where teams genuinely work.
+    Not from a handoff event, though one is now raised
+    (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`). Attribution stays the
+    routing key because it is the *stricter* observation: a handoff says the supervisor delegated,
+    while an `agent`-stamped event says the specialist actually did something. A turn routed to
+    `safety` that then did nothing there is a mis-route the handoff alone would score as correct.
     """
     outcome = _run_one(
         _probe(),

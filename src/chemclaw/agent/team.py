@@ -30,10 +30,17 @@ needed code that did not exist:
    irrelevant to it (there is nothing identity-shaped in state to filter), and propagation is
    strictly downward — a specialist cannot leak an identity change back up.
    `tests/test_agent_team.py` asserts it rather than trusting the reasoning.
-3. **The audit trail names the specialist beside the human.** `_Specialist` stamps the running
-   agent's name for the duration of its invocation, and `agent/audit.py` reads it. Attribution to
-   "the agent" is what makes a trail worthless in a regulated system, and overloading `actor` — the
-   human's Entra oid — would be D-040's failure repeated.
+3. **The audit trail names the specialist beside the human.** `_AttributedSpecialist` stamps the
+   running agent's name for the duration of its invocation, and `agent/audit.py` reads it.
+   Attribution to "the agent" is what makes a trail worthless in a regulated system, and
+   overloading `actor` — the human's Entra oid — would be D-040's failure repeated.
+
+   **The same bracket announces the routing to the chemist watching**
+   (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`): `running_specialist` raises
+   `HandoffEvent` on entry and its hand back in the `finally`, so the span a surface draws and the
+   span the trail claims cannot disagree. Observed at the specialist's *invocation* rather than at
+   the delegation, which is what keeps it true whichever way the still-open routing question
+   settles — `task` tool or routing node, the compiled specialist is invoked either way.
 4. **Skills do not inherit.** Each specialist's skills are narrowed by its own profile through the
    same `skill_permits` predicate the main agent uses, because `build_langgraph_agent` builds each
    one the ordinary way. A specialist holding fewer tools therefore sees fewer skills, which is the
@@ -159,14 +166,22 @@ def reject_widening(parent: AgentProfile, child: AgentProfile) -> None:
 
 
 @contextmanager
-def running_specialist(name: str) -> Iterator[None]:
-    """Stamp `name` as the agent running, for the audit trail, and unstamp it after.
+def running_specialist(name: str, reason: str = "") -> Iterator[None]:
+    """Enter `name` as the agent running — on the audit trail and on the turn's stream — and leave.
 
     Ambient rather than threaded through every call for the same reason the actor is: a subagent
     runs inside the turn's context, so the trail can read it without every tool signature growing a
     field it would then have to be trusted to pass on. Restored in a `finally` so a specialist that
     raises does not leave its name stamped on the supervisor's next tool call — which would
     misattribute a record in the one table that must not be wrong.
+
+    **The handoff is announced from here, and that is the point.** Invariant 3 already made this
+    block the interval the audit trail attributes to the specialist; `HandoffEvent` is the same fact
+    told to the chemist watching, and telling it anywhere else would create two brackets that can
+    disagree about when a specialist was running. They cannot disagree now — the trail's stamp and
+    the stream's pair of events are the same `try`/`finally`. The exit fires in the `finally` for
+    the reason the unstamp does: a specialist that raises has still stopped running, and a trace
+    that never closes the handoff would show a turn stuck inside a specialist it left.
     """
     # Imported lazily so this module does not depend on the identity layer's import order; the
     # contextvar lives beside the actor's because they are read together and reset together.
@@ -174,12 +189,18 @@ def running_specialist(name: str) -> Iterator[None]:
         reset_current_specialist,
         set_current_specialist,
     )
+    from chemclaw.core.turn_signals import record_handoff
 
     token = set_current_specialist(name)
+    record_handoff(name, reason)
     try:
         yield
     finally:
         reset_current_specialist(token)
+        # Empty `to` is "control returned to the agent above", which `HandoffEvent.to` already
+        # declares. Unambiguous because specialists do not nest — `build_langgraph_agent` gives a
+        # specialist no team of its own — so the only agent to return to is the supervisor.
+        record_handoff("")
 
 
 class _AttributedSpecialist:
@@ -198,12 +219,12 @@ class _AttributedSpecialist:
 
     def invoke(self, state: Any, config: Any = None, **kwargs: Any) -> Any:
         """Run the specialist synchronously, attributed."""
-        with running_specialist(self._name):
+        with running_specialist(self._name, _stated_reason(state)):
             return self._runnable.invoke(state, config, **kwargs)
 
     async def ainvoke(self, state: Any, config: Any = None, **kwargs: Any) -> Any:
         """Run the specialist, attributed — the path a turn actually takes."""
-        with running_specialist(self._name):
+        with running_specialist(self._name, _stated_reason(state)):
             return await self._runnable.ainvoke(state, config, **kwargs)
 
     def with_config(self, *args: Any, **kwargs: Any) -> "_AttributedSpecialist":
@@ -292,6 +313,26 @@ def build_team_middleware(
         # exists to close. An empty one is the right thing for a lookup that must find nothing.
         backend=StateBackend(),
     )
+
+
+def _stated_reason(state: Any) -> str:
+    """Why the supervisor delegated, read off the state it handed the specialist.
+
+    `SubAgentMiddleware` builds a specialist's state as the parent's, minus the excluded keys, with
+    `messages` replaced by exactly `[HumanMessage(description)]` — the `task` tool's `description`
+    argument, which *is* the supervisor's stated reason. Read from the invocation payload rather
+    than from the tool call's arguments deliberately: the payload is what a specialist is given
+    under any dispatch mechanism, so this survives the routing choice D-2026-08-10 leaves open.
+
+    Best-effort by design. The reason is prose nothing branches on, so a state shape this does not
+    recognise costs an empty `reason` on an otherwise correct handoff — never a failed delegation.
+    """
+    if not isinstance(state, dict):
+        return ""
+    messages = state.get("messages") or []
+    if not messages:
+        return ""
+    return str(getattr(messages[-1], "text", "") or "")
 
 
 def _description(profile: AgentProfile) -> str:
