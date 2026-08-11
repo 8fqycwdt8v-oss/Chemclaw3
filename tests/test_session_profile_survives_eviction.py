@@ -51,10 +51,10 @@ def _client_with_one_slot(
 def _live_profile(app: Any, session_id: str) -> Any:
     """The profile the front door would run this session's next turn under.
 
-    Read off the live entry rather than off the agent factory, because agents are cached one per
-    profile — the factory is called once per profile per process and says nothing about which
-    profile a *session* is on. `live.profile` is what `POST /messages` passes to `agent_pool.lease`
-    and to `connector_factory`, so it is the value that actually decides the surface.
+    Read off the live entry rather than off the session's owner row, because the owner records who
+    may reattach and says nothing about which profile the next turn runs under. `live.profile` is
+    what `POST /messages` passes to `graph_factory` and to `connector_factory`, so it is the value
+    that actually decides the surface.
     """
     entry = app.state.live_sessions.get(session_id)
     assert entry is not None, "the session did not rehydrate at all"
