@@ -1472,9 +1472,13 @@ consistent" while making zero tool calls, because `all(...)` over an empty list 
 added caught it. A probe that cannot see the defect it is named after is worse than no probe,
 because its green is quoted later.
 
-**M13 done.** `make lint type test` green, and the verification that matters is that the suite ran
-against a tree with `agent-framework-anthropic`, `-core` and `-openai` **uninstalled** — a grep
-proves an import is not written, an uninstall proves it cannot be satisfied.
+**M13 done.** `make lint type test` green at **4115 passed / 36 skipped / 0 failed** (7:24), and
+the verification that matters is that the run happened against a tree with
+`agent-framework-anthropic`, `-core` and `-openai` **uninstalled** (`import agent_framework` →
+`ModuleNotFoundError`). A grep proves an import is not written; an uninstall proves it cannot be
+satisfied. Every skip is an environment limit — no Temporal test server (offline sandbox), no
+xtb/crest binaries — and none is framework-related. Helm render + `kubeconform`, which this
+container cannot run, passed on CI.
 
 **The removal was not mechanical, and the reason generalises.** While both engines were live a
 module could read the *old* stored message shape and be right about half the rows. With one engine
