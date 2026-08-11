@@ -421,6 +421,55 @@ def test_the_specialists_own_output_falls_between_its_handoff_and_its_hand_back(
     assert back < kinds.index("tool_result"), kinds
 
 
+def test_a_specialists_events_are_attributed_to_the_specialist_not_to_the_tool_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M9's `agent` field must carry the specialist's name — it carried `"tools"` on every turn.
+
+    The attribution was derived from the subgraph namespace, on the assumption that a specialist's
+    updates arrive under `("<specialist>:<task-id>",)`. They arrive under `("tools:<uuid>",)`:
+    `SubAgentMiddleware` invokes the compiled specialist as an ordinary runnable *inside* the
+    `task` tool, so the parent's tool node is the only frame and the specialist's name is not on
+    the path at all. Every event a specialist raised was therefore attributed to an agent called
+    `"tools"`.
+
+    Found on the live lane, not here: a sonnet-5 routing arm reported its single delegation as
+    `expected evidence → tools`, scoring as a supervisor mis-route what was the harness reading a
+    field that could never hold the right value. The unit test that should have caught it passed
+    against hand-written namespaces the engine never emits.
+
+    So the assertion is driven end to end and reads the specialist's *tool call*, which is the
+    event a routing measurement actually scores.
+    """
+    from chemclaw.api.events import ToolCallEvent
+
+    monkeypatch.setattr(settings, "agent_teams_enabled", True)
+    monkeypatch.setattr(
+        "chemclaw.agent.langgraph_agent.build_chat_model",
+        lambda *_a, **_k: ScriptedChatModel(
+            [{"name": "screen_hazards", "args": {"smiles": "CCO"}}, "no alert matched"]
+        ),
+    )
+    graph = build_langgraph_agent(
+        ScriptedChatModel(
+            [
+                {
+                    "name": "task",
+                    "args": {"description": "check it", "subagent_type": "safety"},
+                },
+                "done",
+            ]
+        ),
+        audit_sink=NullAuditSink(),
+    )
+    calls = {
+        event.tool: event.agent for event in _turn_events(graph) if isinstance(event, ToolCallEvent)
+    }
+    assert calls.get("screen_hazards") == "safety", calls
+    # The supervisor's own delegation is not the specialist's work, so it stays unattributed.
+    assert calls.get("task") == ""
+
+
 def test_a_specialist_that_raises_still_hands_control_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -104,7 +104,10 @@ async def graph_events(
         `Event`s in the order and with the meanings `api/events.py` declares.
     """
     todos: list[str] = []
-    async for namespace, mode, payload in graph.astream(
+    # Who is currently answering, tracked across the stream by the handoff pair rather than
+    # inferred per event. `""` is the main agent, which is every turn without a team.
+    agent = ""
+    async for _namespace, mode, payload in graph.astream(
         {"messages": [("user", message)]}, config, stream_mode=_MODES, subgraphs=True
     ):
         if mode == "messages":
@@ -115,10 +118,15 @@ async def graph_events(
                 yield TokenEvent(text=text)
         elif mode == "custom":
             event = _custom_event(payload, on_signal)
+            if isinstance(event, HandoffEvent):
+                # The enter names the specialist, the hand back clears it. Safe to read as state
+                # because the pair brackets the specialist's execution in stream order, which
+                # `tests/test_agent_team.py` pins by asserting its output lands between them.
+                agent = event.to
             if event is not None:
                 yield event
         elif mode == "updates":
-            async for event in _from_update(payload, namespace, trace, todos):
+            async for event in _from_update(payload, agent, trace, todos):
                 yield event
 
 
@@ -147,15 +155,32 @@ def _custom_event(payload: Any, on_signal: Any) -> Event | None:
 
 
 async def _from_update(
-    payload: Any, namespace: tuple[str, ...], trace: ToolCallTrace, todos: list[str]
+    payload: Any, agent: str, trace: ToolCallTrace, todos: list[str]
 ) -> AsyncIterator[Event]:
     """The events one completed node produces: its calls, its results, and any new plan.
 
-    `namespace` is the path of node names down to the subgraph that produced this update — `()` at
-    the root. It becomes the `agent` attribution on every event a specialist raises (M9), which is
-    what stops a team's trace from reading as though one actor did everything.
+    `agent` is the specialist currently running, tracked by the caller from the handoff pair, and
+    it becomes the `agent` attribution on every event that specialist raises (M9) — which is what
+    stops a team's trace from reading as though one actor did everything.
+
+    **It used to be derived from the subgraph namespace, and that was wrong on every real turn.**
+    `_agent_of(namespace)` took the node name before the colon, on the assumption that a
+    specialist's updates arrive under `("<specialist>:<task-id>",)`. They do not:
+    `SubAgentMiddleware` invokes the compiled specialist as an ordinary runnable *inside* the
+    `task` tool, so the only frame on the namespace is the parent's tool node and every specialist
+    event was attributed to the literal agent `"tools"`. The specialist's name is not in the
+    namespace at all, under any dispatch that routes through the task tool — so this was not a
+    formatting slip but a name that was never there to read.
+
+    Measured on the live lane before it was believed: a sonnet-5 routing arm scored its one
+    delegation as `expected evidence → tools`, i.e. reported as a supervisor mis-route what was
+    actually the harness reading the wrong field. The unit test that should have caught it passed
+    because it parametrized hand-written namespaces (`("evidence:7f3a",)`) the engine never emits —
+    the repo's recurring failure of asserting against an invented shape.
+
+    The handoff pair is the reader that *can* be right: `agent/team.running_specialist` raises it
+    with the name it was constructed with, rather than reconstructing one from a graph path.
     """
-    agent = _agent_of(namespace)
     for node, update in (payload or {}).items():
         if not isinstance(update, dict):
             continue
@@ -183,19 +208,6 @@ async def _from_update(
             if plan:
                 yield PlanEvent(todos=plan)
         logger.debug("graph node %r produced %d event source(s)", node, len(update))
-
-
-def _agent_of(namespace: tuple[str, ...]) -> str:
-    """Which agent produced an event, from the subgraph namespace it arrived under.
-
-    The root graph is Chemclaw itself and carries no attribution — an event with an empty `agent`
-    means "the agent you are talking to", which is what every event meant before teams existed and
-    is what keeps this field additive for an existing consumer. A subgraph's namespace entries are
-    `"<node>:<task-id>"`, so the node name is the part before the colon.
-    """
-    if not namespace:
-        return ""
-    return namespace[-1].split(":", 1)[0]
 
 
 def _attributed(event: Event, agent: str) -> Event:

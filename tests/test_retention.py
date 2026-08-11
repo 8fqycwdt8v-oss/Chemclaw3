@@ -557,6 +557,13 @@ def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
     activity, Temporal would retry it to exhaustion, and the three tables the sweep *can* handle
     would stop being pruned too — a missing checkpointer silently disabling retention for
     everything else.
+
+    **This test drops shared tables, so it fails beside a running stack rather than because of a
+    defect.** It `DROP`s `checkpoints`, `checkpoint_blobs` and `checkpoint_writes` from the same
+    database `make up` serves, and a front door started by `make live-up` recreates them on first
+    use — its checkpointer migrates lazily. Observed on 2026-08-11: one failure in an otherwise
+    green 4206-test run, passing in isolation and passing again with the lane stopped. If this is
+    the only red test, check for a live lane before reading it as a regression.
     """
 
     async def _run() -> RetentionOutcome:

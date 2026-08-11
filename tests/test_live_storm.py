@@ -282,6 +282,33 @@ def test_the_lane_scripts_the_chaos_family_drives_exist() -> None:
         assert (live_storm._LANE_DIR / script).is_file()
 
 
+def test_the_note_repo_is_provisioned_before_the_docker_branch_takes_over() -> None:
+    """`exec docker compose` never returns, so anything after it runs only without Docker.
+
+    This is a defect that shipped: `ensure_note_repo` sat in the *native* list, below an
+    `exec` — so on the branch `bootstrap.sh` itself calls "the right way", the lane came up with
+    no dedicated clone, `note_repo_dir` fell back to the working checkout, and the PR-gate refused
+    every submission before running a git command. Since job results, reports and distilled
+    playbooks all take that gate (D-005), the knowledge-contribution half of a live run was
+    unreachable on exactly the machines most likely to run it — and nothing failed loudly.
+
+    Asserted on the ordering rather than on mere presence, because presence is what was already
+    true and was not enough. A textual check because the only alternative is starting Docker in
+    CI: the invariant is positional, so position is the honest thing to pin.
+
+    Both anchors match the *commands* rather than any prose about them — the first draft searched
+    for `exec docker compose`, found that string inside the very comment explaining the fix, and
+    failed against the corrected script. A guard that a nearby sentence can move is not a guard.
+    """
+    script = (live_storm._LANE_DIR / "bootstrap.sh").read_text(encoding="utf-8")
+    provision = script.index("\n    ensure_note_repo\n")
+    handover = script.index("exec docker compose -f ")
+    assert provision < handover, (
+        "ensure_note_repo must run before `exec docker compose` hands the process over; "
+        "below it, the Docker path silently skips the PR-gate's clone"
+    )
+
+
 # --------------------------------------------------------------------------- the mock's own guard
 
 
@@ -340,6 +367,33 @@ def test_a_request_carrying_tool_output_is_recognised_as_a_continuation() -> Non
     assert already_has_tool_results(after_tools)
     assert not already_has_tool_results({"input": "a bare string"})
     assert not already_has_tool_results({})
+    # Chat completions says the same thing with a `role: "tool"` message. Reading only the
+    # Responses shape would run that protocol to the iteration cap — the identical runaway.
+    assert already_has_tool_results({"messages": [{"role": "tool", "content": "[]"}]})
+    assert not already_has_tool_results({"messages": [{"role": "user", "content": "hello"}]})
+
+
+def test_the_mock_serves_the_protocol_the_engine_actually_posts_to() -> None:
+    """`ChatOpenAI` posts to `/v1/chat/completions`, and for a while the mock served neither.
+
+    The mock was written when the conversation layer ran on the Microsoft Agent Framework, whose
+    client resolved to the **Responses** API. The LangGraph rebuild builds a `ChatOpenAI`; nothing
+    here followed. From that day every credential-free lane — `make live-degradation`,
+    `make live-storm`, `make live-soak` — got a bare `404 Not Found` and every turn died with no
+    answer and no tool call, which reads as a system defect rather than a missing route. Measured:
+    a degradation run scored 1/3 with "the turn produced no token or answer at all" while the
+    mock's own counter read `requests: 0`.
+
+    Asserted against the app's real routing table rather than by calling the handler, because the
+    defect was the *absence of a route* — the one thing a handler test cannot see.
+    """
+    from chemclaw.cli.mock_llm import MockLlm, build_app
+
+    served = {getattr(route, "path", None) for route in build_app(MockLlm(BEHAVIOURS)).routes}
+    assert "/v1/chat/completions" in served, sorted(p for p in served if p)
+    # Both, not either: the Responses route is still what a deployment on that API would reach,
+    # and dropping it would trade one silent 404 for another.
+    assert "/v1/responses" in served
 
 
 def test_every_declared_behaviour_is_reached_by_some_check() -> None:

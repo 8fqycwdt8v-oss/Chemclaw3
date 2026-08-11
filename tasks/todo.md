@@ -1380,6 +1380,89 @@ test and fails the ordering test, which is what earns the ordering test its plac
 test` green at 4042 passed, 154 skipped, 0 failed (141 of the skips are the offline sandbox's
 missing Postgres, not this change).
 
+**M12 suite C, run live for the first time (2026-08-11).** Postgres + Temporal + the four workers +
+the front door, against a real credential. Three findings, and *two of them were in the reading
+rather than in the system* — which is the reason to run a harness before trusting the number it
+prints:
+
+1. **The `agent` attribution named the tool node, never the specialist.** Every specialist event
+   arrived as agent `"tools"`, so the suite scored its one observed delegation as
+   `expected evidence → tools` — reporting a supervisor mis-route that had not happened. The name
+   is not in the subgraph namespace under any dispatch through the `task` tool, so this was not a
+   formatting slip. Fixed by attributing from the handoff pair, which is the only reader that holds
+   the real name (`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`).
+2. **The cost column was `None` on every turn** while 26 rows sat in `turn_costs`. `session_tokens`
+   short-circuited on *the harness process's* `session_store`, which defaults to `memory` and is
+   exported by `processes.sh` only to the processes it starts. A local guess about a remote
+   process; the query is now the only reader.
+3. **The measurement itself: the supervisor delegated 0 times in 15 probes.** It answered every one
+   directly, and used only tools the expected specialist advertises in **14 of 15** (12 of those
+   unambiguously — `ask_clarifying_question` and `find_notes` are shared across profiles; rt-07
+   called no tool at all). So the shape here is *not* the mis-routing M9 feared. On this model the
+   single agent picks the right capability cluster on its own, and the team buys nothing it is
+   paying for. A five-probe sonnet-5 arm delegated once out of fifteen before the credential's
+   usage limit cut the run short, so "rarely, and model-dependent" is as far as the evidence goes.
+
+**Both arms, on haiku, 15 probes each.** The control arm ran once the credential recovered; the
+team arm's cost did not need re-running, because the ledger fix made it readable retroactively.
+
+| arm | delegated | tool calls | median tokens/turn | mean tokens/turn |
+| --- | ---: | ---: | ---: | ---: |
+| team | 0 | 19 | 95,313 | 101,858 |
+| single | — | 33 | 91,321 | 117,271 |
+
+**Read the median, not the mean.** The mean says the single agent costs 15% *more*, and that is an
+artefact of four high-variance turns (rt-01, rt-09, rt-13, rt-14) where it took extra tool-calling
+round trips. The median is the systematic part: the team costs **~4k tokens more per turn, on every
+turn**, which is the `task` tool and the supervisor prompt riding in every request. The single agent
+is cheaper on **11 of 15** probes.
+
+So the answer to M9's question, on this model and this corpus: **the team is a constant tax for a
+capability that fired zero times**, and the single agent reaches the right specialist's tools
+unaided in 14 of 15. `agent_teams_enabled` stays off — now on evidence rather than on caution. This
+also makes the routing-mechanism choice (`task` tool vs. routing node) moot until something
+actually routes: there is no trace to make legible.
+
+**M12 suite B (degradation): 3/3 PASS**, at zero token cost, with the broker deliberately stopped —
+the outage is announced, announced *before* the first token, and the durable launcher was genuinely
+reached. Getting there required fixing the mock (below).
+
+**The mock spoke a protocol nothing uses any more.** `cli/mock_llm` served only `/v1/responses`,
+because it was written when layer 1 ran on the Microsoft Agent Framework, whose client resolved to
+the Responses API. The LangGraph rebuild builds a `ChatOpenAI`, which posts to
+`/v1/chat/completions`. Nothing followed, so **every credential-free lane** — `live-degradation`,
+`live-storm`, `live-soak` — had been taking a bare `404` and dying with no answer and no tool call
+since M13. First run scored 1/3 with "the turn produced no token or answer at all" while the mock's
+own counter read `requests: 0`; after adding the route, 3/3 and `requests: 2` (the second call being
+the answer after the tool result, which is `already_has_tool_results` correctly recognising the
+chat-completions shape rather than looping to the cap).
+
+**M12 suite A (plan gate), run live — and it found the day's fourth reading defect.** First run:
+0/5, with state-changing calls apparently running unrefused. The gate was innocent twice over. The
+lane needed `CHEMCLAW_HARNESS_ENABLED=true` as well as `harness_autonomy=plan_only` (the Makefile
+target documents only the second), which took it to 4/5. The remaining failure was real and was
+*not* in the gate: `announce_tool_failures` sat innermost, so it nested **inside**
+`enforce_plan_approval`, which raises before calling its handler. The announcer never ran, and a
+refusal reached the chemist only as a `tool_result` reading "Refused: …" — which a surface renders
+as a step that worked. The front-door log recorded two refusals in a run the suite scored as zero.
+Fixed by moving the announcer outside everything that refuses
+(`D-2026-08-11-a-refusal-nobody-can-see-is-not-a-gate`); the refusal check now PASSes.
+
+Across the two post-fix runs every one of the five checks has passed, and none has failed for a
+system reason. DARK-1 shows FAIL in the latest run only because haiku left the todo list unchanged
+on the third turn, so the scenario was never exercised — the harness reporting an un-taken
+measurement as a miss rather than a pass, which is the rule
+`test_a_script_that_never_changes_the_plan_cannot_report_dark_1_as_passed` exists to enforce. It
+PASSed with a genuine hash change in the preceding run.
+
+**The pattern across all four findings, which is the thing worth keeping.** The handoff, the
+attribution, the mock protocol and the announcer were every one of them a defect in *observation*
+rather than in mechanism — the specialist ran, the gate refused, the delegation happened, the
+behaviour catalogue was right. Each had passing unit tests, and each test supplied the observation
+by hand (an invented namespace, a hand-written SSE frame, a protocol nobody re-checked after the
+engine changed). None was reachable without a live stack. The rule now written into the tests: **a
+test whose subject is a reader of an external shape may not supply that shape by hand.**
+
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
 **The plan's stated reason for this phase was wrong, and finding that out is most of what M10
