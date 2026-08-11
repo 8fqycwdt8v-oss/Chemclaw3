@@ -236,8 +236,14 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
             print(f"error: {exc}", file=sys.stderr)
 
 
-async def _plan_command(prompt: str, actor: str, saver: Any = None) -> str:
+async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
+
+    **`saver` has no default**, and that is the fix rather than a style choice: `session_todos`
+    resolves the *configured* checkpointer when handed `None`, which under `session_store=memory`
+    is not the store this session's turns wrote to. A default here would leave the defect reachable
+    by omission — `/plan` answering "(no plan yet)" for a session that has one, and `/approve`
+    recording against the empty-plan constant every deployment shares.
 
     `/approve` binds to the plan as it stands *now*, exactly as
     `POST /sessions/{id}/plan/decision` does — there is no hash to mistype here, but there is also

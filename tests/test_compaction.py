@@ -33,6 +33,7 @@ from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS
 from chemclaw.agent.compaction import (
     TOOL_RESULT_PLACEHOLDER,
     KeepLastConversationGroupsEdit,
+    RecordContextCompaction,
     context_compaction_middleware,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -277,9 +278,30 @@ def test_the_policy_is_two_middleware_and_the_observer_is_inside() -> None:
     middleware = context_compaction_middleware()
 
     assert len(middleware) == 2, f"expected the editor and its observer, got {middleware}"
-    assert middleware[-1].__class__.__name__ == "record_context_compaction", (
+    assert isinstance(middleware[-1], RecordContextCompaction), (
         f"the observer is not innermost: {[m.__class__.__name__ for m in middleware]}"
     )
+
+
+def test_the_observer_does_not_narrow_the_engine_it_reports_on() -> None:
+    """A graph carrying this policy still runs synchronously.
+
+    `create_agent` puts a middleware that declares *either* model-call hook into *both* chains, and
+    the base class raises `NotImplementedError` for the half it did not declare — so an observer
+    with only `awrap_model_call` makes every `invoke()`/`stream()` fail while every async test
+    passes. Measured before the fix: this call raised "Synchronous implementation of
+    wrap_model_call is not available", and the same graph without the observer answered.
+    `agent/team.py::_AttributedSpecialist.invoke` is the reachable caller.
+    """
+    # `_Recording` rather than patching `GenericFakeChatModel.bind_tools` onto the class: that
+    # mutation outlives the test, and `pytest-randomly` means whichever test runs next with a bare
+    # fake inherits it. A local subclass is the same three lines without the reach.
+    _Recording.seen = []
+    graph = build_langgraph_agent(model=_Recording(messages=iter([AIMessage(content="done")])))
+
+    state = graph.invoke({"messages": [HumanMessage(content="hi")]})
+
+    assert state["messages"][-1].content == "done"
 
 
 def test_the_prompt_names_the_placeholder_it_will_actually_see() -> None:

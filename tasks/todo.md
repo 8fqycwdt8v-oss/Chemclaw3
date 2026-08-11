@@ -1765,3 +1765,48 @@ sees one turn, not two disconnected halves — which was an assumption until thi
 
 Phoenix needed Python 3.12 to import (20.0.0 declares `>=3.10` and carries a dataclass default only
 3.12 accepts), so it ran in a venv of its own. That is the topology anyway.
+
+---
+
+# Review pass over the compaction + Phoenix change (2026-08-11)
+
+Prompted by: "Review all changes. Implement fixes automatically. Really make it production ready."
+Decided in [`D-2026-08-11-what-the-review-found-in-the-compaction-change`](../docs/decisions/D-2026-08-11-what-the-review-found-in-the-compaction-change.md).
+
+Three methods, three disjoint sets of findings — which is the argument for running all three rather
+than whichever is cheapest:
+
+- **The review skill at max effort** found six, including the one that mattered: the observer
+  middleware declared only the async hook, so every synchronous `graph.invoke()` raised.
+- **A hand pass over interactions** found the two a diff-shaped review cannot see: the privacy flag
+  that re-arms itself on upgrade, and the placeholder instructing the model to do what the repeat
+  guard refuses.
+- **A test written to compare against upstream's own dataclass fields** had already found the three
+  missing embedding hide flags, before either of the above ran.
+
+## Steps
+
+- [x] `RecordContextCompaction` declares **both** hooks; sync path pinned by a test.
+- [x] `_warn_about_sensitive_data` warns in both directions, naming the endpoint in the live case.
+- [x] Placeholder reduced to the fact; the guidance moved to the system prompt, where it is paid
+      for once rather than once per cleared result.
+- [x] `_plan_command`'s `saver` required; `threads_deferred` reported; `leaver._existing_tables`
+      inlined; the harness guide's `awaiting_jobs` and two `lg_`-prefixed names corrected; the
+      middleware diagram gained the context editor; the `DEFERRED.md` prompt-cache row now says
+      compaction moves the number it tells an operator to read.
+- [x] The `timestamptz` cast's failure mode written down as a considered answer rather than silence.
+- [x] ADR + ledger row; the merged ADRs are amended rather than edited.
+
+## Review
+
+**Re-verified against a live Phoenix after the fixes, not just re-reasoned.** Two turns — one
+async, one **sync** (the path that raised `NotImplementedError` before the fix) — both land as
+traces rooted at `chemclaw.turn`, each carrying an LLM span with `llm.token_count.prompt=99 /
+completion=5 / total=104`, and **zero** content-bearing attributes across all 10 spans, including no
+trace of the 20,000-character evidence payload compaction had cleared.
+
+**What is uncomfortable and worth keeping in the record:** the change being reviewed was itself a
+fix for "a mechanism whose description and behaviour had drifted apart", and all three findings
+above are that same defect. Writing the fix does not confer immunity. The docstring that argued for
+the async-only hook was *specific and confident* and wrong — which is the case for measuring rather
+than reasoning, applied to one's own prose.

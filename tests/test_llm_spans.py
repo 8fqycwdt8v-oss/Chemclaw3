@@ -25,7 +25,11 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.core.config import settings
-from chemclaw.core.logging import _instrument_llm_calls, _trace_config
+from chemclaw.core.logging import (
+    _instrument_llm_calls,
+    _trace_config,
+    _warn_about_sensitive_data,
+)
 
 # Distinctive enough that a substring sweep cannot match them by accident, which is what lets the
 # content assertion be a sweep rather than a list of attribute names.
@@ -193,3 +197,49 @@ def test_every_hide_flag_is_set_together(monkeypatch: pytest.MonkeyPatch) -> Non
         for name in TraceConfig.__dataclass_fields__
         if name.startswith("hide_")
     ), "content was allowed but hide flags were still set"
+
+
+def test_enabling_content_says_so_out_loud(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The dangerous direction must warn, because it is the one that used to be silent.
+
+    `otel_include_sensitive_data` governed nothing for a phase, and the process warned about
+    exactly that. Giving it a consumer back inverts which case needs saying: a deployment that set
+    the flag while it was inert — and `core/config/observability.py` kept it "because a deployment
+    may still have it in its values file" — gets `otel_llm_spans` switched on by the shipped chart
+    and starts exporting a chemist's question to the collector, without anybody deciding that in
+    this release.
+
+    The endpoint is in the assertion because a warning that does not say *where* the content is
+    going leaves the operator with the wrong half of the question.
+    """
+    monkeypatch.setattr(settings, "otel_include_sensitive_data", True)
+    monkeypatch.setattr(settings, "otel_llm_spans", True)
+    monkeypatch.setattr(settings, "otel_endpoint", "http://collector.observability.svc:4317")
+
+    with caplog.at_level("WARNING"):
+        _warn_about_sensitive_data()
+
+    warning = caplog.text
+    assert "exported to http://collector.observability.svc:4317" in warning, warning
+    assert "has no effect" not in warning, "the inert-case warning fired while the flag was live"
+
+
+def test_the_inert_case_still_says_it_is_inert(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The inert direction keeps its warning: a dead switch must not read as a live one.
+
+    Both directions are pinned because the bug being guarded against is a *branch* that fires on
+    the wrong one — and a test for only the new half would have passed against the code that had
+    only the old half.
+    """
+    monkeypatch.setattr(settings, "otel_include_sensitive_data", True)
+    monkeypatch.setattr(settings, "otel_llm_spans", False)
+
+    with caplog.at_level("WARNING"):
+        _warn_about_sensitive_data()
+
+    assert "has no effect" in caplog.text
+    assert "exported to" not in caplog.text, "the live-case warning fired while the flag was inert"

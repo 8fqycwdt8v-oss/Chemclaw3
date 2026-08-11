@@ -326,3 +326,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape](D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape.md) | LangSmith is declined; the gaps it would fill are named and split |
 | [D-2026-08-11-the-specialists-name-is-not-in-the-namespace](D-2026-08-11-the-specialists-name-is-not-in-the-namespace.md) | Attribute a specialist's events from the handoff, because the graph path never held its name |
 | [D-2026-08-11-what-the-removal-found](D-2026-08-11-what-the-removal-found.md) | Deleting the framework is what exposed the readers that only knew one shape |
+| [D-2026-08-11-what-the-review-found-in-the-compaction-change](D-2026-08-11-what-the-review-found-in-the-compaction-change.md) | A middleware that narrowed its engine, a privacy flag that re-armed itself, and a placeholder arguing with a guard |

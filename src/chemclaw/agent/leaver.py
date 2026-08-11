@@ -32,7 +32,6 @@ pattern match and no "all users matching". The default is a dry run.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 import psycopg
 
@@ -79,7 +78,8 @@ _SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = %(actor)s
 # not work: Postgres resolves `DELETE FROM checkpoints` at *parse* time, so the guard never gets
 # evaluated and the whole erasure fails with `relation "checkpoints" does not exist`. Measured
 # against a schema with no checkpointer, which is exactly what every current deployment is. Hence
-# `_existing_tables` below — the check has to be a separate query.
+# `core.db.existing_tables` — the check has to be a separate query, which is also why the retention
+# sweep shares it rather than owning a second copy.
 _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = tuple(
     (table, f"DELETE FROM {table} WHERE thread_id IN ({_SESSION_SCOPED})")
     for table in CHECKPOINT_TABLES
@@ -150,18 +150,6 @@ class ErasureReport:
         return sum(self.retained.values())
 
 
-async def _existing_tables(cur: Any, tables: set[str]) -> set[str]:
-    """Which of `tables` exist on this connection's `search_path`.
-
-    A thin pass-through since the nightly retention sweep needed the same answer about the same
-    tables for the same reason (`core.db.existing_tables`, which carries the explanation). Kept as a
-    name here because every table in `_ERASE` is checked, not just the checkpointer's, so the answer
-    does not depend on remembering which ones might be missing — and that framing is this module's,
-    not the helper's.
-    """
-    return await existing_tables(cur, tables)
-
-
 async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
     """Count — and, with `apply`, delete — one actor's conversational rows.
 
@@ -200,7 +188,9 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                     )
                     row = await cur.fetchone()
                     report.retained[table] = int(row[0]) if row else 0
-                present = await _existing_tables(cur, {table for table, _ in _ERASE})
+                # Every table in `_ERASE` is asked about, not just the checkpointer's, so the
+                # answer does not depend on remembering which ones might be missing.
+                present = await existing_tables(cur, {table for table, _ in _ERASE})
                 for table, statement in _ERASE:
                     if table not in present:
                         # Reported as zero rather than omitted: "this deployment holds none of your
