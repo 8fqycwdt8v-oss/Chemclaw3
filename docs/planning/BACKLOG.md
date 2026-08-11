@@ -5,30 +5,46 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 
 ## Open — Left by the LangGraph rebuild (2026-08-11, D-2026-08-11-what-the-removal-found)
 
-- [ ] **The three M12 probes are still unrun, and nothing in M13 measured them** — [M].
-      Each needs a credential or a tenant this environment does not have, and the migration shipped
-      without them on purpose rather than by oversight:
-      **(a) concurrency** — 8 simultaneous turns against a compiled graph. D-123's *defect* has no
-      surface left (its parser went with the dependency, which is why `agent_pool.py` could be
-      deleted), but LangGraph's own behaviour under that load is unmeasured, so this is a new
-      question rather than the old one re-asked. **(b) plan → approve → execute, end to end, live**
-      — historically this *silently* did not work, and every unit test passed while it did not.
-      **(c) team routing accuracy and per-specialist token cost** against the single-agent
-      baseline; `agent_teams_enabled` is off by default for exactly this reason, and a team that
-      mis-routes is worse than no team.
-      **Trigger**: a live model credential in a deployment, whichever arrives first. Use the
-      cheapest model available for (a) and (b); (c) needs the real one to mean anything.
+- [ ] **M12 probe (a), concurrency, is still unrun** — [M]. 8 simultaneous turns against a compiled
+      graph. D-123's *defect* has no surface left (its parser went with the dependency, which is why
+      `agent_pool.py` could be deleted), but LangGraph's own behaviour under that load is
+      unmeasured, so this is a new question rather than the old one re-asked.
+      **Trigger**: a live stack; it needs no expensive model, and `cli/mock_llm` can now drive it
+      (its chat-completions route was added 2026-08-11 — before that every mock-driven lane 404'd).
 
-- [ ] **Per-model token attribution is gone from the metrics surface and only the ledger has it** —
-      [S]. The framework's chat-client instrumentation emitted `gen_ai.client.token.usage` labelled
-      by request model, response model, provider and token type; the LangChain stack ships no
-      equivalent (measured — `docs/guides/runbook.md` §(viii)). `turn_costs` still carries model
-      attribution per turn, which is where D-2026-08-01-spend-is-a-ledger-not-a-label decided it
-      belongs, so nothing is *lost* that a query cannot answer — but a dashboard that read the OTel
-      histogram now reads nothing, and `core/metrics.py`'s counters deliberately carry `profile`
-      only.
-      **Trigger**: an operator asking a per-model question of a Grafana panel rather than of the
-      database.
+      **(b) and (c) ran on 2026-08-11** against Postgres + Temporal + the front door on
+      claude-haiku-4-5, and what they found is in `tasks/todo.md`: four defects, every one of them
+      in the *observation* rather than the mechanism, and each with a passing unit test in front of
+      it. (b) plan → approve → execute now passes including the refusal check, after
+      `D-2026-08-11-a-refusal-nobody-can-see-is-not-a-gate`. (c) both arms ran: the supervisor
+      delegated **0 times in 15 probes** and the team cost ~4k tokens/turn more at the median for a
+      capability that never fired, so `agent_teams_enabled` stays off on evidence.
+      **What (c) still does not settle**: this row previously said it "needs the real one to mean
+      anything", and that caveat stands — delegation is model-dependent (a partial sonnet-5 arm
+      delegated once in fifteen before the credential's usage limit ended the run). A frontier-model
+      arm would answer whether the supervisor ever routes; it would not change the cost arithmetic,
+      which is a property of the prompt rather than the model.
+
+- [ ] **Per-model token attribution is gone from the metrics surface *and* from the ledger** —
+      [M], raised from [S] on 2026-08-11 after the claim below it was checked against the database.
+      The framework's chat-client instrumentation emitted `gen_ai.client.token.usage` labelled by
+      request model, response model, provider and token type; the LangChain stack ships no
+      equivalent (measured — `docs/guides/runbook.md` §(viii)).
+
+      **This row used to say "`turn_costs` still carries model attribution per turn … so nothing is
+      *lost* that a query cannot answer". That is false.** `turn_costs` has eleven columns —
+      `correlation_id, session_id, actor, profile, input_tokens, output_tokens, cache_read_tokens,
+      cache_write_tokens, duration_seconds, completed, recorded_at` — and no `model` among them;
+      nothing in `agent/turn_cost.py` or `agent/turn_cost_store.py` writes one. So the consolation
+      the severity rested on does not exist, and a per-model question cannot be answered from the
+      database either. Found while reading the ledger for M12's cost column, which is the only
+      reason anyone looked.
+
+      This also makes the M12 routing comparison model-blind: both arms were priced from
+      `turn_costs`, and the ledger cannot say which model produced a row — the arms are only
+      comparable because the front door was pinned to one model for each run, by hand.
+      **Trigger**: adding the column is cheap and is the fix; do it the next time a migration is
+      written, rather than answering a per-model question with a guess.
 
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
