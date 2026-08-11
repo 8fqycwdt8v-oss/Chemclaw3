@@ -1549,7 +1549,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       tampered with — indistinguishable from the tampering the chain exists to detect.
 - [ ] **The reasoning a `correlation_id` now reaches is still erodible** — [M], and it is what makes the
       audit-chain join necessary-but-not-sufficient. The join lands on `session_messages`, whose rows
-      `session_store._compact` rewrites and `durable/retention.py` prunes by age — and which a
+      `durable/retention.py` prunes by age — and which a
       failed or abandoned turn never reaches at all, since the projection is written once, after
       the answer. So a trail can point at a conversation that has since been compacted out of
       recognisability, or at one whose words were never written down. Wants a decision about what a GxP deployment must retain,
@@ -1562,10 +1562,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       one — a reader cannot tell which rows are which. D-157's `rationale` works because a job launch
       is a discrete, deliberate act with an obvious author; an inline tool call is not. Needs a
       decision, not code.
-- [ ] **The reasoning that does exist is compacted, pruned, or never written** — [M]. The only
-      durable trace of intent is the raw message blob in `session_messages`, and three things
-      erode it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and
-      a turn that ran its tools and then failed or was abandoned writes no row at all.
+- [ ] **The reasoning that does exist is pruned, or never written at all** — [M]. The only durable
+      trace of intent is the raw message blob in `session_messages`, and two things erode it:
+      `durable/retention.py` prunes rows by age, and a turn that ran its tools and then failed or
+      was abandoned writes no row at all.
 - [ ] **The approved plan's text is still not durable** — [M]. D-157 made the authorization bind to
       the plan, but the plan itself lives in an in-process `TodoSessionStore`, so a `plan_approvals`
       row still points at a `plan_hash` whose subject exists nowhere durable — a signature on a
@@ -2358,6 +2358,7 @@ claim about the world is to run it.
       orphan, so the repair would strip and commit a pairing that was intact on disk. Both
       docstrings that promised the opposite are corrected, and
       `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
+      (That file is gone; see the superseding note below.)
       **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the
       load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call
       groups from `session_messages`. Either is a design change to a durable path with a data-loss
@@ -2369,6 +2370,15 @@ claim about the world is to run it.
       (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching
       `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads
       a partial history and so sidesteps the corruption class rather than accepting it.
+      **Superseded by D-2026-08-10-langgraph-rebuild-of-the-conversation-layer, which deleted the
+      whole problem rather than the fix.** The defect was that the stored history was re-read
+      before every model call; the graph reads its checkpointer instead, so nothing re-reads it at
+      all. Durable compaction, its two settings, `agent/history_compaction.py` and the read-repair
+      that made a `LIMIT` unsafe are all gone. The `LIMIT` still stays out, for a new reason: the
+      one reader left is the transcript route, and a window makes a reloaded conversation look like
+      it began later than it did. `durable/retention.py` is now the only thing bounding the table,
+      by age — which is the policy statement a deployment actually makes, where a context-window
+      heuristic quietly editing a GxP record was not.
 
 - [x] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
       so the only metrics that run a live retriever have zero drift coverage — verified by

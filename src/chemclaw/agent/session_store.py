@@ -1,13 +1,17 @@
 """Durable, Postgres-backed conversation history (plan Phase F3).
 
-`PostgresHistoryProvider` is the durable replacement for MAF's `InMemoryHistoryProvider`: instead of
-keeping a session's messages in the in-process session state (which dies with the pod), it appends
-each turn's stored messages to the `session_messages` table keyed by session id, and loads them
-back in insertion order. So a fresh process over the same database resumes the conversation — the
-"session survives a restart" requirement (F3-T1). It overrides only the two storage primitives
-(`get_messages`/`save_messages`), exactly as `InMemoryHistoryProvider` does; the base
-`HistoryProvider` still decides *which* messages to store per turn and runs `before_run`/
-`after_run`, and compaction still layers on top.
+`PostgresHistoryProvider` appends each turn's exchange to the `session_messages` table keyed by
+session id and loads it back in insertion order, so a fresh process over the same database can show
+a conversation that outlived its pod — the "session survives a restart" requirement (F3-T1).
+
+**It is a read-model projection, not the conversation's state.** That is the change D-2026-08-10 §2
+made and it is what everything below follows from. Under MAF this table *was* the thread: the
+framework wrote it as the turn went and read it back before each model call, which made it
+load-bearing, made it grow without bound, made a half-written turn a poison pill, and made three
+mechanisms necessary that are now gone (a disconnect rollback, a read-time orphan repair, and a
+compaction pass over the stored rows). Turn state lives in the LangGraph checkpointer now. What is
+written here is written once, by `chemclaw.api.runner._record_transcript`, after the answer exists;
+what reads it is `GET /sessions/{id}/messages` and the audit trail's join, both for a person.
 
 This is the conversation layer, deliberately separate from Temporal job state (D-002) and the
 calculation cache. The MAF `Message` is stored via its own `to_dict()`/`from_dict()`, so the store
@@ -18,29 +22,18 @@ the message history above, `SessionOwnerStore` (who owns a session id — the fa
 LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
 the fact the in-process 409 guard loses at the pod boundary, D-121).
 
-**MAF's after-run compaction cannot reach this provider, so the provider does it itself** (REV-4,
-D-151). `CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the
-place `InMemoryHistoryProvider` keeps its thread. This provider deliberately keeps nothing there,
-which is the entire point of it, so that lookup finds nothing and the strategy returns having done
-nothing. Under `session_store="postgres"` — the production default — the `after_strategy` half of
-`chemclaw.agent.chemclaw_agent._build_compaction` is a silent no-op, and it always will be:
-nothing short of
-reintroducing the in-process thread would change it.
+**`get_messages` has no `LIMIT` and must not grow one.** That used to be a data-safety rule, because
+the read repaired tool-call pairings and wrote the repair back. It is now a rendering rule: the
+reader is a person reloading a conversation, and a transcript that silently omits its own beginning
+does not look truncated — it looks like the conversation started later than it did.
 
-The consequence was that the rows grew for the session's whole life and every turn re-read all of
-them before the model call — `_SELECT_WITH_ID` has no `LIMIT`. `save_messages` now applies the
-*same* strategy to the table after storing a turn (see `_compact`), which is the promise
-`_build_compaction`'s docstring was already making, kept in the one place that can keep it.
-
-**`get_messages` is a plain read, and the `LIMIT` that looks like the obvious fix stays out.** It
-used to repair unmatched tool-call pairings on the way out and write the correction back, which is
-what made a windowed read unsafe: a `tool_result` whose `tool_use` merely fell outside the window is
-indistinguishable from a real orphan, so the repair would strip it and commit that, destroying a
-pairing that was intact on disk. The repair went with the MAF thread that needed it — nothing feeds
-this back to a model any more — but the `LIMIT` is still wrong for a different reason: the route is
-a transcript, and a transcript that silently omits its own beginning is worse than a slow one.
-Compaction is what bounds the table, and it deletes only whole pairing components, via
-`droppable_rows` (D-145). `tests/test_durable_compaction_gap.py` pins the absent `LIMIT`.
+**The table is bounded by `durable/retention.py`, by age, and by nothing else.** A compaction pass
+used to shrink it too, applying the model's context-window policy (`keep_last_conversation_groups`)
+to the stored rows. That was right while the rows were the model's context and wrong the moment they
+stopped being: it deleted a chemist's older messages not because any policy said to keep less, but
+because the model no longer needed them — a context heuristic quietly editing a GxP record. Age-
+based retention is the policy statement a deployment actually makes, and it deletes only whole
+pairing components (`droppable_rows`, D-145).
 """
 
 import logging
@@ -54,11 +47,9 @@ from agent_framework import HistoryProvider, Message
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
-from chemclaw.agent.history_compaction import plan_compaction
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
-from chemclaw.core.metrics_bridge import degraded, record_metric
 
 log = logging.getLogger(__name__)
 
@@ -72,10 +63,6 @@ _INSERT = "INSERT INTO session_messages (session_id, message, correlation_id) VA
 # id-less variant: every reader needs the id, and the one that existed was dead code that D-143's
 # prose then cited as the statement the read path runs.
 _SELECT_WITH_ID = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
-_UPDATE_MESSAGE = "UPDATE session_messages SET message = %s WHERE id = %s"
-_DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"
-_MAX_ID = "SELECT MAX(id) FROM session_messages WHERE session_id = %s"
-_COUNT = "SELECT count(*) FROM session_messages WHERE session_id = %s"
 
 # The per-session turn claim (D-121). One statement, so the check and the take cannot be
 # interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
@@ -112,20 +99,6 @@ _OWNER_LIST = (
     "SELECT session_id, created_at FROM session_owners "
     "WHERE owner IS NOT DISTINCT FROM %s ORDER BY created_at DESC, session_id DESC LIMIT %s"
 )
-
-
-def _crossed_new_compaction_bucket(count_before: int, count_after: int, floor: int) -> bool:
-    """Whether this turn's insert pushed the row count into a new `floor`-sized bucket.
-
-    Buckets are `count // floor`: 0 below the floor, 1 from `floor` to `2*floor - 1`, and so on. The
-    gate for `_compact`'s expensive path (`SELECT` the whole history + `plan_compaction` over it) —
-    without it, every turn once the session is past the floor repeated that full read-and-replan,
-    forever, at a cost proportional to the *entire* stored history, for a session that stays open.
-    Purely a function of two counts, so nothing needs to be persisted between calls to know whether
-    the previous turn already tried: `count_before` is always this call's own `count_after` minus
-    what it just inserted, both freshly read, never a cached belief about an earlier turn.
-    """
-    return count_after >= floor and max(count_before, 0) // floor != count_after // floor
 
 
 def _session_dsn() -> str:
@@ -205,11 +178,11 @@ class PostgresHistoryProvider(HistoryProvider):
     ) -> None:
         """Append this turn's messages to the session's durable history (no-op if none to store).
 
-        Then compact, if the deployment has asked for it. The append commits on its own first, and
-        the compaction pass runs in a second transaction whose failure is logged and swallowed —
-        exactly the split `_persist_repair` makes, and for the same reason: storing the turn is the
-        critical path and disposing of old rows is not. This keeps the append's contract byte-for-
-        byte what it was.
+        One statement in one transaction, and nothing follows it. The turn's exchange lands whole or
+        not at all, which is what lets `chemclaw.api.runner` carry no rollback: there is no window
+        in which half of it is committed. Bounding the table is `durable/retention.py`'s job, on its
+        own schedule, and deliberately not this call's — an append on the answer path must not also
+        be deciding what to delete.
         """
         if not session_id or not messages:
             return
@@ -219,97 +192,8 @@ class PostgresHistoryProvider(HistoryProvider):
         rows = [(session_id, Jsonb(message.to_dict()), correlation_id) for message in messages]
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                # The watermark before the insert: everything above it is this turn's own work and
-                # must survive the pass regardless of what the strategy says (see `_compact`).
-                await cur.execute(_MAX_ID, (session_id,))
-                row = await cur.fetchone()
-                watermark = 0 if row is None or row[0] is None else int(row[0])
                 await cur.executemany(_INSERT, rows)
             await conn.commit()
-        if settings.agent_durable_compaction_enabled:
-            await self._compact(session_id, watermark, inserted=len(rows))
-
-    async def _compact(self, session_id: str, watermark: int, inserted: int) -> None:
-        """Apply the context compaction policy to the *stored* history (D-151).
-
-        MAF's `CompactionProvider.after_run` cannot do this: it reads
-        `session.state[source_id]["messages"]`, the slot `InMemoryHistoryProvider` writes and this
-        provider deliberately does not. So the rows grew forever and every turn re-read all of them.
-        This runs the identical strategy — `chemclaw.agent.chemclaw_agent.compaction_strategy`,
-        the same one that bounds the model's context — against the table.
-
-        Only past the floor *and* only on the turn that crosses into a new floor-sized bucket
-        (`_crossed_new_compaction_bucket`) — not on every turn spent above it. Before this, a
-        session that stayed above the floor issued a full `SELECT` of its entire history plus a
-        `plan_compaction` pass over all of it on *every* `save_messages` call, on top of the read
-        MAF already performed before the model call. `inserted` (how many rows this call just
-        appended) is all that costs: it turns the one `COUNT` already needed into "did this insert
-        cross a bucket boundary", with no extra query and nothing persisted between calls.
-
-        `watermark` protects the turn just written. The composed strategy's fallback can exclude
-        *every* message when a single payload is oversized, and a turn that deleted the rows it had
-        just stored would lose the conversation it was recording.
-
-        Best-effort by construction: a failure here leaves a larger history, which is the state the
-        system was in before this existed. It must never cost the turn its messages.
-        """
-        # Imported at call time: `agents.chemclaw_agent` reaches the connector registry and the
-        # whole tool surface, and the storage layer must not pull that in at import (the workers
-        # import this module without ever building an agent).
-        from chemclaw.agent.chemclaw_agent import compaction_strategy
-
-        floor = settings.agent_durable_compaction_min_rows
-        try:
-            async with self._connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(_COUNT, (session_id,))
-                    counted = await cur.fetchone()
-                count = 0 if counted is None else int(counted[0])
-                if not _crossed_new_compaction_bucket(count - inserted, count, floor):
-                    return
-                async with conn.cursor() as cur:
-                    await cur.execute(_SELECT_WITH_ID, (session_id,))
-                    stored = [
-                        (int(row[0]), Message.from_dict(row[1])) for row in await cur.fetchall()
-                    ]
-            # The connection is released here (the `async with self._connection()` block above has
-            # already exited) — before `plan_compaction`'s CPU work runs, so it never pins a pooled
-            # connection while every other request on the same pod waits on the same bounded pool.
-            strategy, _ = compaction_strategy()
-            plan = await plan_compaction(
-                stored,
-                strategy=strategy,
-                protected={row_id for row_id, _ in stored if row_id > watermark},
-            )
-            if plan.is_empty():
-                return
-            async with self._connection() as conn:
-                async with conn.cursor() as cur:
-                    if plan.rewrites:
-                        await cur.executemany(
-                            _UPDATE_MESSAGE,
-                            [
-                                (Jsonb(message.to_dict()), row_id)
-                                for row_id, message in plan.rewrites
-                            ],
-                        )
-                    if plan.deletes:
-                        await cur.execute(_DELETE_IDS, (session_id, sorted(plan.deletes)))
-                await conn.commit()
-        except Exception:
-            degraded(
-                log, "history_compaction", "could not compact stored history for %s", session_id
-            )
-            return
-        record_metric(
-            lambda m: m.increment("chemclaw_history_rows_compacted_total", float(len(plan.deletes)))
-        )
-        log.info(
-            "compacted session %s: %d row(s) removed, %d collapsed to a summary",
-            session_id,
-            len(plan.deletes),
-            len(plan.rewrites),
-        )
 
 
 class SessionOwnerStore:

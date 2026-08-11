@@ -20,24 +20,21 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agent_framework import AgentSession, Content, Message
+from agent_framework import AgentSession
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ActivityError, ChildWorkflowError
 
-from chemclaw.agent.session_store import PostgresHistoryProvider
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import ToolCallEvent
 from chemclaw.api.runner import run_turn
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.connectors import jobs as jobs_module
-from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from tests.fakes import FakeUpdate, fed
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
-from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
@@ -352,75 +349,6 @@ def test_the_two_wire_budgets_are_configuration_rather_than_literals() -> None:
     assert "settings.stream_max_result_numbers" in source
     assert settings.agent_audit_max_arg_chars > 0
     assert settings.stream_max_result_numbers > 0
-
-
-# --------------------------------------------------------------------------------------------
-# The compaction watermark (agent/session_store.py) — a guard whose deletion destroys the turn
-# --------------------------------------------------------------------------------------------
-
-
-def _bulky_turn(index: int) -> list[Message]:
-    """One turn's stored messages, with a payload large enough to force a compaction decision."""
-    return [
-        Message(role="user", contents=[Content.from_text(f"question {index}")]),
-        Message(
-            role="assistant",
-            contents=[
-                Content.from_function_call(call_id=f"w{index}", name="predict_pka", arguments={})
-            ],
-        ),
-        Message(
-            role="tool",
-            contents=[
-                Content.from_function_result(call_id=f"w{index}", result="payload " + "z" * 4000)
-            ],
-        ),
-        Message(role="assistant", contents=[Content.from_text(f"answer {index}")]),
-    ]
-
-
-def test_compaction_never_deletes_the_turn_that_triggered_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The `protected=` watermark, which three test files covered and none of them pinned.
-
-    `plan_compaction`'s `protected` parameter *is* tested directly; what was untested is the call
-    site's derivation of it from the watermark — the row ids this `save_messages` just inserted.
-    Replacing it with `protected=set()` left 31 tests green across the three files that name
-    compaction, and on a real database with a tight budget it deleted **every** row, including the
-    turn being stored: rows after = 0, the new turn survived = False. A conversation that answers
-    and then forgets the exchange it just had is the worst failure this store can have, and nothing
-    would have said so.
-    """
-    monkeypatch.setattr(settings, "agent_durable_compaction_enabled", True)
-    monkeypatch.setattr(settings, "agent_durable_compaction_min_rows", 4)
-    monkeypatch.setattr(settings, "agent_context_token_budget", 50)
-
-    async def _run() -> list[Message]:
-        await migrated_db_or_skip()
-        provider = PostgresHistoryProvider()
-        session_id = "review-watermark"
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
-                )
-            await conn.commit()
-        for index in range(4):
-            await provider.save_messages(session_id, _bulky_turn(index))
-        return await provider.get_messages(session_id)
-
-    remaining = asyncio.run(_run())
-    assert remaining, "compaction emptied the table, including the turn it was triggered by"
-    rendered = " ".join(
-        content.text or ""
-        for message in remaining
-        for content in message.contents
-        if getattr(content, "text", None)
-    )
-    assert "question 3" in rendered and "answer 3" in rendered, (
-        "the turn that triggered compaction was compacted away by it"
-    )
 
 
 def _agent_note(note_id: str, body: str) -> Note:

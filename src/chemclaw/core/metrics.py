@@ -258,12 +258,6 @@ _COUNTERS: dict[str, str] = {
         "the openai_compatible provider, which reports cache reads but has no cache-write concept: "
         "an honest zero here is not a fault (REV-9)."
     ),
-    # Durable history compaction (D-151). A count that stays flat while sessions are long means
-    # the pass is not running — the knob is off, or the row floor is never reached — which is
-    # the difference between "history is bounded" and "nothing is bounding it".
-    "chemclaw_history_rows_compacted_total": (
-        "Stored conversation rows removed by durable compaction after a turn."
-    ),
     # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
     # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
     # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,

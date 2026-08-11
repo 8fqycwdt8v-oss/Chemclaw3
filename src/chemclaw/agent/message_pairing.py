@@ -12,8 +12,8 @@ checkpointer now (D-2026-08-10 §2), so what is left are the two jobs that were 
 
 - **A guard on deletion.** `droppable_rows` is the rule every code path that deletes conversation
   rows goes through, so an age cutoff or a compaction pass cannot take one half of a pair. It is
-  used by `durable/retention.py` and `agent/history_compaction.py`, and it contracts rather than
-  expands, so the worst case is a straddling group surviving one more sweep.
+  used by `durable/retention.py`, and it contracts rather than expands, so the worst case is a
+  straddling group surviving one more sweep.
 - **Assertions.** `unmatched_call_ids`, `unmatched_result_ids` and
   `calls_without_adjacent_results` are what a test uses to prove code that deletes or assembles
   messages did not strand anything. None has a production caller, and none should acquire one:
@@ -101,9 +101,9 @@ def droppable_rows(rows: Sequence[tuple[int, Message]], candidates: AbstractSet[
 
     Storage may not dispose of a conversation row on its own terms: a `function_call` and the
     `function_result` answering it are one indivisible unit, and deleting either half alone bricks
-    the session (`unmatched_result_ids` explains why the surviving half cannot be healed). Both
-    callers that delete rows — durable compaction and age-based retention — choose their candidates
-    for reasons that know nothing about pairing, so the pairing rule is applied once, here.
+    the session (`unmatched_result_ids` explains why the surviving half cannot be healed). The
+    caller that deletes rows — age-based retention — chooses its candidates for reasons that know
+    nothing about pairing, so the pairing rule is applied once, here rather than there.
 
     Rows are joined into components by shared `call_id`, in **either** direction: a row is linked to
     every row mentioning an id it mentions, whether as the call or the result. The relation is

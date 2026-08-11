@@ -78,8 +78,9 @@ class ServiceSettings(BaseSettings):
     # restart, so a session is resumable. `memory` keeps the classic in-process provider
     # (dev/test); `postgres` persists each turn's messages to `session_messages` keyed by
     # session id, so a fresh process over the same DSN resumes the thread. **Session state is
-    # not Temporal job state** — it is the conversation layer (D-002), and compaction still runs
-    # on top. `session_store_dsn` lets the session store point at a different database than the
+    # not Temporal job state** — it is the conversation layer (D-002), and the table is a read
+    # model rather than the turn's state. `session_store_dsn` lets it point at a database other
+    # than the
     # calculation/fingerprint DSN; empty falls back to `postgres_dsn` (one database in the
     # simple deployment).
     session_store: Literal["memory", "postgres"] = "memory"

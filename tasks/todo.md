@@ -626,7 +626,8 @@ arranged to keep that commit small and the suite green at each step.
       rollback watermark, the orphan repair and `PostgresHistoryProvider` — otherwise this step
       takes the system from "transcript silently empty" to "transcript route deleted" and locks the
       regression in.
-- [ ] **Step 4b — the subtractive half, now that 4a exists.** Scoped 2026-08-11 by reading what
+- [x] **Step 4b — the subtractive half, now that 4a exists** (done 2026-08-11, three commits).
+      Scoped by reading what
       each target is still load-bearing for, which changed the step in two ways.
 
       **`PostgresHistoryProvider` does not go away — it *became* the projection store.** Step 4a
@@ -658,7 +659,53 @@ arranged to keep that commit small and the suite green at each step.
       deleting a row whose partner is not also expiring (D-145). That caller is about *legacy* rows
       that still hold tool calls, and it is unaffected by any of the above.
 
-      Not started. The pieces are independent and each wants its own suite run.
+      **What the execution changed about that scoping, all three found by checking rather than
+      trusting the plan:**
+
+      1. **`unmatched_call_ids` stays, and so does `unmatched_result_ids`.** The scoping listed the
+         first for deletion with the repair. But `unmatched_result_ids` was *already* an assertion
+         by design (D-145: "deliberately not wired into the read-time repair"), and once the repair
+         is gone the two are the same kind of thing — a symmetric pair a test uses to prove a
+         deletion stranded nothing. Only the *healing* half goes: `strip_call_ids` and
+         `strip_unmatched_calls`. The old docstrings spent paragraphs on an asymmetry ("one
+         direction self-heals, the other is permanent") that turns out to have been an artifact of
+         the repair; deleting it made the module more coherent, not less.
+      2. **There is no D-151 row in `DEFERRED.md`.** The scoping said to delete one in the same
+         commit. Checked: the file has no compaction row at all. Nothing to delete.
+      3. **The reason durable compaction had to go is stronger than "its caller is gone".** The
+         scoping said the transcript route is the only reader now, so the re-read cost that
+         motivated D-151 has evaporated. True, but the real argument is what compaction *is*: it
+         applies `keep_last_conversation_groups` — a model context-window policy — to stored rows.
+         That was right while the rows were the model's context. It is a category error once they
+         are a GxP record, because it deletes a chemist's older messages not because policy says to
+         keep less but because the model stopped needing them. Age-based retention is the policy
+         statement a deployment actually makes. Also note the setting already defaulted to `False`,
+         so deleting it changes no default deployment's behavior — it removes an option that had
+         become the wrong shape.
+
+      Also deleted along the way, each because its only subject was one of the three: the
+      `chemclaw_rollback_watermark_unavailable_total` counter and its `PrometheusRule` alert plus
+      the `rollbackWatermarkWarning` value; `chemclaw_history_rows_compacted_total`; the
+      `history_repair` and `history_compaction` degraded labels; `tests/test_history_compaction.py`
+      and `tests/test_rollback_watermark_guard.py`; and `tests/test_durable_compaction_gap.py`,
+      whose two MAF `after_run` tests existed only as D-151's justification — its surviving
+      no-window test moved into `test_session_store.py`.
+
+      **Three tests changed subject rather than being deleted, which is the part worth checking in
+      review.** `test_a_disconnect_during_a_slow_verifier_…` and `…_slow_job_result_wait_…` asked
+      whether a teardown in a post-run window destroys a committed exchange. Nothing destroys
+      anything now — but the predicate they were really guarding, `answered or run_complete` rather
+      than `answered` alone, still governs the *state* rollback. Rewritten onto `session.state` and
+      mutation-checked: flipping the predicate to `answered` fails exactly those two and nothing
+      else. `test_the_load_repair_writes_back_which_is_why_a_limit_is_unsafe` said in as many words
+      that removing the repair should turn it into a different test; the `LIMIT` survives for a new
+      reason (a windowed transcript does not look truncated, it looks like the conversation started
+      later than it did) and the replacement asserts that behaviorally against Postgres instead of
+      grepping the SQL. Mutation-checked: `LIMIT 50` fails it.
+
+      Suite 4214 → 4178, 36 skipped, 0 failed, every collected id diffed and accounted for at each
+      of the three commits (42 removed, 6 added). `make cov` 85.71% against the 84% floor; all
+      eight offline validators green.
 - [x] **Step 4a — the transcript projection, from the turn's event stream** (done 2026-08-11).
       Written in `run_turn._record_transcript`, immediately after the answer is assembled, through
       the history provider the front door already passes. Re-measured on the same probe that found

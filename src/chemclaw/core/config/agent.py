@@ -76,21 +76,6 @@ class AgentSettings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
-    # Apply that same policy to the *stored* history, not only to the model's context (D-151).
-    # MAF's after-run compaction cannot reach `PostgresHistoryProvider` — it reads a session-state
-    # slot the durable provider deliberately never writes — so under `session_store="postgres"` the
-    # rows accumulated forever and every turn re-read all of them. This runs the identical strategy
-    # against the table after a turn is stored.
-    #
-    # Off by default, matching `retention_enabled`: a `DELETE` on conversation history is a policy a
-    # deployment states, never one it inherits on upgrade. Deliberately reuses the budget above
-    # rather than taking its own — durable deletion is strictly more destructive than context
-    # exclusion, so it must never be the more aggressive of the two.
-    agent_durable_compaction_enabled: bool = False
-    # Short sessions never pay the extra read: a pass is only worth doing once there is something to
-    # reclaim, and this is far below where the token budget starts excluding anything.
-    agent_durable_compaction_min_rows: int = Field(default=200, ge=1)
-
     # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
     # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
     # (architektur.md §7), not this. Because Entra enforcement defaults off in dev
