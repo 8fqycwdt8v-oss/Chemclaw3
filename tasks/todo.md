@@ -1366,6 +1366,20 @@ ADR prefers for trace legibility — is an M12 measurement rather than a guess t
 `team.running_specialist`, which both mechanisms pass through, so the comparison is down to routing
 accuracy and per-specialist cost (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
 
+**The handoff gap, closed.** `HandoffEvent` had shipped as a union member nothing produced — the
+one item on the migration's open list where the code made a promise it did not keep. The fix looked
+blocked behind the routing choice and was not: reading the `task` tool's arguments would have bound
+the contract to the delegation mechanism, while observing the specialist's *invocation* survives
+either mechanism, because both invoke the compiled specialist. Raised as a pair from
+`team.running_specialist`, which is already invariant 3's bracket, so the trace's span and the audit
+trail's span are the same `try`/`finally` and cannot drift apart.
+
+Falsified twice rather than asserted: stubbing the emitter fails all three new tests, and moving the
+entry announcement after execution — both events still firing, in the wrong order — passes the pair
+test and fails the ordering test, which is what earns the ordering test its place. `make lint type
+test` green at 4042 passed, 154 skipped, 0 failed (141 of the skips are the offline sandbox's
+missing Postgres, not this change).
+
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
 **The plan's stated reason for this phase was wrong, and finding that out is most of what M10
