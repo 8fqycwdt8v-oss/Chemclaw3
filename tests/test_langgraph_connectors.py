@@ -173,6 +173,61 @@ def test_an_unreachable_connector_costs_its_tools_and_not_the_turn() -> None:
     assert answer == "answered without it"
 
 
+def test_a_real_turn_reaches_a_real_connector_on_the_graph_engine(
+    probe: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wiring, end to end: `run_turn` on the graph engine calls a live connector's tool.
+
+    Every other test in this file opens the specs itself and hands the tools to
+    `build_langgraph_agent`, which is why they all passed while the path a chemist takes was
+    broken. `run_turn` built its connectors with `connector_tools` — MAF's — on *both* engines and
+    handed those objects to the graph factory, so the first graph turn with any connector enabled
+    died at construction with `ValueError: The first argument must be a string or a callable …
+    Got <class '…transport.DegradingHttpConnector'>`. Nothing caught it because every graph test
+    ran with `connectors=[]`, which is exactly the shape that cannot fail.
+
+    So this drives the runner with its own default connector path: no `connectors=` argument, the
+    factory monkeypatched to this test's live server rather than the deployment's bundles, and the
+    assertion is the connector's own output text arriving in the turn. That output can only exist
+    if the spec was built, the session opened, and the resulting `BaseTool` bound into the graph —
+    the three steps `turn_connectors` + `open_turn_connectors` now join up.
+    """
+    from chemclaw.api import runner
+    from chemclaw.api.events import ToolResultEvent
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "agent_engine", "langgraph")
+    monkeypatch.setattr(runner, "turn_connectors", lambda: [_spec("lg-probe", probe)])
+
+    class _Session:
+        """The two attributes `run_turn` reads off a session on this path."""
+
+        session_id = "s-connector-wiring"
+        state: dict[str, Any] = {}
+
+    def _factory(**kwargs: Any) -> Any:
+        return build_langgraph_agent(
+            ScriptedChatModel([{"name": "echo", "args": {"text": "hi"}}, "done"]),
+            audit_sink=NullAuditSink(),
+            **kwargs,
+        )
+
+    async def _run() -> list[Any]:
+        return [
+            event
+            async for event in runner.run_turn(
+                object(),
+                cast(Any, _Session()),
+                "call echo",
+                graph_factory=_factory,
+            )
+        ]
+
+    events = asyncio.run(_run())
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert any("echoed:hi" in result.preview for result in results), [e.type for e in events]
+
+
 def test_connectors_opened_together_close_cleanly(probe: int) -> None:
     """Several connectors open concurrently and tear down without a cross-task scope error.
 

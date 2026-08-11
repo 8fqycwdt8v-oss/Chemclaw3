@@ -26,7 +26,7 @@ import asyncio
 import importlib
 import logging
 import os.path
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import AsyncExitStack
 from functools import cache
 from pathlib import Path
@@ -571,6 +571,42 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
             lambda m: m.increment("chemclaw_connectors_unreachable_total", len(unreachable))
         )
     return unreachable
+
+
+async def open_turn_connectors(
+    stack: AsyncExitStack, connectors: Sequence[Any]
+) -> tuple[list[Any], list[str]]:
+    """Open one turn's connectors, whichever engine's representation they are.
+
+    The other half of `chemclaw.agent.chemclaw_agent.turn_connectors`, and the reason `run_turn`
+    has one connector path instead of two: the engine chose the representation when the turn's
+    connectors were built, so the only thing left to decide here is which opener that
+    representation needs — and the two openers do not return the same thing. MAF's tools exist
+    before the connection and survive it, so `open_reachable` returns only the casualties; a
+    LangGraph connector has no tools until its session is live, so `open_connector_specs` returns
+    both. Normalising to the pair here is what lets the caller treat them alike.
+
+    Dispatch is on the type rather than on `graph_engine_selected()` deliberately: the engine has
+    already spoken by the time this is called, and asking it a second time would let a caller that
+    built one representation open the other — a mismatch that would surface as an empty toolset
+    rather than as an error.
+
+    **Scaffolding, like its twin.** With the MAF path gone (M13 Step 3) this is
+    `open_connector_specs` and the branch is deleted with the representation it serves.
+
+    Args:
+        stack: The caller's exit stack, which owns tearing the connections down.
+        connectors: This turn's connectors, homogeneous by construction — one factory built them.
+
+    Returns:
+        The tools the turn's model should see, and the names of the connectors that did not
+        come up.
+    """
+    if all(isinstance(connector, ConnectorSpec) for connector in connectors):
+        # Empty lands here and is a no-op on either engine: no session to open, no tool to lose.
+        return await open_connector_specs(stack, connectors)
+    unreachable = await open_reachable(stack, connectors)
+    return list(connectors), unreachable
 
 
 def job_tools() -> list[CapabilityTool]:

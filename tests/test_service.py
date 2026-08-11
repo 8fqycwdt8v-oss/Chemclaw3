@@ -91,9 +91,8 @@ def _app(agent: _FakeAgent | None = None, **kwargs: Any) -> FastAPI:
     `agent_factory` and `graph_factory` are the same fake seen from either side (see
     `tests.fakes_turn.ScriptedTurn`), so one call configures whichever engine is selected and no
     test here has to know which that is. Connectors default to none for the reason
-    `_no_connectors` records, and one more the graph engine adds: the runner hands this list
-    straight to the graph builder, and the production default is the other engine's connector
-    representation.
+    `_no_connectors` records; a test that does want one passes whichever representation the engine
+    in force opens (`tests.test_capability_degradation._dark_connector`).
     """
     fake = agent if agent is not None else _FakeAgent()
     kwargs.setdefault("connector_factory", _no_connectors)

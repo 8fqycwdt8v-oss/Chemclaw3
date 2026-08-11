@@ -417,7 +417,7 @@ arranged to keep that commit small and the suite green at each step.
 
       **Step 0's prerequisite landed on 2026-08-11 (Step 7a below); the flip itself has not.**
       What remains before the switch can move is Step 4's `_resume` (done), the connector
-      representation (Step 3a, new and open) and Step 3 itself.
+      representation (Step 3a, done) and Step 3 itself.
 - [x] **Step 7a — the graph path's injection seam and the 67-test re-point.** The seam is
       `create_app(graph_factory=…)` → `app.state.graph_factory` → `FrontDoor.graph_factory` →
       `run_turn(graph_factory=…)`, deliberately the same shape `agent_factory` and
@@ -436,7 +436,8 @@ arranged to keep that commit small and the suite green at each step.
 
       Thirteen tests carry `maf_engine_only`, each naming the MAF-only subject it pins and where
       the graph engine's equivalent lives: the plan read through `runner.todo_titles` /
-      `_PlanEmitter` (6), the `open_reachable` connector lifecycle (3), MAF's
+      `_PlanEmitter` (6), the `open_reachable` connector lifecycle (3, since reduced to 1 by
+      Step 3a), MAF's
       `function_approval_request` content (1), streamed-argument reassembly and the closing
       `tool_trace.flush()` (1), the MAF tool-call event sequence (1), and the `awaiting-job:` todo
       residue (1). They go with the branch in Step 3, which is what the mark is for. One skip runs
@@ -472,23 +473,61 @@ arranged to keep that commit small and the suite green at each step.
         `FrontDoor.agent_pool`'s only caller with it and leaves `run_turn`'s `agent` parameter with
         no consumer but `_resume`. It should be deleted and `api/routes/turns.py` should pass
         `None`, rather than kept as a context manager that yields a constant.
-- [ ] **Step 3a — the two engines' connector representations are not wired to their engines.**
-      Found while re-pointing the tests (Step 7a), and it is the *fourth* live defect the flip
-      would expose. `run_turn` takes one `connectors` list, opens it with `open_reachable`, and
-      hands it to `graph_factory`. Both of those are MAF's: `open_reachable` enters MAF tool
-      objects as context managers, and `build_langgraph_agent` wants LangChain tools. The graph
-      engine's own path — `chemclaw_agent.connector_specs` + `registry.open_connector_specs`, which
-      returns the tools *because* they do not exist until the session is open — is **called from
-      nowhere in `src/`**. Measured: a graph turn with any real connector dies at graph
-      construction with `ValueError: The first argument must be a string or a callable with a
-      __name__ … Got <class 'chemclaw.connectors.transport.DegradingHttpConnector'>`. Every graph
-      test that passes today does so with `connectors=[]`.
+      - **`cli/chat.py` never reaches `run_turn`, so the engine switch does not reach `make chat`**
+        (found 2026-08-11 while wiring Step 3a; not in the plan anywhere). `_run` builds a MAF
+        agent with `build_agent`, opens `connector_tools()` with `open_reachable`, and takes each
+        turn with a bare `agent.run` inside `converse` — the front door's whole turn lifecycle
+        (budget, degradation event, audit correlation, answer gate) is reimplemented in four lines
+        there and always was. It is not a connector problem and Step 3a deliberately did not touch
+        it: the CLI needs a turn path, and the honest one is to route it through `run_turn` rather
+        than to grow it a second engine branch. Sized here because Step 3 deletes what it calls.
+- [x] **Step 3a — wire each engine's connector representation to its engine.** Found while
+      re-pointing the tests (Step 7a), and it was the *fourth* live defect the flip would expose:
+      `run_turn` took one `connectors` list, opened it with `open_reachable`, and handed it to
+      `graph_factory`. Both of those are MAF's — `open_reachable` enters MAF tool objects as
+      context managers, and `build_langgraph_agent` wants LangChain tools — while the graph
+      engine's own path (`chemclaw_agent.connector_specs` + `registry.open_connector_specs`) was
+      **called from nowhere in `src/`**. Measured before the fix: a graph turn with any real
+      connector died at graph construction with `ValueError: The first argument must be a string or
+      a callable with a __name__ … Got <class
+      'chemclaw.connectors.transport.DegradingHttpConnector'>`. Every graph test that passed did so
+      with `connectors=[]`.
 
-      It is deliberately **not** fixed here, because the fix is a decision rather than a patch: the
-      front door passes `connector_factory(profile)` explicitly, so either that default becomes
-      engine-aware or `run_turn` grows a *third* `graph_engine_selected()` branch — and the
-      "exactly two branch points" invariant above is a claim this step owns. It belongs with the
-      runner's MAF branch, not before it.
+      **The decision: the factory becomes engine-aware; `run_turn` does not grow a branch.**
+      `chemclaw_agent.turn_connectors(profile)` picks the representation (specs on the graph
+      engine, tool objects on MAF) and is the front door's `connector_factory` default;
+      `registry.open_turn_connectors(stack, connectors)` opens whichever it is handed and returns
+      the pair both engines need — the tools the model should see, and the names that did not come
+      up. The runner has one connector path, not two.
+
+      Both halves dispatch where the difference actually is. `turn_connectors` asks the engine
+      because the engine is what decides; `open_turn_connectors` dispatches on the *type* it was
+      handed rather than asking again, so a caller that built one representation cannot open the
+      other — a mismatch that would surface as an empty toolset instead of an error. Each is one
+      line from deleting at Step 3: `turn_connectors` collapses to `connector_specs`,
+      `open_turn_connectors` to `open_connector_specs`, and no caller names either engine.
+
+      **On the "exactly two branch points" invariant this step owns:** `graph_engine_selected` now
+      has three callers, and the invariant is restated rather than broken. Each caller is one
+      *construction* the engine choice determines — the agent, the graph, and the connectors they
+      hold. What the predicate must not decide is anything else about a turn: the budget ledger,
+      the degradation event, the rollback gate, the audit trail and the metrics stay engine-neutral
+      by construction, which is precisely what putting the choice in `turn_connectors` preserved
+      and what a third `if` inside `run_turn` would have given up.
+
+      Verified end to end, not by inspection:
+      `tests/test_langgraph_connectors.py::test_a_real_turn_reaches_a_real_connector_on_the_graph_engine`
+      drives `run_turn` with its own default connector path against a live uvicorn MCP server and
+      asserts the connector's output text (`echoed:hi`) arrives as a `ToolResultEvent`.
+      Mutation-checked: restoring the old `connectors=list(turn_connectors())` argument to the
+      graph factory turns that turn into `['capability_degraded', 'error']`.
+
+      Two of the three `maf_engine_only` connector skips came back as **both**-engine tests with
+      it: `tests/test_capability_degradation.py`'s dark-connector announcement and degrade-not-fail
+      pair now build the dark connector per engine (`_dark_connector`), the graph half pointing at
+      a closed port so the failure is the real open path rather than a stub reporting itself
+      unreachable. The third stays marked — `_SpyMcpTool`'s `entered`/`exited` count is MAF's
+      context-manager protocol, and `HeldConnectorSession` has no counterpart to spy on.
 - [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, durable
       compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
 

@@ -17,14 +17,17 @@ import asyncio
 import json
 from collections.abc import Iterator
 from contextlib import AsyncExitStack
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 import chemclaw.api.runner as runner
-from chemclaw.connectors.registry import open_reachable
+from chemclaw.agent.chemclaw_agent import graph_engine_selected
+from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
+from chemclaw.connectors.registry import _mcp_connection, open_reachable
 from chemclaw.core.metrics import METRICS
-from tests.fakes_turn import maf_engine_only
+from tests.conftest import _free_port
 from tests.test_service import _client, _FakeAgent
 
 
@@ -67,6 +70,26 @@ class _DarkMcpTool:
         return None
 
 
+def _dark_connector(name: str) -> Any:
+    """A connector whose host is down, in whichever representation the engine in force opens.
+
+    The two engines disagree about what a connector *is* before it is open — MAF hands out an
+    object that fails to connect, LangGraph hands out a `ConnectorSpec` whose session never opens —
+    so a test that named one of them could only ever cover one engine. What it must not do is
+    weaken to a shape neither engine uses: the degradation these tests pin is a property of the
+    real open path, and a stub that merely reports itself unreachable would pass over a runner that
+    had stopped opening connectors at all.
+
+    The graph half points at a closed port rather than faking the failure, for that reason. Nothing
+    is listening, `create_session` fails, `HeldConnectorSession` absorbs it, and the name comes back
+    in `unreachable` — the same three steps a dark host in a cluster produces.
+    """
+    if graph_engine_selected():
+        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{_free_port()}/mcp")
+        return _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
+    return _DarkMcpTool(name)
+
+
 def _stream_events(connectors: list[Any]) -> list[dict[str, Any]]:
     """Run one turn through the real front door and collect its SSE events."""
     agent = _FakeAgent()
@@ -83,12 +106,6 @@ def _stream_events(connectors: list[Any]) -> list[dict[str, Any]]:
     return events
 
 
-@maf_engine_only(
-    "a dark MAF connector object travelling through `open_reachable`. The graph engine's "
-    "connector path is `connector_specs` + `open_connector_specs` and nothing in `src/` calls "
-    "either from a turn, so this cannot be re-pointed — see the M13 Step 3a note in "
-    "`tasks/todo.md`"
-)
 def test_a_dark_connector_is_announced_before_the_answer_streams() -> None:
     """The chemist learns the answer is partial while it is still arriving, not afterwards.
 
@@ -96,26 +113,20 @@ def test_a_dark_connector_is_announced_before_the_answer_streams() -> None:
     who has already acted on it. Before the first token, a surface can render the answer as
     provisional from the start.
     """
-    events = _stream_events([_DarkMcpTool("eln")])
+    events = _stream_events([_dark_connector("eln")])
 
     kinds = [e["type"] for e in events]
     assert kinds == ["capability_degraded", "token", "token", "answer"]
     assert events[0]["connectors"] == ["eln"]
 
 
-@maf_engine_only(
-    "a dark MAF connector object travelling through `open_reachable`. The graph engine's "
-    "connector path is `connector_specs` + `open_connector_specs` and nothing in `src/` calls "
-    "either from a turn, so this cannot be re-pointed — see the M13 Step 3a note in "
-    "`tasks/todo.md`"
-)
 def test_the_turn_still_answers_without_its_connectors() -> None:
     """Degrade, do not fail: an unreachable connector costs its tools, never the conversation.
 
     Worth pinning alongside the announcement, because the obvious over-correction for a silent
     failure is to start raising — which would turn one dark connector into a dead front door.
     """
-    events = _stream_events([_DarkMcpTool("eln"), _DarkMcpTool("qm")])
+    events = _stream_events([_dark_connector("eln"), _dark_connector("qm")])
 
     answers = [e for e in events if e["type"] == "answer"]
     assert len(answers) == 1

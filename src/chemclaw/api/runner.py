@@ -30,7 +30,7 @@ from typing import Any
 from agent_framework import AgentSession
 
 from chemclaw.agent.checkpointer import checkpointer
-from chemclaw.agent.chemclaw_agent import connector_tools, graph_engine_selected
+from chemclaw.agent.chemclaw_agent import graph_engine_selected, turn_connectors
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.harness_todo import apply_deferred_completions, todo_titles
 from chemclaw.agent.job_results import await_job_results
@@ -61,7 +61,7 @@ from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace, approval_prompt
 from chemclaw.api.runner_usage import TurnUsage, usage_tokens
 from chemclaw.api.tool_results import session_sink
-from chemclaw.connectors.registry import open_reachable
+from chemclaw.connectors.registry import open_turn_connectors
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
@@ -151,11 +151,11 @@ async def run_turn(
         roles: The user's app roles, made ambient for the authorization gate.
         dry_run: Plan the turn without launching anything expensive (IDEA-4). Ambient for the
             turn rather than a tool argument, so the model can neither set it nor clear it.
-        connectors: This turn's connector tools. Defaults to every enabled connector
-            (`chemclaw.agent.chemclaw_agent.connector_tools`); a caller that selected an agent
-            profile
-            passes that profile's narrowed set, and a test passes an empty list to run with
-            none.
+        connectors: This turn's connectors, in whichever representation the configured engine
+            opens — MCP tool objects on MAF, `ConnectorSpec`s on the graph engine. Defaults to
+            every enabled connector (`chemclaw.agent.chemclaw_agent.turn_connectors`, which makes
+            that choice); a caller that selected an agent profile passes that profile's narrowed
+            set, and a test passes an empty list to run with none.
         budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
             count are booked against the session/user when the turn ends (the front-door
             admission check reads those counters before the *next* turn). `None` disables
@@ -315,15 +315,24 @@ async def run_turn(
             )
             # This turn's own connector tools, connected for its duration and torn down after.
             # Built per turn rather than held on the agent because a connector's connection must
-            # belong to exactly one turn — see `agents.chemclaw_agent.connector_tools`. They are
-            # passed to `agent.run`, which appends run-scoped tools to the agent's configured
-            # ones, so the model sees one combined surface. An unreachable connector costs its
-            # tools, not the turn.
-            turn_connectors = connectors if connectors is not None else connector_tools()
+            # belong to exactly one turn — see `agents.chemclaw_agent.connector_tools`. Whichever
+            # engine runs, the model ends up seeing one combined surface: MAF appends these to the
+            # agent's configured tools at `agent.run`, the graph binds them at construction. An
+            # unreachable connector costs its tools, not the turn.
+            #
             # Surfaced before the first token rather than discarded (REV-6): the model cannot tell
             # the chemist that a tool was missing, because it never saw one missing — it answers
             # from the surface it was handed. Only this layer knows the surface was short.
-            unreachable = await open_reachable(stack, turn_connectors)
+            #
+            # One call for both engines, because the engine's choice was already made when these
+            # connectors were built (`chemclaw.agent.chemclaw_agent.turn_connectors`). What comes
+            # back is the pair every turn needs regardless: the tools the model should see, and the
+            # connectors that did not come up. On MAF the tools *are* the objects passed in; on the
+            # graph engine they do not exist until the sessions are live, which is the whole reason
+            # this returns them rather than leaving the caller to reuse its input.
+            turn_tools, unreachable = await open_turn_connectors(
+                stack, connectors if connectors is not None else turn_connectors()
+            )
             # The durable subsystem is announced the same way and for the same reason. It was not,
             # and connectors were: Temporal was never probed, so a turn whose every durable
             # launcher was going to fail planned exactly like a turn that could run one. Measured
@@ -350,7 +359,7 @@ async def run_turn(
                     profile=profile,
                     actor=actor or "",
                     correlation_id=correlation_id,
-                    connectors=list(turn_connectors),
+                    connectors=turn_tools,
                     checkpointer=await _turn_checkpointer(),
                 )
                 if graph_engine_selected()
@@ -380,7 +389,7 @@ async def run_turn(
                     yield event
             else:
                 stream = agent.run(
-                    user_message, stream=True, session=session, tools=turn_connectors or None
+                    user_message, stream=True, session=session, tools=turn_tools or None
                 )
                 async for update in stream:
                     turn_usage.add(usage_tokens(update))
@@ -452,9 +461,7 @@ async def run_turn(
                             usage=turn_usage,
                         )
                         if graph is not None
-                        else _resume(
-                            agent, session, results, turn_connectors, tool_trace, turn_usage
-                        )
+                        else _resume(agent, session, results, turn_tools, tool_trace, turn_usage)
                     )
                     async for event in continuation:
                         if isinstance(event, TokenEvent):
