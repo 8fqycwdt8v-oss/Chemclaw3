@@ -75,6 +75,16 @@ class PlanNotApprovedError(AuthorizationError):
     """
 
 
+# The identity of "no plan". A constant rather than a fact about any session, which is precisely
+# why `plan_identity` refuses to return it: a decision recorded against it would say "someone
+# approved the empty plan", and every session proposes that whenever it holds no todos. Exported
+# for the display route, which has to show *an* identity even when there is nothing to decide on.
+#
+# It lived in `harness_mode` while the mode did. It belongs beside the function that computes plan
+# identities, because the two are one rule read from either end.
+EMPTY_PLAN_HASH = stable_hash([])
+
+
 def plan_identity(items: Sequence[str]) -> str | None:
     """The hash a human decision is recorded against, or `None` when there is no plan.
 

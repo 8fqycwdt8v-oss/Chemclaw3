@@ -170,7 +170,7 @@ def build_langgraph_agent(
             *_harness_middleware(prof),
             _skills_middleware(backend),
             *_team_middleware(prof, actor, correlation_id, audit_sink, connectors),
-            *_middleware(audit, prof),
+            *tool_call_middleware(audit, prof),
         ],
         name="chemclaw",
         checkpointer=checkpointer,
@@ -374,36 +374,52 @@ def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
     return labelled
 
 
-def _middleware(audit: Any, profile: AgentProfile) -> list[Any]:
-    """The tool-call chain, outermost first — the MAF agent's order, ported not redesigned.
+def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
+    """What governs a tool call, outermost first — the MAF agent's order, ported not redesigned.
 
     The order is load-bearing and every position was argued for once already, so it is reproduced
     rather than re-derived:
 
-    - the two converters outermost, so an exception still reaches audit *unchanged* and is recorded
-      as an `error` outcome before either turns it into what the model reads;
-    - audit next, so a denied or refused attempt is a recorded attempt;
+    - audit outermost, so a denied or refused attempt is a recorded attempt;
     - authorization inside audit, then the dry-run and repeat gates beside it, for the same reason:
-      each is a decision worth recording and worth explaining to the model;
+      each is a decision worth recording;
     - `announce_tool_failures` innermost, closest to the tool body, because it is the only one that
-      must see the raw exception from *every* failure — including the two the converters above turn
-      into results — so the chemist's transcript shows the step that did not work (D-138).
+      must see the raw exception from *every* failure — including the ones the converters above
+      this list turn into results — so the chemist's transcript shows the step that did not work
+      (D-138).
 
-    LangChain nests `wrap_tool_call` middleware in list order, so first here is outermost, exactly
-    as MAF's list is read. All six are no-ops on the dev path: the sink is log-only, authz is open
-    until `entra_required`, `is_dry_run()` is False off the request path, and the repeat counter is
+    All of them are no-ops on the dev path: the sink is log-only, authz is open until
+    `entra_required`, `is_dry_run()` is False off the request path, and the repeat counter is
     absent unless a turn started one.
 
-    The plan-approval gate is the seventh, inserted by `_middleware` before
-    `lg_announce_tool_failures` to keep that one innermost.
+    **Separate from the two model-facing converters, and the split is a decision.** They used to be
+    one list, because the only caller was a chat turn and every tool call there is answered *to a
+    model*. `agent/tool_invocation.py` is the caller that made the difference visible: a template
+    step has no model, and handing it a refusal converted into prose is actively wrong — the
+    refusal became the step's `${steps.<id>.result}`, so a `job` step launched the workflow it had
+    just been denied, and a `tool` step interpolated "you are not authorized" into a later step as
+    though it were an answer. Governance must raise for a caller that has no model to read it.
     """
     return [
-        lg_surface_authorization_denials,
-        lg_surface_domain_errors,
         audit,
         lg_enforce_tool_authz,
         lg_refuse_writes_on_dry_run,
         lg_refuse_repeated_calls,
         *([lg_enforce_plan_approval] if gate_applies(profile) else []),
         lg_announce_tool_failures,
+    ]
+
+
+def tool_call_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
+    """The governed chain plus the two converters that answer a *model*.
+
+    The converters go outermost, so an exception still reaches audit unchanged and is recorded as
+    an `error` outcome before either turns it into what the model reads. LangChain nests
+    `wrap_tool_call` middleware in list order, so first here is outermost, exactly as MAF's list
+    was read.
+    """
+    return [
+        lg_surface_authorization_denials,
+        lg_surface_domain_errors,
+        *tool_governance_middleware(audit, profile),
     ]

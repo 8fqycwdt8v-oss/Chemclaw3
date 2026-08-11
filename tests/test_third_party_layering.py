@@ -195,12 +195,16 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.durable", "temporal"): "layer 2 IS Temporal",
     ("chemclaw.durable", "postgres"): "job records and the retention sweep own their tables",
     ("chemclaw.durable", "maf"): (
-        "the two places layer 2 must speak layer 1's own types: `template_activities` runs a tool "
-        "or a model turn as a template step and has to build MAF's invocation context to do it, "
-        "and `retention` deserialises stored session rows with `Message.from_dict` so it can reuse "
+        "`retention` deserialises stored session rows with `Message.from_dict` so it can reuse "
         "`agent.message_pairing.droppable_rows` rather than re-derive which rows may be dropped. "
-        "Both are consequences of the `durable → agent` edge test_layering.py already declares; "
-        "an agent message *is* a MAF object, so that edge cannot be taken without this one"
+        "A consequence of the `durable → agent` edge test_layering.py already declares; a stored "
+        "message *is* a MAF object, so that edge cannot be taken without this one"
+    ),
+    ("chemclaw.durable", "langgraph"): (
+        "`template_activities` runs a tool or a model turn as a template step, so it builds the "
+        "same tool object a chat turn's surface holds and drives the same graph — which is the "
+        "point: a template's calls are governed identically to a conversation's (D-168), and that "
+        "is only true while both name the same types"
     ),
     # connectors: the capability seam (D-110/D-118). MCP is the protocol, not the capability.
     ("chemclaw.connectors", "temporal"): "a bundle owns its own workflows, activities and worker",

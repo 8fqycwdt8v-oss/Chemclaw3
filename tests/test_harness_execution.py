@@ -30,12 +30,15 @@ from agent_framework import (
 from agent_framework._middleware import ChatMiddlewareLayer
 from agent_framework._tools import FunctionInvocationLayer
 
+from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.chemclaw_agent import build_agent
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
 from chemclaw.cli import chat as cli
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
+from tests.fakes_langgraph import ScriptedChatModel
 
 # One scripted turn: given the messages sent to the model, return its next reply.
 _ScriptedTurn = Callable[[list[Message]], ChatResponse]
@@ -336,22 +339,25 @@ def test_the_cli_takes_a_turn_under_the_shipped_harness_configuration(
 ) -> None:
     """`cli.converse` completes a turn with `harness_enabled` on — the chart's configuration.
 
-    The gap this closes is a composition, not a component (D-152, LIVE-8). Every other test in this
-    file builds its own session and passes it to `agent.run`; the CLI did not, relying on the
-    agent's implicit thread, and MAF's `ToolApprovalMiddleware` refuses a session-less run under the
-    harness. So the harness was covered, the CLI was covered, and the only untested thing was the
-    pair — which is precisely what the Helm chart deploys. It surfaced on the first live run as
-    `RuntimeError: ToolApprovalMiddleware requires an AgentSession`, before the model was reached.
+    The gap this closed is a composition, not a component (D-152, LIVE-8): the harness was covered,
+    the CLI was covered, and the pair — which is precisely what the Helm chart deploys — was not.
+    It surfaced on the first live run as `RuntimeError: ToolApprovalMiddleware requires an
+    AgentSession`, before the model was reached.
 
-    Offline on purpose: the scripted client makes the *on* state of a flag testable without a
+    **The mechanism is gone and the composition is still worth a test.** That failure was MAF's
+    harness refusing a session-less run; a graph turn takes a `thread_id` string, so there is
+    nothing to be absent. What remains true is the reason the gap existed at all — the CLI and the
+    harness flag are exercised separately everywhere else — so this keeps driving both together,
+    against the configuration the chart actually sets.
+
+    Offline on purpose: a scripted model makes the *on* state of a flag testable without a
     credential, which is the rule this whole class of defect keeps re-teaching.
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
-    client = ScriptedChatClient([_text("aspirin's pKa is about 3.5")])
-    agent = build_agent(chat_client=client)
+    model = ScriptedChatModel(["aspirin's pKa is about 3.5"])
+    agent = build_langgraph_agent(model=model, audit_sink=NullAuditSink())
 
-    answer = asyncio.run(cli.converse(agent, "what is aspirin's pKa?", (), agent.create_session()))
+    answer = asyncio.run(cli.converse(agent, "what is aspirin's pKa?"))
 
     assert "3.5" in answer
-    assert len(client.calls) == 1

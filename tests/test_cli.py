@@ -6,15 +6,14 @@ resolution, single-turn text extraction), not model behavior.
 """
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
-from agent_framework import DEFAULT_TODO_SOURCE_ID, AgentSession, TodoItem, TodoSessionStore
 
 from chemclaw.agent import plan_approval_store as store_module
-from chemclaw.agent.harness_mode import EMPTY_PLAN_HASH, current_plan_hash
-from chemclaw.agent.harness_todo import mark_awaiting_job, todo_titles
+from chemclaw.agent import plan_state
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
+from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
 from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
 
@@ -89,49 +88,51 @@ def test_message_flag_parses_single_shot() -> None:
     assert args.audit_postgres is True
 
 
-def test_converse_returns_the_agent_text() -> None:
-    """One turn returns the agent response's text (run path, no LLM)."""
+def test_converse_returns_the_final_assistant_text() -> None:
+    """One turn returns the last message's text (graph path, no LLM).
 
-    class _Response:
-        text = "  55% yield  "
+    The answer is the *last* message rather than a single `response.text`, because a graph returns
+    its whole message list — so a turn that called tools ends with the model's reply after them,
+    and reading anything but the tail would surface a tool result as the answer.
+    """
+
+    class _Message:
+        content = "  55% yield  "
 
     class _Agent:
-        mcp_tools: list[object] = []
-
-        async def run(self, prompt: str, **_run_options: object) -> _Response:
-            assert prompt == "hi"
-            return _Response()
+        async def ainvoke(self, state: dict[str, object], _config: object) -> dict[str, object]:
+            assert state["messages"] == [("user", "hi")]
+            return {"messages": [_Message()]}
 
     assert asyncio.run(cli.converse(_Agent(), "hi")).strip() == "55% yield"
 
 
-def test_a_turn_runs_on_a_session_because_the_harness_requires_one() -> None:
-    """`converse` passes its session to `agent.run` (D-152).
+def test_successive_turns_continue_one_thread() -> None:
+    """`converse` invokes under a stable `thread_id`, which is what makes the CLI multi-turn.
 
-    Not cosmetic: under `harness_enabled` — which the shipped Helm chart sets — MAF's
-    `ToolApprovalMiddleware` raises `requires an AgentSession` on a session-less `agent.run`, so
-    the CLI could not take a single turn under the production configuration. The front door always
-    passed a session and never met it. Fails on the unfixed code, where `session` never reached
-    `run`.
+    The checkpointer keys a conversation on that id, so passing a different one per turn would
+    give a terminal session amnesia between questions while every individual turn still worked.
+
+    Its ancestor asserted that `converse` passed a `session=` to `agent.run`, because under
+    `harness_enabled` MAF's `ToolApprovalMiddleware` raised "requires an AgentSession" on a
+    session-less run and the CLI could not take a single turn under the shipped Helm configuration
+    (D-152). A thread id is a string in a config dict; there is nothing to be absent, so what is
+    left worth pinning is that it does not *change*.
     """
-
-    class _Response:
-        text = "ok"
+    seen: list[object] = []
 
     class _Agent:
-        mcp_tools: list[object] = []
+        async def ainvoke(self, _state: object, config: dict[str, object]) -> dict[str, object]:
+            seen.append(config["configurable"]["thread_id"])  # type: ignore[index]
+            return {"messages": [_Message()]}
 
-        def __init__(self) -> None:
-            self.seen: object = "never called"
-
-        async def run(self, prompt: str, **run_options: object) -> _Response:
-            self.seen = run_options.get("session")
-            return _Response()
+    class _Message:
+        content = "ok"
 
     agent = _Agent()
-    sentinel = object()
-    asyncio.run(cli.converse(agent, "hi", (), sentinel))
-    assert agent.seen is sentinel
+    asyncio.run(cli.converse(agent, "first"))
+    asyncio.run(cli.converse(agent, "second"))
+    assert seen == [cli._CLI_SESSION_ID, cli._CLI_SESSION_ID]
 
 
 # --- `/approve` decides on a plan, or refuses — the same question the HTTP route asks -----------
@@ -154,54 +155,66 @@ def cli_approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanAppro
     factory.cache_clear()
 
 
-async def _set_plan(session: AgentSession, titles: list[str]) -> None:
-    """Write `titles` as the session's plan, the way the model's own todo tool does."""
-    items = [TodoItem(id=index + 1, title=title) for index, title in enumerate(titles)]
-    await TodoSessionStore().save_state(
-        session, items, next_id=len(items) + 1, source_id=DEFAULT_TODO_SOURCE_ID
-    )
+@pytest.fixture
+def cli_plan(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[str]], None]:
+    """Set what the CLI's session is proposing, at the seam `_plan_command` reads it through.
 
-
-def test_approve_refuses_a_session_whose_todos_are_only_bookkeeping(
-    cli_approvals: InMemoryPlanApprovalStore,
-) -> None:
-    """`/approve` must decide on a *plan*, not on the launcher's `awaiting-job:` rows.
-
-    The guard used to be `todo_titles`, which is the *display* list and counts those rows, while
-    the hash recorded was `current_plan_hash`, which strips them and falls back to the global
-    `EMPTY_PLAN_HASH`. Two different questions, so a session holding nothing but bookkeeping passed
-    the guard and recorded an approval against a constant every session in every deployment shares.
-    The gate refuses that identity, so nothing unsafe followed — but the terminal answered
-    "approved …; the session may now execute" when nothing had been approved and the session could
-    not execute, which is the one thing an approval prompt must never say.
+    The plan lives in the checkpointer now, and reading it is `agent/plan_state.session_todos`'s
+    job — tested against a real one in `tests/test_plan_state.py`. What these tests are about is
+    what `/plan` and `/approve` *decide* given a plan, so the read is the input, not the subject.
     """
 
+    def _set(titles: list[str]) -> None:
+        async def _todos(session_id: str, **_kwargs: object) -> list[str]:
+            return list(titles)
+
+        monkeypatch.setattr(plan_state, "session_todos", _todos)
+
+    return _set
+
+
+def test_approve_refuses_a_session_with_no_plan(
+    cli_approvals: InMemoryPlanApprovalStore, cli_plan: Callable[[list[str]], None]
+) -> None:
+    """`/approve` must decide on a *plan*, and an empty todo list is not one.
+
+    The empty list hashes to `EMPTY_PLAN_HASH`, a constant every session in every deployment
+    proposes whenever it holds no todos — so a decision recorded against it means nothing, and the
+    gate refuses that identity anyway. Nothing unsafe followed when this was missing, but the
+    terminal answered "approved …; the session may now execute" when nothing had been approved and
+    the session could not execute, which is the one thing an approval prompt must never say.
+
+    Its ancestor made the same point about a session holding *only* the launcher's `awaiting-job:`
+    bookkeeping rows, which the display counted and the hash stripped — two questions, one guard.
+    That distinction is structural now rather than a parse: waiting jobs are a separate state field
+    (`agent/state.ChemclawState.awaiting_jobs`), so they are not in `todos` and such a session is
+    simply this one.
+    """
+    cli_plan([])
+
     async def _run() -> tuple[str, tuple[bool, str] | None]:
-        session = AgentSession(session_id="cli-bookkeeping")
-        await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
-        assert await todo_titles(session), "the precondition is that the display is non-empty"
-        reply = await cli._plan_command("/approve", session, settings.cli_admin_actor)
-        return reply, await cli_approvals.decision(session.session_id, EMPTY_PLAN_HASH)
+        reply = await cli._plan_command("/approve", settings.cli_admin_actor)
+        return reply, await cli_approvals.decision(cli._CLI_SESSION_ID, EMPTY_PLAN_HASH)
 
     reply, recorded = asyncio.run(_run())
-    assert "no plan to approve" in reply, (
-        f"a bookkeeping-only session was told it approved: {reply}"
-    )
+    assert "no plan to approve" in reply, f"a planless session was told it approved: {reply}"
     assert recorded is None, "an approval was recorded against the empty-plan constant"
 
 
-def test_approve_records_and_arms_a_real_plan(cli_approvals: InMemoryPlanApprovalStore) -> None:
+def test_approve_records_and_arms_a_real_plan(
+    cli_approvals: InMemoryPlanApprovalStore, cli_plan: Callable[[list[str]], None]
+) -> None:
     """The counterweight: a session proposing real work items is approvable and says so.
 
     A refusal that refused everything would be a broken command rather than a fixed one.
     """
+    titles = ["screen the species", "compute the barrier"]
+    cli_plan(titles)
 
     async def _run() -> tuple[str, str, tuple[bool, str] | None]:
-        session = AgentSession(session_id="cli-real-plan")
-        await _set_plan(session, ["screen the species", "compute the barrier"])
-        reply = await cli._plan_command("/approve", session, "alice@lab")
-        plan_hash = await current_plan_hash(session)
-        return reply, plan_hash, await cli_approvals.decision(session.session_id, plan_hash)
+        reply = await cli._plan_command("/approve", "alice@lab")
+        plan_hash = plan_identity(titles) or EMPTY_PLAN_HASH
+        return reply, plan_hash, await cli_approvals.decision(cli._CLI_SESSION_ID, plan_hash)
 
     reply, plan_hash, recorded = asyncio.run(_run())
     assert plan_hash != EMPTY_PLAN_HASH, "the precondition is a plan with real work items"
@@ -214,22 +227,18 @@ def test_approve_records_and_arms_a_real_plan(cli_approvals: InMemoryPlanApprova
 
 
 def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
-    cli_approvals: InMemoryPlanApprovalStore,
+    cli_approvals: InMemoryPlanApprovalStore, cli_plan: Callable[[list[str]], None]
 ) -> None:
-    """`/plan` displays what the chemist sees, and reports the identity only when there is one.
+    """`/plan` reports an identity only when there is one to report.
 
     Printing `EMPTY_PLAN_HASH` beside a verdict invited exactly the confusion `/approve` acted on:
-    it looks like a plan identity, and it is a global constant. The todo lines are still shown in
-    full — the bookkeeping rows are what the session is genuinely doing — because emptiness
-    invalidates *deciding*, not displaying.
+    it looks like a plan identity, and it is a global constant.
     """
+    cli_plan([])
 
     async def _run() -> str:
-        session = AgentSession(session_id="cli-display")
-        await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
-        return await cli._plan_command("/plan", session, settings.cli_admin_actor)
+        return await cli._plan_command("/plan", settings.cli_admin_actor)
 
     reply = asyncio.run(_run())
-    assert "waiting on the DFT run" in reply, f"the display lost the session's todos: {reply}"
     assert "no approvable plan" in reply, f"the empty constant was shown as a plan: {reply}"
     assert EMPTY_PLAN_HASH not in reply
