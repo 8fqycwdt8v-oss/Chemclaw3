@@ -25,26 +25,81 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       arm would answer whether the supervisor ever routes; it would not change the cost arithmetic,
       which is a property of the prompt rather than the model.
 
-- [ ] **Per-model token attribution is gone from the metrics surface *and* from the ledger** —
-      [M], raised from [S] on 2026-08-11 after the claim below it was checked against the database.
-      The framework's chat-client instrumentation emitted `gen_ai.client.token.usage` labelled by
-      request model, response model, provider and token type; the LangChain stack ships no
-      equivalent (measured — `docs/guides/runbook.md` §(viii)).
+- [x] **Per-model token attribution is gone from the metrics surface and only the ledger has it** —
+      [S]. **Closed 2026-08-11** by `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`,
+      and not in the pipeline the row assumed. The framework's `gen_ai.client.token.usage` histogram
+      was a *metric*, and nothing in the LangChain stack emits one; what replaced it is a **span**
+      per model call carrying `llm.token_count.prompt`/`.completion`/`.total`, `llm.model_name` and
+      `llm.provider`, through OpenInference's LangChain instrumentation over the OTLP exporter that
+      already existed (`CHEMCLAW_OTEL_LLM_SPANS`, on in the chart). So "which model, how many
+      tokens" is a trace query and `/metrics` is unchanged — `chemclaw_*_tokens_total` still carries
+      `profile` and not `model`, which is D-152's decision and stays right.
 
-      **This row used to say "`turn_costs` still carries model attribution per turn … so nothing is
-      *lost* that a query cannot answer". That is false.** `turn_costs` has eleven columns —
-      `correlation_id, session_id, actor, profile, input_tokens, output_tokens, cache_read_tokens,
-      cache_write_tokens, duration_seconds, completed, recorded_at` — and no `model` among them;
-      nothing in `agent/turn_cost.py` or `agent/turn_cost_store.py` writes one. So the consolation
-      the severity rested on does not exist, and a per-model question cannot be answered from the
-      database either. Found while reading the ledger for M12's cost column, which is the only
-      reason anyone looked.
+      **One clause of the above is wrong and was corrected on merge**: it closed by saying
+      `turn_costs` "already holds per-turn model attribution, and a third answer would be a third
+      thing to reconcile". It does not. Checked against the live database on 2026-08-11 — the table
+      has eleven columns (`correlation_id, session_id, actor, profile, input_tokens, output_tokens,
+      cache_read_tokens, cache_write_tokens, duration_seconds, completed, recorded_at`) and no
+      `model` among them, and nothing in `agent/turn_cost.py` or `agent/turn_cost_store.py` writes
+      one. The closure itself stands — the spans are real and carry `llm.model_name` beside their
+      token counts — but there are *two* answers, not three, and the ledger is not one of them.
+      That is the row below.
 
-      This also makes the M12 routing comparison model-blind: both arms were priced from
-      `turn_costs`, and the ledger cannot say which model produced a row — the arms are only
-      comparable because the front door was pinned to one model for each run, by hand.
-      **Trigger**: adding the column is cheap and is the fix; do it the next time a migration is
-      written, rather than answering a per-model question with a guess.
+- [ ] **`turn_costs` cannot say which model a turn spent its tokens on** — [S]. The table books one
+      row per turn with `profile` but no `model`, so cost per model is answerable from traces (see
+      above) and not from the ledger — which matters because the ledger is what survives a trace
+      retention window, and D-2026-08-01-spend-is-a-ledger-not-a-label put spend there deliberately.
+      It already bounded a real measurement: M12's two routing arms were both priced from this
+      table, and they are comparable only because the front door was pinned to one model per run
+      **by hand**. A mixed-model run would have produced a number with nothing in the data to catch
+      it.
+      **Trigger**: the next migration to touch this schema — the column is one `ALTER TABLE` and
+      one field on the write path, and doing it opportunistically beats a migration of its own.
+
+## Open — Left by the deep-agents audit (2026-08-11, D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape)
+
+- [x] **The LLM call itself is invisible between `chemclaw.turn` and `chemclaw.tool`** — [S].
+      **Closed 2026-08-11** by the same change. Measured on a tool-calling turn: 8 spans — `AGENT`
+      ×1, `LLM` ×2 (one per model call, with their own token counts), `CHAIN` ×4, `TOOL` ×1 — so a
+      slow turn resolves past "the model, presumably". The OpenInference `TOOL` span nests with
+      `core/tracing.py`'s `chemclaw.tool` rather than replacing it; ours is the audited one and the
+      one that exists when the flag is off.
+
+- [ ] **AG-13 has no experiment surface, and the eval lane is where one could live** — [M].
+      Blocked since D-057 on "needs an external benchmark + a live LLM to score it", and it in turn
+      blocks the plan-vs-single-shot A/B row below. `evals/live.py` already drives the real front
+      door and writes each probe's whole event stream to disk, and `evals/live_judge.py` already
+      runs a stronger model as judge; what is missing is dataset versioning, run-over-run diffing
+      and annotation — the things `data/evals/baseline.json` plus a Markdown report approximate.
+      **Scope, and it is the whole point of the row**: the eval lane only. Non-production, a dev
+      credential, and probe questions that are already committed to this repo — which is where the
+      content-egress objection is weakest, and the reason this is not a production-tracing question.
+      Do not re-open it as one: the ADR lists the four written constraints that decided that.
+      **Evaluate the self-hostable tools first**, because LangSmith cannot be self-hosted without an
+      enterprise contract. Both candidates are legally fine to run internally and they gate
+      different things, which is what should decide it rather than the licence label:
+      **Arize Phoenix** — Elastic License 2.0, source-available but *not* OSI-approved; its three
+      limitations are no-hosted-service-to-third-parties, no circumventing the licence key, no
+      removing notices, so internal use and modification are squarely permitted and **nothing is
+      feature-gated**. One container plus Postgres, which this cluster already runs; OTLP-first and
+      the reference implementation of the OpenInference conventions; OAuth2/OIDC with an Entra ID
+      config URL.
+      **Langfuse** — MIT core, so the licence has no asterisk, but audit logs, data-retention
+      management, server-side masking, project-level RBAC and SCIM sit behind a commercial key.
+      That gated set *is* the compliance surface a GxP deployment wants, so "MIT" describes the
+      licence rather than the deliverable. SSO and org-level RBAC are in the core. Four stateful
+      services (Postgres + ClickHouse + Redis + S3) against this cluster's current Postgres +
+      Temporal.
+      **Check the OSPO policy first**: a blanket ban on non-OSI licences ends the comparison before
+      any of the above matters, and that is a policy question rather than a legal one — though it is
+      a narrower question than it looked. `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`
+      picked Phoenix and found its *client* half (`openinference-instrumentation-langchain` and its
+      closure) is **Apache-2.0**; only the server image is ELv2, so nothing ELv2 is vendored and the
+      policy question is about a container an operator runs. That ADR ships the instrumentation and
+      the spans; what is still open here is the **backend** — someone running Phoenix against the
+      probe transcripts so there are datasets, experiments and annotation.
+      **Exit criterion**: whether it closes AG-13's stated blocker — not whether the UI is nice.
+      **Trigger**: a live model credential plus somebody who wants the A/B answered.
 
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 

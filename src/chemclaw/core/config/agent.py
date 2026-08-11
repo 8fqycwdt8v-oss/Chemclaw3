@@ -65,14 +65,27 @@ class AgentSettings(BaseSettings):
     # default = every skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # Conversation context management. The agent keeps a session thread and
+    # Conversation context management (`agent/compaction.py`). The agent keeps a session thread and
     # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
     # long chat would grow unbounded. Compaction runs only when the included context exceeds
     # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
-    # then reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace
+    # then reclaims tokens cheapest-first: replace stale tool results with a short placeholder
     # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
-    # turns beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
-    # kept. No LLM summarizer — deterministic and credential-free.
+    # groups beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
+    # kept — they are not in the message list at all. No LLM summarizer — deterministic and
+    # credential-free, which is also what keeps a summarizer from becoming an injection surface
+    # over retrieved evidence (D-025).
+    #
+    # **These three had no reader at all between M13 and the ADR that restored them**, because the
+    # policy lived in the framework the rebuild removed while the settings, this comment and a
+    # sentence in the system prompt stayed behind describing it.
+    # `chemclaw_context_compactions_total` is what a deployment now checks instead of re-reading
+    # this paragraph.
+    #
+    # `agent_keep_last_tool_groups` counts the newest *tool results* kept verbatim, not tool-call
+    # groups: the strategy behind it is upstream's `ClearToolUsesEdit` and that is what it counts.
+    # The name is D-025's and stays, because it is ENV-visible and renaming it would cost every
+    # deployment that sets it to buy a more accurate word.
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)

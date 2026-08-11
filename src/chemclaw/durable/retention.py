@@ -38,6 +38,20 @@ a records story with no disposal story is incomplete.
   that the highest-volume table in this set is unbounded until an operator says otherwise, and
   `infra/sql/README.md` says so rather than implying a bound that does not exist.
 
+- `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` — the LangGraph turn state (D-2026-08-10
+  §3). They belong on this list for the same reason everything above does and were missing for a
+  reason worth stating: they are created by `AsyncPostgresSaver.setup()` rather than by a migration
+  in `infra/sql`, so they appear in no schema review and in no inventory. Erasure already reached
+  them per actor (`agent/leaver.py`); disposal did not, so a deployment that erased nobody kept
+  every turn's state for its whole life.
+
+  Pruned by **thread**, not by row. A checkpoint chains to the one before it through
+  `parent_checkpoint_id`, so deleting the old rows inside a live thread would leave the survivors
+  pointing at nothing; a thread expires whole, when its newest checkpoint does. All three tables go
+  in one transaction, against the per-table rule below, because they are one thread's state split
+  across three keys with no foreign key to enforce it — `_prune_checkpoints` says what committing
+  them separately would cost.
+
 - `audit_events` is **refused**, by design, not by omission. The table is hash-chained
   (`infra/sql/011`), so deleting its oldest rows leaves the surviving head pointing at a `prev_hash`
   that no longer exists — indistinguishable from tampering, which is precisely what the chain is
@@ -72,9 +86,10 @@ with workflow.unsafe.imports_passed_through():
     from psycopg import AsyncConnection
     from psycopg.rows import TupleRow
 
+    from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
     from chemclaw.agent.message_pairing import droppable_rows, stored_call_ids, unreadable_rows
     from chemclaw.core.config import settings
-    from chemclaw.core.db import connection
+    from chemclaw.core.db import connection, existing_tables
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -97,11 +112,32 @@ logger = logging.getLogger(__name__)
 # trace blob and every trace blob past its window may go. Its link rows are not listed separately
 # and must not be — they cascade from the blob (042), so listing them would be a second, racing
 # definition of the same disposal.
+#
+# `checkpoints` is in the register and, like `session_messages`, is not pruned by the plain cutoff
+# the pair describes — `_prune_checkpoints` handles it and the pair records only that the table is
+# in scope and what dates a row. It has no timestamp column at all: the checkpoint payload carries
+# its own `ts`, which is what the expression names.
 _PRUNABLE: dict[str, tuple[str, str]] = {
     "session_events": ("created_at", "consumed_at IS NOT NULL"),
     "session_messages": ("created_at", "TRUE"),
     "tool_result_blobs": ("created_at", "TRUE"),
+    "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
 }
+
+# The expired threads, newest-checkpoint-first by age. Grouped rather than filtered row by row
+# because the unit of disposal is a thread: `parent_checkpoint_id` chains a thread's checkpoints,
+# so removing the old ones from a thread still in use would leave the survivors pointing at rows
+# that are gone. `HAVING max(...)` is what makes "this conversation is finished with" the question
+# being asked, rather than "this checkpoint is old".
+#
+# `LIMIT` for the reason `_EXPIRED_SESSIONS` has one: a first pass against a deployment that has
+# never pruned faces every thread it has ever had under a 30 s `statement_timeout`, and a pass that
+# times out is retried, times out again and deletes nothing.
+_EXPIRED_THREADS = (
+    "SELECT thread_id FROM checkpoints GROUP BY thread_id "
+    "HAVING max((checkpoint->>'ts')::timestamptz) < now() - make_interval(days => %s) "
+    "ORDER BY thread_id LIMIT %s"
+)
 
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
 # expired row are visited, so a deployment whose sessions are all recent pays one indexed scan.
@@ -145,6 +181,7 @@ def _window_days(table: str) -> int:
         "session_events": settings.retention_session_events_days,
         "session_messages": settings.retention_session_messages_days,
         "tool_result_blobs": settings.retention_tool_results_days,
+        "checkpoints": settings.retention_checkpoints_days,
     }[table]
 
 
@@ -154,7 +191,9 @@ async def prune_expired_rows() -> RetentionOutcome:
     """Delete rows past their table's retention window; return the per-table counts.
 
     Each table is pruned **and committed** in its own statement, so one failure cannot roll back
-    the others. That was the docstring's claim before it was true: there was a single `commit()`
+    the others — with one deliberate exception, the three checkpoint tables, which are one thread's
+    state and go together (`_prune_checkpoints` says why). That was the docstring's claim before it
+    was true: there was a single `commit()`
     after the loop, so a timeout on the second table discarded the first table's deletions and the
     run reported them as done — a sweep that says it removed rows it then rolled back is worse than
     one that fails outright, because the growth it was meant to bound continues while the log says
@@ -185,6 +224,14 @@ async def prune_expired_rows() -> RetentionOutcome:
                 deleted, deferred = await _prune_session_messages(conn, days)
                 outcome.deleted[table] = deleted
                 outcome.sessions_deferred = deferred
+                continue
+            if table == "checkpoints":
+                # Three tables, one thread, one transaction — see `_prune_checkpoints`. It reports
+                # each table separately because that is what an operator can go and look at, and it
+                # commits itself, which is why no `commit()` follows this call either.
+                counts, skipped = await _prune_checkpoints(conn, days)
+                outcome.deleted.update(counts)
+                outcome.skipped.extend(skipped)
                 continue
             async with conn.cursor() as cur:
                 # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
@@ -262,6 +309,54 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
             deleted += max(cur.rowcount, 0)
         await conn.commit()
     return deleted, deferred
+
+
+async def _prune_checkpoints(
+    conn: AsyncConnection[TupleRow], days: int
+) -> tuple[dict[str, int], list[str]]:
+    """Delete every trace of threads whose newest checkpoint has expired.
+
+    Returns `(rows deleted per table, tables skipped with the reason)`.
+
+    **One transaction across all three tables, against this module's own per-table rule.** That rule
+    exists so one table's failure cannot roll back another's, and it holds because those tables are
+    independent. These three are not: they are one thread's state split across three keys with no
+    foreign key to enforce it. Committing them separately gives a crash between two commits a choice
+    of two bad outcomes — surviving `checkpoints` rows referring to blobs that are gone (a thread
+    that now raises when read) or orphaned blobs no later pass can find (because the `HAVING` is
+    over `checkpoints`, and that thread no longer has any). One transaction has neither, and it is
+    bounded by the batch cap rather than by the backlog.
+
+    **Skipped, not failed, when the tables are absent.** They are created by
+    `AsyncPostgresSaver.setup()` rather than by a migration, so a deployment that has never run the
+    graph engine does not have them — and a sweep that raised there would stop pruning the three
+    tables it had already handled on every subsequent pass, which is the opposite of what a
+    retention job is for. `core.db.existing_tables` is asked once, because the check cannot live
+    inside the `DELETE` (Postgres resolves the relation at parse time).
+    """
+    async with conn.cursor() as cur:
+        present = await existing_tables(cur, CHECKPOINT_TABLES)
+        missing = sorted(set(CHECKPOINT_TABLES) - present)
+        if missing:
+            # All or nothing: the tables are created together by one `setup()`, so a partial set is
+            # a schema nobody has, and guessing which half to prune would be inventing a case.
+            return {}, [f"{', '.join(missing)} (no checkpointer in this schema)"]
+        await cur.execute(_EXPIRED_THREADS, (days, settings.retention_max_sessions_per_pass))
+        threads = [str(row[0]) for row in await cur.fetchall()]
+        if not threads:
+            return dict.fromkeys(CHECKPOINT_TABLES, 0), []
+        deleted: dict[str, int] = {}
+        for table in CHECKPOINT_TABLES:
+            # `CHECKPOINT_TABLES` is a module constant of the checkpointer's own, never a caller's,
+            # so the interpolation cannot carry untrusted input; the thread ids are bound.
+            await cur.execute(
+                f"DELETE FROM {table} WHERE thread_id = ANY(%s)",  # noqa: S608
+                (threads,),
+            )
+            deleted[table] = max(cur.rowcount, 0)
+    await conn.commit()
+    logger.info("pruned %d expired checkpoint thread(s)", len(threads))
+    return deleted, []
 
 
 @durable_workflow("background")

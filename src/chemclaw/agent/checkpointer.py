@@ -31,6 +31,7 @@ built in — hence the async factory rather than a module-level instance.
 import logging
 from typing import Any
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -49,6 +50,34 @@ _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 # person's turn state, and its test has to prove the list is complete. `checkpoint_migrations` is
 # deliberately absent from the *erasure* half — it holds schema versions, not anyone's conversation.
 CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
+
+
+async def process_checkpointer() -> Any:
+    """Turn state for a process that keeps **one** graph alive for its whole run.
+
+    Durable where the deployment has a database, `InMemorySaver` otherwise — which is a real
+    conversation for as long as the process lives, and the honest lifetime for a run whose
+    transcript is not stored anywhere either.
+
+    **Not the same question `api/runner._turn_checkpointer` answers, and the difference is the
+    graph's lifetime.** The front door compiles a graph *per turn* (it binds that turn's connector
+    tools at construction), so an in-memory saver there would be created and discarded inside one
+    turn and hold nothing — `None` is the truthful answer for a deployment with no database. A
+    terminal session builds its graph once, so the same saver spans every turn of the run and the
+    in-memory branch is worth taking.
+
+    Here rather than in `chemclaw.cli` because the caller must not name `langgraph` at module scope:
+    `tests/test_third_party_layering.py` polices which package may depend on which third-party
+    stack, and the CLI is not one that owns this one. That is not a formality worked around — this
+    module is what "where turn state lives" means, so the decision belongs beside the durable
+    saver it chooses between.
+
+    Returns:
+        A checkpointer to build a long-lived graph on and to read that session's plan from.
+    """
+    if settings.session_store == "postgres":
+        return await checkpointer()
+    return InMemorySaver()
 
 
 async def checkpointer() -> AsyncPostgresSaver:

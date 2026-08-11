@@ -245,11 +245,11 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     view of it — so the gate asks the plan as it stands at this instant, which is the property
     `plan_is_approved`'s docstring insists on and had to arrange deliberately under MAF.
 
-    **`awaiting_jobs` needs no exclusion here.** Under MAF a todo waiting on a durable job was
-    marked by prefixing its description, and the identity had to filter those out or an approved
-    plan revoked its own approval the moment it launched a job. Here they are a separate state
-    field (`chemclaw.agent.state.ChemclawState`), so they are not in `todos` and there is nothing to
-    filter.
+    **Waiting jobs need no exclusion here.** Under MAF a todo waiting on a durable job was marked by
+    prefixing its description, and the identity had to filter those out or an approved plan revoked
+    its own approval the moment it launched a job. Nothing writes that bookkeeping into `todos` now
+    — a launched job is a `job_records` row and a `session_events` push-back — so the list this
+    hashes is the plan and only the plan, and there is nothing to filter.
 
     Raises:
         PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;

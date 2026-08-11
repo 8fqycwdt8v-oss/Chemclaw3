@@ -40,11 +40,14 @@ order as the MAF agent's, over the *same* decision functions — `tool_authz.dry
 an authorization decision, a dry-run refusal or a GxP audit row depend on which engine a deployment
 happens to run, which is the one drift this migration must be incapable of.
 
-What is deliberately *not* here yet, because nothing calls it: the extra state fields (they arrive
-with the phase that reads them), the human gate and the plan-approval middleware (M5), a *durable*
-checkpointer (M6 — the parameter exists, the Postgres saver behind it does not) and the per-turn
-connector tools (M7). A stub advertising a capability this engine does not have would read as
-coverage while proving nothing.
+This paragraph used to list what was "deliberately not here yet, because nothing calls it" — the
+extra state fields, the plan-approval middleware, a durable checkpointer, the per-turn connector
+tools. Every item on it has since arrived (M5–M7), and the list outlived its subject: it was still
+telling a reader in M13 that the Postgres saver behind `checkpointer=` did not exist, four phases
+after `agent/checkpointer.py` shipped it. The rule it stated is the part worth keeping — a stub
+advertising a capability this engine does not have reads as coverage while proving nothing — and
+`agent/compaction.py` records what happens when the inverse is left standing: prose that keeps
+advertising a mechanism after the mechanism is gone.
 """
 
 import uuid
@@ -68,6 +71,7 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     instructions_for,
 )
+from chemclaw.agent.compaction import context_compaction_middleware
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -170,6 +174,12 @@ def build_langgraph_agent(
             _skills_middleware(backend),
             *_team_middleware(prof, actor, correlation_id, audit_sink, connectors),
             *tool_call_middleware(audit, prof),
+            # Unconditional, unlike the harness middleware above it: an unbounded thread is a
+            # property of a session, not of the plan/execute mode, and the single-turn agent
+            # accumulates one just as fast. Last in the list, so the reduction is the last thing
+            # between the assembled request and the model and it sees everything the middleware
+            # above added.
+            *context_compaction_middleware(),
         ],
         name="chemclaw",
         checkpointer=checkpointer,

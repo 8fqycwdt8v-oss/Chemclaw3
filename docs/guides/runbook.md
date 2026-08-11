@@ -41,18 +41,27 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
     to appear as separate services — unset, they are one. Traces only, on purpose: metrics are
     `/metrics` (Prometheus, scraped per pod) and logs are JSON on stdout, and neither needs a
     second copy over OTLP.
-  - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` no longer does anything** and the process says so at
-    WARNING if you set it. Its only consumer was the agent framework's own instrumentation, which
-    attached prompts and results to *its* spans; no first-party span carries turn content.
-  - **A real regression, named rather than papered over: per-model token attribution is gone.**
-    The agent framework's chat-client instrumentation recorded `gen_ai.client.token.usage` — an
-    OTel *metric* (a histogram), despite a name that reads like a span attribute — labelled by
-    request model, response model, provider and token type. Measured across the installed venv,
-    exactly one module emits it — the agent framework's own observability module; nothing in
-    `langchain`, `langgraph` or `langsmith` does. It goes in two steps and neither is faked: it
-    stops being exported now (this is a span pipeline, and there is no metric pipeline), and it
-    stops being produced when the package is removed. What remains is `/metrics`'s token counters,
-    which carry `profile` rather than model; §(viii) is the place that reads them.
+  - **`CHEMCLAW_OTEL_LLM_SPANS=true` gives you a span per model call** — token counts, model name
+    and provider, plus the chain and tool spans around them — through OpenInference's LangChain
+    instrumentation, over the same OTLP exporter. On in the shipped chart. Point the collector at
+    Arize Phoenix to read these conventions natively; any OTLP backend receives the same spans, and
+    nothing in the image depends on Phoenix.
+  - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` decides whether those spans carry content**, and it is
+    off. Off sets every OpenInference hide flag, so a span carries identifiers and counts and
+    nothing a chemist typed — measured by sweeping every exported attribute for the question and the
+    answer, not by naming the keys that might hold them. Turning it on is a decision about content
+    leaving the pod: the collector's store then holds the same class of data `SECURITY.md` describes
+    for the audit trail. It governs nothing while `CHEMCLAW_OTEL_LLM_SPANS` is off, and the process
+    says so at WARNING if you set it anyway.
+  - **This is what closed the per-model attribution regression.** The agent framework's chat-client
+    instrumentation recorded `gen_ai.client.token.usage` — an OTel *metric* (a histogram), despite a
+    name that reads like a span attribute — labelled by request model, response model, provider and
+    token type, and it went out with the framework: nothing in `langchain`, `langgraph` or
+    `langsmith` emits it. The replacement is not that metric. It is a *span* per model call carrying
+    `llm.token_count.prompt`/`.completion`/`.total` and `llm.model_name`, so the question is
+    answered in the trace pipeline rather than the metric one. `/metrics`'s token counters are
+    unchanged and still carry `profile` rather than model — deliberately, D-152 — and §(viii) is
+    the place that reads them.
 
 ## Exposing the front door (the two settings that decide whether it boots)
 
@@ -661,13 +670,15 @@ cost this review a wrong estimate:
   Marking it cacheable needs a change upstream, not in Chemclaw — the same conclusion the previous
   framework's `SkillsProvider` f-string forced, reached again for the same structural reason.
 
-Per-model attribution for the same spend **is not currently available**, and that is a regression
-worth naming rather than a gap that was always there: the old framework's own instrumentation
-emitted `gen_ai.client.token.usage` labelled by request model, response model, provider and token
-type, and it went out with the framework. Measured across the installed stack, the only package
-that emits that metric is the one that was removed — nothing in `langchain`, `langgraph` or
-`langsmith` does. So these counters are the whole picture today, and they carry `profile`, which
-OTel has never heard of.
+Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
+old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
+provider and token type, and it went out with the framework — nothing in `langchain`, `langgraph`
+or `langsmith` emits it. What replaced it is not a metric: `CHEMCLAW_OTEL_LLM_SPANS=true` puts one
+span per model call in the trace pipeline carrying `llm.token_count.*` and `llm.model_name`, so
+"which model, how many tokens" is a trace query and "what is this deployment spending per hour" is
+these counters. They still carry `profile` rather than model, deliberately (D-152): the `turn_costs`
+ledger already holds per-turn model attribution, and a second, lossier answer as a counter label
+would be two systems to reconcile.
 
 ## (ix) Work the PR-gate review queue
 

@@ -47,7 +47,7 @@ the pair applies in filename order and neither shadows the other.
 | `reaction_fingerprints` | 003 (+004) | `science/fingerprints/store.py` | — |
 | `audit_events` | 006 (+010, 011, 026, 044) | `agent/audit_store.py` | **refused**: deleting from a hash chain is indistinguishable from the tampering it detects. Safe disposal needs archive-then-reseal — BACKLOG STO-13 |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
-| `session_messages` | 008 (+022, 026, 043) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145), plus in-line compaction on write (D-151) |
+| `session_messages` | 008 (+022, 026, 043) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
 | `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
 | `session_owners` | 013 (+021, 043) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
@@ -71,7 +71,18 @@ the pair applies in filename order and neither shadows the other.
 | `tool_result_blobs` | 042 | `api/tool_results.py` | `durable/retention.py`, by `created_at` (`retention_tool_results_days`). 0 by default like every other window, so **an operator who has not stated one lets this grow** — and at up to a row per tool call it grows fastest of the three. It holds no record of anything (the answers are in `calculation_results` and `job_records`), so a plain age cutoff is the whole policy it needs |
 | `tool_result_links` | 042 | `api/tool_results.py` | cascades from `tool_result_blobs` |
 
-## Two things the shape of this table will not tell you
+## Three things the shape of this table will not tell you
+
+**Four tables in this database are not in the table above, and cannot be.** `checkpoints`,
+`checkpoint_blobs`, `checkpoint_writes` and `checkpoint_migrations` are created by
+`AsyncPostgresSaver.setup()` (`agent/checkpointer.py`), not by a file in this directory, so
+`tests/test_schema_inventory.py` — which pins the table to exactly what the migrations create —
+would call a row for them a phantom. That absence is not free: they hold every session's turn
+state, they are the tables nobody reviews because they appear in no migration, and nothing disposed
+of them for as long as they existed. `durable/retention.py` now prunes them by **thread**
+(`retention_checkpoints_days`) — a checkpoint chains to its parent, so a thread expires whole when
+its newest checkpoint does — and `agent/leaver.py` erases them per actor. `checkpoint_migrations` is
+the checkpointer's own version ledger and is never touched, the standing `schema_migrations` has.
 
 **There are three foreign keys in the whole schema** (`calculation_artifacts` → `artifact_blobs`,
 `bo_suggestions` → `bo_campaigns`, `tool_result_links` → `tool_result_blobs`), each one where a
