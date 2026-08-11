@@ -26,25 +26,23 @@ import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_answer as runner_answer
 import chemclaw.api.runner_trace as runner_trace
-from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
+from chemclaw.agent.harness_todo import mark_awaiting_job
 from chemclaw.agent.loop_cap import observe_loop_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
-    ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorEvent,
     Event,
     JobStartedEvent,
     PlanEvent,
-    TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import record_job_started
 from tests.fakes import FakeUpdate, fed
-from tests.fakes_turn import Piece, ScriptedTurn, maf_engine_only
+from tests.fakes_turn import Piece, ScriptedTurn
 
 
 class _FakeAgent(ScriptedTurn):
@@ -69,7 +67,7 @@ def _run_turn(message: str = "q") -> list[Any]:
         return [
             event
             async for event in runner.run_turn(
-                agent, session, message, connectors=[], graph_factory=agent.graph_factory
+                session, message, connectors=[], graph_factory=agent.graph_factory
             )
         ]
 
@@ -175,7 +173,7 @@ def _events(agent: ScriptedTurn, session: AgentSession | None = None) -> list[An
         return [
             event
             async for event in runner.run_turn(
-                agent, turn_session, "run it", connectors=[], graph_factory=agent.graph_factory
+                turn_session, "run it", connectors=[], graph_factory=agent.graph_factory
             )
         ]
 
@@ -212,33 +210,6 @@ class _ApprovalRequestingAgent(ScriptedTurn):
         return self.stream(message)
 
 
-@maf_engine_only(
-    "MAF's `function_approval_request` content and the runner's `user_input_requests` branch. "
-    "The graph engine raises no such content and the branch is not on its path at all"
-)
-def test_an_approval_request_names_the_tool_it_would_run() -> None:
-    """The runner's `user_input_requests` branch, executed by a test for the first time.
-
-    Every fake update in this suite hard-coded `user_input_requests=[]`, so nothing had ever
-    reached `yield ApprovalRequestEvent(prompt=approval_prompt(request))`. Driven with the content
-    MAF actually produces — a `function_approval_request` raised by a tool registered
-    `approval_mode="always_require"` — two things showed up that a `[]` cannot:
-
-    - The stream does **not** raise. A `ValidationError` here was the hypothesis; it is refuted.
-    - The prompt was the bare fallback `"Approval requested."`, because MAF puts the subject on a
-      nested `function_call` and none of the attributes `approval_prompt` scanned are set. A
-      chemist was being asked to approve an unnamed something.
-
-    The event is also asserted to arrive *between* the tokens: an approval that lands after the
-    answer is a decision requested about work already reported.
-    """
-    events = _events(_ApprovalRequestingAgent())
-    approvals = [e for e in events if isinstance(e, ApprovalRequestEvent)]
-    assert [e.prompt for e in approvals] == ["Approve calling submit_dft_job?"]
-    tokens = [i for i, e in enumerate(events) if isinstance(e, TokenEvent)]
-    assert tokens[0] < events.index(approvals[0]) < tokens[-1]
-
-
 def test_launched_job_is_announced_to_the_streaming_turn() -> None:
     """A job launched by a tool surfaces as a JobStartedEvent — not silence until push-back."""
     events = _events(_JobLaunchingAgent("qm-abc"))
@@ -273,42 +244,6 @@ def test_classic_agent_emits_no_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [e for e in _run_turn() if isinstance(e, PlanEvent)] == []
 
 
-@maf_engine_only(
-    "the plan read out of MAF's `TodoSessionStore` through `runner.todo_titles`; the graph "
-    "engine's plan is the `write_todos` state update rendered by `graph_stream._from_update`"
-)
-def test_plan_is_emitted_and_only_when_it_changes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The harness's todo list is streamed as a checklist, once per distinct state.
-
-    Re-sending an unchanged plan on every update would flood the transcript with duplicates.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    class _PlanningAgent(ScriptedTurn):
-        """Marks a todo, streams past it unchanged, then completes it."""
-
-        def __init__(self, session: AgentSession) -> None:
-            self._session = session
-
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
-            await mark_awaiting_job(self._session, "qm-1", title="Await QM job qm-1")
-            yield "a"
-            yield "b"  # same plan: must not re-emit
-            await complete_awaiting_job(self._session, "qm-1", reason="finished")
-            yield "c"
-
-    session = AgentSession(session_id="s-jobs")
-    plans = [
-        e for e in _events(_PlanningAgent(session), session=session) if isinstance(e, PlanEvent)
-    ]
-    assert [p.todos for p in plans] == [
-        ["[ ] Await QM job qm-1"],
-        ["[x] Await QM job qm-1"],
-    ]
-
-
 class _PlanClearingAgent(ScriptedTurn):
     """Plans, launches a job, and clears its todo list in the resume — the topic-change shape.
 
@@ -332,38 +267,6 @@ class _PlanClearingAgent(ScriptedTurn):
         else:
             await TodoSessionStore().save_state(self._session, [], next_id=1, source_id="todo")
             yield "never mind, here is the answer."
-
-
-@maf_engine_only(
-    "the runner's post-resume `_PlanEmitter` site, which reads MAF's todo store; the graph "
-    "engine emits plans only from `graph_stream`, which has one site and one predicate"
-)
-def test_an_emptied_plan_is_not_streamed_as_an_empty_checklist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The post-resume emit site used to admit `[]`, which renders as "the agent has no plan".
-
-    Two sites emitted the plan with two different predicates: the streaming loop guarded on
-    truthiness, the post-resume one on `is not None`. So a turn whose plan was cleared during the
-    resume produced `plan events: [['step one'], []]` — the empty checklist `_current_plan`'s own
-    docstring says must never be produced, and the rendering reserved for an agent that does not
-    plan at all. One emitter now answers for both sites.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-    monkeypatch.setattr(settings, "mid_turn_resume_enabled", True)
-    monkeypatch.setattr(settings, "mid_turn_resume_timeout_seconds", 5.0)
-
-    async def _results(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
-        return {job_ids[0]: {"energy_hartree": -154.1}}
-
-    monkeypatch.setattr(runner, "await_job_results", _results)
-    session = AgentSession(session_id="s-jobs")
-    agent = _PlanClearingAgent(session)
-    events = _events(agent, session=session)
-    assert agent.calls == 2, "the resume must have run for this to test the second emit site"
-    plans = [e.todos for e in events if isinstance(e, PlanEvent)]
-    assert plans == [["[ ] Await QM job qm-9"]]
-    assert [] not in plans
 
 
 class _CappedLoopAgent(ScriptedTurn):
@@ -405,20 +308,6 @@ def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> 
 def test_an_ordinary_turn_does_not_claim_the_cap_fired() -> None:
     """A signal that is always on is worth nothing; the common path must stay silent."""
     assert [e for e in _run_turn() if isinstance(e, ErrorEvent)] == []
-
-
-@maf_engine_only("a failing `runner.todo_titles` read, which the graph engine never performs")
-def test_unreadable_plan_does_not_sink_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A malformed todo state costs the plan view, never the answer — it is only a view."""
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _boom(session: AgentSession) -> list[str]:
-        raise ValueError("corrupt todo state")
-
-    monkeypatch.setattr(runner, "todo_titles", _boom)
-    events = _run_turn()
-    assert [e for e in events if isinstance(e, PlanEvent)] == []
-    assert _answer(events).text == "Yield was 90% [[reaction-a]]."
 
 
 def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -749,7 +638,7 @@ def _verified_answer(agent: ScriptedTurn) -> AnswerEvent:
         return [
             event
             async for event in runner.run_turn(
-                agent, session, "q", connectors=[], graph_factory=agent.graph_factory
+                session, "q", connectors=[], graph_factory=agent.graph_factory
             )
         ]
 
@@ -902,7 +791,7 @@ def _turn_events(**overrides: Any) -> list[Any]:
         return [
             event
             async for event in runner.run_turn(
-                agent, session, "q", connectors=[], graph_factory=agent.graph_factory, **overrides
+                session, "q", connectors=[], graph_factory=agent.graph_factory, **overrides
             )
         ]
 

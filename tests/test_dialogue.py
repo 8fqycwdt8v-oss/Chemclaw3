@@ -42,7 +42,6 @@ def _events(agent: ScriptedTurn, **kwargs: Any) -> list[Any]:
         return [
             e
             async for e in run_turn(
-                agent,
                 AgentSession(session_id="s1"),
                 "hi",
                 connectors=[],

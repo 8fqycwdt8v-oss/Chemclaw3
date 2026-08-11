@@ -12,10 +12,10 @@ from typing import Any
 
 from agent_framework import AgentSession
 
-from chemclaw.api.events import AnswerEvent, ErrorEvent, Event, TokenEvent, ToolCallEvent
+from chemclaw.api.events import ErrorEvent, Event, TokenEvent, ToolCallEvent
 from chemclaw.api.runner import run_turn
 from tests.fakes import FakeUpdate
-from tests.fakes_turn import Piece, ScriptedTurn, maf_engine_only
+from tests.fakes_turn import Piece, ScriptedTurn
 
 
 class _ToolContent:
@@ -63,32 +63,6 @@ def test_events_round_trip_with_type_discriminator() -> None:
     assert ToolCallEvent(tool="predict_pka").type == "tool_call"
 
 
-@maf_engine_only(
-    "the MAF event sequence for a tool-calling turn — a `tool_call` with no `tool_result`, "
-    "because a MAF fake narrates the call without a tool node running. The graph engine's whole "
-    "sequence for the same turn is pinned by `tests/test_langgraph_stream.py`"
-)
-def test_run_turn_emits_toolcall_tokens_then_answer() -> None:
-    """A scripted turn yields the tool-call trace, each token, then the assembled answer."""
-    agent = _FakeAgent()
-    session = agent.create_session(session_id="s1")
-
-    async def _collect() -> list[Event]:
-        return [event async for event in run_turn(agent, session, "hello", connectors=[])]
-
-    # Without the capability announcement: no Temporal broker runs in a test process, so every
-    # turn here truthfully opens by saying the durable subsystem is down. This test is about the
-    # trace/answer ordering, which that announcement is not part of.
-    events = [e for e in asyncio.run(_collect()) if e.type != "capability_degraded"]
-    kinds = [e.type for e in events]
-    assert kinds == ["tool_call", "token", "token", "answer"]
-    assert isinstance(events[0], ToolCallEvent)
-    assert events[0].tool == "gather_evidence"
-    answer = events[-1]
-    assert isinstance(answer, AnswerEvent)
-    assert answer.text == "The answer."
-
-
 def test_run_turn_reports_failure_as_error_event() -> None:
     """A turn whose model call raises yields a single user-safe ErrorEvent, not an exception."""
 
@@ -108,7 +82,7 @@ def test_run_turn_reports_failure_as_error_event() -> None:
         return [
             event
             async for event in run_turn(
-                agent, session, "hello", connectors=[], graph_factory=agent.graph_factory
+                session, "hello", connectors=[], graph_factory=agent.graph_factory
             )
         ]
 

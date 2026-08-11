@@ -123,7 +123,7 @@ def test_runner_stamps_and_clears_session() -> None:
         return [
             event
             async for event in run_turn(
-                agent, session, "hi", connectors=[], graph_factory=agent.graph_factory
+                session, "hi", connectors=[], graph_factory=agent.graph_factory
             )
         ]
 

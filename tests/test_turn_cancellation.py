@@ -231,7 +231,6 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     async def _abandon() -> None:
         stream = _closable(
             run_turn(
-                agent,
                 AgentSession(session_id="s1"),
                 "hi",
                 actor="u1",
@@ -275,7 +274,7 @@ def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
         seen: list[str] = []
         agent = _EndlessAgent()
         stream = _closable(
-            run_turn(agent, AgentSession(session_id="s1"), "hi", graph_factory=agent.graph_factory)
+            run_turn(AgentSession(session_id="s1"), "hi", graph_factory=agent.graph_factory)
         )
         try:
             async for event in stream:
@@ -313,7 +312,7 @@ def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
     agent = _StatePoisoningAgent(session)
 
     async def _abandon() -> None:
-        stream = _closable(run_turn(agent, session, "hi", graph_factory=agent.graph_factory))
+        stream = _closable(run_turn(session, "hi", graph_factory=agent.graph_factory))
         async for _event in stream:
             break  # the client goes away after the first token
         await stream.aclose()  # sse-starlette's send-timeout teardown
@@ -340,7 +339,6 @@ def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
         agent = _StallingAgent(session, poison=True)
         await _cancel_mid_turn(
             run_turn(
-                agent,
                 session,
                 "hi",
                 # Stated, as every sibling in this file states it: defaulting means every enabled
@@ -387,7 +385,6 @@ def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
             agent = _AnsweringAgent(history, session.session_id)
             stream = _closable(
                 run_turn(
-                    agent,
                     session,
                     f"hi ({teardown})",
                     history=history,
@@ -446,7 +443,6 @@ def test_a_disconnect_after_the_answer_is_billed_as_completed(
         agent = _AnsweringAgent(history, "s-answered-cancel")
         stream = _closable(
             run_turn(
-                agent,
                 AgentSession(session_id="s-answered-cancel"),
                 "hi",
                 history=history,
@@ -486,7 +482,6 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
         agent = _StallingAgent(session, updates=3)
         await _cancel_mid_turn(
             run_turn(
-                agent,
                 session,
                 "hi",
                 actor="u1",
@@ -540,7 +535,6 @@ def test_a_failed_watermark_read_never_turns_a_disconnect_into_a_history_wipe() 
         agent = _StallingAgent(session, poison=True)
         await _cancel_mid_turn(
             run_turn(
-                agent,
                 session,
                 "hi",
                 history=history,
@@ -589,7 +583,6 @@ def test_a_disconnect_during_a_slow_verifier_keeps_the_committed_exchange(
         agent = _AnsweringAgent(history, session.session_id)
         await _cancel_mid_turn(
             run_turn(
-                agent,
                 session,
                 "hi",
                 history=history,
@@ -648,7 +641,6 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_committed_exchange
         agent = _JobAgent(history, session.session_id)
         await _cancel_mid_turn(
             run_turn(
-                agent,
                 session,
                 "hi",
                 history=history,

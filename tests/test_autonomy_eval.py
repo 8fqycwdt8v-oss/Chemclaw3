@@ -24,14 +24,11 @@ import pytest
 from agent_framework import AgentSession
 
 import chemclaw.api.runner as runner
-from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
-from chemclaw.api.events import AnswerEvent, Event, PlanEvent
+from chemclaw.api.events import Event
 from chemclaw.core.config import settings
 from chemclaw.evals.harness import load_eval_cases
 from chemclaw.evals.metric import EvalCase, MetricError, registered_names
 from chemclaw.evals.metrics import precision_recall_f1
-from tests.fakes import FakeUpdate
-from tests.fakes_turn import maf_engine_only
 
 _ANSWER = {"type": "answer", "text": "done", "unsupported_claims": [], "review_required": False}
 
@@ -55,7 +52,7 @@ def _drive(agent: Any, session_id: str) -> list[Event]:
 
     async def _collect() -> list[Event]:
         session = AgentSession(session_id=session_id)
-        return [event async for event in runner.run_turn(agent, session, "go")]
+        return [event async for event in runner.run_turn(session, "go")]
 
     return asyncio.run(_collect())
 
@@ -63,101 +60,6 @@ def _drive(agent: Any, session_id: str) -> list[Event]:
 def test_the_autonomy_metrics_are_registered() -> None:
     """Registration is an import side effect, so a module left out of `evals/__init__` is dead."""
     assert {"plan_quality", "runaway_rate", "plan_execute_utility"} <= set(registered_names())
-
-
-@maf_engine_only(
-    "a `PlanEvent` stream produced from MAF's todo store through `runner.todo_titles`; on the "
-    "graph engine the same stream comes from `write_todos` via `graph_stream`, which is where "
-    "the plan's shape is pinned for that engine"
-)
-def test_a_committed_transcript_is_the_shape_the_front_door_really_emits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The load-bearing test: the cases score a real event stream, not an invented one.
-
-    Everything else here is arithmetic over a dict a human wrote. If that dict does not match what
-    `run_turn` produces, all of it is a fiction that reports healthy numbers forever. So drive the
-    real runner and assert the two facts the metrics actually depend on: `PlanEvent.todos` are
-    checkbox-prefixed display strings, and the plan is emitted only when it changes, which is what
-    makes "the last one" the final state rather than one sample among many.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    class _PlanningAgent:
-        mcp_tools: list[object] = []
-
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_options: Any
-        ) -> Any:
-            async def _gen() -> Any:
-                await mark_awaiting_job(session, "qm-1", title="Compute the DFT energy")
-                yield FakeUpdate(text="working ")
-                yield FakeUpdate(text="still ")  # plan unchanged: must not re-emit
-                await complete_awaiting_job(session, "qm-1", reason="finished")
-                yield FakeUpdate(text="done.")
-
-            return _gen()
-
-    events = _drive(_PlanningAgent(), "s-real")
-    plans = [event for event in events if isinstance(event, PlanEvent)]
-    assert [p.todos for p in plans] == [
-        ["[ ] Compute the DFT energy"],
-        ["[x] Compute the DFT energy"],
-    ]
-    assert isinstance(events[-1], AnswerEvent)
-
-    # And the metric reads that stream directly — no reformatting between the runner and the case.
-    result = _score(
-        "plan_quality",
-        _case(
-            output={"transcript": [e.model_dump(mode="json") for e in events]},
-            reference={"expected_plan_steps": ["Compute the DFT energy"]},
-        ),
-    )
-    assert result.value == 1.0
-
-
-@maf_engine_only(
-    "the `awaiting-job:` todo residue, which is MAF harness state; the graph engine's plan has "
-    "no description field for the marker to live in (see `chemclaw.agent.state.Todo`)"
-)
-def test_a_turn_that_defers_to_a_durable_job_is_not_a_runaway(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The defect this metric was rewritten for, driven through the real runner.
-
-    Launching a durable job and saying so is the *correct* end of a turn: the work is safe in
-    Temporal and the answer reports it. `mark_awaiting_job` records that by opening a todo, which
-    stays open on purpose — so the turn answers with an unchecked step, which the residue heuristic
-    read as "the loop cap stopped it mid-plan" and scored 1/1 against a gate of 0.0.
-
-    Nothing in the transcript can separate the two by looking harder, which is why the heuristic
-    could not be repaired: the `awaiting-job:` marker lives in the todo's *description* and
-    `PlanEvent.todos` carries only the rendered display strings. Hence the fixture below produces a
-    genuine `run_turn` stream rather than a hand-written dict — the residue is real, and the metric
-    must still say 0.0.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    class _DeferringAgent:
-        mcp_tools: list[object] = []
-
-        def run(  # noqa: D102 - a fake agent's run, documented by its class
-            self, message: str, *, stream: bool, session: AgentSession, **_options: Any
-        ) -> Any:
-            async def _gen() -> Any:
-                await mark_awaiting_job(session, "qm-9", title="Await the DFT job")
-                yield FakeUpdate(text="I've started the DFT run, job qm-9.")
-
-            return _gen()
-
-    events = [e.model_dump(mode="json") for e in _drive(_DeferringAgent(), "s-defer")]
-    # The residue really is there — otherwise this test would pass for the wrong reason.
-    assert any(todo.startswith("[ ] ") for e in events for todo in e.get("todos", []))
-    case = _case(metrics=["runaway_rate"], output={"transcripts": [events]})
-    result = _score("runaway_rate", case)
-    assert result.value == 0.0
-    assert result.passed is True
 
 
 def test_a_capped_loop_is_a_runaway_and_says_so_in_the_transcript() -> None:

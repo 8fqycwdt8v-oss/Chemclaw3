@@ -33,27 +33,6 @@ class AgentSettings(BaseSettings):
     # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
     framing_envelope_secret: str = ""
 
-    # Which framework assembles the conversation layer. `maf` is the Microsoft Agent Framework
-    # this system was built on; `langgraph` selects the LangGraph rebuild (a typed `StateGraph`,
-    # `interrupt()` for every human gate, a Postgres checkpointer for turn state, and the
-    # supervisor/specialist team). Both engines advertise the same tools, skills and audit
-    # middleware and emit the same `api/events.py` stream — that event contract is the
-    # conformance boundary between them, which is what makes running the eval suite twice a
-    # measurement rather than an argument.
-    #
-    # **Defaults to `langgraph` since M13 Step 0.** It defaulted to `maf` while the rebuild landed
-    # phase by phase, so an unfinished engine was never the one a deployment got; that condition
-    # ended when both engines carried the whole suite — 4233/37 on MAF, 4223/47 flipped, zero
-    # failures either way, the difference being tests that name a MAF-only subject.
-    #
-    # **What this default does not assert.** M12 left three probes unrun because each needs a live
-    # model credential: the D-123 concurrency run, plan→approve→execute end to end, and team
-    # routing accuracy. This value says the graph engine passes everything measurable offline. It
-    # does not say those three passed, and the switch stays here until they do — a deployment that
-    # must have the old engine still has `CHEMCLAW_AGENT_ENGINE=maf`. The switch and the MAF branch
-    # are deleted together once the rebuild is proven live (no dead path kept "for later").
-    agent_engine: Literal["maf", "langgraph"] = "langgraph"
-
     # Route turns through a supervisor and five specialists rather than one agent (M9,
     # `docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md`).
     #

@@ -30,36 +30,12 @@ MAF branch, `run` goes and the rest stays.
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
-from types import SimpleNamespace
 from typing import Any
 
-import pytest
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
-
-from chemclaw.agent.chemclaw_agent import graph_engine_selected
-from tests.fakes import FakeUpdate
-
-
-def maf_engine_only(subject: str) -> pytest.MarkDecorator:
-    """Skip on the graph engine, naming what this test pins that only the MAF engine has.
-
-    Not every failing test wanted re-pointing. A few have no graph counterpart at all — MAF's
-    `user_input_requests` approval content, the plan read through `runner.todo_titles`, the
-    `open_reachable` connector lifecycle — and weakening those until they pass on both engines
-    would leave a test whose name still promises something it no longer checks. Skipping with the
-    subject spelled out keeps them honest and makes M13's deletion mechanical: when the branch
-    goes, so does everything carrying this mark.
-
-    Args:
-        subject: What the test pins and where the graph engine's equivalent lives, in one phrase.
-
-    Returns:
-        A `skipif` mark, active only while `agent_engine` selects the graph.
-    """
-    return pytest.mark.skipif(graph_engine_selected(), reason=f"MAF-engine-only: {subject}")
 
 
 class Chunk:
@@ -103,17 +79,12 @@ def _chunk(piece: Piece) -> Chunk:
 class ScriptedTurn(ABC):
     """A turn's model behaviour, exposed as both engines' injection points.
 
-    Subclass and implement `stream`; the base supplies `run` (what MAF's `agent.run` looks like
-    from `run_turn`'s side) and `graph_factory` (what `run_turn(graph_factory=…)` calls). A test
-    then hands the *same object* to both parameters — the turn in the `agent` slot and its own
-    `graph_factory` in the other — and the engine in force decides which face is used, so one test
-    body covers both without a branch in it.
-
-    `mcp_tools` is here because MAF agents advertise it and the fakes all carried it; nothing on
-    the graph path reads it.
+    Subclass and implement `stream`; the base supplies `graph_factory`, which is what
+    `run_turn(graph_factory=…)` calls. It had a second face — `run`, the shape MAF's `agent.run`
+    presented to `run_turn` — so that one test body could cover both engines without a branch in
+    it; that face went with the engine, and what it bought survives as the reason the remaining
+    one exists.
     """
-
-    mcp_tools: list[Any] = []
 
     @abstractmethod
     def stream(self, message: str) -> AsyncIterator[Piece]:
@@ -124,27 +95,6 @@ class ScriptedTurn(ABC):
         would be written for either engine. `message` is passed because a resume drives this a
         second time with the framed job results, and some tests assert on what arrived.
         """
-
-    def run(
-        self,
-        message: str,
-        *,
-        stream: bool,
-        session: Any,
-        **_run_options: Any,
-    ) -> AsyncIterator[Any]:
-        """The MAF face: the same pieces, wrapped in the streamed-update shape MAF emits.
-
-        `stream` and the run options are accepted and ignored exactly as the hand-written fakes
-        accepted them — `run_turn` always streams, and what it passes besides (`tools=`) is the
-        turn's connectors, which a fake has nothing to do with.
-        """
-
-        async def _updates() -> AsyncIterator[Any]:
-            async for piece in self.stream(message):
-                yield _maf_update(_chunk(piece))
-
-        return _updates()
 
     def graph_factory(self, **build_kwargs: Any) -> Any:
         """The graph face: the real agent, compiled over a model that replays the same pieces.
@@ -165,28 +115,6 @@ class ScriptedTurn(ABC):
         return build_langgraph_agent(
             _ReplayingChatModel(turn=self), audit_sink=NullAuditSink(), **build_kwargs
         )
-
-
-def _maf_update(chunk: Chunk) -> FakeUpdate:
-    """One piece as MAF's streamed update, with usage only when the piece reported some.
-
-    A usage content that reports zero is not the same as no usage content at all — `usage_tokens`
-    counts the first as `unreadable` — so a piece with no token count carries no content, which is
-    what every fake that predates this module did.
-    """
-    if not chunk.tokens:
-        return FakeUpdate(text=chunk.text)
-    return FakeUpdate(
-        text=chunk.text,
-        contents=[
-            SimpleNamespace(
-                usage_details={
-                    "input_token_count": chunk.input_tokens,
-                    "output_token_count": chunk.output_tokens,
-                }
-            )
-        ],
-    )
 
 
 def _graph_chunk(chunk: Chunk) -> AIMessageChunk:

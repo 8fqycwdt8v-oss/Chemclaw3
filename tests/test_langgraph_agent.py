@@ -39,8 +39,6 @@ from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     available_tool_names,
-    build_agent,
-    graph_engine_selected,
     harness_tool_names,
     skills_source,
 )
@@ -516,31 +514,6 @@ def test_a_role_change_mid_session_renarrows_the_listing(monkeypatch: pytest.Mon
     assert still_listed == _listed_skills(prompts[0]) - {gated}, (
         f"turn two re-narrowed to {len(still_listed)} skills, expected only {gated} to drop"
     )
-
-
-def test_the_engine_switch_selects_which_framework_serves_a_turn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`CHEMCLAW_AGENT_ENGINE` now decides, where until M8 it could only refuse.
-
-    The switch is documented in `.env.example` and `test_config.py` enforces that it is, so an
-    operator setting it has every reason to believe it did something. Until the front door could
-    drive a compiled graph's stream, the honest answer was a refusal naming the phase; now it is a
-    branch, and `graph_engine_selected` is the one predicate both branch points read
-    (`api/runner.run_turn` builds the graph, `api/state.FrontDoor.turn_agent` declines to lease a
-    pooled agent for it).
-
-    Asserted on the predicate rather than on `build_agent`, deliberately. `build_agent` still
-    builds a MAF `Agent` under either setting, and must: the front door uses one to scaffold a
-    session whichever engine serves the turn, and that stays true until M13 deletes the MAF path.
-    A test demanding it raise would be pinning a behaviour this phase deliberately removed.
-    """
-    monkeypatch.setattr(settings, "agent_engine", "langgraph")
-    assert graph_engine_selected() is True
-
-    monkeypatch.setattr(settings, "agent_engine", "maf")
-    assert graph_engine_selected() is False
-    assert build_agent(chat_client=object()) is not None
 
 
 # --- the plan gate (M5) --------------------------------------------------------------------------

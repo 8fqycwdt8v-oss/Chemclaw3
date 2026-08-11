@@ -216,7 +216,6 @@ def test_a_real_turn_reaches_a_real_connector_on_the_graph_engine(
         return [
             event
             async for event in runner.run_turn(
-                object(),
                 cast(Any, _Session()),
                 "call echo",
                 graph_factory=_factory,

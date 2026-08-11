@@ -22,7 +22,7 @@ from chemclaw.api.app import LiveSession, _LiveSessions, create_app
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from tests.fakes import asgi_client
-from tests.fakes_turn import Piece, ScriptedTurn, maf_engine_only
+from tests.fakes_turn import Piece, ScriptedTurn
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -278,40 +278,6 @@ def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
 
     asyncio.run(_drive())
     assert sent == [], f"a cancelled handler still emitted a response: {sent}"
-
-
-@maf_engine_only(
-    "`_SpyMcpTool`'s own `__aenter__`/`__aexit__` count, which is MAF's connector protocol. Both "
-    "engines now open their turn's connectors (`registry.open_turn_connectors`), but the graph "
-    "engine's unit is a `HeldConnectorSession` around an MCP session — there is no per-turn "
-    "context manager of ours for a spy to count, and the once-per-turn property it pins is covered "
-    "there by `tests/test_langgraph_connectors.py`"
-)
-def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
-    """Create a session, post a message, stream the turn; the turn's connector opens once."""
-    agent = _FakeAgent()
-    spy = _SpyMcpTool()
-    with _client(agent, connector_factory=lambda _profile: [spy]) as client:
-        session_id = client.post("/sessions").json()["session_id"]
-        events = []
-        with client.stream(
-            "POST", f"/sessions/{session_id}/messages", json={"message": "hello"}
-        ) as res:
-            assert res.status_code == 200
-            for line in res.iter_lines():
-                if line.startswith("data:"):
-                    events.append(json.loads(line[len("data:") :].strip()))
-
-    # Without the capability announcement: no Temporal broker runs in a test process, so every
-    # turn truthfully opens by saying the durable subsystem is down. This test is about the turn
-    # streaming at all and its connector opening once, which that announcement is not part of.
-    kinds = [e["type"] for e in events if e["type"] != "capability_degraded"]
-    assert kinds == ["token", "token", "answer"]
-    assert "".join(e["text"] for e in events if e["type"] == "token") == "hi there"
-    # The connector lifecycle is the service's, and it is per *turn*: one connect and one teardown
-    # for this turn, from the factory the app calls each time (not a set held on the agent, which
-    # would be shared across concurrent turns — see `agents.chemclaw_agent.connector_tools`).
-    assert spy.entered == 1 and spy.exited == 1
 
 
 def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:

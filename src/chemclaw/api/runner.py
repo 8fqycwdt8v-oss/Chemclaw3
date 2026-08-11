@@ -30,7 +30,7 @@ from typing import Any
 from agent_framework import AgentSession
 
 from chemclaw.agent.checkpointer import checkpointer
-from chemclaw.agent.chemclaw_agent import graph_engine_selected, turn_connectors
+from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.harness_todo import apply_deferred_completions, todo_titles
 from chemclaw.agent.job_results import await_job_results
@@ -58,10 +58,10 @@ from chemclaw.api.events import (
 )
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
-from chemclaw.api.runner_trace import ToolCallTrace, approval_prompt
-from chemclaw.api.runner_usage import TurnUsage, usage_tokens
+from chemclaw.api.runner_trace import ToolCallTrace
+from chemclaw.api.runner_usage import TurnUsage
 from chemclaw.api.tool_results import session_sink
-from chemclaw.connectors.registry import open_turn_connectors
+from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
@@ -123,7 +123,6 @@ def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
 
 
 async def run_turn(
-    agent: Any,
     session: AgentSession,
     user_message: str,
     *,
@@ -139,11 +138,6 @@ async def run_turn(
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
     Args:
-        agent: A built Chemclaw agent (classic or harness). Injected by the app; injectable so tests
-            drive it with a fake streaming agent and no live model. Unused on the graph engine —
-            not merely ignored but genuinely absent, because `FrontDoor.turn_agent` yields `None`
-            there: a graph is compiled inside the turn around that turn's connectors, so there is
-            nothing to lease before they exist. See `graph_factory`.
         session: The caller's conversation session (per user+thread), so the turn resumes context.
         user_message: The chemist's message for this turn.
         actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
@@ -151,11 +145,10 @@ async def run_turn(
         roles: The user's app roles, made ambient for the authorization gate.
         dry_run: Plan the turn without launching anything expensive (IDEA-4). Ambient for the
             turn rather than a tool argument, so the model can neither set it nor clear it.
-        connectors: This turn's connectors, in whichever representation the configured engine
-            opens — MCP tool objects on MAF, `ConnectorSpec`s on the graph engine. Defaults to
-            every enabled connector (`chemclaw.agent.chemclaw_agent.turn_connectors`, which makes
-            that choice); a caller that selected an agent profile passes that profile's narrowed
-            set, and a test passes an empty list to run with none.
+        connectors: This turn's unopened connector specs. Defaults to every enabled connector
+            (`chemclaw.agent.chemclaw_agent.connector_specs`); a caller that selected an agent
+            profile passes that profile's narrowed set, and a test passes an empty list to run
+            with none.
         budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
             count are booked against the session/user when the turn ends (the front-door
             admission check reads those counters before the *next* turn). `None` disables
@@ -168,13 +161,12 @@ async def run_turn(
             (REV-10) — the surface it selects is chosen by the caller, which passes the matching
             agent and connectors. `None` labels the spend `default`, so every series carries the
             same label set and the family sums to the deployment's whole spend.
-        graph_factory: Builds this turn's compiled graph on the LangGraph engine, given the
-            profile, the turn's identity and its already-open connectors. A parameter rather than
-            a direct call so the graph path has the same injection seam the MAF path gets from
-            `agent` — the front door supplies it from `create_app(graph_factory=…)`, exactly as it
-            supplies `agent` from `agent_factory`. Without it, exercising this engine at all would
-            need a live model credential, which is why 67 tests broke the first time
-            `agent_engine` was flipped. Unused on the MAF engine.
+        graph_factory: Builds this turn's compiled graph, given the profile, the turn's identity
+            and its already-open connectors. A parameter rather than a direct call so a test can
+            drive a whole turn without a live model credential — the front door supplies it from
+            `create_app(graph_factory=…)`. It is the *only* such seam now that the agent argument
+            is gone, which is why it exists: 67 tests broke the first time the engine was flipped,
+            for want of it.
 
     Yields:
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
@@ -324,14 +316,11 @@ async def run_turn(
             # the chemist that a tool was missing, because it never saw one missing — it answers
             # from the surface it was handed. Only this layer knows the surface was short.
             #
-            # One call for both engines, because the engine's choice was already made when these
-            # connectors were built (`chemclaw.agent.chemclaw_agent.turn_connectors`). What comes
-            # back is the pair every turn needs regardless: the tools the model should see, and the
-            # connectors that did not come up. On MAF the tools *are* the objects passed in; on the
-            # graph engine they do not exist until the sessions are live, which is the whole reason
-            # this returns them rather than leaving the caller to reuse its input.
-            turn_tools, unreachable = await open_turn_connectors(
-                stack, connectors if connectors is not None else turn_connectors()
+            # Opening returns the tools as well as the casualties because a connector's tools do
+            # not exist until its session is live — `load_mcp_tools` needs an open session — which
+            # is why this is not "open these and reuse the list you passed in".
+            turn_tools, unreachable = await open_connector_specs(
+                stack, connectors if connectors is not None else connector_specs()
             )
             # The durable subsystem is announced the same way and for the same reason. It was not,
             # and connectors were: Temporal was never probed, so a turn whose every durable
@@ -350,68 +339,39 @@ async def run_turn(
             # ties a fetched result back to the audit trail). `ToolCallTrace` deliberately knows
             # neither — see its module docstring.
             tool_trace = ToolCallTrace(sink=session_sink(session.session_id, correlation_id))
-            # The turn's compiled graph, or `None` on the MAF engine. Held in a local rather than
-            # built inline because a mid-turn resume has to continue *this* graph on *this* thread
-            # — a second build would bind a second set of connector sessions and start the
-            # continuation from an empty conversation.
-            graph = (
-                graph_factory(
-                    profile=profile,
-                    actor=actor or "",
-                    correlation_id=correlation_id,
-                    connectors=turn_tools,
-                    checkpointer=await _turn_checkpointer(),
-                )
-                if graph_engine_selected()
-                else None
+            # This turn's compiled graph. Held in a local rather than built inline because a
+            # mid-turn resume has to continue *this* graph on *this* thread — a second build would
+            # bind a second set of connector sessions and start the continuation from an empty
+            # conversation. Compiled *inside* the turn because it binds this turn's connector tools
+            # at construction (M7).
+            graph = graph_factory(
+                profile=profile,
+                actor=actor or "",
+                correlation_id=correlation_id,
+                connectors=turn_tools,
+                checkpointer=await _turn_checkpointer(),
             )
             graph_config = {"configurable": {"thread_id": session.session_id}}
-            if graph is not None:
-                # The graph engine drives itself and emits the contract directly
-                # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream
-                # is that module's job rather than this loop's. What stays here is the whole rest
-                # of the turn — the budget ledger, the rollback gate, the cancellation teardown,
-                # the metrics — because none of it is a property of which framework produced the
-                # tokens. The graph is compiled *inside* the turn because it binds this turn's
-                # connector tools at construction (M7).
-                async for event in graph_events(
-                    graph,
-                    user_message,
-                    config=graph_config,
-                    trace=tool_trace,
-                    on_signal=lambda s: (
-                        started_jobs.append(s.job_id) if isinstance(s, JobSignal) else None
-                    ),
-                    usage=turn_usage,
-                ):
-                    if isinstance(event, TokenEvent):
-                        answer_parts.append(event.text)
-                    yield event
-            else:
-                stream = agent.run(
-                    user_message, stream=True, session=session, tools=turn_tools or None
-                )
-                async for update in stream:
-                    turn_usage.add(usage_tokens(update))
-                    # Drain *before* this update's own content: a tool that ran while the model was
-                    # producing this update ran before the text it then produced, so emitting the
-                    # signal first is the truthful transcript order (RCH-4/RCH-5).
-                    for signal in drain():
-                        if isinstance(signal, JobSignal):
-                            started_jobs.append(signal.job_id)
-                        yield _signal_event(signal)
-                    text = getattr(update, "text", "") or ""
-                    if text:
-                        answer_parts.append(text)
-                        yield TokenEvent(text=text)
-                    for call in await tool_trace.feed(update):
-                        yield call
-                    for request in getattr(update, "user_input_requests", None) or []:
-                        yield ApprovalRequestEvent(prompt=approval_prompt(request))
-                    plan_event = await plan.changed(session)
-                    if plan_event is not None:
-                        yield plan_event
-            # The stream is exhausted, so `agent.run` has returned and the history provider has
+            # The graph drives itself and emits the contract directly
+            # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream is
+            # that module's job rather than this loop's. What stays here is the whole rest of the
+            # turn — the budget ledger, the rollback gate, the cancellation teardown, the metrics —
+            # because none of it was ever a property of which framework produced the tokens, which
+            # is what made deleting the other engine a deletion rather than a rewrite.
+            async for event in graph_events(
+                graph,
+                user_message,
+                config=graph_config,
+                trace=tool_trace,
+                on_signal=lambda s: (
+                    started_jobs.append(s.job_id) if isinstance(s, JobSignal) else None
+                ),
+                usage=turn_usage,
+            ):
+                if isinstance(event, TokenEvent):
+                    answer_parts.append(event.text)
+                yield event
+            # The stream is exhausted, so the graph has returned and the history provider has
             # committed this turn's rows as a complete, paired exchange. From here on a teardown
             # has nothing half-written to discard — set the fact the rollback gate reads at the
             # moment it becomes true, not at the answer, which is still a verifier call and
@@ -443,25 +403,19 @@ async def run_turn(
                     # the first — so the exchange is incomplete again until it returns, and a
                     # teardown landing inside it must roll the turn back after all.
                     run_complete = False
-                    # Whichever engine ran the first half runs the second, and on the graph engine
-                    # that is literally a second `graph_events` over the *same* graph and the same
-                    # `thread_id` — the exact analogue of MAF's second `agent.run` on the same
-                    # session, because in both cases the continuation has to see the conversation
-                    # the first half produced. It is `on_signal=` no-op rather than the ledger's
-                    # appender for the same reason `_resume` never waits again: a resume that fed
-                    # its own job ids back into `started_jobs` would be the recursion this feature
-                    # is deliberately without.
-                    continuation = (
-                        graph_events(
-                            graph,
-                            _job_results_message(results),
-                            config=graph_config,
-                            trace=tool_trace,
-                            on_signal=lambda _signal: None,
-                            usage=turn_usage,
-                        )
-                        if graph is not None
-                        else _resume(agent, session, results, turn_tools, tool_trace, turn_usage)
+                    # A second `graph_events` over the *same* graph and the same `thread_id`,
+                    # because the continuation has to see the conversation the first half produced.
+                    # It is `on_signal=` no-op rather than the ledger's appender deliberately: a
+                    # resume that fed its own job ids back into `started_jobs` would be the
+                    # recursion this feature is without, so that one chemist turn cannot chain
+                    # durable jobs indefinitely inside a single request.
+                    continuation = graph_events(
+                        graph,
+                        _job_results_message(results),
+                        config=graph_config,
+                        trace=tool_trace,
+                        on_signal=lambda _signal: None,
+                        usage=turn_usage,
                     )
                     async for event in continuation:
                         if isinstance(event, TokenEvent):
@@ -872,11 +826,12 @@ async def _current_plan(session: AgentSession) -> list[str] | None:
 def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
     """The completed jobs, worded and framed as the message that continues the turn.
 
-    Extracted from `_resume` because it is the *decision* and the two engines only differ in the
-    plumbing that carries it (M3's shape): the graph engine's resume is a second `graph_events`
-    over the same thread, MAF's is a second `agent.run` over the same session, and a chemist must
-    not get a differently-worded — or differently-framed — continuation depending on which one is
-    configured.
+    A function of its own rather than a string inlined at the resume site, because it is the
+    *decision* the resume carries and it was extracted while two engines had to agree on it — MAF
+    resumed with a second `agent.run`, the graph with a second `graph_events`, and a chemist must
+    not have got a differently-worded or differently-framed continuation depending on which was
+    configured. One engine is left and the wording still belongs here, beside the framing rule it
+    depends on rather than buried in the turn loop.
 
     The results are handed to the model as *framed data*, not as an instruction: they arrive from
     a workflow, and the same injection discipline that applies to retrieved notes applies here
@@ -894,54 +849,6 @@ def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
         "work as done. Their results follow as data; continue your answer using them.\n"
         + frame_untrusted(summary, note_id="job-results")
     )
-
-
-async def _resume(
-    agent: Any,
-    session: Any,
-    results: dict[str, dict[str, Any]],
-    connectors: Sequence[Any],
-    tool_trace: ToolCallTrace,
-    turn_usage: TurnUsage,
-) -> AsyncIterator[Event]:
-    """Continue a MAF turn with completed job results, streaming the continuation's events.
-
-    The graph engine has no counterpart function: its continuation is `graph_events` called a
-    second time over the turn's own graph, so the only thing that needed extracting for it was
-    `_job_results_message`. This one exists because MAF's second run is a different call with a
-    different stream shape, and both drain the same signal buffer.
-
-    Anything the continuation itself starts is surfaced too, but a resume is deliberately not
-    recursive — a second wait would let one chemist turn chain durable jobs indefinitely inside a
-    single request.
-
-    The turn's connectors are passed through rather than rebuilt: the resume is part of the same
-    turn, inside the same open connections, so a second set would open a second connection per
-    connector for no reason.
-
-    The turn's `tool_trace` is passed through for the same reason and one more: a tool the resume
-    calls is part of this turn's evidence, so its result has to reach the answer verifier along
-    with the rest. A trace of its own would have collected them into an object nobody reads.
-
-    `turn_usage` is passed for the reason that matters most and was missed until the 2026-08-05
-    review: this is a *second* `agent.run`, so it spends real tokens, and until now not one of them
-    reached the budget guard, `chemclaw_tokens_total` or the `TurnCost` row. Measured on a turn
-    that spent 1,000 tokens before the wait and 5,000 after it, the ledger booked 1,000 — 83 % of
-    the turn unmetered. The one feature that adds an unbounded second model call was the one
-    feature the runaway-cost refusal (D-144) could not see.
-    """
-    message = _job_results_message(results)
-    async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
-        turn_usage.add(usage_tokens(update))
-        for signal in drain():
-            yield _signal_event(signal)
-        text = getattr(update, "text", "") or ""
-        if text:
-            yield TokenEvent(text=text)
-        for call in await tool_trace.feed(update):
-            yield call
-    for call in tool_trace.flush():
-        yield call
 
 
 def _signal_event(signal: Signal) -> Event:

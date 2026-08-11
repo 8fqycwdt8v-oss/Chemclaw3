@@ -29,7 +29,7 @@ from chemclaw.core.turn_signals import (
     record_job_started,
     record_proposal,
 )
-from tests.fakes_turn import Piece, ScriptedTurn, maf_engine_only
+from tests.fakes_turn import Piece, ScriptedTurn
 
 
 class _SignallingAgent(ScriptedTurn):
@@ -66,7 +66,6 @@ def _events(agent: ScriptedTurn) -> list[Any]:
         return [
             event
             async for event in run_turn(
-                agent,
                 AgentSession(session_id="s1"),
                 "hi",
                 connectors=[],
@@ -134,7 +133,6 @@ def test_signals_are_isolated_per_turn() -> None:
             return [
                 e
                 async for e in run_turn(
-                    agent,
                     AgentSession(session_id=job_id),
                     "hi",
                     connectors=[],
@@ -172,55 +170,6 @@ def test_plan_is_absent_when_the_harness_is_off(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(settings, "harness_enabled", False)
     events = _events(_SignallingAgent(jobs=[], proposals=[]))
     assert not [e for e in events if e.type == "plan"]
-
-
-@maf_engine_only(
-    "the plan read through `runner.todo_titles`; the graph engine renders the "
-    "`write_todos` state update in `chemclaw.api.graph_stream` instead"
-)
-def test_plan_is_emitted_from_the_harness_todo_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the harness on, the plan the loop is working is what the surface shows (RCH-5).
-
-    Read from the harness's own `TodoProvider` store, not a parallel copy — a second representation
-    would drift the moment the model revised its todos mid-turn.
-
-    MAF-only: on the graph engine the plan is the `write_todos` state update, which
-    `chemclaw.api.graph_stream._todo_titles` renders under the same change-and-never-empty rule.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    plans = [["[ ] gather evidence"], ["[ ] gather evidence", "[x] compute pKa"]]
-    calls = {"n": 0}
-
-    async def _fake_titles(session: Any) -> list[str]:
-        calls["n"] += 1
-        return plans[min(calls["n"] - 1, len(plans) - 1)]
-
-    monkeypatch.setattr("chemclaw.api.runner.todo_titles", _fake_titles)
-    events = _events(_SignallingAgent(jobs=[], proposals=[]))
-    emitted = [e.todos for e in events if e.type == "plan"]
-    # Emitted when it first appears and again when it changes — never once per update.
-    assert emitted == plans
-
-
-@maf_engine_only(
-    "`runner._PlanEmitter`'s change filter; the graph engine's copy of the rule is "
-    "in `graph_stream._from_update`"
-)
-def test_an_unchanged_plan_is_not_re_emitted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A static plan streams once, not on every update (which would spam the transcript).
-
-    MAF-only for the same reason as the test above; the graph engine's copy of this rule lives in
-    `graph_stream._from_update` and is pinned there.
-    """
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _fake_titles(session: Any) -> list[str]:
-        return ["[ ] one step"]
-
-    monkeypatch.setattr("chemclaw.api.runner.todo_titles", _fake_titles)
-    events = _events(_SignallingAgent(jobs=[], proposals=[]))
-    assert len([e for e in events if e.type == "plan"]) == 1
 
 
 def test_a_failing_plan_read_never_sinks_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:

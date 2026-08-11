@@ -238,7 +238,6 @@ def test_the_runner_serves_a_whole_turn_on_the_graph_engine(
         return [
             event
             async for event in run_turn(
-                object(),
                 _Session(),  # type: ignore[arg-type]
                 "what is the pKa?",
                 connectors=[],
@@ -341,7 +340,6 @@ def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatc
         return [
             event
             async for event in run_turn(
-                object(),
                 _Session(),  # type: ignore[arg-type]
                 "go",
                 connectors=[],

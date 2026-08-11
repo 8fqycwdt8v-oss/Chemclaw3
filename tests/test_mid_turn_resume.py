@@ -19,7 +19,6 @@ from unittest import mock
 import pytest
 from agent_framework import AgentSession
 
-from chemclaw.agent.chemclaw_agent import graph_engine_selected
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.api.runner import run_turn
@@ -57,7 +56,6 @@ def _events(agent: ScriptedTurn) -> list[Any]:
         return [
             e
             async for e in run_turn(
-                agent,
                 AgentSession(session_id="s1"),
                 "compute it",
                 connectors=[],
@@ -161,25 +159,21 @@ def test_a_turn_that_starts_no_job_never_waits(
     assert called == []
 
 
-@pytest.mark.skipif(
-    not graph_engine_selected(), reason="the graph engine's resume; MAF's is `runner._resume`"
-)
-def test_the_graph_resume_never_reaches_for_the_turns_agent(
+def test_the_resume_continues_the_same_graph_with_the_job_results(
     monkeypatch: pytest.MonkeyPatch, enabled: None
 ) -> None:
-    """`agent=None` is what the front door really passes on this engine, and it used to crash.
+    """A turn that launched a job answers once, from both halves — the whole of AGT-2.
 
-    `FrontDoor.turn_agent` yields `None` for the graph engine — there is no process-lived agent to
-    lease, because a graph is compiled inside the turn around its connectors. Every other test here
-    still hands `run_turn` a fake in the `agent` slot, so none of them could see that the resume
-    called `agent.run` on it: under `CHEMCLAW_MID_TURN_RESUME_ENABLED=true` a turn that launched a
-    durable job died with `AttributeError: 'NoneType' object has no attribute 'run'`. Off by
-    default, covered by nothing, and an operator-settable knob — so the flip to this engine would
-    have converted a dormant defect into a live crash.
+    The continuation is a second `graph_events` over the *same* graph and the same `thread_id`,
+    which is why the assertion is two model calls and one answer carrying text from each: a
+    continuation that started a fresh graph would answer without having seen the first half, and a
+    continuation that never ran would answer without the number.
 
-    Driving the production shape is what makes the fix load-bearing: the continuation is a second
-    `graph_events` over the same graph and the same `thread_id`, so the `agent` argument is not
-    merely unused here, it is *absent*.
+    It was written as `test_the_graph_resume_never_reaches_for_the_turns_agent`, pinning that
+    `run_turn` did not call `.run` on the `None` the front door passed in the agent slot — a real
+    crash under `CHEMCLAW_MID_TURN_RESUME_ENABLED=true`, covered by nothing, on an
+    operator-settable knob. That slot no longer exists, so the defect has no surface and only the
+    behaviour it protected is left to pin.
     """
 
     async def _fake_wait(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
@@ -192,7 +186,6 @@ def test_the_graph_resume_never_reaches_for_the_turns_agent(
         return [
             event
             async for event in run_turn(
-                None,
                 AgentSession(session_id="s-graph-resume"),
                 "compute it",
                 connectors=[],

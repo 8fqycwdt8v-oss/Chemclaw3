@@ -20,8 +20,6 @@ from collections.abc import Iterator
 
 import pytest
 
-from tests.fakes import FakeUpdate
-
 
 @pytest.fixture
 def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[object]]:
@@ -190,22 +188,25 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
     with a fake agent rather than asserted about.
     """
     import asyncio
-    from typing import Any
+    from collections.abc import AsyncIterator
 
     from agent_framework import AgentSession
 
     from chemclaw.api.runner import run_turn
+    from tests.fakes_turn import Piece, ScriptedTurn
 
-    class _Agent:
-        def run(self, message: str, **_options: Any) -> object:
-            async def _gen() -> Any:
-                yield FakeUpdate("ok")
+    class _Turn(ScriptedTurn):
+        """One token, so the turn really runs and really finishes."""
 
-            return _gen()
+        async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base
+            yield "ok"
 
     async def _drive() -> None:
         session = AgentSession(session_id="s-trace")
-        async for _event in run_turn(_Agent(), session, "hello", connectors=[]):
+        turn = _Turn()
+        async for _event in run_turn(
+            session, "hello", connectors=[], graph_factory=turn.graph_factory
+        ):
             pass
 
     asyncio.run(_drive())

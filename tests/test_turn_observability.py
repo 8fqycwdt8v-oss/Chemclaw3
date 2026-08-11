@@ -37,7 +37,6 @@ def _drive(agent: ScriptedTurn, session_id: str) -> None:
 
     async def _collect() -> None:
         async for _ in run_turn(
-            agent,
             AgentSession(session_id=session_id),
             "hi",
             connectors=[],
@@ -95,7 +94,6 @@ def test_a_failed_turn_is_still_timed() -> None:
 
     async def _collect() -> None:
         async for _ in run_turn(
-            broken,
             AgentSession(session_id="s-e"),
             "hi",
             connectors=[],
@@ -148,7 +146,6 @@ def test_token_spend_is_counted_not_only_budgeted() -> None:
 
     async def _collect() -> None:
         async for _ in run_turn(
-            metered,
             AgentSession(session_id="s-f"),
             "hi",
             connectors=[],
@@ -191,7 +188,6 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
 
     async def _collect() -> None:
         async for _ in run_turn(
-            metered,
             AgentSession(session_id="s-cost"),
             "hi",
             connectors=[],
@@ -230,7 +226,6 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
 
     async def _collect_broken() -> None:
         async for _ in run_turn(
-            broken,
             AgentSession(session_id="s-broken"),
             "hi",
             connectors=[],

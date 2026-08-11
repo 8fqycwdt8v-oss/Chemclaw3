@@ -36,7 +36,7 @@ from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from tests.fakes import FakeUpdate, fed
-from tests.fakes_turn import Chunk, Piece, ScriptedTurn, maf_engine_only
+from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -90,7 +90,6 @@ def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPat
 
     async def _drive() -> None:
         async for _ in run_turn(
-            agent,
             AgentSession(session_id="resume-usage"),
             "compute it",
             budget=_Recording(),
@@ -334,33 +333,6 @@ class _UnparseableArgumentAgent:
             )
 
         return _gen()
-
-
-@maf_engine_only(
-    "the reassembly of streamed argument *fragments*, and the closing `tool_trace.flush()` that "
-    "rescues a call whose fragments never parse. The graph engine reads calls whole from the "
-    "`updates` stream (`graph_stream`'s own docstring says why), so there is nothing to reassemble "
-    "and nothing left in the trace to flush"
-)
-def test_a_call_whose_arguments_never_parse_still_reaches_the_stream() -> None:
-    """`run_turn`'s closing `tool_trace.flush()`, which nothing exercised through a whole turn.
-
-    The trace announces a call the moment its arguments parse; a provider that streams something
-    other than JSON has no such moment, so the final flush is the only thing that keeps the call
-    from vanishing. Deleting those two lines from `run_turn` left 160 tests green — `flush()` was
-    tested on the object and never through the turn that has to call it.
-    """
-
-    async def _collect() -> list[Any]:
-        return [
-            e
-            async for e in run_turn(
-                _UnparseableArgumentAgent(), AgentSession(session_id="flush-1"), "find things"
-            )
-        ]
-
-    calls = [e for e in asyncio.run(_collect()) if isinstance(e, ToolCallEvent)]
-    assert [call.tool for call in calls] == ["find_notes"]
 
 
 # --------------------------------------------------------------------------------------------

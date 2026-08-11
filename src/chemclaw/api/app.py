@@ -35,8 +35,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from chemclaw.agent.agent_pool import AgentPool
-from chemclaw.agent.chemclaw_agent import build_agent, history_provider, turn_connectors
+from chemclaw.agent.chemclaw_agent import build_agent, connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.interaction_tools import (
@@ -176,7 +175,7 @@ def _default_agent_factory(profile: str | None) -> Any:
 def create_app(
     agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
-    connector_factory: Callable[[str | None], list[Any]] = turn_connectors,
+    connector_factory: Callable[[str | None], list[Any]] = connector_specs,
     turn_claims: SessionTurns | None = None,
     graph_factory: Callable[..., Any] = build_langgraph_agent,
 ) -> FastAPI:
@@ -191,11 +190,9 @@ def create_app(
             after a pod restart. Defaults to the config-gated store (present only under
             `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
             without a database.
-        connector_factory: Builds *this turn's* connectors for one profile name, in whichever
-            representation the configured engine opens
-            (`chemclaw.agent.chemclaw_agent.turn_connectors`). A factory rather than a list because
-            a connector's connection must belong to a single turn (see
-            `chemclaw.agent.chemclaw_agent.connector_tools`), so the app calls it per turn; and
+        connector_factory: Builds *this turn's* connector specs for one profile name
+            (`chemclaw.agent.chemclaw_agent.connector_specs`). A factory rather than a list because
+            a connector's connection must belong to a single turn, so the app calls it per turn; and
             per-profile because the profile narrows the connector surface as well as the
             in-process one. Injectable for the same reason `agent_factory` is: a test drives the
             whole HTTP surface without a connector server running.
@@ -281,11 +278,6 @@ def create_app(
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
     app.state.history = history_provider()
-    # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
-    # per-profile agent above still serves everything that does not stream; only a streaming turn
-    # needs exclusivity, because that is where the Anthropic client keeps tool-call identity on
-    # itself.
-    app.state.agent_pool = AgentPool(app.state.agent_factory, settings.service_max_concurrent_turns)
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
     # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it

@@ -23,9 +23,8 @@ from typing import Any, cast
 import pytest
 
 import chemclaw.api.runner as runner
-from chemclaw.agent.chemclaw_agent import graph_engine_selected
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
-from chemclaw.connectors.registry import _mcp_connection, open_reachable
+from chemclaw.connectors.registry import _mcp_connection, open_connector_specs
 from chemclaw.core.metrics import METRICS
 from tests.conftest import _free_port
 from tests.test_service import _client, _FakeAgent
@@ -49,45 +48,17 @@ def _reachable_durable_subsystem(monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     yield
 
 
-class _DarkMcpTool:
-    """A connector whose host is down: it enters its context and stays unconnected.
-
-    Deliberately not a raising stand-in. `open_reachable` catches nothing on purpose — MAF
-    re-connects an unconnected tool inside `Agent.run` and would raise there anyway — so the real
-    shape of an unreachable connector is exactly this: the context manager succeeds, `is_connected`
-    stays `False`, and the tool contributes nothing to the turn.
-    """
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.is_connected = False
-        self.functions: list[Any] = []
-
-    async def __aenter__(self) -> "_DarkMcpTool":
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
-
-
 def _dark_connector(name: str) -> Any:
-    """A connector whose host is down, in whichever representation the engine in force opens.
+    """A connector whose host is down: a spec pointing at a port nothing is listening on.
 
-    The two engines disagree about what a connector *is* before it is open — MAF hands out an
-    object that fails to connect, LangGraph hands out a `ConnectorSpec` whose session never opens —
-    so a test that named one of them could only ever cover one engine. What it must not do is
-    weaken to a shape neither engine uses: the degradation these tests pin is a property of the
-    real open path, and a stub that merely reports itself unreachable would pass over a runner that
-    had stopped opening connectors at all.
-
-    The graph half points at a closed port rather than faking the failure, for that reason. Nothing
-    is listening, `create_session` fails, `HeldConnectorSession` absorbs it, and the name comes back
-    in `unreachable` — the same three steps a dark host in a cluster produces.
+    Pointed at a closed port rather than faked, deliberately. The degradation these tests pin is a
+    property of the real open path — `create_session` fails, `HeldConnectorSession` absorbs it, and
+    the name comes back in `unreachable`, the same three steps a dark host in a cluster produces —
+    and a stub that merely reported itself unreachable would keep passing over a runner that had
+    stopped opening connectors at all.
     """
-    if graph_engine_selected():
-        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{_free_port()}/mcp")
-        return _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
-    return _DarkMcpTool(name)
+    endpoint = HttpEndpoint(url=f"http://127.0.0.1:{_free_port()}/mcp")
+    return _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
 
 
 def _stream_events(connectors: list[Any]) -> list[dict[str, Any]]:
@@ -155,7 +126,7 @@ def test_each_unreachable_connector_moves_the_counter() -> None:
 
     async def _open() -> None:
         async with AsyncExitStack() as stack:
-            await open_reachable(stack, [_DarkMcpTool("eln"), _DarkMcpTool("qm")])
+            await open_connector_specs(stack, [_dark_connector("eln"), _dark_connector("qm")])
 
     before = METRICS.value("chemclaw_connectors_unreachable_total")
     asyncio.run(_open())

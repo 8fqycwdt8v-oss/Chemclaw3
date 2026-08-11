@@ -593,29 +593,6 @@ def history_provider() -> HistoryProvider:
     return InMemoryHistoryProvider()
 
 
-def graph_engine_selected() -> bool:
-    """Whether this deployment's turns run on the LangGraph engine (M8).
-
-    The one reader of `settings.agent_engine` on the serving path, so "which engine is this" has a
-    single definition rather than a string comparison repeated at each branch. It replaces
-    `_reject_unsupported_engine`, which refused to build anything while the front door could not
-    drive a compiled graph's stream — that is what M8 changed.
-
-    The **callers** are what makes this small: the two places that build a turn's agent branch on it
-    (`chemclaw.api.runner.run_turn` and `chemclaw.api.state.FrontDoor.turn_agent`), plus
-    `turn_connectors`, which picks the connector representation the chosen engine can open.
-    Everything below them — the tools, the skills, the middleware chain, the profile narrowing, the
-    audit trail — is shared by construction, which is the property this migration is arranged to
-    keep.
-
-    Each caller is one *construction* the engine choice determines: the agent, the graph, and the
-    connectors they hold. A branch on this predicate that decides anything else — how a turn is
-    metered, when it degrades, what it audits — is a sign something was duplicated instead of
-    extracted, which is why `turn_connectors` exists rather than a third `if` inside `run_turn`.
-    """
-    return settings.agent_engine == "langgraph"
-
-
 def instructions_for(profile: AgentProfile) -> str:
     """This profile's system prompt: its own override, or the module default.
 
@@ -821,7 +798,8 @@ def connector_specs(profile: str | AgentProfile | None = None) -> list[Connector
 
     Returns:
         Unopened connection specs. The caller opens them for the turn
-        (`chemclaw.connectors.registry.open_connector_specs`).
+        (`chemclaw.connectors.registry.open_connector_specs`), which is what the front door's
+        `connector_factory` default does once per turn.
     """
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     specs: list[ConnectorSpec] = list(mcp_connections())
@@ -830,36 +808,6 @@ def connector_specs(profile: str | AgentProfile | None = None) -> list[Connector
     if prof.tool_names is not None:
         specs = _narrow_allowed_specs(specs, prof.tool_names)
     return specs
-
-
-def turn_connectors(profile: str | AgentProfile | None = None) -> list[Any]:
-    """This turn's connectors in whichever representation the configured engine opens.
-
-    The engine seam for connectors, and the reason it is a function rather than a branch at the
-    call site: the front door builds a turn's connectors *before* it knows which of the two
-    stream loops will consume them (`chemclaw.api.app.create_app`'s `connector_factory` default),
-    so the choice has to be made where the two representations are defined rather than where they
-    are used. `chemclaw.connectors.registry.open_turn_connectors` is the other half — it opens
-    whichever of the two it is handed — and between them `run_turn` runs one connector path.
-
-    The alternative was a third `graph_engine_selected()` branch inside `run_turn`, which is
-    exactly the duplication M13 exists to remove: the turn's budget ledger, rollback gate,
-    degradation event and metrics are not properties of which framework produced the tokens, and
-    every branch added there is another place the two engines can be made to differ.
-
-    **This function is scaffolding with a scheduled death.** When the MAF path goes (M13 Step 3)
-    it collapses to `connector_specs`, and `open_turn_connectors` collapses to
-    `open_connector_specs`; nothing else has to change, because no caller names either engine.
-
-    Args:
-        profile: The profile to narrow by, passed through to whichever half runs.
-
-    Returns:
-        `ConnectorSpec`s on the LangGraph engine, unconnected MCP tool objects on MAF.
-    """
-    if graph_engine_selected():
-        return list(connector_specs(profile))
-    return connector_tools(profile)
 
 
 def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> list[ConnectorSpec]:

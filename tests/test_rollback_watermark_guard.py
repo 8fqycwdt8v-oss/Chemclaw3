@@ -47,7 +47,6 @@ def _run(history: Any) -> list[Any]:
         return [
             event
             async for event in run_turn(
-                agent,
                 AgentSession(session_id="s-watermark"),
                 "hi",
                 history=history,

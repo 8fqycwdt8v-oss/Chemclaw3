@@ -142,34 +142,28 @@ async def post_message(
                 # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError
                 # and becomes one user-safe error event; a stall in the transport tears the
                 # stream down, and the `finally` still frees the permit either way.
-                async with (
-                    asyncio.timeout(settings.service_turn_timeout_seconds),
-                    # Exclusive for this turn (D-123). Two turns streaming through one chat
-                    # client interleave its tool-call bookkeeping and emit a `tool_use` block
-                    # with an empty name, which Anthropic rejects — 20% of turns in a live
-                    # 50-user run. The lease is returned even if the turn raises or the client
-                    # disconnects, so a pod cannot bleed capacity.
-                    front.turn_agent(live.profile) as turn_agent,
-                ):
+                # There is no agent lease here any more, and its absence is the point of D-123
+                # rather than a regression against it. Two turns streaming through one shared
+                # chat client interleaved its tool-call bookkeeping and emitted a `tool_use`
+                # block with an empty name — 20% of turns in a live 50-user run — which is why a
+                # pooled agent had to be leased exclusively. A graph is compiled per turn around
+                # that turn's own connectors, so there is no shared object to lease: the defect
+                # has no surface left to occur on.
+                async with asyncio.timeout(settings.service_turn_timeout_seconds):
                     async for event in run_turn(
-                        # The session's profile picks both halves of its surface: the agent
-                        # it talks to and the connectors that agent gets. Selecting one
-                        # without the other would advertise a narrowed toolset over the full
-                        # connector set.
-                        turn_agent,
                         live.session,
                         body.message,
                         actor=principal.oid,
                         roles=principal.roles,
                         budget=front.budget,
                         dry_run=body.dry_run,
+                        # The session's profile picks both halves of its surface: the graph the
+                        # chemist talks to and the connectors that graph gets. Selecting one
+                        # without the other would advertise a narrowed toolset over the full
+                        # connector set.
                         connectors=front.connector_factory(live.profile),
                         history=front.history,
                         profile=live.profile,
-                        # The other engine's half of the same selection: `turn_agent` above hands
-                        # over a pooled MAF agent, this hands over the builder for a graph that
-                        # cannot exist until the turn's connectors do. Exactly one of the two is
-                        # used, and which one is `run_turn`'s business rather than this route's.
                         graph_factory=front.graph_factory,
                     ):
                         if event.type == "error":
