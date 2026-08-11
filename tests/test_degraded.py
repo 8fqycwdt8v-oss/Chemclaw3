@@ -44,6 +44,7 @@ _EXPECTED_SUBSYSTEMS = {
     "preferences",
     "skill_manifest",
     "tool_result_store",
+    "transcript_projection",
 }
 
 
