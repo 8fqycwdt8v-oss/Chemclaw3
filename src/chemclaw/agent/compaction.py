@@ -40,8 +40,7 @@ for note ids — coupling the context policy to the shape of every tool's result
 only exists above the budget, where the alternative is a hard context-limit failure and the
 model's own prose in the thread still carries what it concluded. `exclude_tools` is the escape
 hatch if a deployment ever measures that it needs one; it is deliberately empty, because excluding
-the
-evidence sweeps would exclude exactly the results this edit exists to reclaim.
+the evidence sweeps would exclude exactly the results this edit exists to reclaim.
 `docs/guides/harness-konzept.md` §9 carries the provenance risk this trades against.
 
 **Why no summarizer**, unchanged from D-025 and worth restating because `SummarizationMiddleware`
@@ -50,7 +49,7 @@ as conversation, so it is an indirect-prompt-injection surface pointed straight 
 char/4 estimator and two deterministic edits need no credential, no extra model call, and no trust.
 
 **The metric exists because prose about compaction is what caused this defect.**
-`record_context_compaction` is the reader that can say the mechanism fired — it compares the full
+`RecordContextCompaction` is the reader that can say the mechanism fired — it compares the full
 thread on the request's state against the list the edits actually produced, so the number is
 measured downstream of the policy rather than asserted beside it.
 """
@@ -61,10 +60,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from langchain.agents.middleware import (
+    AgentMiddleware,
     ClearToolUsesEdit,
     ContextEditingMiddleware,
     ModelRequest,
-    wrap_model_call,
 )
 from langchain.agents.middleware.context_editing import ContextEdit, TokenCounter
 from langchain_core.messages import AnyMessage, HumanMessage
@@ -78,13 +77,19 @@ logger = logging.getLogger(__name__)
 # What a cleared tool result leaves behind. Not upstream's bare "[cleared]": the model is being
 # shown a message it can see it once received, and a placeholder that does not say why reads as a
 # tool that returned nothing — a different fact, and one the model would reasonably act on by
-# calling the tool again. `agent/repeat_guard.py` would then refuse the second call once the budget
-# is spent, so an unexplained placeholder turns one reclaimed payload into a refusal a chemist
-# sees. Saying what happened and what to do about it costs a few tokens per cleared result and
-# removes that path.
+# calling the tool again.
+#
+# **It states the fact and gives no instruction, and both halves of that are deliberate.** An
+# earlier version ended "Re-run the tool if you still need it", which was wrong twice over. It
+# contradicted `agent/repeat_guard.py`: inside one long harness turn a cleared result can be
+# re-fetched, cleared again and re-fetched, and the third identical call in a turn is *refused* —
+# so the placeholder was telling the model to do the thing a guard three middlewares away would
+# then deny. And it charged for the advice in the worst place: this string is repeated once per
+# cleared result, tens of times, in exactly the situation where the budget is already spent. The
+# guidance is paid for once instead, in the system prompt (`chemclaw_agent`), which is where the
+# marker is explained and where a sentence costs one copy rather than twenty.
 TOOL_RESULT_PLACEHOLDER = (
-    "[Earlier tool result dropped to stay inside this session's context budget. "
-    "Re-run the tool if you still need it.]"
+    "[Earlier tool result dropped to stay inside this session's context budget.]"
 )
 
 
@@ -149,7 +154,7 @@ def context_compaction_middleware() -> list[Any]:
     """The context policy, as the middleware list `build_langgraph_agent` splices in.
 
     Two entries rather than one because they answer different questions and only one of them is the
-    policy: the editing middleware reduces, and `record_context_compaction` observes what the
+    policy: the editing middleware reduces, and `RecordContextCompaction` observes what the
     reduction actually did. The observer sits *inside* the editor — later in the list is nested
     deeper — because it reads the edited list off its own request and the full thread off that
     request's state, and only the innermost position sees both.
@@ -175,7 +180,7 @@ def context_compaction_middleware() -> list[Any]:
                 ),
             ]
         ),
-        record_context_compaction,
+        RecordContextCompaction(),
     ]
 
 
@@ -207,22 +212,41 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     )
 
 
-@wrap_model_call
-async def record_context_compaction(
-    request: ModelRequest[Any],
-    handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
-) -> Any:
+class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):
     """Count a model call whose context was reduced, then run it.
 
-    Async, like every other first-party middleware here (`agent/tool_authz.py`), because the hook a
-    turn takes is the async one: LangChain's base `awrap_model_call` raises rather than falling back
-    to a sync implementation, so a sync-only version would work in a unit test driven with `invoke`
-    and fail the first real turn. Declaring the async half is what makes the two agree.
+    **Both hooks, not one, and that is the whole reason this is a class rather than a decorated
+    function.** LangChain's `AgentMiddleware` base raises `NotImplementedError` for whichever half a
+    middleware leaves undeclared, and `create_agent` puts a middleware that declares *either* hook
+    into *both* chains — so a `@wrap_model_call` async function makes every synchronous
+    `graph.invoke()`/`stream()` fail, and a sync one fails every real turn. Measured: with only the
+    async half, `build_langgraph_agent(model=fake).invoke(...)` raised "Synchronous implementation
+    of wrap_model_call is not available", while the same graph without this middleware answered.
+    `agent/team.py::_AttributedSpecialist.invoke` is the reachable caller — deepagents' `task` tool
+    carries a sync `func` beside its coroutine — so the sync half is not hypothetical.
+    `ContextEditingMiddleware` above declares both for the same reason; an observer that narrowed
+    the engine its editor runs on would be reporting on a policy it had just disabled.
 
     Observation only — it never edits the request, so removing it changes what an operator can see
     and nothing a chemist gets. That separation is deliberate: the defect this module fixes was a
     policy everybody believed was running, and a policy whose own middleware reports on itself can
     be believed for a reason.
     """
-    _record_reduction(request)
-    return await handler(request)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Any],
+    ) -> Any:
+        """Record the reduction, then run the call (sync path)."""
+        _record_reduction(request)
+        return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
+    ) -> Any:
+        """Record the reduction, then run the call — the path a turn actually takes."""
+        _record_reduction(request)
+        return await handler(request)

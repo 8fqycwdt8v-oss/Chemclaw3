@@ -60,9 +60,9 @@ unverändert der ist, der er ohne Harness war.
 | Baustein | Was er tut |
 |---|---|
 | **`TodoListMiddleware`** (LangChain) | Stellt dem Modell `write_todos` bereit und besitzt das Feld `todos` im Graph-State. Ein `Todo` ist `{content, status}` — **ohne** Beschreibungsfeld, was in §4 wichtig wird. |
-| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um genau zwei Felder: `awaiting_jobs` (laufende durable Jobs) und `model_calls` (der Zähler der Runaway-Bremse). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. |
-| **`lg_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Zahl zurück. |
-| **`lg_enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
+| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um genau **ein** Feld: `model_calls` (der Zähler der Runaway-Bremse). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. Ein zweites, `awaiting_jobs`, stand hier, bis auffiel, dass es nie jemand geschrieben oder gelesen hat (§4). |
+| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Zahl zurück. |
+| **`enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
 
 **Warum der Deckel ein eigener Zähler ist und nicht `ModelCallLimitMiddleware`.** Die
 Framework-Middleware erzwingt genau diese Grenze, und sie war der erste Versuch. Sie führt zwei
@@ -81,9 +81,11 @@ Der Harness ist eine **reine Reasoning-Schicht-Erweiterung** und respektiert D-0
 │                                                                        │
 │   create_agent(state_schema=ChemclawState, middleware=[…])             │
 │        │            │                │                                 │
-│        │            │                └─ lg_enforce_plan_approval → Freigabe vor Wirkung
+│        │            │                └─ enforce_plan_approval → Freigabe vor Wirkung
 │        │            └─ TodoListMiddleware  → write_todos, State-Feld `todos`
-│        │            └─ lg_loop_cap         → `model_calls`, harte Obergrenze
+│        │            └─ enforce_loop_cap    → `model_calls`, harte Obergrenze
+│        │            └─ ContextEditingMiddleware → Kontext-Budget (`agent/compaction.py`,
+│        │                 **nicht** harness-bedingt: hängt immer, auch am Einzel-Turn-Agenten)
 │        │                                                                │
 │        └─ ruft pro Schritt vorhandene Tools auf:                        │
 │             • inline (xTB, Löslichkeit, pKa, Graph-Query) — synchron    │
@@ -114,17 +116,22 @@ zurück, das Ergebnis kommt später über den Push-Back in die Session. Ein naiv
 würde entweder blockieren (verbietet die Architektur) oder das Todo fälschlich abhaken, obwohl der
 Job noch läuft.
 
-**Lösung: `awaiting_jobs` ist ein eigenes State-Feld.** Ein Schritt, der einen Temporal-Job
-auslöst, hinterlässt die `job_id` dort — *nicht* im Plan. Der Agent formuliert den Zwischenstand
-(„DFT-Validierung gestartet, ID qm-8f2a"), der Turn gibt die Kontrolle ab, und der zurückgemeldete
-Abschluss bringt die Folgeschritte wieder in Gang.
+**Lösung: die Buchhaltung steht gar nicht erst im Plan.** Ein Schritt, der einen Temporal-Job
+auslöst, hinterlässt die `job_id` als `job_records`-Zeile und als `session_events`-Push-Back —
+*nicht* im Plan. Der Agent formuliert den Zwischenstand („DFT-Validierung gestartet, ID qm-8f2a"),
+der Turn gibt die Kontrolle ab, und der zurückgemeldete Abschluss bringt die Folgeschritte wieder in
+Gang.
+
+Ein State-Feld `awaiting_jobs` war dafür vorgesehen und wurde deklariert, bevor die durable Seite
+gebaut war; die ging dann in die beiden Stores oben. Geschrieben oder gelesen hat es nie jemand, und
+es ist entfernt statt nachgereicht (D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has).
 
 **Warum das mehr ist als Aufräumen.** Vorher wurde ein wartendes Todo dadurch markiert, dass sein
 Beschreibungsfeld mit `awaiting-job:` präfigiert wurde — eine Konvention, die es nur gab, weil das
 Todo-Objekt kein Feld dafür hatte. Der Plan-Identitätshash musste diese Einträge dann wieder
 herausfiltern, sonst hätte ein freigegebener Plan seine eigene Freigabe in dem Moment widerrufen,
-in dem er den ersten Job startet. Heute sind es schlicht **nicht dieselben Felder**: die
-Ausnahme, die das Gate braucht, ist strukturell statt geparst — und `Todo` hat kein
+in dem er den ersten Job startet. Heute steht die Buchhaltung schlicht **nicht in dieser Liste**:
+die Ausnahme, die das Gate braucht, ist strukturell statt geparst — und `Todo` hat kein
 Beschreibungsfeld mehr, in das die Konvention zurückkriechen könnte.
 
 **Durability-Grenze — was einen Absturz überlebt:**
@@ -167,7 +174,7 @@ das *nach* der Wissensproduktion greift (§6).
 - **PR-Gate bleibt terminal (D-005).** Egal wie autonom abgearbeitet wird: jede
   `created_by: agent`-Note geht über Branch → PR → menschliche Freigabe. Autonomie erzeugt
   *Vorschläge*, keine gemergte Wahrheit.
-- **Die Freigabe gilt dem Akt, nicht der Sitzung.** `lg_enforce_plan_approval` hängt am
+- **Die Freigabe gilt dem Akt, nicht der Sitzung.** `enforce_plan_approval` hängt am
   Tool-Aufruf-Rand, weil die Einheit, die eine Freigabe autorisiert, eine *Handlung* ist — dieselbe
   Begründung, die `agent/tool_authz.py` für die Per-Tool-RBAC führt. Eine Prüfung beim Turn-Start
   sieht plausibel aus und ist die Stelle, an der der naheliegende Fix falsch wird: der Plan wird
@@ -234,7 +241,7 @@ globalen `execute` bekam das Gate angehängt, ohne dass seine Freigabe je verbra
 Entscheidung autorisierte damit jeden weiteren Turn.
 
 **Kill-Switch & Beobachtbarkeit.** `harness_enabled=false` fällt sofort auf das heutige Verhalten
-zurück. Der Deckel ist **abgelesen, nicht erschlossen**: `lg_loop_cap` beendet den Lauf und
+zurück. Der Deckel ist **abgelesen, nicht erschlossen**: `enforce_loop_cap` beendet den Lauf und
 hinterlässt die Zahl in `model_calls`, `loop_capped(state)` liest sie, und damit ist auch der Fall
 `harness_max_loop_iterations == 1` beantwortbar — die frühere Schlussfolgerung war dort blind, weil
 die Schleife bei einem Deckel von 1 nie nach ihrer Fortsetzung gefragt wurde. **Offen** ist die

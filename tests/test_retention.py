@@ -550,6 +550,44 @@ def test_an_expired_thread_leaves_none_of_its_three_tables_behind() -> None:
     )
 
 
+def test_the_checkpoint_pass_says_how_many_threads_it_left() -> None:
+    """A capped checkpoint pass reports its tail, for the reason the conversation pass does.
+
+    Without it, a first pass against a deployment with a large backlog returns exactly the cap as
+    its deleted count and an empty `skipped` — indistinguishable from a pass that drained the table,
+    while the growth this sweep exists to bound continues.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        await _create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            for index in range(5):
+                await _seed_thread(f"retention-capped-{index}", age_days=90)
+            outcome = await prune_expired_rows()
+            surviving = 0
+            for index in range(5):
+                surviving += (await _thread_row_counts(f"retention-capped-{index}"))["checkpoints"]
+            return outcome, surviving
+        finally:
+            monkeypatch.undo()
+
+    outcome, surviving = asyncio.run(_run())
+
+    assert outcome.deleted["checkpoints"] == 2, (
+        f"the pass worked more threads than its cap allowed: {outcome.deleted}"
+    )
+    assert surviving == 3, f"{surviving} of 5 seeded threads survive, expected 3"
+    assert outcome.threads_deferred > 0, (
+        "the pass stopped at its cap and reported nothing left, which reads as a bounded table"
+    )
+
+
 def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
     """The absent-tables case is every deployment that has never run the graph engine.
 
