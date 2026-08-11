@@ -244,9 +244,8 @@ def _drive_surfacing(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
     async def _handler(_request: Any) -> Any:
         return await call_next()
 
-    message = asyncio.run(run_middleware(lg_surface_authorization_denials, ctx, _handler))
-    if message is not None:
-        object.__setattr__(ctx, "result", message.content)
+    returned = asyncio.run(run_middleware(lg_surface_authorization_denials, ctx, _handler))
+    object.__setattr__(ctx, "result", getattr(returned, "content", returned))
 
 
 def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
@@ -303,9 +302,8 @@ def _drive_domain_errors(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> N
     async def _handler(_request: Any) -> Any:
         return await call_next()
 
-    message = asyncio.run(run_middleware(lg_surface_domain_errors, ctx, _handler))
-    if message is not None:
-        object.__setattr__(ctx, "result", message.content)
+    returned = asyncio.run(run_middleware(lg_surface_domain_errors, ctx, _handler))
+    object.__setattr__(ctx, "result", getattr(returned, "content", returned))
 
 
 def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> None:
@@ -340,8 +338,8 @@ def test_domain_errors_pass_a_successful_call_through_unchanged() -> None:
     """A call that succeeds is unaffected — no result override, no swallowed exception."""
     ctx = _ctx("predict_pka")
 
-    async def _ok() -> None:
-        ctx.result = "6.51"
+    async def _ok() -> str:
+        return "6.51"
 
     _drive_domain_errors(ctx, _ok)
     assert ctx.result == "6.51"

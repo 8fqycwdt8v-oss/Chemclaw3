@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from chemclaw.agent import plan_approval_store as store_module
+from chemclaw.agent import plan_gate as plan_gate_module
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import (
@@ -80,6 +81,11 @@ async def _set_plan(session: _Session, titles: list[str]) -> None:
 async def _approve(store: InMemoryPlanApprovalStore, session: _Session) -> None:
     """Record a human approval for the plan the session is proposing right now."""
     await store.record(session.session_id, _hash(session), "chemist-1", True)
+
+
+async def _titles(session: _Session) -> list[str]:
+    """The session's plan, as `plan_state.session_todos` would return it."""
+    return list(session.titles)
 
 
 def _hash(session: _Session) -> str:
@@ -245,10 +251,14 @@ def _middleware_names() -> list[str]:
     about, and building a whole graph to inspect its list would need a model. The MAF version
     passed `chat_client=object()` for the same reason and got a whole `Agent` anyway.
     """
+    from chemclaw.agent.audit import NullAuditSink, make_langgraph_audit_middleware
     from chemclaw.agent.langgraph_agent import tool_call_middleware
     from chemclaw.agent.profiles import get_profile
 
-    return [type(m).__name__ for m in tool_call_middleware(object(), get_profile(None))]
+    # A real audit middleware, because its *position* is part of what this asserts and it is the
+    # one entry built per agent rather than imported — a stand-in would show up as `object`.
+    audit = make_langgraph_audit_middleware(correlation_id="-", actor="-", sink=NullAuditSink())
+    return [type(m).__name__ for m in tool_call_middleware(audit, get_profile(None))]
 
 
 def test_the_gate_is_absent_from_the_classic_agent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,7 +299,7 @@ def test_the_default_deployment_has_no_plan_gate() -> None:
 
 
 def test_an_approval_is_spent_by_the_turn_that_used_it(
-    approvals: InMemoryPlanApprovalStore,
+    approvals: InMemoryPlanApprovalStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The gap the *first* version of this fix left, found live rather than reasoned about.
 
@@ -307,6 +317,10 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
     async def _run() -> tuple[bool, bool, bool]:
         session = _Session("one-shot")
         await _set_plan(session, ["screen the species"])
+        # `consume_turn_approval` reads the plan off the checkpointer, which this test has none of
+        # — the session here is a fixture, not a turn that ran. Pointed at the same titles the gate
+        # is driven with, so both halves ask about one plan.
+        monkeypatch.setattr(plan_gate_module, "session_todos", lambda _sid, **_kw: _titles(session))
         await _approve(approvals, session)
         during = await _call("propose_knowledge_note", session)
         await consume_turn_approval(session.session_id)  # the turn ends

@@ -98,9 +98,9 @@ def _openai_compatible_model(model: str | None = None) -> Any:
     return ChatOpenAI(
         model=model or settings.llm_model,
         base_url=settings.llm_base_url,
-        # `ChatOpenAI` takes the credential as a `SecretStr`, which is a real improvement over the
-        # raw string the MAF half passes: it keeps the key out of a repr and out of any log line
-        # that prints the model object.
+        # `ChatOpenAI` takes the credential as a `SecretStr`, which keeps the key out of a repr
+        # and out of any log line that prints the model object — an improvement over the raw string
+        # the MAF client took.
         api_key=SecretStr(settings.llm_api_key or _KEYLESS_PLACEHOLDER),
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
@@ -135,7 +135,7 @@ def _require_anthropic_key() -> None:
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set — the Anthropic chat-client path needs it. "
             "Export it, set CHEMCLAW_LLM_PROVIDER=openai_compatible for the internal endpoint, "
-            "or pass an explicit chat_client to build_agent (as the tests do)."
+            "or pass an explicit model to build_langgraph_agent (as the tests do)."
         )
 
 

@@ -245,7 +245,7 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
     """The plan a node's state update carries, or `None` when it carries none.
 
     `TodoListMiddleware` keeps `{content, status}` items, so the rendered line is the content —
-    the same text `agent/harness_todo.py` renders for the MAF path, so a surface showing a plan
+    the same text `agent/plan_gate.py` renders for the MAF path, so a surface showing a plan
     cannot tell which engine produced it.
     """
     todos = update.get("todos")

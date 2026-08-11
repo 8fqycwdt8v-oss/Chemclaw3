@@ -211,11 +211,11 @@ class PlanStatusOut(BaseModel):
 
 
 def _transcript(stored: "Sequence[Any]") -> list[TranscriptMessage]:
-    """Flatten stored MAF messages into the transcript contract, pairing calls with their results.
+    """Flatten stored messages into the transcript contract, pairing calls with their results.
 
-    Results arrive in a *later* message than the call they answer — MAF emits the assistant's
-    `function_call` and then a `tool` message carrying the `function_result` — so pairing needs one
-    pass over the whole transcript before any message can be rendered. `call_id` is the join.
+    Results arrive in a *later* message than the call they answer — an assistant message carries
+    `tool_calls` and a following `ToolMessage` carries the answer — so pairing needs one pass over
+    the whole transcript before any message can be rendered. `tool_call_id` is the join.
 
     **What this recovers, and what it cannot.** Tool calls and their outcomes were always in
     storage and merely discarded by the route, so they come back for free. Plan snapshots,
@@ -226,28 +226,46 @@ def _transcript(stored: "Sequence[Any]") -> list[TranscriptMessage]:
     """
     results: dict[str, str] = {}
     for message in stored:
-        for content in getattr(message, "contents", []):
-            if content.type == "function_result" and content.call_id is not None:
-                results[content.call_id] = _truncate_for_transcript(getattr(content, "result", ""))
+        call_id = getattr(message, "tool_call_id", None)
+        if call_id:
+            results[str(call_id)] = _truncate_for_transcript(message.content)
     transcript: list[TranscriptMessage] = []
     for index, message in enumerate(stored):
         calls = [
             TranscriptToolCall(
-                tool=content.name or "",
-                arguments=_truncate_for_transcript(getattr(content, "arguments", "")),
-                result=results.get(content.call_id or ""),
+                tool=str(call.get("name", "")),
+                arguments=_truncate_for_transcript(call.get("args", "")),
+                result=results.get(str(call.get("id", ""))),
             )
-            for content in getattr(message, "contents", [])
-            if content.type == "function_call"
+            for call in getattr(message, "tool_calls", []) or []
         ]
-        # A `tool` message is the carrier for a result that has already been attached to its call,
+        # A tool message is the carrier for a result that has already been attached to its call,
         # so surfacing it as its own bubble would render every tool twice.
-        if message.role == "tool" and not calls:
+        role = _ROLES.get(message.type, message.type)
+        if role == "tool" and not calls:
             continue
         transcript.append(
-            TranscriptMessage(index=index, role=message.role, text=message.text, tool_calls=calls)
+            TranscriptMessage(index=index, role=role, text=_text_of(message), tool_calls=calls)
         )
     return transcript
+
+
+# LangChain's message `type` to the role the transcript contract names. The two agree except for
+# `human`/`ai`, and the contract's names are the ones a surface already renders — changing them
+# would be a UI break for a rename.
+_ROLES = {"human": "user", "ai": "assistant"}
+
+
+def _text_of(message: Any) -> str:
+    """The prose of one message, whether its content is a string or a list of blocks."""
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content)
 
 
 def _truncate_for_transcript(value: object) -> str:

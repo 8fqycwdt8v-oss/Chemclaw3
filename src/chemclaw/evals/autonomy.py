@@ -2,7 +2,7 @@
 
 The ticket asks for plan quality, a plan-vs-single-shot A/B, and a runaway/abort rate. The backlog
 row framed this as "zero evaluation of agent behaviour", which overstates it:
-`tests/test_harness_execution.py` already drives real MAF machinery and pins the loop cap. What was
+`tests/test_langgraph_agent.py` already drives real MAF machinery and pins the loop cap. What was
 actually missing is that none of it reaches the **eval layer** — so a prompt edit, a skill change or
 a middleware reorder could regress behaviour and `make eval` would say nothing, and no number
 entered `baseline.json` for the drift check to watch.

@@ -261,10 +261,13 @@ def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
     sink = _RecordingSink()
     mw = make_langgraph_audit_middleware(correlation_id="conv-1", actor="alice@corp", sink=sink)
 
-    async def _returns_ref() -> None:
-        return None
+    async def _returns_ref() -> str:
+        return "pr://note/insight-1"
 
-    ctx = _ctx("propose_knowledge_note", {"type": "insight"}, result="pr://note/insight-1")
+    # Returned by the tool rather than pre-set on the context, which is the shape the trail
+    # actually records: `wrap_tool_call` middleware sees what the *handler* produced, where MAF's
+    # wrote its result onto the invocation context for the middleware to read afterwards.
+    ctx = _ctx("propose_knowledge_note", {"type": "insight"})
     _drive_mw(mw, ctx, _returns_ref)
 
     assert len(sink.events) == 1

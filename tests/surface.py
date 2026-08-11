@@ -22,7 +22,7 @@ class Surface:
     """One profile's advertised surface: its instructions, its tools, and its connectors."""
 
     instructions: str
-    tools: list[Any]
+    tool_names: frozenset[str]
     connectors: list[Any]
 
 
@@ -35,8 +35,11 @@ def surface(profile: str | AgentProfile | None = None) -> Surface:
             asking about a profile the agent would resolve differently.
     """
     resolved = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    # Names, not objects. A capability tool is a plain `@tool`-registered function until
+    # `create_agent` wraps it, so it carries `__name__` and not `.name` — and every caller here is
+    # asking *which* tools, never about the objects.
     return Surface(
         instructions=instructions_for(resolved),
-        tools=_capability_tools(resolved),
+        tool_names=frozenset(tool.__name__ for tool in _capability_tools(resolved)),
         connectors=connector_specs(resolved),
     )

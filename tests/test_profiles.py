@@ -31,7 +31,7 @@ def test_default_profile_reproduces_todays_agent() -> None:
     default = surface("default")
     assert default.instructions == base.instructions
     assert default.instructions == _INSTRUCTIONS
-    assert {t.name for t in default.tools} == {t.name for t in base.tools}
+    assert default.tool_names == base.tool_names
     assert {t.name for t in default.connectors} == {t.name for t in base.connectors}
     # And the default profile's connector set is every enabled connector, as the global agent's is.
     assert {tool.name for tool in connector_specs()} == {
@@ -53,7 +53,7 @@ def test_profile_narrows_tools_and_swaps_instructions() -> None:
         tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
     )
     agent = surface(profile)
-    assert {t.name for t in agent.tools} == {"gather_evidence"}
+    assert agent.tool_names == {"gather_evidence"}
     assert agent.instructions != _INSTRUCTIONS
 
     connectors = connector_specs(profile)

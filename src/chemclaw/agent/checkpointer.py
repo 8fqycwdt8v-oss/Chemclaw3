@@ -92,11 +92,23 @@ async def close_checkpointer() -> None:
     """Drop the process's checkpointer and close its pool — for tests and orderly shutdown.
 
     The saver is dropped with the pool because it holds both the pool *and* the loop it was built
-    in; keeping one without the other is how a second test in a second event loop gets a saver
+    in; keeping one without the other is how a second caller in a second event loop gets a saver
     pinned to a loop that has closed.
+
+    **A pool whose loop has already closed is dropped, not awaited.** `psycopg_pool` schedules its
+    workers' shutdown on the loop it was opened in, so closing it from a *different* live loop
+    raises `RuntimeError: Event loop is closed` — from inside the close, after the reference would
+    otherwise have been cleared, leaving the process holding a pool nobody can close. Production has
+    one loop, so this is a test-shaped hazard; it is handled here rather than in the tests because
+    the alternative is every caller remembering which loop opened the pool. The connections are
+    released with their dead loop either way, so there is nothing left to leak.
     """
     global _saver, _pool
     _saver = None
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
+    pool, _pool = _pool, None
+    if pool is None:
+        return
+    try:
+        await pool.close()
+    except RuntimeError:
+        logger.debug("the checkpointer pool outlived its event loop; dropped without closing")

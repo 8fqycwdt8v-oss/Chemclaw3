@@ -37,7 +37,6 @@ _EXPECTED_SUBSYSTEMS = {
     "cost_ledger",
     "job_resume",
     "log_redaction",
-    "mode_display",
     "plan_approval",
     "preferences",
     "skill_manifest",

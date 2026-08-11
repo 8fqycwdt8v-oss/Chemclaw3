@@ -161,8 +161,8 @@ class _RecordingHistory:
     ) -> None:
         """Append this turn's exchange, the way `PostgresHistoryProvider` commits it."""
         for message in messages:
-            text = "".join(getattr(content, "text", "") for content in message.contents)
-            self.rows.append((session_id, f"{message.role}: {text}"))
+            role = "user" if message.type == "human" else "assistant"
+            self.rows.append((session_id, f"{role}: {message.content}"))
 
 
 class _StallingAgent(ScriptedTurn):

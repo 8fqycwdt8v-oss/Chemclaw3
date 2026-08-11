@@ -42,8 +42,8 @@ def register_tool(fn: CapabilityTool) -> None:
 
     The key is `fn.__name__` because that is exactly the name MAF advertises to the model —
     deriving it here rather than passing it separately removes a whole drift class (see the
-    name-drift guard in `tests/test_agent.py`). A duplicate name is a programming error, as in
-    `chemclaw.evals.metric.register`.
+    name-drift guard in `tests/test_langgraph_agent.py`). A duplicate name is a programming
+    error, as in `chemclaw.evals.metric.register`.
     """
     name = fn.__name__
     if name in _REGISTRY:

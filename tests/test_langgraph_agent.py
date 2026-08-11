@@ -9,7 +9,7 @@ The claims under test, in the order the phases landed:
 1. **The graph compiles and completes a tool-using turn** (M1). Driven by a scripted fake model, so
    the assertion is about the wiring — the model is offered Chemclaw's tools, its tool call is
    executed, its result comes back — and not about model behaviour. The same bargain
-   `tests/test_agent.py` strikes for the MAF path.
+   `tests/test_langgraph_agent.py` strikes for the MAF path.
 2. **The in-process capability surface transfers unchanged** (M1). `core/tool_registry` holds plain
    callables, so the same functions the MAF agent advertises reach the model here with no adapter
    and no second declaration. If that stopped being true every tool would need a LangGraph twin,
@@ -462,13 +462,17 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
 
     token = set_current_identity("u-1", frozenset({"reader"}))
     try:
+        from chemclaw.agent import chemclaw_agent
+        from chemclaw.connectors.registry import skills_dirs
+
+        every_dir = [*settings.skills_dirs, *skills_dirs()]
         permitted = {
             name
-            for name in declared_tools([*settings.skills_dirs])
+            for name in declared_tools(every_dir)
             if skill_permits(
                 enabled=settings.skills_enabled_list,
-                declared=declared_tools([*settings.skills_dirs]),
-                available={t.name for t in tools},
+                declared=declared_tools(every_dir),
+                available=chemclaw_agent._advertised_names(profile, tools),
                 gates=settings.skill_role_gates,
             )(name)
         }

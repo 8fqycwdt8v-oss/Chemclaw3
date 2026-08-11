@@ -22,73 +22,6 @@ def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Settings
     return cfg
 
 
-def test_openai_compatible_client_carries_endpoint_and_transport(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`openai_compatible` builds an OpenAIChatClient over an AsyncOpenAI with our base_url/key."""
-    _use_settings(
-        monkeypatch,
-        llm_provider="openai_compatible",
-        llm_base_url="https://llm.internal/v1",
-        llm_model="internal-model",
-        llm_api_key="generic-key",
-        llm_timeout_seconds=12.0,
-        llm_max_retries=5,
-    )
-
-    captured: dict[str, Any] = {}
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **kwargs: Any) -> None:
-            captured["openai"] = kwargs
-
-    class FakeOpenAIChatClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured["maf"] = kwargs
-
-    # The provider imports these lazily inside the function, from their real modules.
-    monkeypatch.setitem(sys.modules, "openai", type(sys)("openai"))
-    sys.modules["openai"].AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
-    fake_af_openai = type(sys)("agent_framework.openai")
-    fake_af_openai.OpenAIChatClient = FakeOpenAIChatClient  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
-
-    provider.build_chat_model()
-
-    assert captured["openai"]["base_url"] == "https://llm.internal/v1"
-    assert captured["openai"]["api_key"] == "generic-key"
-    assert captured["openai"]["timeout"] == 12.0
-    assert captured["openai"]["max_retries"] == 5
-    assert captured["maf"]["model"] == "internal-model"
-
-
-def test_keyless_endpoint_gets_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An internal endpoint with no configured key still constructs (non-empty placeholder key)."""
-    _use_settings(
-        monkeypatch,
-        llm_provider="openai_compatible",
-        llm_base_url="https://llm.internal/v1",
-        llm_model="internal-model",
-        llm_api_key="",
-    )
-    captured: dict[str, Any] = {}
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **kwargs: Any) -> None:
-            captured.update(kwargs)
-
-    fake_openai = type(sys)("openai")
-    fake_openai.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    fake_af_openai = type(sys)("agent_framework.openai")
-    fake_af_openai.OpenAIChatClient = lambda **k: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
-
-    provider.build_chat_model()
-
-    assert captured["api_key"]  # non-empty, so the OpenAI SDK will not refuse to construct
-
-
 def test_anthropic_path_preflights_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Anthropic dev path fails clearly when its key is absent (unchanged pre-seam behavior)."""
     _use_settings(monkeypatch, llm_provider="anthropic")
@@ -107,37 +40,6 @@ def _fake_openai_client_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, An
     fake_af_openai.OpenAIChatClient = lambda **k: captured.update(k)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
     return captured
-
-
-def test_model_routes_select_the_task_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A routed task uses its mapped model; an unrouted task falls back to the default model."""
-    _use_settings(
-        monkeypatch,
-        llm_provider="openai_compatible",
-        llm_base_url="https://llm.internal/v1",
-        llm_model="internal-large",
-        model_routes={"verifier": "internal-small"},
-    )
-    captured = _fake_openai_client_capture(monkeypatch)
-
-    provider.build_chat_model("verifier")
-    assert captured["model"] == "internal-small"  # routed to the cheap model
-
-    provider.build_chat_model("agent")
-    assert captured["model"] == "internal-large"  # unrouted → default llm_model
-
-
-def test_default_task_is_unchanged_without_routes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no routes, the default `agent` task keeps the provider's default model."""
-    _use_settings(
-        monkeypatch,
-        llm_provider="openai_compatible",
-        llm_base_url="https://llm.internal/v1",
-        llm_model="internal-model",
-    )
-    captured = _fake_openai_client_capture(monkeypatch)
-    provider.build_chat_model()  # default task, empty model_routes
-    assert captured["model"] == "internal-model"
 
 
 # --- the LangGraph half of the seam (D-2026-08-10, phase M1) ------------------------------------

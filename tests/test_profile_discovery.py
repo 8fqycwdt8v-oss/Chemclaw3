@@ -131,7 +131,7 @@ def test_the_shipped_profile_narrows_both_halves_of_thesurface() -> None:
     """
     load_profiles()
     agent = surface("property-lookup")
-    assert {t.name for t in agent.tools} == {"ask_clarifying_question"}
+    assert agent.tool_names == {"ask_clarifying_question"}
     attached = {c.name: sorted(c.allowed_tools or ()) for c in connector_specs("property-lookup")}
     assert attached == {
         "calc": ["calculator_trust", "compute_xtb_energy", "predict_pka", "predict_solubility"]
@@ -157,7 +157,7 @@ def test_advertised_tool_names_matches_the_surface_the_agent_really_builds(
     # No `try/finally` releasing anything: a `ConnectorSpec` is a description, not an open client.
     # It used to be an unconnected MAF tool object owning an httpx client, which had to be closed
     # or the test leaked one per profile.
-    real = {tool.name for tool in advertised.tools}
+    real = advertised.tool_names
     for connector in advertised.connectors:
         real |= set(connector.allowed_tools or ())
 
@@ -209,12 +209,6 @@ def test_a_session_selects_its_profile_and_keeps_it() -> None:
     Fixed at creation on purpose: a conversation whose instructions and tools changed underneath
     it would have a thread that no longer matches its own history.
     """
-    built: list[str | None] = []
-
-    def factory(profile: str | None) -> _FakeAgent:
-        built.append(profile)
-        return _FakeAgent(profile)
-
     app = create_app(connector_factory=lambda _profile: [])
     with TestClient(app) as client:
         default = client.post("/sessions").json()["session_id"]
@@ -223,9 +217,11 @@ def test_a_session_selects_its_profile_and_keeps_it() -> None:
         ]
     assert app.state.live_sessions.get(default).profile is None
     assert app.state.live_sessions.get(narrowed).profile == "property-lookup"
-    # One agent per distinct profile, built once each — an agent is configuration, not
-    # per-session state, so two sessions on one profile must not build two.
-    assert built == [None, "property-lookup"]
+    # The profile is *all* the session carries about its surface. There used to be an assertion
+    # here that one agent was built per distinct profile and cached — an agent was configuration,
+    # not per-session state. Nothing is cached per process now: a graph binds its tools at
+    # construction and is compiled per turn, so the profile recorded on the session is what decides
+    # each turn's surface.
 
 
 def test_an_unknown_profile_is_refused_at_session_creation() -> None:

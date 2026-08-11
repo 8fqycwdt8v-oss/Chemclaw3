@@ -185,7 +185,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.agent", "httpx"): "the workload-identity and OBO token exchanges are HTTP",
     # api: layer 1's front door (F2).
     ("chemclaw.api", "http"): "api/ IS the FastAPI + SSE front door",
-    ("chemclaw.api", "maf"): "it serves agent/ over HTTP and holds the runner's MAF types",
     ("chemclaw.api", "postgres"): "routes/ops.py reads readiness straight off the pool",
     ("chemclaw.api", "token"): (
         "api/auth.py is the one place an inbound bearer token is validated — F4's 'one "
@@ -211,10 +210,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.connectors", "mcp"): "MCP is the protocol a connector server speaks",
     ("chemclaw.connectors", "http"): "each bundle's tool server is an ASGI app",
     ("chemclaw.connectors", "httpx"): "the client that calls a bundle carries the turn's identity",
-    ("chemclaw.connectors", "maf"): (
-        "connectors/transport.py builds the MAF tool objects the agent consumes — the one adapter "
-        "point where a connector is handed to layer 1"
-    ),
     ("chemclaw.api", "langgraph"): (
         "api/graph_stream.py translates a compiled graph's stream into the turn event contract "
         "(M8, D-2026-08-10) — the front door's half of driving the other engine; retires with the "
@@ -335,7 +330,7 @@ _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
     # `ShouldContinueCallable`/`ShouldContinueResult` from `agent_framework._harness._loop`, in
     # `agent/loop_cap.py` and `agent/plan_gate.py` — were removed rather than re-blessed. Both are
     # pure type aliases with no runtime behaviour, so `chemclaw.agent.harness_types` declares them
-    # and `tests/test_harness_types.py` fails if MAF's shape drifts from ours. The dict stays
+    # and `tests/test_langgraph_agent.py` fails if MAF's shape drifts from ours. The dict stays
     # because the ratchet above is what deleted these rows: a private import that gains a public
     # home, or goes away, loses its row on the next run.
 }

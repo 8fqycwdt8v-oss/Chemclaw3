@@ -67,7 +67,7 @@ def test_a_capped_loop_is_a_runaway_and_says_so_in_the_transcript() -> None:
 
     `chemclaw.agent.loop_cap` observes the loop's last decision and `run_turn` emits
     `loop_cap_reached` for it — the third member of the exhaustion family. That the *runner* really
-    emits it for a really capped MAF loop is pinned in `tests/test_harness_execution.py`; what is
+    emits it for a really capped MAF loop is pinned in `tests/test_langgraph_agent.py`; what is
     pinned here is that the metric scores it, which is the half an eval case can see.
     """
     capped = [

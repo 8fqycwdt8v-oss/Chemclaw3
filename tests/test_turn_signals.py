@@ -183,19 +183,6 @@ def test_plan_is_absent_when_the_harness_is_off(monkeypatch: pytest.MonkeyPatch)
     assert not [e for e in events if e.type == "plan"]
 
 
-def test_a_failing_plan_read_never_sinks_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plan is a display concern; failing to read it must not lose the chemist's answer."""
-    monkeypatch.setattr(settings, "harness_enabled", True)
-
-    async def _boom(session: Any) -> list[str]:
-        raise RuntimeError("todo store unavailable")
-
-    monkeypatch.setattr("chemclaw.api.runner.todo_titles", _boom)
-    events = _events(_SignallingAgent(jobs=[], proposals=[]))
-    assert events[-1].type == "answer"
-    assert not [e for e in events if e.type == "error"]
-
-
 def test_an_approval_signal_carries_the_holds_handle_to_the_stream() -> None:
     """An opened approval hold reaches the surface WITH the id that answers it (gap RCH-3).
 

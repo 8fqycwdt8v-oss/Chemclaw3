@@ -741,10 +741,10 @@ def test_transcript_reads_back_the_stored_thread() -> None:
 
     History is seeded through `app.state.history` — the very provider a real turn stores through —
     rather than by running the fake agent, which yields updates without persisting anything. That
-    keeps the test on the route's own behavior (ownership gate, ordering, MAF-shape flattening)
-    instead of re-implementing MAF's storage in a fake and asserting the fake.
+    keeps the test on the route's own behavior (ownership gate, ordering, message flattening)
+    instead of re-implementing storage in a fake and asserting the fake.
     """
-    from agent_framework import Message
+    from langchain_core.messages import AIMessage, HumanMessage
 
     from chemclaw.api.auth import Principal, require_principal
 
@@ -760,7 +760,7 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     asyncio.run(
         app.state.history.save_messages(
             session_id,
-            [Message("user", ["hello"]), Message("assistant", ["hi there"])],
+            [HumanMessage(content="hello"), AIMessage(content="hi there")],
             state=session.state,
         )
     )

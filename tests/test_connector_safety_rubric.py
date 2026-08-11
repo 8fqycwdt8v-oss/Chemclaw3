@@ -67,7 +67,7 @@ endpoint:
 class _ScriptedChatClient(FunctionInvocationLayer, BaseChatClient):
     """A real chat client with scripted replies, so MAF's own tool-calling loop does the calling.
 
-    Same shape as `tests/test_harness_execution.py`'s: only the model's replies are fake. The
+    Same shape as `tests/test_langgraph_agent.py`'s: only the model's replies are fake. The
     tool execution path — including whatever middleware wraps it — is the framework's real one,
     which is the entire point of testing governance here rather than against a stand-in context.
     """

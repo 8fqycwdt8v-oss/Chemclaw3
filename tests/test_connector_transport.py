@@ -376,9 +376,10 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
         async with AsyncExitStack() as stack:
             tools, unreachable = await open_connector_specs(stack, [spec])
             assert not unreachable
-            with pytest.raises(Exception) as excinfo:  # noqa: PT011 - the MCP client's own type
-                await next(t for t in tools if t.name == "blow_up").ainvoke({})
-            return str(excinfo.value)
+            # Returned rather than raised: `langchain-mcp-adapters` renders an MCP error result
+            # as the tool's content, which is the shape a model is meant to read. What the test is
+            # about is unchanged — what the *caller* is told.
+            return str(await next(t for t in tools if t.name == "blow_up").ainvoke({}))
         raise AssertionError("unreachable")  # pragma: no cover
 
     with _Server(app, port):
@@ -461,9 +462,10 @@ def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
         async with AsyncExitStack() as stack:
             tools, unreachable = await open_connector_specs(stack, [spec])
             assert not unreachable
-            with pytest.raises(Exception) as excinfo:  # noqa: PT011 - the MCP client's own type
-                await next(t for t in tools if t.name == "bad_smiles").ainvoke({})
-            return str(excinfo.value)
+            # Returned rather than raised: `langchain-mcp-adapters` renders an MCP error result
+            # as the tool's content, which is the shape a model is meant to read. What the test is
+            # about is unchanged — what the *caller* is told.
+            return str(await next(t for t in tools if t.name == "bad_smiles").ainvoke({}))
         raise AssertionError("unreachable")  # pragma: no cover
 
     with _Server(app, port):

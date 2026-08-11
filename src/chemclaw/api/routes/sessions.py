@@ -61,9 +61,7 @@ async def create_session(
     # even if the pod dies before the first turn writes any history.
     if front.session_owners is not None:
         await front.session_owners.record(session_id, principal.oid, profile)
-    front.live_sessions.add(
-        session_id, TurnSession(session_id=session_id), principal.oid, profile
-    )
+    front.live_sessions.add(session_id, TurnSession(session_id=session_id), principal.oid, profile)
     return SessionOut(session_id=session_id)
 
 

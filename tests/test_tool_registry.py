@@ -89,7 +89,7 @@ def test_capability_tools_are_exactly_the_registry() -> None:
 def test_agent_advertises_the_registered_inprocess_tools() -> None:
     """The built agent advertises every registered in-process tool under its function name."""
     agent = surface(None)
-    advertised = {t.name for t in agent.tools}
+    advertised = agent.tool_names
     assert _EXPECTED_INPROCESS_TOOLS <= advertised
 
 
