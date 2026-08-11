@@ -112,8 +112,8 @@ async def refuse_repeated_calls(
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     """Count this call and return the refusal it has earned, or `None` to let it through.
 
-    The decision, framework-free, so both engines share one counter, one threshold and one
-    sentence. Splitting it would let a turn's repeat budget depend on `agent_engine` — and the
+    The decision, framework-free, so there is one counter, one threshold and one sentence however
+    the plumbing around it is written. Splitting it would let a turn's repeat budget drift — and the
     number that matters here was measured (7–8 identical `find_past_jobs` calls in one turn, a
     median of 128–142 s against 16.9 s), so a second copy free to drift from it would quietly undo
     the finding.

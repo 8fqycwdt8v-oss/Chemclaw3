@@ -657,7 +657,7 @@ def skill_tool_names() -> set[str]:
     Read off each library's own constant rather than spelled out here, so an upstream rename
     becomes a changed value instead of a silently stale allow-list.
 
-    The union rather than a branch on `settings.agent_engine`, and the reason is what this function
+    The union rather than the one engine's own names, and the reason is what this function
     is *for*: its four callers are validators — the skill validator, the template validator, the
     prose contract, and the test that checks the instructions — and every one of them asks a
     deployment-wide question ("does anything provide this name?"), never a per-turn one. Branching

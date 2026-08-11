@@ -48,11 +48,12 @@ class DryRunRefusal(AuthorizationError):
 
 # --- the decisions, framework-free ---------------------------------------------------------------
 #
-# Each of the five gates below is one sentence of policy wrapped in one framework's plumbing. The
-# sentence lives here so that porting the plumbing to a second engine cannot reword it: a dry-run
-# refusal that says something different depending on `agent_engine`, or a denial the model is told
-# about under one engine and not the other, would be exactly the drift this migration is supposed
-# to be incapable of. The engines below are wrappers over these four functions and nothing else.
+# Each of the five gates below is one sentence of policy wrapped in the framework's plumbing. The
+# sentence lives here, apart from that plumbing, because it was written while two engines had to
+# agree on it: a dry-run refusal worded one way under one engine, or a denial the model is told
+# about under one and not the other, was the drift the migration was arranged to be incapable of.
+# One engine is left and the separation still earns its place — the plumbing is the part that
+# changes when a library does, and the policy is the part that must not.
 
 
 def dry_run_refusal(name: str) -> DryRunRefusal | None:
@@ -257,9 +258,9 @@ def _refusal_message(request: Any, text: str) -> ToolMessage:
     result — "its message becomes the tool's own successful result, verbatim, no gating" — so the
     model reads it as the answer to the call rather than as a transient failure worth retrying.
     `status="error"` reaches Anthropic as `is_error` on the tool_result block, which is the
-    opposite signal, and it would make a denial mean something different depending on
-    `agent_engine`. That is precisely the divergence the shared decisions in this module exist to
-    prevent, and it does not get to sneak back in through the envelope they are wrapped in.
+    opposite signal, and a denial that means one thing to the model here and another wherever the
+    next wrapper is written is precisely the divergence the shared decisions in this module exist
+    to prevent. It does not get to sneak back in through the envelope they are wrapped in.
     """
     return ToolMessage(content=text, tool_call_id=request.tool_call["id"])
 

@@ -201,11 +201,11 @@ def create_app(
             config-gated store (present only under `session_store="postgres"`); tests inject an
             in-memory fake to exercise the cross-process conflict without a database.
         graph_factory: Builds *this turn's* compiled graph on the LangGraph engine, given the
-            profile, the turn's identity and its already-open connectors. The graph engine's twin
-            of `agent_factory`, and it exists for exactly the reason that one does: without it a
-            test can inject a credential-free agent on one engine and not on the other, so the
-            front door's own surface would be untestable the moment `agent_engine` flips. A
-            factory rather than an instance because a graph binds its tools at construction and
+            profile, the turn's identity and its already-open connectors. It is the seam a test
+            injects a credential-free turn through, and the *only* one now that the agent argument
+            is gone: without it the front door's own surface would need a live model to exercise at
+            all. A factory rather than an instance because a graph binds its tools at construction
+            and
             therefore belongs to one turn (`chemclaw.agent.langgraph_agent`), which is also why it
             is *not* cached the way `agent_factory`'s result is.
 

@@ -1,9 +1,10 @@
 """The LangGraph conversation agent — layer 1 rebuilt (D-2026-08-10, phase M1).
 
-`build_langgraph_agent` is the LangGraph twin of `chemclaw_agent.build_agent`: same instructions,
-same in-process capability tools, same per-task model route, and — as later phases land — the same
-middleware chain, skills and human gates. Which one a deployment gets is `settings.agent_engine`,
-so an unfinished engine is never what runs in production.
+`build_langgraph_agent` builds the compiled graph a turn runs on: the instructions, the in-process
+capability tools, the per-task model route, the middleware chain, the skills and the human gates.
+It was written as the twin of `chemclaw_agent.build_agent` and lived behind a config switch until
+it carried the whole suite; the switch and the other engine are gone (M13 Step 3), so this is what
+a deployment gets.
 
 **Named for the engine, not for "graph", and that is not fussiness.** In this codebase *the graph*
 is the Markdown knowledge graph — layer 4, `kg/graph.py`, whose own `build_graph` builds a NetworkX

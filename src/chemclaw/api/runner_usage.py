@@ -113,7 +113,7 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
     `input_token_details`. What must *not* differ is the arithmetic — the same `TurnUsage`, the
     same "cache reads are not folded into input" rule, and the same `unreadable` counter — because
     the budget guard, the cost table and the token counters are all downstream of this and none of
-    them may report a different number depending on `agent_engine`.
+    them may report a different number depending on which adapter reported the usage.
 
     **Cache counts are subtracted from `input`, which `usage_tokens` does not have to do.**
     Anthropic's own API excludes cache reads from `input_tokens`, and MAF passes that through; the

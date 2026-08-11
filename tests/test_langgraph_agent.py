@@ -1,7 +1,7 @@
 """The LangGraph engine builds and runs — layer 1's rebuild, phase M1 (D-2026-08-10).
 
 These prove the claims `agent/langgraph_agent.py` makes and nothing it does not yet make. The
-engine is selected by `settings.agent_engine`, lands phase by phase, and this file grows with it;
+engine landed phase by phase behind a config switch, and this file grew with it;
 asserting here on a gate M5 has not built would be a test of a plan rather than of the code.
 
 The claims under test, in the order the phases landed:

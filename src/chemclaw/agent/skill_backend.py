@@ -10,9 +10,9 @@ filesystem tool over the same backend. Listing is therefore only half the gate: 
 one guessed path away from the caller who was refused it.
 
 So the narrowing moves to the backend, which is the only place both halves meet.
-`chemclaw.agent.skill_access` still decides *which* skills survive — the same three predicates
-under both engines, because a gate that answers differently per `agent_engine` is not a gate — and
-this module makes those answers binding on every path that can reach a file.
+`chemclaw.agent.skill_access` still decides *which* skills survive — the same three predicates,
+because a gate that answers differently depending on which code path asked is not a gate — and this
+module makes those answers binding on every path that can reach a file.
 
 **Every reach path, not the obvious one.** `BackendProtocol` exposes `ls`, `read`, `glob` and
 `grep`, each with an async twin, plus a write half. Filtering `ls` alone would leave three

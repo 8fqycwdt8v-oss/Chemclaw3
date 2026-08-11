@@ -208,20 +208,18 @@ def test_an_event_from_the_main_agent_carries_no_attribution() -> None:
 def test_the_runner_serves_a_whole_turn_on_the_graph_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The M8 acceptance: `CHEMCLAW_AGENT_ENGINE=langgraph` and `run_turn` produces a real turn.
+    """The M8 acceptance: `run_turn` drives a compiled graph and produces a real turn.
 
     Everything the runner owns is engine-neutral by construction — the budget ledger, the
     cancellation teardown, the rollback gate, the metrics, the answer assembly — so this asserts
     the one thing that had to be built: that the graph reaches all of it and comes out the far end
     as an `AnswerEvent` carrying the text the model streamed.
 
-    The MAF `agent` argument is deliberately `object()`. On this engine it is unused, and passing
-    something that would *work* if it were reached would hide the branch failing to take.
+    It was written when `run_turn` still took a MAF agent alongside the graph factory, and passed
+    `object()` in that slot so a branch failing to take could not be masked by an argument that
+    would have worked. The slot is gone; what it was guarding is now structural.
     """
     from chemclaw.api.runner import run_turn
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "agent_engine", "langgraph")
 
     class _Session:
         """The two attributes `run_turn` reads off a session on this path."""
@@ -316,7 +314,6 @@ def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatc
     from chemclaw.api.runner import run_turn
     from chemclaw.core.config import settings
 
-    monkeypatch.setattr(settings, "agent_engine", "langgraph")
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 1)
 

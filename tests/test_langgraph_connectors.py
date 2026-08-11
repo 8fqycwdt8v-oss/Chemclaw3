@@ -190,14 +190,12 @@ def test_a_real_turn_reaches_a_real_connector_on_the_graph_engine(
     factory monkeypatched to this test's live server rather than the deployment's bundles, and the
     assertion is the connector's own output text arriving in the turn. That output can only exist
     if the spec was built, the session opened, and the resulting `BaseTool` bound into the graph —
-    the three steps `turn_connectors` + `open_turn_connectors` now join up.
+    the three steps `connector_specs` + `open_connector_specs` join up.
     """
     from chemclaw.api import runner
     from chemclaw.api.events import ToolResultEvent
-    from chemclaw.core.config import settings
 
-    monkeypatch.setattr(settings, "agent_engine", "langgraph")
-    monkeypatch.setattr(runner, "turn_connectors", lambda: [_spec("lg-probe", probe)])
+    monkeypatch.setattr(runner, "connector_specs", lambda: [_spec("lg-probe", probe)])
 
     class _Session:
         """The two attributes `run_turn` reads off a session on this path."""
@@ -306,7 +304,7 @@ def test_concurrent_turns_get_their_own_session_and_their_own_identity() -> None
 def test_a_profile_narrows_connectors_identically_on_both_engines() -> None:
     """Attenuation is the same decision whichever engine reads it.
 
-    A profile that dropped a different set of connectors depending on `agent_engine` would be a
+    A profile that dropped a different set of connectors depending on the engine would have been a
     different security posture behind one config value — the drift this migration's shared
     decisions exist to make impossible. Asserted against the *live* manifests rather than a
     fixture, so a new bundle is covered the day it lands.

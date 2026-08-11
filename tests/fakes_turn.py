@@ -1,13 +1,14 @@
 """One turn's model behaviour, written once and played on either engine.
 
-**Why this module exists.** `chemclaw.api.runner.run_turn` takes a built MAF `agent` *and* a
-`graph_factory`, and uses exactly one of them depending on `settings.agent_engine`. Sixteen test
-files were written when only the first existed, so they hand `run_turn` a fake MAF agent and let
-`graph_factory` keep its production default — the real `build_langgraph_agent`, which needs a live
-model credential. Measured on 2026-08-11: flipping `CHEMCLAW_AGENT_ENGINE=langgraph` with nothing
-else changed turned 67 of those tests into `RuntimeError: ANTHROPIC_API_KEY is not set`, and left
-the stall-and-cancel cases waiting on an agent that is never run. The asymmetry was the whole
-finding: `agent` was injectable and `graph_factory` effectively was not.
+**Why this module exists.** `chemclaw.api.runner.run_turn` once took a built MAF `agent` *and* a
+`graph_factory` and used exactly one of them, and sixteen test files were written when only the
+first existed — so they handed `run_turn` a fake agent and let `graph_factory` keep its production
+default, the real `build_langgraph_agent`, which needs a live model credential. Measured on
+2026-08-11: selecting the graph engine with nothing else changed turned 67 of those tests into
+`RuntimeError: ANTHROPIC_API_KEY is not set`, and left the stall-and-cancel cases waiting on an
+agent that was never run. The asymmetry was the whole finding: `agent` was injectable and
+`graph_factory` effectively was not. That argument outlived the engine it was made about —
+`graph_factory` is now the only seam a turn can be driven through, so it has to stay one.
 
 **What it replaces, and why not the alternatives.** Two cheaper shapes were rejected:
 

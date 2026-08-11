@@ -382,10 +382,9 @@ class FrontDoorState:
     def graph_factory(self) -> Callable[..., Any]:
         """Builds one turn's compiled graph on the LangGraph engine — called per turn, never cached.
 
-        The graph engine's twin of `agent`, and read through the same view for the same reason:
-        `run_turn` needs it as an argument, and a route that reached `app.state` for it directly
-        would take an `Any` with it. On the MAF engine nothing calls the result, so passing it
-        costs a lookup and keeps the route free of a branch on `agent_engine`.
+        Read through this view rather than off `app.state` directly for the reason every property
+        here exists: `run_turn` needs it as an argument, and a route reaching into `app.state`
+        would take an `Any` with it.
         """
         factory: Callable[..., Any] = self._app.state.graph_factory
         return factory
