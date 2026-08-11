@@ -1,4 +1,4 @@
-"""`python -m chemclaw.cli.mock_llm` — an OpenAI **Responses API** mock, to drive the system hard.
+"""`python -m chemclaw.cli.mock_llm` — an OpenAI-compatible mock, to drive the system hard.
 
 The point is not to avoid paying for tokens. It is that a real model cannot be asked for the inputs
 that actually break this system: an empty function name (STREAM-1), a malformed argument document,
@@ -6,10 +6,15 @@ four hundred argument fragments, forty parallel calls in one turn, or a turn wit
 Every one of those has been a live defect here, and none of them is reachable by prompting. A mock
 makes them a parameter.
 
-It speaks the wire, not the Python. `agent_framework.openai.OpenAIChatClient` resolves to
-the **Responses** client — `client.responses.create/parse`, not chat-completions — and the
-previous generation of this idea took 37 × HTTP 404 on exactly that point
-(`docs/archive/load-test-2026-07.md`).
+It speaks the wire, not the Python — **both chat protocols, because the engine changed under it.**
+`/v1/responses` came first: the Microsoft Agent Framework's `OpenAIChatClient` resolved to the
+Responses client, and the previous generation of this idea took 37 × HTTP 404 on exactly that point
+(`docs/archive/load-test-2026-07.md`). The LangGraph rebuild builds a `ChatOpenAI`, which posts to
+`/v1/chat/completions` — and nothing here followed, so from that day every credential-free lane got
+a bare 404 and every turn died with no answer and no tool call. The lesson is the one the 404s
+taught the first time, repeated because the *other* side moved: a mock of a protocol is pinned to
+whichever client is actually built, and neither an ADR nor a docstring notices when that changes.
+
 Talking HTTP rather than injecting a `BaseChatClient` is also the only way to exercise what actually
 broke before: the streaming assembler, the middleware stack, budget admission, the audit sink and
 the session store all sit between the socket and the agent, and the in-process scripted client in
@@ -112,13 +117,21 @@ def already_has_tool_results(payload: dict[str, Any]) -> bool:
     Detected from the request rather than from per-session state on purpose: the mock stays
     stateless, so concurrent turns cannot interfere with each other's step counters — which at the
     concurrency this harness offers would be a race that looked like an application defect.
+
+    **Both request shapes, because the two protocols say it differently.** The Responses API carries
+    a `function_call_output` item in `input`; chat completions carries a `role: "tool"` message in
+    `messages`. Reading only the first would drive the chat-completions route round the loop until
+    the iteration cap — the same runaway this function was written to stop, one protocol over.
     """
     payload_input = payload.get("input")
-    if not isinstance(payload_input, list):
-        return False
-    return any(
+    if isinstance(payload_input, list) and any(
         isinstance(item, dict) and item.get("type") == "function_call_output"
         for item in payload_input
+    ):
+        return True
+    messages = payload.get("messages")
+    return isinstance(messages, list) and any(
+        isinstance(item, dict) and item.get("role") == "tool" for item in messages
     )
 
 
@@ -195,13 +208,19 @@ class MockLlm:
         whichever behaviour happened to be first in the catalogue, so `f-no-text` reported an answer
         it never wrote and the `text` field of every other behaviour was dead. That is LOAD-1's
         shape again, one layer up: the harness measuring something other than what it named.
+
+        **Chat completions needs no chain, and that is a property of the protocol rather than an
+        omission.** It has no `previous_response_id`; the client resends the whole conversation on
+        every call, so the user message carrying the marker is present on the second pass and the
+        marker scan below finds it unaided. The chain exists only because the Responses API drops
+        everything but the tool output on continuation.
         """
         previous = payload.get("previous_response_id")
         if isinstance(previous, str):
             name = self._chain.get(previous)
             if name is not None:
                 return self._by_name[name]
-        text = json.dumps(payload.get("input", ""))
+        text = json.dumps([payload.get("input", ""), payload.get("messages", "")])
         for name, behaviour in self._by_name.items():
             if f"[[{name}]]" in text:
                 return behaviour
@@ -350,8 +369,103 @@ async def _stream(behaviour: Behaviour, model: str, response_id: str) -> AsyncIt
     yield "data: [DONE]\n\n"
 
 
+async def _chat_stream(behaviour: Behaviour, model: str, completion_id: str) -> AsyncIterator[str]:
+    """The same turn as `_stream`, in chat-completions frames.
+
+    A second encoding of one behaviour rather than a second mock, because the behaviour catalogue —
+    and the LOAD-1 guard that validates it against the live tool surface — is the part with the
+    value in it. Only the wire shape differs.
+
+    Built through `ChatCompletionChunk` for the reason `_stream` builds through the Responses
+    models: `langchain_openai` deserializes every frame before the agent sees it, so a chunk this
+    mock got subtly wrong would raise inside the client and read as an application defect.
+
+    The tool-call encoding is the part worth naming. Chat completions streams a call as deltas over
+    an *indexed* slot: the first delta carries `id`, `type` and `function.name`, and every later one
+    carries only an argument fragment against the same `index`. Sending the name again on a
+    fragment makes the client assemble two calls out of one — the reassembly hazard `graph_stream`
+    refuses to read calls from the token stream because of.
+    """
+    from openai.types.chat import ChatCompletionChunk
+
+    created = int(time.time())
+
+    def frame(choice: dict[str, Any], **extra: Any) -> str:
+        chunk = ChatCompletionChunk.model_validate(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "finish_reason": None, **choice}],
+                **extra,
+            }
+        )
+        return f"data: {chunk.model_dump_json()}\n\n"
+
+    if behaviour.think_seconds:
+        await asyncio.sleep(behaviour.think_seconds)
+
+    yield frame({"delta": {"role": "assistant"}})
+
+    for index, call in enumerate(behaviour.calls):
+        yield frame(
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": f"call_{uuid.uuid4().hex[:16]}",
+                            "type": "function",
+                            "function": {"name": call.tool, "arguments": ""},
+                        }
+                    ]
+                }
+            }
+        )
+        document = (
+            call.raw_arguments
+            if call.raw_arguments is not None
+            else json.dumps(call.arguments, separators=(",", ":"))
+        )
+        for piece in _fragments(document, call.fragments):
+            # No `name` and no `id`: this is a continuation of slot `index`, and repeating either
+            # is what makes a client announce one call twice.
+            yield frame(
+                {"delta": {"tool_calls": [{"index": index, "function": {"arguments": piece}}]}}
+            )
+            if behaviour.think_seconds:
+                await asyncio.sleep(behaviour.think_seconds / max(call.fragments, 1))
+
+    if behaviour.text:
+        for chunk_text in (behaviour.text[i : i + 40] for i in range(0, len(behaviour.text), 40)):
+            yield frame({"delta": {"content": chunk_text}})
+
+    # Usage rides the final frame, which is what `stream_options.include_usage` asks for and what
+    # `api/runner_usage.graph_usage_tokens` meters the turn from. Omitting it would meter every
+    # mock turn at zero and silently disarm the budget guard under the storm.
+    yield frame(
+        {"delta": {}, "finish_reason": "tool_calls" if behaviour.calls else "stop"},
+        usage={
+            "prompt_tokens": behaviour.input_tokens,
+            "completion_tokens": behaviour.output_tokens,
+            "total_tokens": behaviour.input_tokens + behaviour.output_tokens,
+        },
+    )
+    yield "data: [DONE]\n\n"
+
+
 def build_app(mock: MockLlm) -> FastAPI:
-    """The three routes the OpenAI SDK will actually reach, over this mock's behaviour set."""
+    """The routes the OpenAI SDK will actually reach, over this mock's behaviour set.
+
+    **Two chat protocols, because the engine changed under this file.** `/v1/responses` was the only
+    one for as long as the conversation layer ran on the Microsoft Agent Framework, which spoke the
+    Responses API. The LangGraph rebuild builds a `ChatOpenAI`, which posts to
+    `/v1/chat/completions` — so from that day every credential-free lane (`make live-degradation`,
+    `make live-storm`, `make live-soak`) got a bare `404 Not Found` from the mock and the turn died
+    with no answer and no tool call. Measured before it was fixed: a degradation run scored 1/3 with
+    "the turn produced no token or answer at all" while the mock's own counter read `requests: 0`.
+    """
     app = FastAPI(title="chemclaw-mock-llm")
 
     @app.post("/v1/responses")
@@ -397,6 +511,55 @@ def build_app(mock: MockLlm) -> FastAPI:
             }
         ]
         return JSONResponse(body)
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request) -> Any:
+        """The same turn as `/v1/responses`, for the protocol `ChatOpenAI` actually posts to.
+
+        The body of this handler is deliberately the *same sequence of decisions* as the Responses
+        one — select, collapse to an answer once tool results are present, record, honour an
+        injected HTTP status — because those decisions are what the storm's scenarios are written
+        against. Only the encoding differs, and it differs in `_chat_stream`.
+
+        No `mock.remember`: chat completions has no `previous_response_id` to chain from, and the
+        client resends the conversation, so `select` finds the marker on every pass unaided.
+        """
+        payload = await request.json()
+        behaviour = mock.select(payload)
+        if behaviour.calls and already_has_tool_results(payload):
+            behaviour = replace(behaviour, calls=[])
+        mock.record(behaviour)
+        if behaviour.http_status != 200:
+            return JSONResponse(
+                {"error": {"message": "injected failure", "type": "server_error"}},
+                status_code=behaviour.http_status,
+            )
+        model = str(payload.get("model", "mock"))
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        if payload.get("stream"):
+            return StreamingResponse(
+                _chat_stream(behaviour, model, completion_id), media_type="text/event-stream"
+            )
+        return JSONResponse(
+            {
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": behaviour.text},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": behaviour.input_tokens,
+                    "completion_tokens": behaviour.output_tokens,
+                    "total_tokens": behaviour.input_tokens + behaviour.output_tokens,
+                },
+            }
+        )
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Any:

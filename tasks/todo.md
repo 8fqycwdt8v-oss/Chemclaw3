@@ -1403,12 +1403,41 @@ prints:
    paying for. A five-probe sonnet-5 arm delegated once out of fifteen before the credential's
    usage limit cut the run short, so "rarely, and model-dependent" is as far as the evidence goes.
 
-**What is still unmeasured, and why.** The API key hit its usage limit mid-run (`400 … regain
-access on 2026-09-01`), so the single-agent control arm never ran and the comparison M9 actually
-asked for — team accuracy *and cost* against the baseline — remains open. `agent_teams_enabled`
-therefore stays off: nothing here argues for turning it on, and one arm is still half a
-measurement. The plan-gate suite is likewise unrun. The degradation suite needs no credential (it
-drives `cli/mock_llm` over HTTP) and is the one that can still be taken.
+**Both arms, on haiku, 15 probes each.** The control arm ran once the credential recovered; the
+team arm's cost did not need re-running, because the ledger fix made it readable retroactively.
+
+| arm | delegated | tool calls | median tokens/turn | mean tokens/turn |
+| --- | ---: | ---: | ---: | ---: |
+| team | 0 | 19 | 95,313 | 101,858 |
+| single | — | 33 | 91,321 | 117,271 |
+
+**Read the median, not the mean.** The mean says the single agent costs 15% *more*, and that is an
+artefact of four high-variance turns (rt-01, rt-09, rt-13, rt-14) where it took extra tool-calling
+round trips. The median is the systematic part: the team costs **~4k tokens more per turn, on every
+turn**, which is the `task` tool and the supervisor prompt riding in every request. The single agent
+is cheaper on **11 of 15** probes.
+
+So the answer to M9's question, on this model and this corpus: **the team is a constant tax for a
+capability that fired zero times**, and the single agent reaches the right specialist's tools
+unaided in 14 of 15. `agent_teams_enabled` stays off — now on evidence rather than on caution. This
+also makes the routing-mechanism choice (`task` tool vs. routing node) moot until something
+actually routes: there is no trace to make legible.
+
+**M12 suite B (degradation): 3/3 PASS**, at zero token cost, with the broker deliberately stopped —
+the outage is announced, announced *before* the first token, and the durable launcher was genuinely
+reached. Getting there required fixing the mock (below).
+
+**The mock spoke a protocol nothing uses any more.** `cli/mock_llm` served only `/v1/responses`,
+because it was written when layer 1 ran on the Microsoft Agent Framework, whose client resolved to
+the Responses API. The LangGraph rebuild builds a `ChatOpenAI`, which posts to
+`/v1/chat/completions`. Nothing followed, so **every credential-free lane** — `live-degradation`,
+`live-storm`, `live-soak` — had been taking a bare `404` and dying with no answer and no tool call
+since M13. First run scored 1/3 with "the turn produced no token or answer at all" while the mock's
+own counter read `requests: 0`; after adding the route, 3/3 and `requests: 2` (the second call being
+the answer after the tool result, which is `already_has_tool_results` correctly recognising the
+chat-completions shape rather than looping to the cap).
+
+**Still unrun:** the plan-gate suite. Nothing blocks it but time.
 
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
