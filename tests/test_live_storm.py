@@ -282,6 +282,33 @@ def test_the_lane_scripts_the_chaos_family_drives_exist() -> None:
         assert (live_storm._LANE_DIR / script).is_file()
 
 
+def test_the_note_repo_is_provisioned_before_the_docker_branch_takes_over() -> None:
+    """`exec docker compose` never returns, so anything after it runs only without Docker.
+
+    This is a defect that shipped: `ensure_note_repo` sat in the *native* list, below an
+    `exec` — so on the branch `bootstrap.sh` itself calls "the right way", the lane came up with
+    no dedicated clone, `note_repo_dir` fell back to the working checkout, and the PR-gate refused
+    every submission before running a git command. Since job results, reports and distilled
+    playbooks all take that gate (D-005), the knowledge-contribution half of a live run was
+    unreachable on exactly the machines most likely to run it — and nothing failed loudly.
+
+    Asserted on the ordering rather than on mere presence, because presence is what was already
+    true and was not enough. A textual check because the only alternative is starting Docker in
+    CI: the invariant is positional, so position is the honest thing to pin.
+
+    Both anchors match the *commands* rather than any prose about them — the first draft searched
+    for `exec docker compose`, found that string inside the very comment explaining the fix, and
+    failed against the corrected script. A guard that a nearby sentence can move is not a guard.
+    """
+    script = (live_storm._LANE_DIR / "bootstrap.sh").read_text(encoding="utf-8")
+    provision = script.index("\n    ensure_note_repo\n")
+    handover = script.index("exec docker compose -f ")
+    assert provision < handover, (
+        "ensure_note_repo must run before `exec docker compose` hands the process over; "
+        "below it, the Docker path silently skips the PR-gate's clone"
+    )
+
+
 # --------------------------------------------------------------------------- the mock's own guard
 
 
