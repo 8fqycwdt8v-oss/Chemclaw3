@@ -80,6 +80,34 @@ fields rather than against a list written twice — is what found them. `hide_em
 one that mattered: the text being embedded is a chemist's question or a note's body, so the omission
 would have put content on a span under the configuration whose entire purpose is that it does not.
 
+### Against a live Phoenix, not only an in-memory exporter
+
+The above is measured on spans as they are *built*. What a deployment gets is spans as they are
+*exported*, so the same turn was run twice through the shipped path — `configure_telemetry()`, the
+real OTLP gRPC exporter, `CHEMCLAW_OTEL_ENDPOINT` — into Phoenix 20.0.0 running locally, and the
+result read back out of Phoenix's own REST API:
+
+| | spans | traces | token counts | content-bearing attributes |
+|---|---|---|---|---|
+| suppressed (default) | 10 | 1 | prompt 1234 / completion 56 / total 1290 | **0** |
+| content allowed | 10 | 1 | prompt 1234 / completion 56 / total 1290 | **5** |
+
+Identical in every respect except the one the flag governs. The five are `input.value`,
+`output.value` and three message contents — the same five the in-memory run found, which is the
+useful part: nothing is added or removed on the way through the exporter.
+
+**The two span families join into one tree**, which was not obvious in advance and is the reason
+this was worth running rather than reasoning about. Phoenix reports a single trace whose root is
+*our* `chemclaw.turn`, with `chemclaw` (CHAIN) beneath it, then the skills middleware (AGENT),
+`model` (CHAIN) → the model call (LLM) twice, `tools` (CHAIN) → `ask_clarifying_question` (TOOL),
+and `chemclaw.tool` — ours, carrying `tool.name` — as a second child of the turn. The
+first-party spans and the OpenInference ones share a trace id and nest, so an operator reading
+Phoenix sees one turn rather than two disconnected halves.
+
+Phoenix itself needed Python 3.12 to import (20.0.0 declares `>=3.10` and has a dataclass default
+that only 3.12 accepts), so it was run in a venv of its own — which is the topology anyway, and a
+small piece of evidence for the decision above that the backend is somebody else's process.
+
 ## Consequences
 
 - `docs/guides/runbook.md` and `deploy/README.md` stop saying per-model attribution is gone. The

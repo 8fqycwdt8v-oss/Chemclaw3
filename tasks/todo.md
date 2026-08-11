@@ -1658,3 +1658,27 @@ list test would have passed while the default configuration leaked content.
 **What this does not do.** It does not close AG-13. That row wants datasets, run-over-run diffing
 and annotation on the eval lane, which is a Phoenix *deployment* run against the probe transcripts.
 What changed is that the trace half of the original ask no longer needs a platform at all.
+
+### Run against a live Phoenix (2026-08-11, follow-up)
+
+The in-memory measurement covers spans as they are *built*. What a deployment gets is spans as they
+are *exported*, so the same turn went twice through the shipped path — `configure_telemetry()`, the
+real OTLP gRPC exporter, `CHEMCLAW_OTEL_ENDPOINT` — into Phoenix 20.0.0 running locally, read back
+out of Phoenix's own REST API:
+
+| | spans | traces | token counts | content-bearing attributes |
+|---|---|---|---|---|
+| suppressed (default) | 10 | 1 | 1234 / 56 / 1290 | **0** |
+| content allowed | 10 | 1 | 1234 / 56 / 1290 | **5** |
+
+Identical except for the one thing the flag governs, and the same five attributes the in-memory run
+found — nothing is added or removed on the way through the exporter.
+
+**The finding worth having run it for**: the first-party and OpenInference spans join into *one*
+trace. Phoenix shows `chemclaw.turn` as the root, with `chemclaw` (CHAIN) beneath it, the skills
+middleware (AGENT), `model` (CHAIN) → the model call (LLM) twice, `tools` (CHAIN) →
+`ask_clarifying_question` (TOOL), and our `chemclaw.tool` as a second child of the turn. An operator
+sees one turn, not two disconnected halves — which was an assumption until this run.
+
+Phoenix needed Python 3.12 to import (20.0.0 declares `>=3.10` and carries a dataclass default only
+3.12 accepts), so it ran in a venv of its own. That is the topology anyway.
