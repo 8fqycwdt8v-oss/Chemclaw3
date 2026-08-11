@@ -596,6 +596,40 @@ arranged to keep that commit small and the suite green at each step.
 - [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, durable
       compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
 
+      **STOP — this step is additive before it is subtractive, and the reason is a live regression
+      Steps 0/3 have already shipped.** The plan's §2 promised that `session_messages` "survives as
+      a **read-model projection** for `GET /sessions/{id}/messages` and the audit trail — written
+      from the checkpoint stream, never read back into the graph", keeping the route, the ownership
+      gate and the GxP transcript intact. **That writer was never built.** `save_messages` is a MAF
+      `HistoryProvider` hook; the graph writes to the checkpointer and calls nothing else.
+
+      Measured 2026-08-11 against a real Postgres, not inferred:
+
+      - One complete graph turn through `run_turn` under `session_store=postgres` — events
+        `['capability_degraded', 'token', 'answer']` — leaves **0 rows** in `session_messages`.
+      - Two turns on one session leave **8 rows in `checkpoints` and 0 in `session_messages`**.
+
+      So the blast radius is exact: **conversation continuity is fine** (the thread lives in the
+      checkpointer under `thread_id = session_id`, which is why turn two still sees turn one), and
+      **`GET /sessions/{id}/messages` returns `[]` for every session** — the transcript route is
+      dead in production code right now.
+
+      **No test caught it, and the reason is worth keeping.**
+      `test_service.py::test_the_transcript_route_...` seeds `session_messages` by calling
+      `save_messages` directly, and its docstring says it does so deliberately — "rather than by
+      running the fake agent, which yields updates without persisting anything… That keeps the test
+      on the route's own behavior". Sound reasoning for what it set out to pin, and it makes the
+      test structurally blind to the writer's absence: it asserts ordering, flattening and the
+      ownership gate over rows it wrote itself.
+
+      **So the order inverts.** Build the projection first, prove it with a test that runs a turn
+      instead of seeding the table, and only then delete the rollback watermark, the orphan repair
+      and `PostgresHistoryProvider` — otherwise this step takes the system from "transcript
+      silently empty" to "transcript route deleted" and locks the regression in. The open design
+      question is where the projection is written from: the checkpoint stream (what §2 says, and
+      the only source that survives a pod restart mid-turn) or `run_turn`'s own event stream
+      (simpler, already ordered, but lost if the process dies before the turn ends).
+
       **`_resume` is done (2026-08-11), and it was *ported*, not removed.** The crash was real:
       `turn_agent` yields `None` on the graph engine and mid-turn resume called `agent.run` on it,
       so a turn launching a durable job under `CHEMCLAW_MID_TURN_RESUME_ENABLED=true` died with
