@@ -21,8 +21,12 @@ What is pinned here:
   1. Abandoning a turn still books the tokens metered so far (no free abandoned turns).
   2. Abandoning a turn releases the admission permit and the session's active-turn slot, so the
      session is not 409-bricked and capacity is returned.
-  3. A half-written turn is rolled back under *both* teardowns, not just the one a test can reach
-     by hand.
+  3. A turn cut short has its session state rolled back under *both* teardowns, not just the one a
+     test can reach by hand — and a turn whose model run completed does not, however long the
+     verifier or a job-result wait then holds it open.
+  4. The transcript is all-or-nothing across a teardown: a turn that answered keeps its exchange,
+     a turn that did not writes none. That pair is what replaced the durable rollback the runner
+     used to carry (D-2026-08-10 §2), and it is why the rollback could go.
 """
 
 import asyncio
@@ -128,55 +132,37 @@ class _StatePoisoningAgent(ScriptedTurn):
 
 
 class _AnsweringAgent(ScriptedTurn):
-    """An agent that completes an ordinary turn: two tokens, a stored message, then it returns.
+    """An agent that completes an ordinary turn: two tokens, then it returns.
 
-    The message is written the way a durable provider writes one — the runner never sees it, and
-    by the time the answer is assembled it is already committed. That is what makes the teardown
-    *after* the answer different in kind from one before it: there is no unmatched `tool_use` and
-    nothing half-written, only a finished exchange somebody could still delete.
+    It stores nothing itself, and that is what the projection changed. Under MAF this fake had to
+    append its own rows, because the framework committed the thread as it went and the runner never
+    saw the write. `_record_transcript` is the writer now, so leaving the fake mute makes these
+    tests drive the *real* write path rather than a hand-placed imitation of it.
     """
-
-    def __init__(self, history: "_RecordingHistory", session_id: str) -> None:
-        """Commit this turn's rows to `history` under `session_id` once the reply is out."""
-        self._history = history
-        self._session_id = session_id
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
         yield Chunk("the ", output_tokens=5)
         yield Chunk("answer", output_tokens=5)
-        self._history.rows.append((self._session_id, "user: " + message))
-        self._history.rows.append((self._session_id, "assistant: the answer"))
 
 
 class _RecordingHistory:
-    """A durable history provider, reduced to the two calls the runner's rollback guard makes.
+    """The transcript projection store, reduced to the one call the runner makes into it.
 
-    `latest_message_id` is the pre-turn watermark and `rollback_to` deletes everything above it —
-    the same contract `chemclaw.agent.session_store.PostgresHistoryProvider` implements against
-    Postgres. Holding the rows in a list is what lets a test assert on what a rollback *destroyed*
-    rather than on whether it was called.
+    Holding the rows in a list is what lets a test assert on what a teardown *left behind* rather
+    than on whether a method was called — which is the question these tests ask, and the one that
+    used to be put to the deleted `rollback_to`.
     """
 
     def __init__(self) -> None:
         self.rows: list[tuple[str, str]] = []
-        self.rollbacks: list[int] = []
 
-    async def latest_message_id(self, session_id: str) -> int | None:
-        """The highest stored row id for the session, or None when it has no history yet."""
-        rows = [index for index, row in enumerate(self.rows, start=1) if row[0] == session_id]
-        return rows[-1] if rows else None
-
-    async def rollback_to(self, session_id: str, watermark: int) -> int:
-        """Delete this session's rows above `watermark`, returning how many went."""
-        self.rollbacks.append(watermark)
-        keep = [
-            row
-            for index, row in enumerate(self.rows, start=1)
-            if row[0] != session_id or index <= watermark
-        ]
-        deleted = len(self.rows) - len(keep)
-        self.rows[:] = keep
-        return deleted
+    async def save_messages(
+        self, session_id: str, messages: list[Any], *, state: dict[str, Any] | None = None
+    ) -> None:
+        """Append this turn's exchange, the way `PostgresHistoryProvider` commits it."""
+        for message in messages:
+            text = "".join(getattr(content, "text", "") for content in message.contents)
+            self.rows.append((session_id, f"{message.role}: {text}"))
 
 
 class _StallingAgent(ScriptedTurn):
@@ -362,27 +348,28 @@ def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
 
 
 def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
-    """A turn that answered is never rolled back, however the stream is then torn down.
+    """A turn that answered keeps its transcript, however the stream is then torn down.
 
     The window is one send plus one round trip and it was open on the only path production takes:
-    the client drops while sse-starlette is writing the `AnswerEvent`, the runner's teardown clause
-    runs unconditionally, and under `session_store="postgres"` `rollback_to` DELETEs the user and
-    assistant rows the finished turn had already committed. The turn is billed `completed=True` and
-    its output is gone — silent loss of conversation history, which in a GxP system is the
+    the client drops while sse-starlette is writing the `AnswerEvent`, and the runner's teardown
+    clause runs unconditionally. Under MAF that clause ran `rollback_to`, which DELETEd the user
+    and assistant rows the finished turn had already committed — the turn billed `completed=True`
+    and its output gone, silent loss of conversation history, which in a GxP system is the
     expensive outcome rather than the cheap one.
 
-    The rollback exists to discard a *half-written* turn (an unmatched `tool_use` that would brick
-    every later turn, ISSUE-B-10). An answered turn has none: `agent.run` returned, and the pair is
-    complete. So the guard is the answer, and this pins it under both teardowns — `aclose()`, which
-    sse-starlette uses on a send timeout, and the cancellation a real disconnect delivers into the
-    yield the answer is suspended in.
+    The rollback is gone, and this is the test that has to keep holding without it — which is
+    exactly why it survives the deletion rather than going with it. `_record_transcript` writes the
+    exchange in one call once the answer exists, so the property is now structural: there is no
+    later step that could remove what this turn committed. Pinned under both teardowns — `aclose()`,
+    which sse-starlette uses on a send timeout, and the cancellation a real disconnect delivers
+    into the yield the answer is suspended in.
     """
     history = _RecordingHistory()
     session = AgentSession(session_id="s6")
 
     async def _drive() -> None:
         for teardown in ("aclose", "cancel"):
-            agent = _AnsweringAgent(history, session.session_id)
+            agent = _AnsweringAgent()
             stream = _closable(
                 run_turn(
                     session,
@@ -403,9 +390,6 @@ def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
             else:
                 with pytest.raises(asyncio.CancelledError):
                     await stream.athrow(asyncio.CancelledError())
-            assert history.rollbacks == [], (
-                f"a {teardown} teardown after the answer rolled the durable history back"
-            )
             assert history.rows[-1][1] == "assistant: the answer", (
                 f"the answered turn's committed rows did not survive a {teardown} teardown: "
                 f"{history.rows}"
@@ -440,7 +424,7 @@ def test_a_disconnect_after_the_answer_is_billed_as_completed(
     history = _RecordingHistory()
 
     async def _drive() -> None:
-        agent = _AnsweringAgent(history, "s-answered-cancel")
+        agent = _AnsweringAgent()
         stream = _closable(
             run_turn(
                 AgentSession(session_id="s-answered-cancel"),
@@ -502,28 +486,22 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
     asyncio.run(_drive())
 
 
-class _WatermarkBlindHistory(_RecordingHistory):
-    """A durable history whose pre-turn watermark read fails the way a busy database does.
+def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> None:
+    """Nothing to roll back, because nothing was written — the other half of the deleted guard.
 
-    The rows themselves are perfectly readable — only `latest_message_id` fails — because that is
-    the real shape of the incident: one hiccup at turn start, a healthy store by teardown time.
+    The durable rollback existed for the opposite arrangement: MAF committed the thread as the turn
+    went, so a disconnect mid-tool-call left a `tool_use` with no `tool_result`, every later turn
+    replayed it, the model rejected the thread outright, and one dropped connection permanently
+    bricked the conversation. Deleting the rollback is only safe if that half-written state cannot
+    occur, so this is the claim the deletion rests on and it has to be pinned rather than argued.
+
+    `_record_transcript` runs once, after the answer exists, and writes the user message and the
+    answer in a single call. A teardown therefore lands on one side or the other: before it, and
+    the store is untouched (here), or after it, and the exchange is whole (the two tests above).
+    Nothing moves this test to green except moving that write, which is precisely the change that
+    would reintroduce the failure.
     """
-
-    async def latest_message_id(self, session_id: str) -> int | None:
-        """Fail exactly as `chemclaw.core.db` does when a connection cannot be obtained in time."""
-        raise ConnectionError("Postgres unreachable at postgresql://h/db: connection timeout")
-
-
-def test_a_failed_watermark_read_never_turns_a_disconnect_into_a_history_wipe() -> None:
-    """No watermark means no durable delete — not a delete from the beginning of time.
-
-    The failed read used to leave the watermark `None`, which the store treated as 0, so the
-    teardown ran `DELETE … id > 0`: the *entire* conversation, when the guard existed to remove
-    one turn. With the watermark unreadable there is no boundary this turn's rows can be told
-    apart at, so the only honest rollback is none — the next read's `message_pairing` repair
-    drops any orphaned tool call, exactly as the rollback's own failure branch already relies on.
-    """
-    history = _WatermarkBlindHistory()
+    history = _RecordingHistory()
     history.rows = [
         ("s-blind", "user: an earlier question"),
         ("s-blind", "assistant: an earlier answer"),
@@ -543,32 +521,52 @@ def test_a_failed_watermark_read_never_turns_a_disconnect_into_a_history_wipe() 
             ),
             agent.stalled,
         )
-        assert history.rollbacks == [], (
-            "the durable rollback ran without a watermark — the delete boundary was a guess"
-        )
         assert history.rows == before, (
-            f"a failed watermark read plus a disconnect wiped the conversation: {history.rows}"
+            f"a turn that never answered still committed a transcript row: {history.rows}"
         )
 
     asyncio.run(_drive())
 
 
-def test_a_disconnect_during_a_slow_verifier_keeps_the_committed_exchange(
+class _StateWritingAgent(ScriptedTurn):
+    """An answering agent that also advances `session.state`, the way the harness does.
+
+    The state write is the thing under test in the two windows below. It stands in for a completed
+    todo, a consumed approval, a recorded plan hash — whatever the turn's model run legitimately
+    settled before the post-run wait began.
+    """
+
+    def __init__(self, session: AgentSession) -> None:
+        """Advance `session`'s state as the turn streams."""
+        self._session = session
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+        self._session.state["todos"] = ["done"]
+        yield Chunk("the ", output_tokens=5)
+        yield Chunk("answer", output_tokens=5)
+
+
+def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rollback predicate is "the last `agent.run` returned", not "the answer was yielded".
+    """The teardown predicate is "the model run returned", not "the answer was yielded".
 
     Between the run finishing and the AnswerEvent the turn still awaits the verifier — an LLM
-    call. A disconnect or the front door's wall-clock deadline landing in that window found
-    `answered` still False and rolled back an exchange the history provider had already committed
-    complete and correctly paired: the verifier, a scoring aid, silently cost the chemist the
-    answer it was scoring.
+    call. A disconnect or the front door's wall-clock deadline landing in that window finds
+    `answered` still False, and on the `answered`-only predicate would roll the session state back
+    over a run that had genuinely completed: the verifier, a scoring aid, silently undoing the work
+    it was scoring. `run_complete` is what draws the line in the right place, and this is the test
+    that fails if someone simplifies the predicate to the flag that reads like the obvious one.
+
+    This used to assert on `history.rows` instead, because MAF committed the stored thread during
+    the run and the teardown then DELETEd it. Both halves of that are gone — the projection writes
+    once, after the answer — so the surviving guard is the state rollback, and that is what it now
+    asks about. The window and the predicate are unchanged.
     """
     from chemclaw.agent.verifier import VerificationResult
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
-    history = _RecordingHistory()
     session = AgentSession(session_id="s-slow-verify")
     stalled = asyncio.Event()
 
@@ -580,48 +578,37 @@ def test_a_disconnect_during_a_slow_verifier_keeps_the_committed_exchange(
     monkeypatch.setattr("chemclaw.api.runner_answer.verify_turn_answer", _stalling_verify)
 
     async def _drive() -> None:
-        agent = _AnsweringAgent(history, session.session_id)
+        agent = _StateWritingAgent(session)
         await _cancel_mid_turn(
-            run_turn(
-                session,
-                "hi",
-                history=history,
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            ),
+            run_turn(session, "hi", connectors=[], graph_factory=agent.graph_factory),
             stalled,
         )
-        assert history.rollbacks == [], (
-            "a slow verifier made the teardown roll a finished turn back"
-        )
-        assert [text for _, text in history.rows] == ["user: hi", "assistant: the answer"], (
-            f"the committed exchange did not survive a disconnect during verification: "
-            f"{history.rows}"
+        assert session.state.get("todos") == ["done"], (
+            f"a slow verifier made the teardown roll a finished run's state back: {session.state}"
         )
 
     asyncio.run(_drive())
 
 
-def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_committed_exchange(
+def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other window between the run and the answer: `await_job_results` under mid-turn resume.
 
-    The wait can hold the turn open for `mid_turn_resume_timeout_seconds`; the exchange it holds
-    is already committed, so a teardown landing inside it has nothing half-written to discard.
-    (Once the resume's *second* `agent.run` starts the exchange is genuinely incomplete again and
-    the rollback re-arms — that is the `run_complete = False` around `_resume`.)
+    The wait can hold the turn open for `mid_turn_resume_timeout_seconds`, and the run whose state
+    it holds has completed — so a teardown inside it has nothing to undo. (Once the resume's
+    *second* run starts the turn is genuinely mid-flight again and the rollback re-arms: that is
+    the `run_complete = False` around the resume.)
     """
     from chemclaw.core.config import settings
     from chemclaw.core.turn_signals import record_job_started
 
     monkeypatch.setattr(settings, "mid_turn_resume_enabled", True)
-    history = _RecordingHistory()
     session = AgentSession(session_id="s-slow-resume")
     stalled = asyncio.Event()
 
-    class _JobAgent(_AnsweringAgent):
-        """An answering agent whose turn also launched a durable job, so the resume wait runs."""
+    class _JobAgent(_StateWritingAgent):
+        """A state-writing agent whose turn also launched a durable job, so the wait runs."""
 
         async def stream(  # noqa: D102 - see `ScriptedTurn`
             self, message: str
@@ -638,23 +625,13 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_committed_exchange
     monkeypatch.setattr("chemclaw.api.runner.await_job_results", _stalling_wait)
 
     async def _drive() -> None:
-        agent = _JobAgent(history, session.session_id)
+        agent = _JobAgent(session)
         await _cancel_mid_turn(
-            run_turn(
-                session,
-                "hi",
-                history=history,
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            ),
+            run_turn(session, "hi", connectors=[], graph_factory=agent.graph_factory),
             stalled,
         )
-        assert history.rollbacks == [], (
-            "a slow job-result wait made the teardown roll a finished turn back"
-        )
-        assert [text for _, text in history.rows] == ["user: hi", "assistant: the answer"], (
-            f"the committed exchange did not survive a disconnect during the resume wait: "
-            f"{history.rows}"
+        assert session.state.get("todos") == ["done"], (
+            f"a slow job-result wait rolled a finished run's state back: {session.state}"
         )
 
     asyncio.run(_drive())

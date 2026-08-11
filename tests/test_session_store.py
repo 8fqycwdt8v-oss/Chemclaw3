@@ -37,6 +37,19 @@ async def _provider_or_skip() -> PostgresHistoryProvider:
     return PostgresHistoryProvider()
 
 
+async def _clear(session_id: str) -> None:
+    """Empty one session's rows, so a rerun starts from the state the test describes.
+
+    Written here rather than borrowed from the provider: the store used to expose `rollback_to`,
+    and these tests reached for it as a truncate because it happened to be there. It was the
+    disconnect rollback's delete, it is gone with that rollback, and a fixture concern should never
+    have been resting on a production method's side effect anyway.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM session_messages WHERE session_id = %s", (session_id,))
+
+
 def test_messages_survive_a_new_provider_instance() -> None:
     """Saved messages reload through a fresh provider over the same DSN (proxy for a restart)."""
 
@@ -65,7 +78,7 @@ def test_an_orphaned_tool_call_is_repaired_on_read() -> None:
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-orphan-repair"
-        await provider.rollback_to(session_id, 0)  # a clean slate for a rerun
+        await _clear(session_id)  # a clean slate for a rerun
         await provider.save_messages(
             session_id,
             [
@@ -105,7 +118,7 @@ def test_repair_rewrites_the_right_rows_when_an_earlier_one_is_dropped() -> None
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-orphan-shift"
-        await provider.rollback_to(session_id, 0)
+        await _clear(session_id)
         await provider.save_messages(
             session_id,
             [
@@ -147,7 +160,7 @@ def test_a_matched_pair_is_never_touched_by_the_repair() -> None:
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-orphan-healthy"
-        await provider.rollback_to(session_id, 0)
+        await _clear(session_id)
         await provider.save_messages(
             session_id,
             [
@@ -165,46 +178,6 @@ def test_a_matched_pair_is_never_touched_by_the_repair() -> None:
         )
         loaded = await provider.get_messages(session_id)
         assert [c.type for m in loaded for c in m.contents] == ["function_call", "function_result"]
-
-    asyncio.run(_run())
-
-
-def test_rollback_deletes_only_what_the_turn_wrote() -> None:
-    """The durable half of the disconnect rollback: rows past the watermark go, earlier ones stay.
-
-    `session.state` is not where this provider keeps messages — `save_messages` has already
-    committed them — so restoring the state alone left a half-written turn durably stored.
-    """
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        session_id = "sess-rollback"
-        await provider.rollback_to(session_id, 0)
-        await provider.save_messages(session_id, [Message(role="user", contents=["turn one"])])
-
-        watermark = await provider.latest_message_id(session_id)
-        assert watermark is not None
-        await provider.save_messages(session_id, [Message(role="user", contents=["turn two"])])
-
-        assert await provider.rollback_to(session_id, watermark) == 1
-        remaining = await provider.get_messages(session_id)
-        assert [m.text for m in remaining] == ["turn one"]  # the committed turn is untouched
-
-    asyncio.run(_run())
-
-
-def test_watermark_is_none_for_a_session_with_no_history() -> None:
-    """A first turn reads no watermark; the caller decides that means 0, the store never guesses.
-
-    `None` here is the store saying "no history yet" — and only that. The runner maps it to a
-    watermark of 0 itself, because `rollback_to` deliberately no longer accepts `None`: the same
-    value used to also mean "the read failed", and defaulting it to 0 turned a failed read plus a
-    disconnect into a full history wipe.
-    """
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        assert await provider.latest_message_id("sess-never-used") is None
 
     asyncio.run(_run())
 

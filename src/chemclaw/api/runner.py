@@ -155,11 +155,10 @@ async def run_turn(
             count are booked against the session/user when the turn ends (the front-door
             admission check reads those counters before the *next* turn). `None` disables
             metering (test/CLI).
-        history: The session's history provider. This turn's transcript is written through it
-            (`_record_transcript`), and it is what the rollback below rolls
-            turn's committed rows back on a client disconnect that lands *before* the turn
-            answered — under the in-memory provider the state snapshot below is the whole story,
-            but a durable one has already written them.
+        history: The session's history provider. This turn's transcript is projected into it
+            (`_record_transcript`) once the answer exists, which is the only thing it is used for
+            here — the graph reads its own checkpointer, never this. `None` runs the turn without
+            a transcript, which is what the CLI and most tests do.
         profile: The session's agent profile, used only to label this turn's token spend
             (REV-10) — the surface it selects is chosen by the caller, which passes the matching
             agent and connectors. `None` labels the spend `default`, so every series carries the
@@ -183,17 +182,15 @@ async def run_turn(
     # Whether this turn produced its answer — the cost ledger's question ("did the user get an
     # answer for the money"), and only that. It is deliberately *not* the rollback predicate:
     # `answered` becomes true only after the verifier and any mid-turn resume have run, windows in
-    # which the exchange is already committed and paired, so gating the rollback on it deleted
-    # finished turns whose teardown merely landed in one of those windows. `run_complete` below is
-    # the rollback's predicate; the two questions have different right answers.
+    # which the model run has already settled the session state, so gating the rollback on it
+    # undid finished runs whose teardown merely landed in one of those windows. `run_complete`
+    # below is the rollback's predicate; the two questions have different right answers.
     answered = False
-    # Whether the last `agent.run` returned. That is the fact the rollback cares about: the
-    # rollback exists to discard a half-written exchange (an orphaned `tool_use` that would brick
-    # the session), and once `agent.run` has returned the history provider has committed a
-    # complete, paired exchange — there is nothing half-written left to undo, however much
-    # bookkeeping (loop-cap reporting, job-result waits, answer verification) still lies between
-    # here and the AnswerEvent. Cleared again for the mid-turn resume's second run, which can
-    # half-write exactly like the first.
+    # Whether the last model run returned. That is the fact the state rollback cares about: it
+    # exists to undo bookkeeping a turn advanced for work it never finished, and once the run has
+    # returned there is no unfinished work left to disown, however much of it (loop-cap reporting,
+    # job-result waits, answer verification) still lies between here and the AnswerEvent. Cleared
+    # again for the mid-turn resume's second run, which can be cut short exactly like the first.
     run_complete = False
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
@@ -247,54 +244,20 @@ async def run_turn(
                 "could not apply deferred job completions for session %s", session.session_id
             )
     # Snapshot the session state before the turn so a client disconnect can roll it back
-    # (ISSUE-B-10). A disconnect mid-tool-call otherwise leaves a `tool_use` block in the stored
-    # history with no matching `tool_result`, and every later turn on that session replays it —
-    # the model rejects the thread outright ("tool_use ids found without tool_result blocks"),
-    # so one dropped connection permanently bricks the conversation rather than costing it a
-    # turn.
+    # (ISSUE-B-10). `session.state` is the harness's own bookkeeping — the todo list, the plan
+    # hash, the approval marks — and a turn torn down half-way through has advanced it for work
+    # that never finished, so the next turn would read a plan claiming steps it never took.
+    #
+    # Only `session.state` is rolled back, and that is the whole rollback now. It used to have a
+    # durable half: a pre-turn watermark over `session_messages`, because MAF wrote the stored
+    # thread incrementally and fed it back to the model, so a disconnect mid-tool-call committed a
+    # `tool_use` with no matching `tool_result` and every later turn replayed it — the model
+    # rejected the thread outright ("tool_use ids found without tool_result blocks") and one
+    # dropped connection permanently bricked the conversation. The graph reads its own
+    # checkpointer instead, and `_record_transcript` writes the user message and the answer
+    # together in one call once the answer exists, so there is no window in which half an exchange
+    # is committed and nothing to delete on the way out (D-2026-08-10 §2).
     state_snapshot = copy.deepcopy(session.state)
-    # The durable half of that snapshot. `session.state` is not where a Postgres-backed history
-    # lives — `save_messages` has already committed its rows — so restoring the state alone left
-    # the orphaned `tool_use` in the database and bricked the session anyway, which is exactly the
-    # failure the snapshot exists to prevent. A watermark lets the rollback delete what this turn
-    # actually wrote, and nothing else.
-    #
-    # The read stays non-fatal, and that is a decision rather than an omission. Failing the turn
-    # would trade a *conditional* future fault — this session breaks only if the client also
-    # disconnects mid-tool-call — for a *certain* immediate one: every turn on the pod fails
-    # whenever the session store hiccups, including the turns that would have completed fine. The
-    # guard is a mitigation, not the thing being guarded.
-    #
-    # What was wrong is that it was silent. A load test ran 32 turns unguarded in 126 seconds and
-    # said so only in a WARNING nobody scrapes. It is now an ERROR *and* a counter, so "the
-    # rollback guard is off" is alertable — which is the property that lets an operator act before
-    # a chemist finds a bricked session. (The cause was connect churn; that is fixed by pooling in
-    # the previous commit. This is the part that must not depend on having fixed the cause.)
-    #
-    # `watermark_read` is what "the guard is off" means mechanically. It used to be encoded as the
-    # watermark staying `None`, which the store then treated as 0 — so the failure that was meant
-    # to disarm the guard instead armed it with the maximally destructive value, and a disconnect
-    # after a failed read deleted the session's *entire* history rather than this turn's rows. The
-    # two meanings of `None` ("no history yet" and "could not read") are now separate: an empty
-    # session reads as watermark 0 with the guard armed, and a failed read leaves the guard
-    # disarmed so the teardown skips the durable delete entirely and leans on the next read's
-    # `message_pairing` repair — the same fallback the rollback's own failure branch relies on.
-    history_watermark = 0
-    watermark_read = False
-    if history is not None and hasattr(history, "latest_message_id"):
-        try:
-            watermark = await history.latest_message_id(session.session_id)
-            history_watermark = 0 if watermark is None else int(watermark)
-            watermark_read = True
-        except Exception:  # noqa: BLE001 - a rollback aid must never fail the turn it guards
-            METRICS.increment("chemclaw_rollback_watermark_unavailable_total")
-            logger.error(
-                "could not read the history watermark for session %s; this turn runs WITHOUT the "
-                "durable-history rollback guard, so a client disconnect during it can leave an "
-                "orphaned tool_use and brick the session",
-                session.session_id,
-                exc_info=True,
-            )
     try:
         async with AsyncExitStack() as stack:
             # The turn span, which is the parent every other span in this request hangs from — the
@@ -554,61 +517,12 @@ async def run_turn(
             "front door's turn deadline); rolling session state back",
             session.session_id,
         )
+        # No durable delete accompanies this any more, and its absence is the point: the
+        # transcript is written once, after the answer, so a teardown either lands before
+        # `_record_transcript` and leaves nothing behind, or lands after it and finds a complete
+        # exchange — the `answered or run_complete` branch above. There is no third outcome.
         session.state.clear()
         session.state.update(state_snapshot)
-        if history is not None and hasattr(history, "rollback_to") and not watermark_read:
-            # The guard was disarmed at the top of the turn (the ERROR + counter already said so):
-            # without the pre-turn watermark there is no boundary this turn's rows can be told
-            # apart at, and the placeholder 0 would delete the *whole* conversation — a disconnect
-            # would cost the chemist every turn they ever had, not the one that broke. Skip the
-            # durable delete and lean on the next read's `message_pairing` repair to drop any
-            # orphaned tool call, exactly as `_roll_back`'s own failure branch below already does.
-            logger.warning(
-                "skipping the durable-history rollback for session %s: the pre-turn watermark "
-                "was unreadable, so only the next read's repair can safely drop this turn's rows",
-                session.session_id,
-            )
-        elif history is not None and hasattr(history, "rollback_to"):
-
-            async def _roll_back() -> None:
-                """Delete this turn's committed rows, reporting its own failure.
-
-                Shielded by the caller, so this runs as a task that outlives the cancelled turn —
-                a plain `await` here would be cancelled at its first suspension point and leave
-                the half-written turn committed after all. It swallows its own errors for the same
-                reason the durable claim release does (D-130): once the awaiting task is
-                cancelled, `shield` stops collecting the inner result, so a failure raised here
-                would surface only as an unattributed `Task exception was never retrieved`.
-                """
-                try:
-                    deleted = await history.rollback_to(session.session_id, history_watermark)
-                except Exception:  # noqa: BLE001 - a cleanup aid must not replace the teardown
-                    logger.warning(
-                        "could not roll durable history back for session %s; the next turn's "
-                        "read-time repair will drop any unmatched tool call",
-                        session.session_id,
-                        exc_info=True,
-                    )
-                    return
-                if deleted:
-                    logger.warning(
-                        "rolled %d durable message(s) back for session %s",
-                        deleted,
-                        session.session_id,
-                    )
-
-            try:
-                await asyncio.shield(_roll_back())
-            except BaseException:  # noqa: BLE001 - see below; nothing here may escape
-                # `BaseException`, not `Exception`: the teardown that brought us here cancels this
-                # task, so the shielded await raises `CancelledError` as soon as it suspends —
-                # while the rollback itself carries on in its own task. Letting that out would
-                # replace the teardown exception we are handling and leave the generator
-                # improperly closed. The bare `raise` below re-raises the original either way.
-                logger.debug(
-                    "the rollback for session %s outlived its turn; it completes on its own task",
-                    session.session_id,
-                )
         raise
     except Exception as exc:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked
@@ -882,9 +796,9 @@ async def _record_transcript(
     if history is None or not answer.strip():
         return
     if not hasattr(history, "save_messages"):
-        # Duck-typed, exactly as the rollback below tests for `latest_message_id` and
-        # `rollback_to`: `history` is whatever the caller injected, and a provider that does not
-        # store is a configuration this path has to tolerate rather than a fault to raise on.
+        # Duck-typed rather than isinstance-checked: `history` is whatever the caller injected —
+        # the two real providers, a test's recorder, a fake that only reads — and a provider that
+        # does not store is a configuration this path tolerates, not a fault to raise on.
         return
     session_id = session.session_id
     try:

@@ -78,7 +78,6 @@ _UPDATE_MESSAGE = "UPDATE session_messages SET message = %s WHERE id = %s"
 _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"
 _MAX_ID = "SELECT MAX(id) FROM session_messages WHERE session_id = %s"
 _COUNT = "SELECT count(*) FROM session_messages WHERE session_id = %s"
-_DELETE_AFTER = "DELETE FROM session_messages WHERE session_id = %s AND id > %s"
 
 # The per-session turn claim (D-121). One statement, so the check and the take cannot be
 # interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
@@ -245,40 +244,6 @@ class PostgresHistoryProvider(HistoryProvider):
                 session_id,
                 len(deletions) + len(rewrites),
             )
-
-    async def latest_message_id(self, session_id: str) -> int | None:
-        """Return the highest stored row id for `session_id`, or `None` when it has no history.
-
-        The pre-turn watermark for `rollback_to`.
-        """
-        async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(_MAX_ID, (session_id,))
-                row = await cur.fetchone()
-        return None if row is None or row[0] is None else int(row[0])
-
-    async def rollback_to(self, session_id: str, watermark: int) -> int:
-        """Delete everything stored for `session_id` after `watermark`; return how many rows went.
-
-        The durable half of the turn rollback in `chemclaw.api.runner`: that only restored the
-        in-process session state, which under this provider is not where the messages live — they
-        are already committed, so a half-written turn survived the rollback that was supposed to
-        discard it.
-
-        `watermark` is deliberately non-optional. It used to be `int | None` with `None` treated
-        as 0, and that made one value mean two opposite things: "this session has no history yet"
-        (where deleting above 0 is correct) and "the pre-turn read failed" (where the only safe
-        delete is none at all). The runner's failed-read path left its watermark `None`, so a
-        disconnect after a store hiccup ran `DELETE … id > 0` — the whole conversation, not the
-        turn. A caller that genuinely means "the session was empty" now has to *decide* that and
-        pass `0`; a caller that could not read the watermark has nothing to pass and must not call.
-        """
-        async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(_DELETE_AFTER, (session_id, watermark))
-                deleted = cur.rowcount
-            await conn.commit()
-        return max(deleted, 0)
 
     async def save_messages(
         self,

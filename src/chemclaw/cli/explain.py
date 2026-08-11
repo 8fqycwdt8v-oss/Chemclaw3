@@ -152,9 +152,11 @@ def _render(
     Which turns to show is decided here rather than during the fetch, and that placement is the
     reason this is testable at all: a turn the audit trail knows about but the transcript does not
     is still shown, and that rule is exactly the one worth exercising offline. It is not
-    hypothetical — `session_store._compact` rewrites message rows, retention prunes them, and
-    `rollback_to` deletes a turn's on disconnect, so the trail routinely outlives the words it
-    points at. Dropping those turns would hide the evidence an auditor most wants.
+    hypothetical — `session_store._compact` rewrites message rows, `durable/retention.py` prunes
+    them by age, and a turn that ran its tools and then failed or was abandoned never writes a
+    transcript row in the first place (the projection is written once, after the answer). So the
+    trail routinely outlives the words it points at. Dropping those turns would hide the evidence
+    an auditor most wants.
     """
     shown = [*order, *(cid for cid in (*calls, *jobs) if cid not in set(order))]
     lines = [f"session {session_id}", ""]

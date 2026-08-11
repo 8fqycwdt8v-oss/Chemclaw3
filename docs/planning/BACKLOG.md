@@ -1549,9 +1549,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       tampered with — indistinguishable from the tampering the chain exists to detect.
 - [ ] **The reasoning a `correlation_id` now reaches is still erodible** — [M], and it is what makes the
       audit-chain join necessary-but-not-sufficient. The join lands on `session_messages`, whose rows
-      `session_store._compact` rewrites, `durable/retention.py` prunes by age, and `rollback_to`
-      deletes on client disconnect. So a trail can point at a conversation that has since been
-      compacted out of recognisability. Wants a decision about what a GxP deployment must retain,
+      `session_store._compact` rewrites and `durable/retention.py` prunes by age — and which a
+      failed or abandoned turn never reaches at all, since the projection is written once, after
+      the answer. So a trail can point at a conversation that has since been compacted out of
+      recognisability, or at one whose words were never written down. Wants a decision about what a GxP deployment must retain,
       not more plumbing.
 - [ ] **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
       `ConnectorJobInput` a required `rationale`; D-2026-07-31-the-audit-chain-is-versioned added an `AuditEvent.purpose` column and
@@ -1561,10 +1562,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       one — a reader cannot tell which rows are which. D-157's `rationale` works because a job launch
       is a discrete, deliberate act with an obvious author; an inline tool call is not. Needs a
       decision, not code.
-- [ ] **The reasoning that does exist is compacted, pruned and rolled back** — [M]. The only durable
-      trace of intent is the raw message blob in `session_messages`, and three mechanisms erode
-      it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and
-      `rollback_to` deletes a turn's rows on client disconnect.
+- [ ] **The reasoning that does exist is compacted, pruned, or never written** — [M]. The only
+      durable trace of intent is the raw message blob in `session_messages`, and three things
+      erode it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and
+      a turn that ran its tools and then failed or was abandoned writes no row at all.
 - [ ] **The approved plan's text is still not durable** — [M]. D-157 made the authorization bind to
       the plan, but the plan itself lives in an in-process `TodoSessionStore`, so a `plan_approvals`
       row still points at a `plan_hash` whose subject exists nowhere durable — a signature on a
@@ -2814,10 +2815,14 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
 - [ ] **SCALE-3 `service_max_concurrent_turns` is still a guess (8).** At 50 users it shed 75% of
       turns; at 64 it shed none but p50 went to 37 s. The measured value depends on the fixes in
       D-119, so it should be re-derived from the next load test, not from this one.
-- [ ] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud.** Having
-      `save_messages` remember the ids it inserted would remove the pre-turn read entirely, but the
-      history provider is shared across every session on the pod, so it needs per-turn state that
-      does not collide. Counted for now (`chemclaw_rollback_watermark_unavailable_total`).
+- [x] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud** — closed by
+      D-2026-08-10-langgraph-rebuild-of-the-conversation-layer, and not the way this row proposed.
+      The suggestion was to have `save_messages` remember the ids it inserted; what actually
+      removed the pre-turn read was removing the thing it guarded. The watermark existed because
+      MAF committed the thread incrementally, so a disconnect could leave half an exchange. The
+      graph reads its own checkpointer and the transcript is projected in one call after the
+      answer, so there is no half-written state to bound — watermark, rollback, counter and alert
+      all deleted rather than made cheaper.
 - [ ] **SCALE-5 A turn still opens and tears down one MCP session per connector.**
       `connectors.registry.open_reachable` enters every connector tool for the turn and closes it
       after, because a connector's connection must belong to exactly one turn

@@ -1456,7 +1456,6 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
         "chemclaw_audit_sink_failures_total",
         "chemclaw_notes_publish_failures_total",
         "chemclaw_turn_claim_refresh_failures_total",
-        "chemclaw_rollback_watermark_unavailable_total",
         "chemclaw_turns_failed_total",
         "chemclaw_turns_shed_total",
         "chemclaw_connectors_unhealthy",

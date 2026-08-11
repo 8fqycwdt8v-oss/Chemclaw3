@@ -236,12 +236,6 @@ _COUNTERS: dict[str, str] = {
         "Tool calls refused because the turn had already made the identical one "
         "`max_identical_tool_calls` times, labelled by tool."
     ),
-    # A guard that switches itself off is worse than one that fails loudly, and this one did
-    # exactly that 32 times in a 126-second load test while nothing but a WARNING said so.
-    "chemclaw_rollback_watermark_unavailable_total": (
-        "Turns that ran without a durable-history rollback watermark (D-107): a client "
-        "disconnect during one of these can leave an orphaned tool_use and brick the session."
-    ),
     # The budget guard (service.budget) already meters spend, but only to *refuse* a turn, and its
     # counters are per-process and unexported. This is the same number as an observable rate, so
     # "what is this deployment costing per hour" stops being a question only the provider's bill

@@ -67,10 +67,10 @@ def test_a_turn_whose_words_were_compacted_away_is_still_shown() -> None:
 
     The limit belongs to D-2026-07-31-the-audit-chain-is-versioned.
 
-    `session_store._compact` rewrites message rows, retention prunes them, and `rollback_to` deletes
-    a turn's rows on disconnect — so the trail can outlive the conversation it points at. Dropping
-    such a turn would hide exactly the evidence an auditor needs; saying the transcript is gone is
-    the truthful rendering.
+    `session_store._compact` rewrites message rows, retention prunes them by age, and a turn that
+    ran its tools and then failed never writes a transcript row at all — so the trail can outlive
+    the conversation it points at. Dropping such a turn would hide exactly the evidence an auditor
+    needs; saying the transcript is gone is the truthful rendering.
     """
     report = _report(order=[], calls={"c-3": [ToolCall("expand_note", "ok", "", 5.0, "u-1", "")]})
     assert "expand_note" in report
