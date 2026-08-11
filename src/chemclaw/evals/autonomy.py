@@ -2,7 +2,7 @@
 
 The ticket asks for plan quality, a plan-vs-single-shot A/B, and a runaway/abort rate. The backlog
 row framed this as "zero evaluation of agent behaviour", which overstates it:
-`tests/test_langgraph_agent.py` already drives real MAF machinery and pins the loop cap. What was
+`tests/test_langgraph_agent.py` already drives a real compiled graph and pins the loop cap. What was
 actually missing is that none of it reaches the **eval layer** — so a prompt edit, a skill change or
 a middleware reorder could regress behaviour and `make eval` would say nothing, and no number
 entered `baseline.json` for the drift check to watch.
@@ -129,13 +129,13 @@ def runaway_rate(case: EvalCase) -> MetricResult:
 
     **This used to infer the loop cap from residue — an answer sent while the plan still held
     unchecked steps — and that scored correct turns as runaways.** The residue of a capped loop and
-    the residue of a *correctly deferred* one are the same thing: `mark_awaiting_job` opens a todo
-    that stays open precisely because the work moved to a durable job, so "I've started the DFT run,
-    job abc123" arrived as a runaway and, at the 0.0 gate, as a failure. The evidence that would
-    separate the two is not in the transcript at all — the marker lives in the todo's *description*
-    and `PlanEvent.todos` carries only rendered display strings — so no prefix filter could have
-    fixed it. The fix was to stop proxying: `AgentLoopMiddleware` no longer stops silently
-    (`chemclaw.agent.loop_cap`), the runner emits `loop_cap_reached`, and this reads that. A metric
+    the residue of a *correctly deferred* one are the same thing: a step stays open precisely
+    because the work moved to a durable job, so "I've started the DFT run, job abc123" arrived as a
+    runaway and, at the 0.0 gate, as a failure. The evidence that would separate the two is not in
+    the transcript at all — `PlanEvent.todos` carries only rendered display strings — so no prefix
+    filter could have fixed it. The fix was to stop proxying: the loop no longer stops silently
+    (`chemclaw.agent.loop_cap.enforce_loop_cap` counts the calls), the runner emits
+    `loop_cap_reached`, and this reads that. A metric
     that measures less and means it beats one that gates at 0.0 on evidence it cannot interpret.
 
     Gated at `eval_runaway_max` (0.0): the pinned turns are scripted to complete, so a runaway among

@@ -20,13 +20,14 @@ import asyncio
 import sys
 from typing import NamedTuple
 
+from chemclaw.agent.session_store import message_from_row
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection
 
 # One turn's words, in order. `created_at` disambiguates rows written before `correlation_id`
 # existed (they carry '' and collapse into a single "unattributed" group).
 _MESSAGES = """
-    SELECT correlation_id, message, created_at
+    SELECT correlation_id, message, message_shape, created_at
     FROM session_messages
     WHERE session_id = %s
     ORDER BY id ASC
@@ -69,28 +70,43 @@ class Job(NamedTuple):
     summary: str
 
 
-def _speaker(message: object) -> tuple[str, str]:
-    """The `(role, text)` of a stored MAF message, tolerating shapes this tool did not write.
+def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
+    """The `(role, text)` of a stored message, tolerating shapes this tool did not write.
 
-    `session_messages.message` is whatever `Message.to_dict()` produced at the time, and that shape
-    is upstream's to change. A reconstruction tool must not fail on a message it cannot parse —
-    the row is still evidence that *something* was said, and saying so is more useful than a
-    traceback. Unknown shapes render as their repr under an `unknown` role.
+    **Read through `session_store.message_from_row`, not parsed here.** `session_messages` holds
+    two serializations — the framework layer 1 was first built on wrote one, LangChain writes the
+    other, and the M6 conversion pass is resumable so a real table holds both indefinitely. This
+    function used to parse the legacy one inline, which meant every row written after that
+    conversion rendered blank: an audit reconstruction that silently shows an empty conversation is
+    worse than one that fails, because it looks like nothing was said.
+
+    A reconstruction tool must still not fail on a message it cannot parse — the row is evidence
+    that *something* was said — so an unreadable payload renders as its repr under an `unknown`
+    role rather than raising.
     """
     if not isinstance(message, dict):
         return "unknown", str(message)
-    role = str(message.get("role", "unknown"))
-    contents = message.get("contents")
-    if isinstance(contents, list):
-        parts = [
-            str(item.get("text", ""))
-            for item in contents
-            if isinstance(item, dict) and item.get("text")
-        ]
-        if parts:
-            return role, " ".join(parts)
-    text = message.get("text")
-    return role, str(text) if text else ""
+    try:
+        restored = message_from_row(message, shape)
+    except Exception:  # noqa: BLE001 - a reconstruction must survive any stored shape
+        return "unknown", str(message)
+    content = restored.content
+    text = content if isinstance(content, str) else " ".join(_texts(content))
+    return _ROLES.get(restored.type, restored.type), text.strip()
+
+
+# LangChain's message `type` to the word a transcript reads in. The two agree except for
+# `human`/`ai`, which nobody calls that out loud.
+_ROLES = {"human": "user", "ai": "assistant"}
+
+
+def _texts(content: object) -> list[str]:
+    """The prose of a block-list content, ignoring blocks that carry none (images, tool use)."""
+    if not isinstance(content, list):
+        return []
+    return [
+        str(block["text"]) for block in content if isinstance(block, dict) and block.get("text")
+    ]
 
 
 def _wrap(text: str, *, limit: int = 400) -> str:
@@ -109,11 +125,11 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
 
     async with connection(target) as conn:
         cursor = await conn.execute(_MESSAGES, (session_id,))
-        for correlation_id, message, _created in await cursor.fetchall():
+        for correlation_id, message, shape, _created in await cursor.fetchall():
             if correlation_id not in turns:
                 turns[correlation_id] = []
                 order.append(correlation_id)
-            role, text = _speaker(message)
+            role, text = _speaker(message, shape)
             if text:
                 turns[correlation_id].append((role, text))
 

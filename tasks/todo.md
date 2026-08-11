@@ -47,9 +47,9 @@ never what a deployment gets.
       the framework row build a model client.
 - [x] `tests/test_langgraph_agent.py` — the loop runs a tool call to a final answer, the surface
       equals the registry, a profile strictly narrows.
-- [ ] `agent/state.py` — **deferred to M5**, the first phase with a field to put in it
+- [x] `agent/state.py` — **deferred to M5**, done there, the first phase with a field to put in it
       (`plan_hash`, `approvals`). A state schema whose every field is unread is a stub.
-- [ ] `agent/harness_types.py` deletion — **moved to M13**. `loop_cap.py` and `plan_gate.py` still
+- [x] `agent/harness_types.py` deletion — **moved to M13**, done in its Step 1. `loop_cap.py` and `plan_gate.py` still
       import it, and those are the MAF path, which stays live until the branch is deleted.
 
 ### M3 — tool middleware chain
@@ -65,7 +65,7 @@ never what a deployment gets.
 - [x] Tests drive real turns through the compiled graph and assert what the *model* is handed;
       they deliberately do not restate the decisions, which are already pinned against the shared
       functions in `test_tool_authz.py` / `test_repeat_guard.py` / `test_audit.py`.
-- [ ] `enforce_plan_approval` is the seventh and belongs to M5 — it reads plan/session state this
+- [x] `enforce_plan_approval` is the seventh and belongs to M5 — done there — it reads plan/session state this
       engine does not have yet.
 
 ### M4 — skills · **go/no-go: GO**
@@ -153,7 +153,7 @@ never what a deployment gets.
 - [x] Turn state survives a new process over the same database (two agents, one `thread_id`, the
       saver dropped between them).
 - [x] `SessionOwnerStore` / `SessionTurnClaims` untouched — chemclaw policy, not framework concern.
-- [ ] `session_messages` as a read-model projection; deleting the rollback watermark, the
+- [x] `session_messages` as a read-model projection; deleting the rollback watermark, the
       mid-turn-resume loop and the orphan repair; the `rollback_to`-vs-fork decision;
       `agent_durable_compaction_enabled`. **All moved to M8/M13 — see the correction below.**
 
@@ -170,9 +170,11 @@ never what a deployment gets.
       replaces a process-lived agent is cheaper than the agent was.
 - [x] `tests/test_langgraph_connectors.py` — seven tests against a live uvicorn MCP server, the
       task-affinity one mutation-verified (the naive shape raises, the test catches it).
-- [ ] `durable/template_activities.py`: replay through the ported `wrap_tool_call` chain —
+- [x] `durable/template_activities.py`: replay through the ported `wrap_tool_call` chain —
       **moved to M8**, which is where the engine branch it must dispatch on comes into existence.
-- [ ] Delete `agent/agent_pool.py` + test + the D-123 `DEFERRED.md` row — gated on M12's probe.
+- [x] Delete `agent/agent_pool.py` + test + the D-123 `DEFERRED.md` row. **The probe gate turned
+      out to be moot** and M13 Step 3 says why: D-123's defect is in the framework's Anthropic
+      streaming parser, so uninstalling the dependency leaves it no surface to occur on.
 
 ### M8 — streaming and the event contract
 - [x] `api/graph_stream.py` — `astream(stream_mode=["messages","updates","custom"], subgraphs=True)`
@@ -193,10 +195,13 @@ never what a deployment gets.
       the union in both directions.
 - [x] `tests/test_langgraph_stream.py` — twelve tests, the conformance one comparing the whole
       event sequence rather than membership.
-- [ ] **`core/turn_signals.py` deletion — moved to M13**, with the MAF branch it still serves.
+- [x] **`core/turn_signals.py` — moved to M13**, where it was *ported* rather than deleted: it had
+      a live LangGraph consumer. The contextvar and its three drains are gone; the module publishes
+      through `get_stream_writer()` (M13 Step 2).
 - [ ] The cross-repo sequence `Chemclaw3_mock` → `Chemclaw3` → `Chemclaw3_ui` for the two contract
       additions — **not started**; both are additive and defaulted, so no consumer is broken yet.
-- [ ] `durable/template_activities.py` replay through the ported chain (inherited from M7).
+- [x] `durable/template_activities.py` replay through the ported chain (inherited from M7) — M13
+      Step 6.
 - [ ] `_resume` (mid-turn job resume) on the graph path — off by default, needs its own decision.
 
 ### M9 — agent teams
@@ -347,10 +352,15 @@ never what a deployment gets.
       correctly refused 409; the team arm delegated nothing because the mock never calls the `task`
       tool. **Neither the gate nor routing accuracy has been measured**, and no number from those
       runs should be cited as if they had.
-- [ ] `agent_pool.py`'s deletion stays gated on the concurrency probe *being run*, not on the
-      reading above — a structural argument is not a measurement.
+- [x] ~~`agent_pool.py`'s deletion stays gated on the concurrency probe *being run*.~~ **The gate
+      dissolved rather than being satisfied**, which is a different thing and worth the distinction:
+      M13 uninstalled `agent-framework-anthropic`, so the streaming parser D-123 measured is not in
+      the tree and the pool's factory (`build_agent`) is gone with the branch. There is nothing left
+      for the probe to be a gate *on*. The probe itself is still unrun and still worth running —
+      LangGraph's own concurrency behaviour under 8 simultaneous turns is not something this
+      migration measured, and the row above says so.
 
-### M13 — remove MAF and update the documents · **scoped and started, not finished**
+### M13 — remove MAF and update the documents · **done 2026-08-11**
 - [x] **Session affinity verified — and the plan's hypothesis is false.** Both Helm comments
       justified affinity partly by "the harness todo list lives in MAF `session.state`". Of the
       three things they named, two were framework state and are gone; the third — a conversation's
@@ -360,7 +370,8 @@ never what a deployment gets.
 - [x] Scoped exhaustively: **25 `agent_framework` import sites across 16 modules**, ~50 test files,
       **~166** doc mentions (the plan's "~135" was low, and the miss is concentrated in the two
       files that need real rewrites). Ordered demolition plan below.
-- [ ] Steps 0–10 below. **Three of them are new code, not deletion**, which the plan did not say.
+- [x] Steps 0–10 below, all landed. **Three of them were new code, not deletion**, which the plan
+      did not say — and a fourth turned out to be a defect fix (Step 10's `explain`).
 
 **Two plan assumptions that are wrong, found by scoping:**
 
@@ -615,7 +626,7 @@ arranged to keep that commit small and the suite green at each step.
       password authentication failed for user "chemclaw"`. Provisioning the role and database and
       running `make db-migrate` (44 migrations) produced the numbers above from the same tree.
       Recorded because the failure looks exactly like a green suite: exit 0, nothing failed.
-- [ ] **Step 4 — the M6-deferred subtractive half** (~14 files): rollback watermark, durable
+- [x] **Step 4 — the M6-deferred subtractive half** (done via 4a + 4b below) (~14 files): rollback watermark, durable
       compaction, orphan repair, `PostgresHistoryProvider`. Keep `message_migration.py`.
 
       **STOP — this step is additive before it is subtractive, and the reason is a live regression
@@ -792,35 +803,68 @@ arranged to keep that commit small and the suite green at each step.
       is the middlewares' own MAF halves and the direct `lg_*` coverage that today exists only
       through whole-turn tests. The ~315–420 estimate covered both halves; 67 of them were the
       turn-level ones and they are green on both engines now.
-- [ ] **Step 8 — OTel** (~4 files). Isolated: the only item that can break observability in
-      production with no test noticing.
-- [ ] **Step 9 — the dependency and the layering rows.** **Blocked on one port, scoped
-      2026-08-11.** After Steps 1/5/6/7 exactly **two** modules in `src/` still import
-      `agent_framework`, and both for the same reason: `agent/message_pairing.py` and
-      `durable/retention.py` read *legacy* `session_messages` rows with `Message.from_dict` so the
-      nightly sweep can refuse to strand half a tool-call pair (`droppable_rows`, D-145).
+- [x] **Step 8 — OTel** (done earlier, verified 2026-08-11). `core/logging.configure_telemetry`
+      builds the `TracerProvider`, the `BatchSpanProcessor` and the OTLP span exporter directly
+      against the OTel SDK, so removing the dependency cannot take the tracing bootstrap with it —
+      the risk this step was isolated for. `opentelemetry-api` arrived transitively through the
+      framework and is a hard requirement of `opentelemetry-sdk`, so it survives the removal;
+      `pyproject.toml`'s comment now says that instead of arguing from what the framework resolved.
 
-      They cannot simply be flipped to LangChain messages, because the rows they read are
-      whichever shape the migration has reached — that is what the `message_shape` stamp is for.
-      The port is: read a row through `session_store._message_from_row` (which already handles
-      both) and re-express `droppable_rows` over LangChain `tool_calls`/`tool_call_id`.
+      **What is genuinely lost is stated rather than faked:** the framework's chat-client
+      instrumentation recorded `gen_ai.client.token.usage` per model, and the LangChain stack ships
+      no equivalent. `core/metrics.py` had been justifying its `profile`-only counter label by
+      pointing at that histogram — a premise that no longer holds. Corrected, and the decision is
+      unchanged: `turn_costs` carries per-turn model attribution
+      (D-2026-08-01-spend-is-a-ledger-not-a-label), and a lossier second answer as a counter label
+      would be the two systems to reconcile the original comment warned about.
+- [x] **Step 9 — the dependency and the layering rows** (done 2026-08-11). The port that blocked it
+      landed first, as its own commit and its own mutation check, because this is the pairing rule
+      for a *data-destroying* nightly job.
 
-      **Not rushed on purpose.** This is the pairing rule for a *data-destroying* nightly job, and
-      D-145 exists because getting it wrong strands a pairing silently — no exception, no failed
-      activity, conversations that stop rendering days later. It wants its own commit and its own
-      mutation check, not the tail of a large one.
+      **The port found a live defect rather than merely moving code.** `message_pairing` and
+      `durable/retention` read legacy rows with `Message.from_dict`, which raises `TypeError` on a
+      LangChain row — so once M6 started writing the new shape, the retention sweep would crash on
+      exactly the sessions that had taken a turn since, Temporal would retry to exhaustion, and
+      pruning would stop silently for the sessions still in use. The fix is `stored_call_ids`,
+      which reads **both** shapes and returns `None` (not empty) for one it cannot read: empty
+      means "in no pairing, disposable", `None` means "nothing can be concluded", and collapsing
+      them would make an unreadable row look droppable. `droppable_rows` now takes call-id sets
+      rather than messages — pairing is a relation between identifiers, and that is what removed
+      the last framework import from the deletion path.
 
-      Everything else in Step 9 is ready: drop `agent-framework-*` from `pyproject.toml`, refresh
-      `uv.lock`, delete the `maf` stack from `_STACKS` and the last two `_ALLOWED_MODULE_STACKS`
-      rows (`chemclaw.agent`, `chemclaw.durable`) — the `chemclaw.api` and `chemclaw.connectors`
-      rows already went, caught by the ratchet's stale-row half. Verify by uninstalling
-      `agent-framework-core` and running the suite green. The remaining ~30 `agent_framework`
-      mentions in `src/` are prose in docstrings, which is Step 10's.
+      Then the dependency itself: `agent-framework-anthropic`/`-core`/`-openai` out of
+      `pyproject.toml`, `uv.lock` refreshed, the three distributions **uninstalled**, and the suite
+      run against a tree that genuinely cannot import them — which is the verification, not a grep.
+      `_STACKS["agent_framework"]` and the two remaining `_ALLOWED_MODULE_STACKS` rows went in the
+      same commit, as the bidirectional ratchet requires.
 
-      (superseded scope below) (3 files, atomic per the ratchet). Verify
-      by uninstalling `agent-framework-core` and running the suite green.
-- [ ] **Step 10 — docs** (~15 files). `docs/reference/architektur.md` (48 mentions) is a full
-      rewrite — MAF is its thesis, not a mention.
+      **Two dead paths fell out of it**, each surviving until now by reading as one half of a pair:
+      `connectors.registry.open_reachable` (opening process-lived connector tool objects) and
+      `api.runner_usage.usage_tokens` (reading `UsageDetails`). Neither had a production caller.
+      `usage_tokens`'s two tests re-point onto `graph_usage_tokens` with real chunk shapes — the
+      assertions were about the arithmetic, which is unchanged.
+
+      **And the twin-distinguishing names went with the twins.** Eight `lg_`-prefixed middlewares
+      and `make_langgraph_audit_middleware` were named to sit beside something that no longer
+      exists; the prose throughout the tree already cited the *unprefixed* names, so the rename
+      makes ~30 docstring references true again rather than merely shorter.
+- [x] **Step 10 — docs and the prose that had gone false** (done 2026-08-11). Larger than "~15
+      files", because the real subject is not documents — it is that **~180 `MAF` mentions in
+      `src/` are prose claims about the tree**, and roughly half of them had become false.
+
+      The line drawn: **past tense about the framework is evidence; present tense about it is
+      false.** "This is shaped this way because that framework did X" stays — deleting the reason
+      leaves an unexplained shape. What went is every sentence asserting the present: a module
+      docstring describing a `build_agent` and a `SkillsProvider` that no longer exist, a config
+      section titled *"The MAF conversational agent"*, an audit middleware described as an adapter
+      to a second implementation, `connectors/transport.py`'s "both engines live here", the runner
+      usage reader's "MAF emits usage as a content".
+
+      Left alone deliberately: `docs/reference/architektur.md`,
+      `docs/planning/implementation-plan.md` and `implementation-tickets.md` each already open by
+      saying they are historical build documents, and `BACKLOG.md`'s mentions are all inside closed
+      `[x]` rows — a log, not a claim about now. Checked rather than assumed: no open row mentions
+      the framework. `docs/archive/` is unmaintained, ADRs are append-only.
 
       **`docs/guides/harness-konzept.md` needs no decision and must not be archived.** This row
       said it was "a proposal document for a MAF feature that was built and has since been
@@ -829,9 +873,21 @@ arranged to keep that commit small and the suite green at each step.
       Betrieb hinter `harness_enabled`", and §10 records what the switch changed and why two of the
       original design decisions existed only to compensate framework defects. It is current
       documentation that was rewritten with the rebuild. Archiving it would break citations from
-      three append-only ADRs (D-038, D-058, D-137) and from `agent/plan_gate.py`,
-      `agent/harness_todo.py` and `agent/harness_mode.py`, to retire a document that is true today.
-      Its remaining MAF mentions are §10's history, which is the one place they belong.
+      three append-only ADRs (D-038, D-058, D-137) and from `agent/plan_gate.py`, to retire a
+      document that is true today. Its remaining MAF mentions are §10's history, which is the one
+      place they belong.
+
+      **One of those false claims was a defect, not prose.** `chemclaw.cli.explain` said it read
+      "a stored MAF message" and did exactly that — it parsed the legacy `contents` shape inline.
+      Measured: every row written by any turn since M6 renders as role `unknown` with empty text,
+      so the audit reconstruction that answers *"why was this run?"* for a GxP auditor showed an
+      **empty conversation** for precisely the sessions still in use. It never failed; it printed
+      nothing. Fixed by making `session_store.message_from_row` public and the only function
+      allowed to decide which serialization a row holds — a second reader is how a table with two
+      shapes acquires a reader that knows one. Mutation-checked: pinning the shape argument to
+      `None` fails the new test.
+
+      Recorded in `docs/decisions/D-2026-08-11-what-the-removal-found.md`.
 
 ## Review
 

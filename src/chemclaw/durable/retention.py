@@ -62,22 +62,24 @@ Every prune is age-based against a per-table window, runs on `background-jobs`, 
 removed so the deletion is itself auditable in the job's own result.
 """
 
+import logging
 from datetime import timedelta
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
-    from agent_framework import Message
     from psycopg import AsyncConnection
     from psycopg.rows import TupleRow
 
-    from chemclaw.agent.message_pairing import droppable_rows
+    from chemclaw.agent.message_pairing import droppable_rows, stored_call_ids, unreadable_rows
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
 from chemclaw.durable.publish import BAD_DATA_RETRY
+
+logger = logging.getLogger(__name__)
 
 # Tables this job is allowed to prune, with the timestamp column that dates a row and the extra
 # predicate that decides whether a row of that table is disposable at all. Explicit and closed: a
@@ -233,7 +235,24 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
     for session_id in session_ids[:cap]:
         async with conn.cursor() as cur:
             await cur.execute(_SESSION_ROWS, (session_id,))
-            rows = [(int(row[0]), Message.from_dict(row[1])) for row in await cur.fetchall()]
+            # Call ids, not deserialised messages. The rows of one session may be in *either*
+            # stored shape — the M6 conversion pass is resumable — and the previous version read
+            # them all with MAF's `Message.from_dict`, which raises `TypeError` on a LangChain
+            # payload. So the sweep crashed on any session that had taken a turn since the
+            # conversion, Temporal retried it to exhaustion, and retention silently stopped for
+            # exactly the sessions still in use.
+            rows = [(int(row[0]), stored_call_ids(row[1])) for row in await cur.fetchall()]
+            if unreadable := unreadable_rows(rows):
+                # Refuse the whole session rather than the row: an unreadable row links to nothing,
+                # so pruning around it could strand a pairing it would have protected.
+                logger.warning(
+                    "skipping retention for session %s: %d row(s) in an unrecognised stored "
+                    "shape (ids: %s)",
+                    session_id,
+                    len(unreadable),
+                    ", ".join(str(row_id) for row_id in unreadable[:10]),
+                )
+                continue
             await cur.execute(_EXPIRED_IDS, (session_id, days))
             expired = {int(row[0]) for row in await cur.fetchall()}
             disposable = droppable_rows(rows, expired)

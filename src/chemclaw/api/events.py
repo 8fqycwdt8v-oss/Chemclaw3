@@ -360,9 +360,10 @@ class EvidenceSourceEvent(BaseModel):
     source had nothing to say" from "this source was crowded out of the budget", which are
     different problems with different fixes.
 
-    Emitted only on the LangGraph engine, because it rides that engine's custom stream; the MAF
-    engine runs the same branches and records the same counter, it simply has no channel to say so.
-    A surface must therefore treat the absence of these as "not reported", never as "no sources".
+    Emitted only where a consumer is draining the graph's custom stream — the front door is, the
+    CLI and a Temporal activity are not. Those still run the same branches and record the same
+    counter; they simply have no channel to say so. A surface must therefore treat the absence of
+    these as "not reported", never as "no sources".
     """
 
     type: Literal["evidence_source"] = "evidence_source"

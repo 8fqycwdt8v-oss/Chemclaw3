@@ -17,7 +17,7 @@ the session store all sit between the socket and the agent, and the in-process s
 failed 100 % of the time.
 
 **The argument names come from the real tools, and this is the whole design.** LOAD-1: the previous
-stub emitted `{"query": "benzene"}` where `find_notes` takes `text`, so every call died in MAF's
+stub emitted `{"query": "benzene"}` where `find_notes` takes `text`, so every call died in the
 parse-error branch *before the tool body ran*, and the run was published as "100 tool calls, the
 tool path is genuinely exercised". Nothing was exercised. So a `Behaviour` here is validated at
 startup against the live tool surface, and one naming a tool or an argument the system does not have
@@ -103,11 +103,11 @@ class Behaviour:
 def already_has_tool_results(payload: dict[str, Any]) -> bool:
     """Whether this request already carries the output of a previous tool call.
 
-    **A model that always calls a tool never finishes.** MAF re-invokes the model after every tool
-    result, so a mock that replays its behaviour verbatim each time drives the agent round its loop
-    until the iteration cap — the first storm turn made 41 tool calls for a behaviour that declares
-    one. A real model calls tools, reads what came back, and then answers, and the mock has to do
-    the same or it is testing a runaway rather than the system.
+    **A model that always calls a tool never finishes.** The agent re-invokes the model after each
+    tool result, so a mock that replays its behaviour verbatim each time drives the agent round its
+    loop until the iteration cap — the first storm turn made 41 tool calls for a behaviour that
+    declares one. A real model calls tools, reads what came back, and then answers, and the mock
+    has to do the same or it is testing a runaway rather than the system.
 
     Detected from the request rather than from per-session state on purpose: the mock stays
     stateless, so concurrent turns cannot interfere with each other's step counters — which at the
@@ -126,8 +126,8 @@ def _validate(behaviour: Behaviour) -> None:
     """Refuse a behaviour whose tool or arguments the real system would reject (the LOAD-1 guard).
 
     Resolved against the live surface rather than a copy of it: `available_tool_names` is what the
-    agent actually advertises, and the registry holds the callable whose signature MAF derives the
-    schema from. A behaviour that passes here cannot fail for the reason every measurement in the
+    agent actually advertises, and the registry holds the callable whose signature the schema is
+    derived from. A behaviour that passes here cannot fail for the reason every measurement in the
     previous load test failed.
     """
     from chemclaw.agent.chemclaw_agent import available_tool_names
@@ -156,7 +156,7 @@ def _validate(behaviour: Behaviour) -> None:
         if unknown:
             raise ValueError(
                 f"behaviour {behaviour.name!r} passes {sorted(unknown)} to {call.tool!r}, which "
-                f"takes {sorted(annotations)}. This is exactly LOAD-1: the call would die in MAF's "
+                f"takes {sorted(annotations)}. This is exactly LOAD-1: the call would die in the "
                 "parse-error branch before the tool body ran, and the run would report it as a "
                 "tool call that happened."
             )
@@ -189,12 +189,12 @@ class MockLlm:
         the behaviour it expects cannot drift apart.
 
         **The chain lookup is not an optimisation; without it the mock answers as the wrong
-        behaviour.** Measured: MAF's first call carries the user message (marker present), and its
-        second carries `previous_response_id` plus *only* the `function_call_output` — the marker is
-        gone. Falling back to the default there meant every turn's final prose came from whichever
-        behaviour happened to be first in the catalogue, so `f-no-text` reported an answer it never
-        wrote and the `text` field of every other behaviour was dead. That is LOAD-1's shape again,
-        one layer up: the harness measuring something other than what it named.
+        behaviour.** Measured: the client's first call carries the user message (marker present),
+        and its second carries `previous_response_id` plus *only* the `function_call_output` — the
+        marker is gone. Falling back to the default there meant every turn's final prose came from
+        whichever behaviour happened to be first in the catalogue, so `f-no-text` reported an answer
+        it never wrote and the `text` field of every other behaviour was dead. That is LOAD-1's
+        shape again, one layer up: the harness measuring something other than what it named.
         """
         previous = payload.get("previous_response_id")
         if isinstance(previous, str):
@@ -234,8 +234,8 @@ def _fragments(document: str, count: int) -> list[str]:
 def _response_object(response_id: str, model: str, behaviour: Behaviour) -> dict[str, Any]:
     """The `Response` body both the streaming and non-streaming paths report.
 
-    `status` is always `completed`. `in_progress` or `queued` makes MAF mint a continuation token
-    and then poll `GET /responses/{id}` — a whole second protocol to implement for no coverage.
+    `status` is always `completed`. `in_progress` or `queued` makes the client mint a continuation
+    token and then poll `GET /responses/{id}` — a second protocol to implement for no coverage.
     """
     return {
         "id": response_id,
@@ -261,9 +261,9 @@ async def _stream(behaviour: Behaviour, model: str, response_id: str) -> AsyncIt
     """The SSE frames for one turn, in the order the SDK's discriminated union accepts them.
 
     Every frame is constructed as the SDK's own model and dumped, rather than hand-written JSON:
-    the SDK validates each event before MAF ever sees it, so a frame this mock got subtly wrong
-    would raise inside the client and read as an application defect. Building through the model
-    makes that failure impossible to ship.
+    the SDK validates each event before the agent ever sees it, so a frame this mock got subtly
+    wrong would raise inside the client and read as an application defect. Building through the
+    model makes that failure impossible to ship.
     """
     from openai.types.responses import (
         Response,
@@ -276,7 +276,7 @@ async def _stream(behaviour: Behaviour, model: str, response_id: str) -> AsyncIt
     )
 
     # Validated into the SDK's own `Response` rather than passed as a dict: the client deserializes
-    # every frame before MAF sees it, so a body this mock got subtly wrong would raise inside the
+    # every frame before the agent sees it, so a body this mock got subtly wrong would raise inside
     # SDK and read as an application defect. Building through the model makes that unshippable.
     body = Response.model_validate(_response_object(response_id, model, behaviour))
     sequence = 0

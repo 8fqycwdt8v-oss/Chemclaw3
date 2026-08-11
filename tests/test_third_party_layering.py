@@ -5,13 +5,14 @@ declared policy — but it records an import only `if target.startswith("chemcla
 (`_ImportVisitor._record`). So it enforces the *first-party* half of the layering rules and none of
 the third-party half, which is the half every architecture document actually writes down:
 
-- `CLAUDE.md`: "Durability lives **only** in Temporal, never in MAF."
+- `CLAUDE.md`: "Durability lives **only** in Temporal, never in the conversation layer's own
+  ad-hoc stores."
 - `CLAUDE.md`: "merging them would put Temporal imports inside the physics" (`science/` vs bundle).
 - `science/README.md`: "None of these import Temporal, MCP, FastAPI or `chemclaw.agent` … and
   `tests/test_layering.py` keeps it that way."
 
 Measured, only the last clause of that last sentence was true: `science/` *is* clean, but
-`import temporalio` in `science/`, `import agent_framework` in `durable/` and `import fastapi` in
+`import temporalio` in `science/`, `import langgraph` in `durable/` and `import fastapi` in
 `kg/` all passed every test in this repo. This file is the missing half, in the same shape as the
 first-party one: AST-walk every file, bucket each import by scope, check the derived graph against
 a small hand-authored policy.
@@ -69,10 +70,10 @@ coverage:
   root in an `import` statement.
 - **Package-keyed allowed rows against file-keyed leaks.** `_KNOWN_LEAKS` is keyed by file so a
   leak cannot grow quietly, and `_ALLOWED_MODULE_STACKS` is keyed by package on purpose: an
-  allowed edge is a *design decision about a layer* ("layer 1 IS MAF"), where a leak is *debt
-  about a file*. The cost is real and worth naming: `("chemclaw.connectors", "maf")` says
-  "connectors/transport.py builds the MAF tool objects — the one adapter point", and that sentence
-  is true of one file out of 54 while the row licenses all of them. Narrowing those rows to files
+  allowed edge is a *design decision about a layer* ("layer 1 IS LangGraph"), where a leak is *debt
+  about a file*. The cost is real and worth naming: `("chemclaw.connectors", "langgraph")` says
+  "connectors/transport.py builds the tool objects — the one adapter point", and that sentence is
+  true of one file out of 54 while the row licenses all of them. Narrowing those rows to files
   would mean re-deciding, per file, what is currently one architectural sentence — and would make
   ordinary growth inside a layer that owns a stack fail the build. The row's *reason* is prose
   about intent; the row itself is about the layer.
@@ -92,11 +93,9 @@ _SRC_ROOT = _REPO_ROOT / "src" / "chemclaw"
 # `fastapi` + `starlette` + `sse_starlette` + `uvicorn`); the policy is written about the stack.
 _STACKS: dict[str, str] = {
     "temporalio": "temporal",
-    "agent_framework": "maf",
-    # The LangGraph rebuild of layer 1 (D-2026-08-10). Mapped the moment it entered the lockfile,
-    # as this module's docstring asks, and separately from `maf` on purpose: the two engines
-    # coexist until M13, so "which packages may import the conversation framework" has to be
-    # answerable per engine or the rows stop describing anything while both are live.
+    # Layer 1 (D-2026-08-10). The `maf` label that stood beside these until M13 is gone with the
+    # dependency: `agent-framework-*` is out of `pyproject.toml`, and a root nothing can install is
+    # a row this file's own both-directions pinning would fail on anyway.
     #
     # `langchain_openai`/`langchain_anthropic` are deliberately **not** here: they are provider
     # SDK wrappers, so they belong to the `llm` stack beside `openai` and `anthropic`, and giving
@@ -174,13 +173,8 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "core/turn_signals.py publishes a turn's signals on the graph's custom stream; the "
         "recording ends are connectors/ and templates/, so this cannot live in agent/"
     ),
-    # agent: layer 1. "MAF — conversation orchestration" is the definition of the layer.
-    ("chemclaw.agent", "maf"): "layer 1 IS the Microsoft Agent Framework",
-    ("chemclaw.agent", "langgraph"): (
-        "layer 1 is being rebuilt on LangGraph (D-2026-08-10); `agent/langgraph_agent.py` is the "
-        "engine `settings.agent_engine='langgraph'` selects, and this row retires with the `maf` "
-        "one when the MAF branch is deleted"
-    ),
+    # agent: layer 1. "LangGraph — conversation orchestration" is the definition of the layer.
+    ("chemclaw.agent", "langgraph"): "layer 1 IS LangGraph (D-2026-08-10)",
     ("chemclaw.agent", "postgres"): "durable sessions, preferences and plan approvals (F3)",
     ("chemclaw.agent", "httpx"): "the workload-identity and OBO token exchanges are HTTP",
     # api: layer 1's front door (F2).
@@ -193,12 +187,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     # durable: layer 2. "Temporal — durable execution" is the definition of the layer.
     ("chemclaw.durable", "temporal"): "layer 2 IS Temporal",
     ("chemclaw.durable", "postgres"): "job records and the retention sweep own their tables",
-    ("chemclaw.durable", "maf"): (
-        "`retention` deserialises stored session rows with `Message.from_dict` so it can reuse "
-        "`agent.message_pairing.droppable_rows` rather than re-derive which rows may be dropped. "
-        "A consequence of the `durable → agent` edge test_layering.py already declares; a stored "
-        "message *is* a MAF object, so that edge cannot be taken without this one"
-    ),
     ("chemclaw.durable", "langgraph"): (
         "`template_activities` runs a tool or a model turn as a template step, so it builds the "
         "same tool object a chat turn's surface holds and drives the same graph — which is the "
@@ -212,18 +200,16 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.connectors", "httpx"): "the client that calls a bundle carries the turn's identity",
     ("chemclaw.api", "langgraph"): (
         "api/graph_stream.py translates a compiled graph's stream into the turn event contract "
-        "(M8, D-2026-08-10) — the front door's half of driving the other engine; retires with the "
-        "`maf` rows when that branch is deleted"
+        "(M8, D-2026-08-10) — the front door's half of driving the graph"
     ),
     ("chemclaw.retrieval", "langgraph"): (
         "retrieval/fanout.py sweeps the evidence sources as a `Send` fan-out, one branch per "
         "source (M10, D-2026-08-10) — the graph is an implementation detail of `gather_evidence` "
-        "and runs under either engine, so this row does not retire with the `maf` ones"
+        "rather than a second orchestration layer"
     ),
     ("chemclaw.connectors", "langgraph"): (
-        "the same adapter point for the other engine (M7, D-2026-08-10): connectors/transport.py "
-        "holds each connector's MCP session open for a turn and registry.py turns what it "
-        "advertises into LangChain tools; retires with the `maf` row when that branch is deleted"
+        "the one adapter point (M7, D-2026-08-10): connectors/transport.py holds each connector's "
+        "MCP session open for a turn and registry.py turns what it advertises into LangChain tools"
     ),
     ("chemclaw.connectors", "rdkit"): "bundle tools validate and depict structures",
     # science: pure computation. Its README forbids Temporal/MCP/FastAPI and permits the rest.
@@ -255,19 +241,18 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
 # Function-scope-only exceptions: a stack this package must not depend on at *import* time. The
 # asymmetry with the dict above is the point — each row is a deliberate lazy import.
 _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
-    # `("chemclaw.core", "maf")` was here — the kernel's one MAF import, `configure_telemetry`
-    # calling `agent_framework.observability.configure_otel_providers` inside the function. That
-    # bootstrap is now written out against the OTel SDK directly, so the kernel names no
-    # conversation framework at any scope, and the row goes with the import: this file's own rule
-    # is that a declared row must still be observed in the tree, or it re-blesses the edge for the
-    # next author.
+    # A row for the kernel's one *framework* import was here — `configure_telemetry` calling the
+    # conversation framework's OTel bootstrap inside the function. That bootstrap is now written
+    # out against the OTel SDK directly, so the kernel names no conversation framework at any
+    # scope, and the row went with the import: this file's own rule is that a declared row must
+    # still be observed in the tree, or it re-blesses the edge for the next author.
     ("chemclaw.core", "llm"): (
         "core/embeddings builds the OpenAI-compatible client inside `_openai_client`, same reason"
     ),
     ("chemclaw.agent", "llm"): (
-        "agent/llm_provider picks the OpenAI or Anthropic SDK at runtime — both engines' halves, "
-        "the raw SDKs for MAF and the `langchain_*` wrappers for LangGraph, which is why they "
-        "carry the `llm` label rather than the framework's"
+        "agent/llm_provider picks the `langchain_openai` or `langchain_anthropic` wrapper at "
+        "runtime; they carry the `llm` label rather than the framework's on purpose, so holding "
+        "the `langgraph` row does not also license building a model client"
     ),
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
     ("chemclaw.evals", "llm"): "the judge client is built per run",
@@ -283,7 +268,8 @@ _ALLOWED_AT_ANY_SCOPE = set(_ALLOWED_MODULE_STACKS) | set(_ALLOWED_LAZY_STACKS)
 # Each row says why it is still here; none of them is a blessing.
 _KNOWN_LEAKS: dict[Site, str] = {
     ("src/chemclaw/agent/durable_tools.py", "temporal"): (
-        "CLAUDE.md: 'Durability lives only in Temporal, never in MAF.' This module holds the "
+        "CLAUDE.md: durability lives only in Temporal, never in the conversation layer. This "
+        "module holds the "
         "workflow id derivation, the `WorkflowIDReusePolicy` and the status mapping for three "
         "durable jobs — durable policy inside layer 1 — and its own docstring's claim that 'no "
         "durable state lives here' is false for exactly that reason. The fix is one `start_job()` "
@@ -310,29 +296,19 @@ _KNOWN_LEAKS: dict[Site, str] = {
     ),
 }
 
-# Imports of a *private* module of any dependency: `agent_framework._harness._loop` is not API, and
-# `agent-framework-core` is required as `>=1.11.0` with no upper bound, so a patch release that
-# moves any of these symbols is an ImportError at process start of both the front door and the
-# worker. The risk is not hypothetical: `FunctionCallContent`/`FunctionResultContent` are already
-# absent from the package top level in 1.11.0. Nothing in that argument is about MAF — every
-# dependency here is floor-pinned the same way — so the rule is not restricted to `_STACKS`'s
-# roots; `pydantic._internal` is the same bet. Keyed by (file, target) — a third one fails.
-#
-# **Three of the five this rule first found were not necessary at all.** The review recorded five;
-# asking the installed package rather than the comments beside them showed that `todos_remaining`,
-# `AgentModeProvider`/`get_agent_mode`/`set_agent_mode` and all five `_compaction` names *are*
-# exported at the top level, and are the identical objects (`af.todos_remaining is
-# _harness._loop.todos_remaining`). `chemclaw_agent.py` carried a comment asserting the opposite.
-# Those three imports are now public ones and their rows are gone; what is left is the two symbols
-# that genuinely are not exported.
+# Imports of a *private* module of any dependency: `langgraph.prebuilt._internal` is not API, and
+# every dependency here is floor-pinned with no upper bound, so a patch release that moves any such
+# symbol is an ImportError at process start of both the front door and the worker. The risk is not
+# hypothetical — it is what this rule was written from: layer 1's previous framework had already
+# moved two symbols out of its package top level, and two chemclaw modules were importing them from
+# a private one. Nothing in that argument is about any particular vendor, so the rule is not
+# restricted to `_STACKS`'s roots; `pydantic._internal` is the same bet. Keyed by (file, target).
 _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
-    # Empty, and that is the point of keeping it: the two rows that lived here —
-    # `ShouldContinueCallable`/`ShouldContinueResult` from `agent_framework._harness._loop`, in
-    # `agent/loop_cap.py` and `agent/plan_gate.py` — were removed rather than re-blessed. Both are
-    # pure type aliases with no runtime behaviour, so `chemclaw.agent.harness_types` declares them
-    # and `tests/test_langgraph_agent.py` fails if MAF's shape drifts from ours. The dict stays
-    # because the ratchet above is what deleted these rows: a private import that gains a public
-    # home, or goes away, loses its row on the next run.
+    # Empty, and that is the point of keeping it: the two rows that lived here were removed rather
+    # than re-blessed, and then the framework they named was removed too. The dict stays because
+    # the ratchet above is what deleted those rows — a private import that gains a public home, or
+    # goes away, loses its row on the next run — and because an empty allow-list is the only shape
+    # that makes "there are none" an assertion rather than an absence.
 }
 
 
@@ -397,7 +373,7 @@ class _Visitor(ast.NodeVisitor):
         early-returns for anything `_STACKS` gives no layering meaning — that is the watch-list the
         module docstring describes. The private-import ratchet is about a versioning bet nobody
         made on purpose, and that bet is identical whichever distribution is on the other end of
-        it: `pydantic._internal`, `networkx.algorithms._x` and `agent_framework._harness` all move
+        it: `pydantic._internal`, `networkx.algorithms._x` and `langgraph._internal` all move
         without a major bump. Filtering both questions through `_STACKS` made the ratchet see eight
         roots while its docstring implied it saw the tree; an unstacked private import is kept with
         `stack=""`, which `_edges` skips and no policy row can match.
@@ -422,10 +398,10 @@ class _Visitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """Record the module, or — when private names are pulled from it — each of those.
 
-        `from agent_framework import _compaction` reaches into private API exactly as
-        `from agent_framework._compaction import x` does, and recording only `node.module` made
-        the first form invisible to `_private_imports`: measured, it passed the whole file. It is
-        also the form MAF actually re-exports its internals as, so it is the likely one. The
+        `from langgraph import _internal` reaches into private API exactly as
+        `from langgraph._internal import x` does, and recording only `node.module` made the first
+        form invisible to `_private_imports`: measured, it passed the whole file. It is also the
+        form a package re-exporting its own internals produces, so it is the likely one. The
         target is spelled `<module>.<name>` so `(file, target)` still identifies the import, and
         the `(package, stack)` edge is unchanged either way — the distribution root is the same.
         """

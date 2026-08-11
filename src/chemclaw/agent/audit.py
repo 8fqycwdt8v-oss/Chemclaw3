@@ -3,7 +3,7 @@
 Why this exists: in a pharma/GxP setting "who ran what, with which inputs, when, did it
 succeed, and to what effect" must be answerable, and it is the first thing needed to
 troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 tools
-(duplication that would drift), one MAF **function middleware** wraps *every* registered
+(duplication that would drift), one **tool-call middleware** wraps *every* registered
 tool uniformly — the audit trail is a single reusable piece (DRY), like the PR-gate.
 
 It is observe-only: it never alters the arguments or the result. Each call records the
@@ -172,22 +172,23 @@ def _truncate(value: object) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def make_langgraph_audit_middleware(
+def make_audit_middleware(
     *,
     correlation_id: str,
     actor: str,
     sink: AuditSink | None = None,
 ) -> AgentMiddleware[Any, Any]:
-    """The same trail, wired to the LangGraph engine — an adapter, not a second implementation.
+    """The trail as tool-call middleware — the wiring, with the recording itself in `_recording`.
 
-    Identical arguments and identical semantics to `make_audit_middleware`, because they share
-    `_recording`: what differs is only where the tool's name, arguments and result come from. The
-    audit trail is the one thing in this migration that must not be able to disagree with itself
-    between engines, so the difference is kept to three field reads.
+    Split that way on purpose. `_recording` is where an audit row is decided and written, and it
+    takes plain values; this reads the tool's name, arguments and result off the request and hands
+    them over. Keeping the decision framework-free is what let the engine underneath be replaced
+    without an audit row's contents depending on which engine ran (D-2026-08-10 §4), and it is
+    what a second caller — a template step, a job replay — reuses instead of re-deriving.
 
     The result recorded as the `ok` detail is the `ToolMessage`'s content rather than a raw return
-    value, which is what the model is actually handed — the same relationship `context.result` has
-    to the MAF path.
+    value, because that is what the model is actually handed: an audit row saying what the tool
+    computed, where the model read something else, would be a record of the wrong event.
     """
     audit_sink: AuditSink = sink if sink is not None else default_audit_sink()
     revision = settings.deployment_revision
@@ -214,8 +215,8 @@ class _Recorded:
     """The one value the caller must hand back: what the tool returned, for the `ok` detail.
 
     A mutable holder rather than a return value because `_recording` is a context manager, and the
-    result is only known inside the block. The MAF adapter reads it off `context.result` after
-    `call_next()`; the LangGraph adapter assigns what `handler` returned.
+    result is only known inside the block — the wrapper assigns what `handler` returned before the
+    block exits and the row is written.
     """
 
     result: object | None = None

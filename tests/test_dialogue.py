@@ -21,7 +21,7 @@ import pytest
 
 from chemclaw.agent.dialogue_tools import ask_clarifying_question
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.tool_authz import DryRunRefusal, lg_refuse_writes_on_dry_run
+from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from chemclaw.api.runner import run_turn
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -127,7 +127,7 @@ def _call(tool: str) -> bool:
     async def _handler(_request: Any) -> Any:
         return await _body()
 
-    asyncio.run(run_middleware(lg_refuse_writes_on_dry_run, tool_request(tool), _handler))
+    asyncio.run(run_middleware(refuse_writes_on_dry_run, tool_request(tool), _handler))
     return ran
 
 
@@ -168,7 +168,7 @@ def test_the_refusal_can_never_be_mistaken_for_a_real_result() -> None:
     """The one genuinely harmful failure mode: a dry-run answer read as a real one.
 
     It reaches the model as a refusal rather than a return value, so
-    `lg_surface_authorization_denials` relays it verbatim — the path `PlanNotApprovedError` already
+    `surface_authorization_denials` relays it verbatim — the path `PlanNotApprovedError` already
     proves works — instead of MAF's opaque "Function failed."
     """
     token = set_dry_run(True)

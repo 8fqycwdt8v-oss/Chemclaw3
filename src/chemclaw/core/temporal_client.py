@@ -90,7 +90,7 @@ async def connect() -> Client:
 
     **A failure is translated here, once, for all of `connect()`'s callers.** temporalio reports an
     unreachable broker as `RuntimeError('Failed client connect: Server connection error:
-    tonic::transport::Error(Transport, ConnectError(...))')`, which MAF collapses to "Error:
+    tonic::transport::Error(Transport, ConnectError(...))')`, which reaches the model as "Error:
     Function failed." for the model — and in the 2026-08-03 live run the model met that in
     `request_development_report` and wrote the whole report by hand instead. There is one client, so
     there is one message: framing it per call site would be the same sentence maintained N times,

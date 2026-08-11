@@ -309,7 +309,7 @@ async def verify_answer(
     try:
         # **Building the client is inside the guard, not above it.** It was above, and a
         # deployment that flipped `verifier_enabled` without a reachable `"verifier"` route
-        # therefore got *no* verification rather than the offline one: `build_chat_client` raised,
+        # therefore got *no* verification rather than the offline one: `build_chat_model` raised,
         # the exception left this function, and the runner's own guard turned it into an unscored
         # answer. The documented promise — degrade to the citation gate, never drop verification —
         # covered a judge that answers badly but not a judge that could not be constructed, which

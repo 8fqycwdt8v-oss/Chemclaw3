@@ -253,7 +253,7 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
     `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`, which reads the ambient watch.
     Only `observe_loop_cap` — the MAF half — ever wrote it, while the graph engine kept its count
     in `model_calls`, which the runner never reads back. So a capped turn on this engine was
-    externally identical to a finished one: the exact defect `lg_loop_cap` was written to fix,
+    externally identical to a finished one: the exact defect `enforce_loop_cap` was written to fix,
     reintroduced one layer up.
 
     Driven at a cap of 1 because that is the value MAF's inference was blind at, and asserted on
@@ -263,7 +263,7 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
     from chemclaw.agent.loop_cap import (
         begin_loop_watch,
         end_loop_watch,
-        lg_loop_cap,
+        enforce_loop_cap,
         loop_capped,
         loop_hit_cap,
     )
@@ -275,11 +275,11 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
     try:
         assert not loop_hit_cap(), "the watch starts unmarked"
         # `@before_model` wraps it in a middleware object, so the hook is what runs per call.
-        first = lg_loop_cap.before_model(cast(Any, {"model_calls": 0}), cast(Any, None))
+        first = enforce_loop_cap.before_model(cast(Any, {"model_calls": 0}), cast(Any, None))
         assert first == {"model_calls": 1}, "the first model call is not a cap"
         assert not loop_hit_cap(), "counting is not capping"
 
-        capped = lg_loop_cap.before_model(cast(Any, {"model_calls": 1}), cast(Any, None))
+        capped = enforce_loop_cap.before_model(cast(Any, {"model_calls": 1}), cast(Any, None))
         assert capped == {"jump_to": "end"}, capped
         assert loop_capped({"model_calls": 1}), "the state record missed the cap"
         assert loop_hit_cap(), "the cap fired but the runner's own reader never saw it"
@@ -291,12 +291,12 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
 def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """**The test the unit test could not be.** A decision is not a guard until it is connected.
 
-    `lg_loop_cap` counted correctly, decided correctly, and returned `{"jump_to": "end"}` on every
-    call past the limit — and the loop kept going, because `before_model`'s conditional edge is
-    built from the hook's `can_jump_to` declaration and there was none. Measured at a cap of 1: the
-    hook fired five times, said "end" four times, and four further model/tool round-trips completed
-    anyway. The same shape as the `to_regclass` guard M6 nearly shipped — a check that runs,
-    answers correctly, and is wired to nothing.
+    `enforce_loop_cap` counted correctly, decided correctly, and returned `{"jump_to": "end"}` on
+    every call past the limit — and the loop kept going, because `before_model`'s conditional edge
+    is built from the hook's `can_jump_to` declaration and there was none. Measured at a cap of 1:
+    the hook fired five times, said "end" four times, and four further model/tool round-trips
+    completed anyway. The same shape as the `to_regclass` guard M6 nearly shipped — a check that
+    runs, answers correctly, and is wired to nothing.
 
     So this drives a whole turn through `run_turn` and asserts the two things a caller can observe:
     the loop **stopped** (one tool call, not the script's four), and the turn **said so**

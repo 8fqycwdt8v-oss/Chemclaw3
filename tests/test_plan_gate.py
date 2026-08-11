@@ -25,8 +25,8 @@ from chemclaw.agent.plan_gate import (
     EMPTY_PLAN_HASH,
     PlanNotApprovedError,
     consume_turn_approval,
+    enforce_plan_approval,
     gate_applies,
-    lg_enforce_plan_approval,
     plan_identity,
 )
 from chemclaw.core.config import settings
@@ -62,7 +62,7 @@ class _Session:
     """A session under test: its id, and the plan it is currently proposing.
 
     Under MAF the plan lived in a todo store hanging off an `AgentSession`, so a test wrote it
-    there and the gate read it back through the same object. `lg_enforce_plan_approval` reads
+    there and the gate read it back through the same object. `enforce_plan_approval` reads
     `request.state["todos"]` — this turn's live view, owned by `TodoListMiddleware` — and takes the
     session id from the ambient contextvar. So a case here is two independent facts, and this
     carries both rather than pretending they still travel together.
@@ -108,7 +108,7 @@ async def _call(tool: str, session: _Session | None) -> bool:
     )
     token = set_current_session_id(session.session_id) if session is not None else None
     try:
-        await run_middleware(lg_enforce_plan_approval, request, _handler)
+        await run_middleware(enforce_plan_approval, request, _handler)
     finally:
         if token is not None:
             reset_current_session_id(token)
@@ -231,7 +231,7 @@ def test_no_session_means_no_gate(approvals: InMemoryPlanApprovalStore) -> None:
     """Off the harness there is no plan and no autonomous loop, so there is nothing to gate.
 
     A template activity's tool step and a one-shot CLI call land here. They are not ungoverned:
-    `lg_enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
+    `enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
     """
     assert asyncio.run(_call("propose_knowledge_note", None))
 
@@ -251,20 +251,20 @@ def _middleware_names() -> list[str]:
     about, and building a whole graph to inspect its list would need a model. The MAF version
     passed `chat_client=object()` for the same reason and got a whole `Agent` anyway.
     """
-    from chemclaw.agent.audit import NullAuditSink, make_langgraph_audit_middleware
+    from chemclaw.agent.audit import NullAuditSink, make_audit_middleware
     from chemclaw.agent.langgraph_agent import tool_call_middleware
     from chemclaw.agent.profiles import get_profile
 
     # A real audit middleware, because its *position* is part of what this asserts and it is the
     # one entry built per agent rather than imported — a stand-in would show up as `object`.
-    audit = make_langgraph_audit_middleware(correlation_id="-", actor="-", sink=NullAuditSink())
+    audit = make_audit_middleware(correlation_id="-", actor="-", sink=NullAuditSink())
     return [type(m).__name__ for m in tool_call_middleware(audit, get_profile(None))]
 
 
 def test_the_gate_is_absent_from_the_classic_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """`harness_enabled` is off by default, and the default path must be untouched."""
     monkeypatch.setattr(settings, "harness_enabled", False)
-    assert "lg_enforce_plan_approval" not in _middleware_names()
+    assert "enforce_plan_approval" not in _middleware_names()
 
 
 def test_the_gate_is_absent_under_execute_autonomy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,7 +275,7 @@ def test_the_gate_is_absent_under_execute_autonomy(monkeypatch: pytest.MonkeyPat
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "execute")
-    assert "lg_enforce_plan_approval" not in _middleware_names()
+    assert "enforce_plan_approval" not in _middleware_names()
 
 
 def test_the_gate_is_attached_under_plan_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,10 +283,10 @@ def test_the_gate_is_attached_under_plan_only(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
     names = _middleware_names()
-    assert "lg_enforce_plan_approval" in names
-    # Inside audit (so a refusal is recorded) and not innermost (that is lg_announce_tool_failures).
-    assert names.index("lg_enforce_plan_approval") > names.index("audit_tool_calls")
-    assert names.index("lg_enforce_plan_approval") < names.index("lg_announce_tool_failures")
+    assert "enforce_plan_approval" in names
+    # Inside audit (so a refusal is recorded) and not innermost (that is announce_tool_failures).
+    assert names.index("enforce_plan_approval") > names.index("audit_tool_calls")
+    assert names.index("enforce_plan_approval") < names.index("announce_tool_failures")
 
 
 def test_the_default_deployment_has_no_plan_gate() -> None:

@@ -13,7 +13,7 @@ Layout:
 - `manifest.py` — the validated contract: `ConnectorManifest`, the two unions, `JobSpec`.
 - `registry.py` — discovery, enablement, and building the MCP tools + generated job tools.
 - `identity.py` — what travels with a call: the turn's identity as headers, our credential as auth.
-- `transport.py` — the MAF MCP tools, built so an unreachable connector costs its tools only.
+- `transport.py` — the per-turn MCP session, held so an unreachable connector costs its tools only.
 - `jobs.py` — one generated durable-launch tool per declared job.
 - `health.py` — the startup reachability probe behind `/readyz` and the unhealthy gauge.
 - `server.py` — the connector *side*: a FastMCP capability as the FastAPI app a bundle serves.

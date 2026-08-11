@@ -27,7 +27,7 @@ It is, since D-2026-08-05, read at run time too — by `chemclaw.agent.skill_acc
 ToolScopedSkillsSource`, which *hides* a skill whose whole declared capability is absent from the
 agent's surface. That is the same one-way direction: the declaration can only cost a skill its
 visibility, never buy it a tool. `declared_tools` below is the reader, and it exists here rather
-than in the source because MAF's `SkillFrontmatter` keeps only the Agent Skills spec's own fields
+than in the source because a skill loader keeps only the Agent Skills spec's own fields
 and drops `tools:` on the floor — the declaration is invisible to a `Skill` object, so anything
 that wants it must read the file.
 """

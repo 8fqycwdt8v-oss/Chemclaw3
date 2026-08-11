@@ -113,19 +113,26 @@ def _emit(signal: Signal) -> None:
     """Publish one signal on the turn's stream, or drop it where nothing is streaming.
 
     **The guard is the design, not a precaution.** `get_stream_writer()` resolves the writer off
-    LangGraph's ambient runnable config, and outside a graph it does not return `None` — it raises
-    `RuntimeError: Called get_config outside of a runnable context` (measured). The same tools run
-    in two places: a chat turn's tool node, where a writer exists and a chemist is watching, and a
-    Temporal activity replaying a template step, where neither is true. Letting the second raise
-    would fail a durable job because it tried to *narrate*.
+    LangGraph's ambient runnable config, and outside a graph it does not return `None` — it raises.
+    The same tools run in two places: a chat turn's tool node, where a writer exists and a chemist
+    is watching, and a Temporal activity replaying a template step
+    (`agent/tool_invocation.invoke_governed`), where neither is true. Letting the second raise would
+    fail a durable job because a tool tried to *narrate*.
 
-    Dropping there costs nothing that was not already lost. The only consumers are the front door's
+    **Two exception types for one condition, both measured**, which is why this catches a pair that
+    otherwise looks careless. A bare call outside any runnable context raises `RuntimeError: Called
+    get_config outside of a runnable context`. A call from inside `StructuredTool.ainvoke` — a
+    runnable context, but not a graph — raises `KeyError: '__pregel_runtime'` instead, because the
+    config exists and the runtime key in it does not. That second one *is* the template-step path,
+    so catching only the first left the exact caller this guard was written for still failing.
+
+    Dropping here costs nothing that was not already lost. The only consumers are the front door's
     stream and `api/graph_stream`, so a signal recorded in an activity had no reader before this
     either — it accumulated in a buffer nobody drained.
     """
     try:
         writer = get_stream_writer()
-    except RuntimeError:
+    except (RuntimeError, KeyError):
         return
     writer({_KEY: signal})
 

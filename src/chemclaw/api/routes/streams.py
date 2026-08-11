@@ -115,8 +115,8 @@ async def session_events(
             reason = str(pushed.payload.get("reason", ""))
             # The completion used to also be recorded against a harness todo waiting on this job,
             # deferred rather than applied because this stream runs concurrently with whatever turn
-            # the session has in flight. Both halves are gone: the todo existed so MAF's
-            # `todos_remaining` loop predicate saw "waiting" rather than re-invoking the model, and
+            # the session has in flight. Both halves are gone: the todo existed so the previous
+            # engine's loop predicate saw "waiting" rather than re-invoking the model, and
             # the graph's loop ends when the model stops calling tools. What the chemist sees is
             # unchanged — that was always this event, not the todo.
             event: JobCompletedEvent | JobFailedEvent = (

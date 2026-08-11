@@ -64,7 +64,7 @@ class LlmSettings(BaseSettings):
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
     # the frontier model drives the main reasoning turn — without a second provider or a second
-    # import site (`build_chat_client(task)` stays the one place a client is built). Model ids
+    # import site (`build_chat_model(task)` stays the one place a model is built). Model ids
     # are for the *active* provider (an `openai_compatible` model name, or an Anthropic one); a
     # task with no entry falls back to the provider's default (`llm_model`/`agent_model`), so an
     # empty map (the default) is exactly today's single-model behavior. ENV override is JSON,

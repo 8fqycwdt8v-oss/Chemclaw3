@@ -21,7 +21,7 @@ from chemclaw.agent.repeat_guard import (
     RepeatedCallRefusal,
     begin_call_watch,
     end_call_watch,
-    lg_refuse_repeated_calls,
+    refuse_repeated_calls,
 )
 from chemclaw.core.config import settings
 from tests.middleware import run_middleware, tool_request
@@ -48,7 +48,7 @@ def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
     async def _handler(_request: Any) -> Any:
         return await call_next()
 
-    asyncio.run(run_middleware(lg_refuse_repeated_calls, ctx, _handler))
+    asyncio.run(run_middleware(refuse_repeated_calls, ctx, _handler))
 
 
 @pytest.fixture

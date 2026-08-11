@@ -232,19 +232,22 @@ def test_launching_validates_rather_than_passing_the_object_through(client: _Fak
 
 
 def test_launching_survives_the_frameworks_own_invocation_path(client: _FakeClient) -> None:
-    """Driven through `agent_framework.tool(...).invoke()` rather than through our idea of it.
+    """Driven through the framework's own dispatcher rather than through our idea of it.
 
     The test above pins today's observed behaviour; this one pins the property that survives the
-    framework changing its mind — whatever MAF hands the body, a launch through MAF's own
-    dispatcher starts the run.
+    framework changing its mind — whatever the dispatcher hands the body, a launch through it
+    starts the run. MAF's `tool(...).invoke()` before the rebuild, LangChain's
+    `StructuredTool.ainvoke` now.
     """
-    from agent_framework import tool as as_tool
+    from langchain_core.tools import StructuredTool
 
     fn = build_template_tool(
         _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
     )
-    invocable = as_tool(fn, name=fn.__name__, description="Run the probe template.")
-    asyncio.run(invocable.invoke(arguments={"params": {"smiles": "CCO"}}))
+    invocable = StructuredTool.from_function(
+        coroutine=fn, name=fn.__name__, description="Run the probe template."
+    )
+    asyncio.run(invocable.ainvoke({"params": {"smiles": "CCO"}}))
     (call,) = client.calls
     assert call["input"].inputs == {"smiles": "CCO"}
 

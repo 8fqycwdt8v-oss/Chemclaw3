@@ -18,8 +18,9 @@ id or a contextvar, so the sentence above stays literally true: this module stil
 what a session is, and a trace built with no sink (every test that does not care, the CLI paths)
 behaves exactly as it did.
 
-Duck-typed throughout, deliberately. MAF's function-call and function-result content classes are
-not stable top-level exports and their shape varies by version, so these match on structure (a
+Duck-typed throughout, deliberately. A provider's function-call and function-result content
+classes are rarely stable top-level exports and their shape varies by version — the previous
+engine's were not, which is what this was written against — so these match on structure (a
 `call_id`/`arguments` pair, a result-bearing attribute) rather than importing a concrete type.
 """
 
@@ -80,7 +81,7 @@ class ToolCallTrace:
     `_names` outlives the flush: the name is what the result event reports, and it is not on the
     result content.
 
-    Still duck-typed: MAF's function-call content class is not a stable top-level export and its
+    Still duck-typed: a function-call content class is rarely a stable top-level export and its
     shape varies by version, so this matches on structure (a `call_id`/`arguments` pair) rather
     than importing a concrete type.
     """
@@ -197,8 +198,9 @@ class ToolCallTrace:
     def issued(self, key: str, tool: str, arguments: str) -> ToolCallEvent:
         """Announce one *complete* call — the decision, with no reassembly in front of it.
 
-        `feed` reaches this through `_take` after buffering fragments, because MAF streams a call's
-        arguments in pieces. LangGraph's `updates` stream hands over a finished `tool_calls` list,
+        `feed` reaches this through `_take` after buffering fragments, because a token stream
+        delivers a call's arguments in pieces. LangGraph's `updates` stream hands over a finished
+        `tool_calls` list,
         so the graph driver has nothing to reassemble and calls this directly
         (`chemclaw.api.graph_stream`). What must not differ between the two is everything below:
         the argument budget, and remembering the name so the result can be reported under it.
@@ -349,25 +351,3 @@ def _result_text(content: Any, /) -> str | None:
             continue
         return value if isinstance(value, str) else str(value)
     return None
-
-
-def approval_prompt(request: Any) -> str:
-    """Render a user-input/approval request as a short prompt string for the UI.
-
-    The attribute scan is the duck-typed part, for a provider that words its own prompt. MAF does
-    not: the only user-input request this codebase actually produces is a
-    `function_approval_request` `Content`, whose `prompt`/`message`/`text`/`description` are all
-    unset and whose subject lives on a nested `function_call`. Falling straight through to the
-    generic string asked a chemist to approve *something* — measured against a real MAF content,
-    which is what `tests/test_runner.py::test_an_approval_request_names_the_tool_it_would_run`
-    now drives, since every fake update in the suite hard-coded `user_input_requests=[]` and this
-    branch had never been executed by a test.
-    """
-    for attr in ("prompt", "message", "text", "description"):
-        value = getattr(request, attr, None)
-        if value:
-            return str(value)
-    name = getattr(getattr(request, "function_call", None), "name", None)
-    if name:
-        return f"Approve calling {name}?"
-    return "Approval requested."

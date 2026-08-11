@@ -1,16 +1,17 @@
 """Stored MAF messages convert to LangChain ones, or say why not (M6, D-2026-08-10).
 
 Rewriting `session_messages` is the one irreversible step in the migration, so the function that
-decides what each row *becomes* is tested against payloads produced by MAF itself rather than
-against hand-written dicts. A hand-written fixture proves the converter agrees with whoever wrote
-the fixture; a real `Message.to_dict()` proves it agrees with the thing that wrote the rows.
+decides what each row *becomes* is tested against the payloads MAF actually wrote — frozen in
+`tests/legacy_rows.py` and verified byte-for-byte against its real constructors when they were
+captured. What the converter must agree with is the *table*, and a table full of historical bytes
+outlives the library that produced them; a fixture that could only be rebuilt by re-installing that
+library could not.
 """
 
 import asyncio
 from typing import Any
 
 import pytest
-from agent_framework import Content, Message
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -32,10 +33,16 @@ from chemclaw.agent.message_migration import (
     convert_stored_messages,
     to_langchain,
 )
-from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
+from chemclaw.agent.session_store import SessionOwnerStore
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.migrate import migrate
+from tests.legacy_rows import (
+    call_content,
+    legacy_message,
+    result_content,
+    text_content,
+)
 from tests.pg import (
     TEST_SCHEMA,
     create_test_schema,
@@ -57,16 +64,11 @@ def _replies(text: str) -> Any:
     return _Replier(messages=iter([AIMessage(content=text)]))
 
 
-def _stored(role: str, *contents: Content) -> dict[str, Any]:
-    """One `session_messages.message` payload, produced the way the store produces them."""
-    return Message(role=role, contents=list(contents)).to_dict()
-
-
 def test_a_plain_exchange_round_trips_to_the_right_types() -> None:
     """The three text roles map to the three LangChain text messages, content intact."""
-    user = to_langchain(_stored("user", Content.from_text("what is the pKa?")))
-    assistant = to_langchain(_stored("assistant", Content.from_text("about 15.9")))
-    system = to_langchain(_stored("system", Content.from_text("you are Chemclaw")))
+    user = to_langchain(legacy_message("user", text_content("what is the pKa?")))
+    assistant = to_langchain(legacy_message("assistant", text_content("about 15.9")))
+    system = to_langchain(legacy_message("system", text_content("you are Chemclaw")))
 
     assert isinstance(user, HumanMessage) and user.content == "what is the pKa?"
     assert isinstance(assistant, AIMessage) and assistant.content == "about 15.9"
@@ -79,11 +81,9 @@ def test_a_tool_call_keeps_its_name_arguments_and_id() -> None:
     The id matters most: it is what pairs the call with its result, and a transcript whose pairs
     are broken is one no provider will accept as a continuation.
     """
-    stored = _stored(
+    stored = legacy_message(
         "assistant",
-        Content.from_function_call(
-            call_id="call-1", name="predict_pka", arguments={"smiles": "CCO"}
-        ),
+        call_content("call-1", "predict_pka", {"smiles": "CCO"}),
     )
 
     converted = to_langchain(stored)
@@ -96,7 +96,7 @@ def test_a_tool_call_keeps_its_name_arguments_and_id() -> None:
 
 def test_a_tool_result_answers_the_call_it_belongs_to() -> None:
     """A `ToolMessage` carries `tool_call_id`, so the pair survives the conversion."""
-    stored = _stored("tool", Content.from_function_result(call_id="call-1", result="pKa 15.9"))
+    stored = legacy_message("tool", result_content("call-1", "pKa 15.9"))
 
     converted = to_langchain(stored)
 
@@ -110,9 +110,7 @@ def test_a_structured_result_falls_back_to_its_rendered_items() -> None:
     `result` is whatever the tool returned and `items` is the same value already rendered into
     content parts, so a non-string result has a text form to fall back to rather than a `repr`.
     """
-    stored = _stored(
-        "tool", Content.from_function_result(call_id="call-2", result={"pka": 15.9, "units": ""})
-    )
+    stored = legacy_message("tool", result_content("call-2", {"pka": 15.9, "units": ""}))
 
     converted = to_langchain(stored)
 
@@ -122,10 +120,10 @@ def test_a_structured_result_falls_back_to_its_rendered_items() -> None:
 
 def test_an_assistant_turn_that_both_speaks_and_calls_keeps_both() -> None:
     """Text and a tool call in one message is the ordinary streaming shape, not an edge case."""
-    stored = _stored(
+    stored = legacy_message(
         "assistant",
-        Content.from_text("let me compute that"),
-        Content.from_function_call(call_id="call-3", name="predict_pka", arguments={"smiles": "O"}),
+        text_content("let me compute that"),
+        call_content("call-3", "predict_pka", {"smiles": "O"}),
     )
 
     converted = to_langchain(stored)
@@ -167,16 +165,15 @@ def test_a_tool_message_holding_no_result_is_refused() -> None:
 #
 # The plan names this as the mitigation for the migration's one irreversible step, and it is a
 # different test from everything above: those prove the conversion is right about a payload, this
-# proves the *pass* is right about a table. Rows are seeded through `PostgresHistoryProvider` rather
-# than by INSERT, so what is converted is what the production writer actually stores — a hand-built
-# row would rehearse a shape nobody writes.
+# proves the *pass* is right about a table. The rows are the legacy literals inserted directly,
+# because nothing writes that shape any more — see `_seeded`.
 
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-async def _seeded(session_id: str) -> PostgresHistoryProvider:
+async def _seeded(session_id: str) -> None:
     """A migrated database holding one realistic MAF-shaped exchange.
 
     Written by raw insert, not through the provider, and that is not a shortcut: the provider
@@ -184,23 +181,15 @@ async def _seeded(session_id: str) -> PostgresHistoryProvider:
     migration exists to convert. Legacy rows are precisely the rows nothing writes any more.
     """
     await migrated_db_or_skip()
-    provider = PostgresHistoryProvider()
     legacy = [
-        Message(role="user", contents=[Content.from_text("what is the pKa of phenol?")]),
-        Message(
-            role="assistant",
-            contents=[
-                Content.from_text("computing"),
-                Content.from_function_call(
-                    call_id="c1", name="predict_pka", arguments={"smiles": "Oc1ccccc1"}
-                ),
-            ],
+        legacy_message("user", text_content("what is the pKa of phenol?")),
+        legacy_message(
+            "assistant",
+            text_content("computing"),
+            call_content("c1", "predict_pka", {"smiles": "Oc1ccccc1"}),
         ),
-        Message(
-            role="tool",
-            contents=[Content.from_function_result(call_id="c1", result="pKa 9.95")],
-        ),
-        Message(role="assistant", contents=[Content.from_text("about 9.95")]),
+        legacy_message("tool", result_content("c1", "pKa 9.95")),
+        legacy_message("assistant", text_content("about 9.95")),
     ]
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -208,9 +197,8 @@ async def _seeded(session_id: str) -> PostgresHistoryProvider:
             await cur.executemany(
                 "INSERT INTO session_messages (session_id, message, message_shape, "
                 "correlation_id) VALUES (%s, %s, 'maf', '')",
-                [(session_id, Jsonb(m.to_dict())) for m in legacy],
+                [(session_id, Jsonb(message)) for message in legacy],
             )
-    return provider
 
 
 def test_a_real_stored_conversation_converts_whole() -> None:

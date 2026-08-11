@@ -16,7 +16,7 @@ wraps it, the per-tool authorization gate addresses it by that name (`tool_role_
 built-in `DEFAULT_WRITE_TOOL_GATES` for a job that writes), a profile can narrow it away, and
 `chemclaw.cli.validate_prose_contract` sees it when checking the agent's prose.
 
-Why a generated pydantic model rather than a `dict` parameter: MAF derives a tool's JSON schema
+Why a generated pydantic model rather than a `dict` parameter: a tool's JSON schema is derived
 from its signature, and a single pydantic-model parameter is already the in-repo idiom for a
 structured argument (`start_optimization_campaign(spec: CampaignSpec)`). Building that model
 from the declared
@@ -209,7 +209,7 @@ _RATIONALE_DOC = [
 def _docstring(job: JobSpec) -> str:
     """Assemble the tool docstring the model reads: summary, description, then the arguments.
 
-    MAF derives the tool description from the docstring, so this *is* the job's model-facing
+    The tool description is derived from the docstring, so this *is* the job's model-facing
     documentation. The `Args:` section is rendered from the same declared params the schema is
     built
     from, so a parameter can never be documented in the prose but missing from the signature — the
@@ -224,7 +224,7 @@ def _docstring(job: JobSpec) -> str:
         lines.extend(f"        {param.name}: {param.description}" for param in job.params)
     elif job.params_model is not None:
         # A referenced model documents its own fields (their descriptions travel in the JSON
-        # schema MAF derives from it), so repeating them here would be a second, drift-prone
+        # schema derived from it), so repeating them here would be a second, drift-prone
         # copy.
         lines.append("    params: The job's launch arguments; see the field docs.")
     else:
@@ -288,9 +288,9 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
         ValidationError: `params` does not satisfy the job's declared schema.
         Exception: Whatever the declared precondition raises to refuse the launch.
     """
-    # **Validate here, because nothing upstream does** (D-138). MAF publishes the params model's
-    # JSON schema but hands the tool body the decoded JSON *object* — a plain `dict` — rather than
-    # constructing the model from it. Until this call existed every declared job died on `'dict'
+    # **Validate here, because nothing upstream does** (D-138). The params model's JSON schema is
+    # published, but the tool body is handed the decoded JSON *object* — a plain `dict` — rather
+    # than a constructed model. Until this call existed every declared job died on `'dict'
     # object has no attribute 'model_dump'` the first time a chemist asked for one, and the
     # precondition below was handed a dict whose attributes it could not read. Accept an
     # already-built model too: a caller that holds one (a test, a template step) is not wrong, and
@@ -312,7 +312,7 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
 def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     """Build the agent tool that launches one declared connector job.
 
-    The returned coroutine function is what MAF advertises: its `__name__` is the manifest's job
+    The returned coroutine function is what gets advertised: its `__name__` is the manifest's job
     name (which is also the authorization key and the profile-narrowing key), its docstring is
     the model-facing description, and its single parameter is the generated params model.
 
@@ -405,9 +405,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             # `connect()` above already frames the broker being unreachable; this is the
             # remaining gap the 2026-08-02 incident exposed one call later — a task queue with no
             # worker registered, a transient RPC timeout, a payload serialization error — all of
-            # which reached MAF raw as "Error: Function failed." and reproduced the exact retry
-            # storm the `connect()` framing exists to prevent. Unlike that case, a connected client
-            # may have reached the server before failing, so this cannot promise nothing started —
+            # which reached the model raw as "Error: Function failed." and reproduced the exact
+            # retry storm the `connect()` framing exists to prevent. Unlike that case, a connected
+            # client may have reached the server before failing, so this cannot promise nothing
+            # started —
             # it says only what it actually knows: most likely nothing did, but check before
             # relaunching a job that writes.
             raise ConnectorJobError(
@@ -438,10 +439,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # `job_completed` event to clear the row it drew.
         #
         # There used to be a second announcement here, opening a harness todo that recorded the
-        # plan as blocked on this id. Its stated purpose was so MAF's `todos_remaining` loop
-        # predicate saw "waiting" rather than re-invoking the model with nothing new (D-040). That
-        # predicate is gone with the framework — the graph's loop ends when the model stops calling
-        # tools, so an open todo cannot drive one — and with it the reason for the todo.
+        # plan as blocked on this id. Its stated purpose was so the framework's `todos_remaining`
+        # loop predicate saw "waiting" rather than re-invoking the model with nothing new (D-040).
+        # That predicate is gone with the framework — the graph's loop ends when the model stops
+        # calling tools, so an open todo cannot drive one — and with it the reason for the todo.
         record_job_started(handle.id, job.name)
         return handle.id
 
@@ -463,7 +464,7 @@ async def _await_briefly(
     **The framing lives here rather than at the call site, and that placement is the 2026-08-05
     review's finding.** It was written at one of the two sites that await: the freshly-started
     branch had it, the *re-joined* branch — a job already running when a second chemist asks for it
-    — did not, so a rejoined run that failed handed MAF a raw `WorkflowFailureError`, which is
+    — did not, so a rejoined run that failed raised a raw `WorkflowFailureError`, which is
     neither a `ChemclawError` nor a `SubsystemUnavailableError` and so reaches the model as
     "Error: Function failed.". That is the fourth appearance of one defect, and copying the guard to
     a second call site would only have set up the fifth. A guard on the *only* function that awaits

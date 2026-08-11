@@ -258,7 +258,7 @@ def test_a_denied_call_reaches_the_model_as_a_refusal(monkeypatch: pytest.Monkey
     """The gate blocks the body and the converter hands the model the reason, not a bare failure.
 
     Two middlewares in one assertion on purpose, because either alone is useless:
-    `lg_enforce_tool_authz` raising only helps if `lg_surface_authorization_denials` turns it into
+    `enforce_tool_authz` raising only helps if `surface_authorization_denials` turns it into
     something the model can act on, and a denial the model reads as a generic tool error is one it
     will retry.
     """
@@ -349,7 +349,7 @@ def test_a_repeated_call_is_refused_on_this_engine(monkeypatch: pytest.MonkeyPat
 def test_the_audit_trail_records_a_call_on_this_engine() -> None:
     """A tool call lands in the GxP trail with its identity, outcome and result.
 
-    `make_langgraph_audit_middleware` shares `_recording` with the MAF middleware, so what this
+    `make_audit_middleware` shares `_recording` with the MAF middleware, so what this
     pins is that the adapter reaches it with the three fields only the engine knows: the tool's
     name, its arguments, and its result as the `ok` detail.
     """
@@ -374,7 +374,7 @@ def test_the_audit_trail_records_a_call_on_this_engine() -> None:
 def test_a_failing_tool_is_announced_and_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     """A raising tool reaches the chemist's stream, the trail, and the model — all three.
 
-    `lg_announce_tool_failures` is innermost precisely so it sees the raw exception even when a
+    `announce_tool_failures` is innermost precisely so it sees the raw exception even when a
     converter turns it into a result, so one turn asserts every layer: the transcript gets a
     failure signal, the trail gets an `error` row, and the model still gets a readable message
     rather than a bare tool error.

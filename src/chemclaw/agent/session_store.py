@@ -14,8 +14,9 @@ written here is written once, by `chemclaw.api.runner._record_transcript`, after
 what reads it is `GET /sessions/{id}/messages` and the audit trail's join, both for a person.
 
 This is the conversation layer, deliberately separate from Temporal job state (D-002) and the
-calculation cache. The MAF `Message` is stored via its own `to_dict()`/`from_dict()`, so the store
-never interprets message shape — a MAF change is a value change, not a schema change.
+calculation cache. A message is stored as LangChain's own `message_to_dict()`, so the column is a
+serialization the library owns; what this module interprets is only *which* serialization a row
+holds (`message_from_row`), because the table still contains rows the previous framework wrote.
 
 Three stores live here because they are one session's durable state and must share a database:
 the message history above, `SessionOwnerStore` (who owns a session id — the fact the in-process
@@ -59,8 +60,14 @@ from chemclaw.core.identity_context import get_current_correlation_id
 log = logging.getLogger(__name__)
 
 
-def _message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
+def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     """One stored row as a LangChain message, whichever shape it holds.
+
+    Public because it has a second reader outside this module: `chemclaw.cli.explain` reconstructs
+    the same conversation for the audit join, and a CLI that parsed the stored payload itself is
+    exactly how a table holding two shapes acquires a reader that knows one. (It did: the CLI read
+    the legacy shape only, so every row written after the M6 conversion rendered blank.) One
+    function knows the shapes; everything else asks it.
 
     Both shapes read, and that is what the `message_shape` stamp is for (D-2026-08-10 §"why a shape
     version"): a rollout is not atomic, and `make db-migrate`'s conversion pass is resumable, so
@@ -204,7 +211,7 @@ class PostgresHistoryProvider:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
-        return [_message_from_row(row[1], row[2]) for row in rows]
+        return [message_from_row(row[1], row[2]) for row in rows]
 
     async def save_messages(
         self,

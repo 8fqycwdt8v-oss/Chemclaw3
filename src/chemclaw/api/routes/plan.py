@@ -122,7 +122,7 @@ async def decide_plan(
     # Nothing else to flip. This used to call `grant_execute` as well, moving the session's MAF
     # mode — a second piece of state saying the same thing, on a different lifetime, which is what
     # let the displayed mode outlive the approval it came from. The recorded decision is the whole
-    # authorization now, and `lg_enforce_plan_approval` reads exactly it.
+    # authorization now, and `enforce_plan_approval` reads exactly it.
     return Response(status_code=204)
 
 

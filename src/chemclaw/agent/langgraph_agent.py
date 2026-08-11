@@ -62,28 +62,28 @@ from langchain_core.runnables import RunnableConfig
 # caller would break every one of those citations to buy nothing — the same argument that freezes
 # the `D-NNN` sequence. Three tests already import it across module boundaries; within one package
 # that is the established idiom here.
-from chemclaw.agent.audit import AuditSink, make_langgraph_audit_middleware
+from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
     instructions_for,
 )
 from chemclaw.agent.llm_provider import build_chat_model
-from chemclaw.agent.loop_cap import lg_loop_cap
-from chemclaw.agent.plan_gate import gate_applies, harness_enabled_for, lg_enforce_plan_approval
+from chemclaw.agent.loop_cap import enforce_loop_cap
+from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
+from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend, skill_read_tool
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.team import SPECIALISTS, build_team_middleware, team_enabled
 from chemclaw.agent.tool_authz import (
-    lg_announce_tool_failures,
-    lg_enforce_tool_authz,
-    lg_refuse_writes_on_dry_run,
-    lg_surface_authorization_denials,
-    lg_surface_domain_errors,
+    announce_tool_failures,
+    enforce_tool_authz,
+    refuse_writes_on_dry_run,
+    surface_authorization_denials,
+    surface_domain_errors,
 )
 from chemclaw.connectors.registry import skills_dirs
 from chemclaw.core.config import settings
@@ -146,7 +146,7 @@ def build_langgraph_agent(
     # *about* tools, so which tools this profile advertises decides which judgment is worth
     # offering (`skills_middleware`).
     tools = _capability_tools(prof)
-    audit = make_langgraph_audit_middleware(
+    audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
         sink=audit_sink,
@@ -236,13 +236,13 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     no loop cap, so attaching either unconditionally would make this engine behave differently from
     the other while both are live — a safer difference, but a difference.
 
-    `lg_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
+    `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
     record. One counter for one number — see its docstring for why the framework's own
     `ModelCallLimitMiddleware` could not supply the observation half.
     """
     if not harness_enabled_for(profile):
         return []
-    return [TodoListMiddleware(), lg_loop_cap]
+    return [TodoListMiddleware(), enforce_loop_cap]
 
 
 def _team_middleware(
@@ -401,11 +401,11 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     """
     return [
         audit,
-        lg_enforce_tool_authz,
-        lg_refuse_writes_on_dry_run,
-        lg_refuse_repeated_calls,
-        *([lg_enforce_plan_approval] if gate_applies(profile) else []),
-        lg_announce_tool_failures,
+        enforce_tool_authz,
+        refuse_writes_on_dry_run,
+        refuse_repeated_calls,
+        *([enforce_plan_approval] if gate_applies(profile) else []),
+        announce_tool_failures,
     ]
 
 
@@ -418,7 +418,7 @@ def tool_call_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     was read.
     """
     return [
-        lg_surface_authorization_denials,
-        lg_surface_domain_errors,
+        surface_authorization_denials,
+        surface_domain_errors,
         *tool_governance_middleware(audit, profile),
     ]

@@ -159,6 +159,26 @@ def test_recording_outside_a_graph_is_a_no_op_rather_than_an_error() -> None:
     record_proposal("n-1", "note/n-1")
 
 
+def test_recording_from_a_governed_call_outside_a_graph_is_a_no_op() -> None:
+    """The path the guard actually exists for, which the first version of it did not cover.
+
+    `agent/tool_invocation.invoke_governed` runs a tool through the middleware chain in a Temporal
+    activity — a runnable context with no graph. `get_stream_writer()` raises a *different*
+    exception there than it does off any runnable context at all: `KeyError: '__pregel_runtime'`
+    rather than `RuntimeError`, because the config exists and the runtime key in it does not.
+    Catching only the second left a durable template step failing because a tool tried to narrate,
+    and the unit test above passed throughout — it drives a bare call, which raises the other one.
+    """
+    from langchain_core.tools import StructuredTool
+
+    async def _body() -> str:
+        record_job_started("qm-3", "qm")
+        return "launched"
+
+    tool = StructuredTool.from_function(coroutine=_body, name="launch", description="launch a job")
+    assert asyncio.run(tool.ainvoke({})) == "launched"
+
+
 def test_a_signal_reaches_the_stream_from_inside_a_tool() -> None:
     """The other half: where a writer *does* exist, the publish actually lands.
 

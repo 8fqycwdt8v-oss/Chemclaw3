@@ -11,9 +11,9 @@ import pytest
 
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, connector_specs
 from chemclaw.agent.plan_gate import (
+    enforce_plan_approval,
     gate_applies,
     harness_enabled_for,
-    lg_enforce_plan_approval,
 )
 from chemclaw.agent.profiles import (
     AgentProfile,
@@ -76,21 +76,21 @@ def test_profile_can_narrow_connectors() -> None:
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     """The invariant: narrowing a profile never removes the audit + per-tool authz middleware."""
     from chemclaw.agent.langgraph_agent import tool_call_middleware
-    from chemclaw.agent.repeat_guard import lg_refuse_repeated_calls
+    from chemclaw.agent.repeat_guard import refuse_repeated_calls
     from chemclaw.agent.tool_authz import (
-        lg_announce_tool_failures,
-        lg_enforce_tool_authz,
-        lg_refuse_writes_on_dry_run,
+        announce_tool_failures,
+        enforce_tool_authz,
+        refuse_writes_on_dry_run,
     )
 
     profile = AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"}))
     middleware = tool_call_middleware(object(), profile)
     # denial + domain-error surfacing + audit + authz + dry-run + repeat guard + announcing
     assert len(middleware) == 7
-    assert lg_enforce_tool_authz in middleware
-    assert lg_refuse_writes_on_dry_run in middleware
-    assert lg_refuse_repeated_calls in middleware
-    assert lg_announce_tool_failures in middleware
+    assert enforce_tool_authz in middleware
+    assert refuse_writes_on_dry_run in middleware
+    assert refuse_repeated_calls in middleware
+    assert announce_tool_failures in middleware
 
 
 def test_unknown_tool_name_in_profile_fails_loud() -> None:
@@ -137,7 +137,7 @@ def test_a_profiles_harness_answer_is_the_same_one_the_plan_gate_gets(
 
     assert gate_applies(profile), "the deployment default must not decide this for the profile"
     assert harness_enabled_for(profile), "the profile's harness override lost to the default"
-    assert lg_enforce_plan_approval in tool_call_middleware(object(), profile)
+    assert enforce_plan_approval in tool_call_middleware(object(), profile)
 
 
 def test_a_harness_profiles_instructions_are_its_own(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LiveSession:
-    """One live conversation: its MAF session, who owns it, and which profile it runs under.
+    """One live conversation: its turn session, who owns it, and which profile it runs under.
 
     A record rather than a tuple because it grew a third field and a fourth is plausible —
     unpacking `(session, owner)` at five call sites was already the kind of thing that breaks

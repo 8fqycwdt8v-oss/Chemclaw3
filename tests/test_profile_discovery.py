@@ -171,7 +171,7 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
     are attached afterwards and unconditionally, so a profile that named a tool the caller may
     not use would still be refused at call time.
     """
-    from chemclaw.agent.tool_authz import lg_enforce_tool_authz
+    from chemclaw.agent.tool_authz import enforce_tool_authz
 
     load_profiles()
 
@@ -188,7 +188,7 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
         return [type(middleware).__name__ for middleware in chain]
 
     assert names("property-lookup") == names(None)
-    assert lg_enforce_tool_authz in tool_call_middleware(object(), get_profile("property-lookup"))
+    assert enforce_tool_authz in tool_call_middleware(object(), get_profile("property-lookup"))
 
 
 class _FakeAgent:

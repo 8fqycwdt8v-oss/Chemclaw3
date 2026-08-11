@@ -24,21 +24,12 @@ is governance of the *call*, which is what this file pins.
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from typing import Any
 
 import pytest
 import uvicorn
-from agent_framework import (
-    BaseChatClient,
-    ChatResponse,
-    ChatResponseUpdate,
-    Content,
-    Message,
-    ResponseStream,
-)
-from agent_framework._tools import FunctionInvocationLayer
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
@@ -62,65 +53,6 @@ endpoint:
   read_only:
     - echo_subject
 """
-
-
-class _ScriptedChatClient(FunctionInvocationLayer, BaseChatClient):
-    """A real chat client with scripted replies, so MAF's own tool-calling loop does the calling.
-
-    Same shape as `tests/test_langgraph_agent.py`'s: only the model's replies are fake. The
-    tool execution path — including whatever middleware wraps it — is the framework's real one,
-    which is the entire point of testing governance here rather than against a stand-in context.
-    """
-
-    def __init__(self, script: Sequence[Callable[[], ChatResponse]]) -> None:
-        """Start with the given reply script, consumed one entry per model call."""
-        super().__init__()
-        self._script = list(script)
-
-    def _inner_get_response(
-        self,
-        *,
-        messages: Sequence[Message],
-        stream: bool,
-        options: Mapping[str, Any],
-        **kwargs: Any,
-    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
-        """Pop and return the next scripted reply."""
-        response = self._script.pop(0)()
-
-        async def _await_response() -> ChatResponse:
-            return response
-
-        return _await_response()
-
-
-def _call(name: str, arguments: dict[str, object]) -> Callable[[], ChatResponse]:
-    """A scripted turn that asks for one tool call."""
-
-    def _reply() -> ChatResponse:
-        return ChatResponse(
-            messages=[
-                Message(
-                    role="assistant",
-                    contents=[Content.from_function_call("c1", name, arguments=arguments)],
-                )
-            ],
-            response_id="r",
-        )
-
-    return _reply
-
-
-def _text(text: str) -> Callable[[], ChatResponse]:
-    """A scripted turn that replies with plain text, ending the loop."""
-
-    def _reply() -> ChatResponse:
-        return ChatResponse(
-            messages=[Message(role="assistant", contents=[Content.from_text(text)])],
-            response_id="r",
-        )
-
-    return _reply
 
 
 class _RecordingSink:

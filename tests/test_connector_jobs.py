@@ -22,7 +22,7 @@ from pydantic import BaseModel, ValidationError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
-from chemclaw.agent.tool_authz import DryRunRefusal, lg_refuse_writes_on_dry_run
+from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.connectors.jobs import (
     ConnectorJobError,
@@ -244,19 +244,23 @@ def test_the_raw_object_is_validated_rather_than_passed_through(client: _FakeCli
 
 
 def test_launching_survives_the_framework_s_own_invocation_path(client: _FakeClient) -> None:
-    """End-to-end through `agent_framework.tool(...).invoke()`, not our idea of it.
+    """End-to-end through the framework's own dispatcher, not our idea of it.
 
     The test above encodes today's observed behaviour (a `dict` arrives). This one encodes the
-    property that actually matters and would survive the framework changing its mind: whatever
-    MAF hands the body, a launch driven through MAF's own dispatcher starts the declared workflow.
+    property that actually matters and survives the framework changing its mind: whatever the
+    dispatcher hands the body, a launch driven through it starts the declared workflow. It ran
+    through MAF's `tool(...).invoke()` before the rebuild and runs through LangChain's
+    `StructuredTool.ainvoke` now — the same question of the engine that is actually wired.
     """
-    from agent_framework import tool as as_tool
+    from langchain_core.tools import StructuredTool
 
     fn = build_job_tool("calc", _SPEC)
-    invocable = as_tool(fn, name=fn.__name__, description="Start a calculation.")
+    invocable = StructuredTool.from_function(
+        coroutine=fn, name=fn.__name__, description="Start a calculation."
+    )
     asyncio.run(
-        invocable.invoke(
-            arguments={"params": {"smiles": "CCO"}, "rationale": "confirm the reported barrier"}
+        invocable.ainvoke(
+            {"params": {"smiles": "CCO"}, "rationale": "confirm the reported barrier"}
         )
     )
     (call,) = client.calls
@@ -396,7 +400,7 @@ def test_a_generated_launcher_is_covered_by_the_dry_run_gate() -> None:
         for job_name in sorted(declared):
             with pytest.raises(DryRunRefusal):
                 asyncio.run(
-                    run_middleware(lg_refuse_writes_on_dry_run, tool_request(job_name), _handler)
+                    run_middleware(refuse_writes_on_dry_run, tool_request(job_name), _handler)
                 )
     finally:
         reset_dry_run(token)

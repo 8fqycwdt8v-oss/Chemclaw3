@@ -8,10 +8,11 @@ deployment turns on (exactly as `skills_enabled` and `data_sources` do). Discove
 enablement: a repo can ship every connector and a deployment can run the subset it has
 validated.
 
-Two products come out of a manifest, and `build_agent` appends both to the in-process tool list:
+Two products come out of a manifest, and a turn's graph binds both:
 
-- **MCP tools** — one MAF MCP tool per `endpoint:`, carrying the turn's identity headers on every
-  call and our own credential on the connection (`chemclaw.connectors.identity`).
+- **MCP tools** — whatever each `endpoint:` advertises over a session held for the turn, carrying
+  the turn's identity headers on every call and our own credential on the connection
+  (`chemclaw.connectors.identity`).
 - **Job tools** — one generated launcher per `jobs:` entry (`chemclaw.connectors.jobs`), registered
 into the
   shared tool registry so audit, authorization and profile narrowing address it like any other tool.
@@ -64,11 +65,11 @@ MANIFEST_FILENAME = "connector.yaml"
 # may take to answer (the manifest's `request_timeout`, which bounds the read). Deliberately not a
 # config field: it is a property of "is this host there at all", the same for every bundle, and a
 # deployment that needs a longer one has a network problem a setting would only hide. Short,
-# because a dark connector must degrade quickly — the whole point of `DegradingHttpConnector`.
+# because a dark connector must degrade quickly — the whole point of `HeldConnectorSession`.
 _CONNECT_TIMEOUT_SECONDS = 5.0
 
-# What one configured connector endpoint becomes, whichever transport it declares. Both are MAF
-# MCP tools with the same agent-facing surface, so callers never branch on the transport.
+# What one configured connector endpoint becomes, whichever transport it declares. Both open into a
+# session advertising the same agent-facing surface, so callers never branch on the transport.
 
 
 class ConnectorError(ChemclawError):
@@ -251,9 +252,9 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
 
     One client carries both halves of what travels with a call (`chemclaw.connectors.identity`):
     our own credential as `auth`, so it is present on the MCP handshake too, and the turn's identity
-    as a request hook, which is the only place that can see the turn's ambient context — MAF's
-    `header_provider` is invoked in the calling task while the request is issued by the MCP
-    transport's writer task, so its headers never land.
+    as a request hook, which is the only place that can see the turn's ambient context — a
+    header-provider callback is invoked in the calling task while the request is issued by the MCP
+    transport's writer task, so its headers would never land.
 
     **Redirects are not followed, and that is a security property rather than a tuning choice.**
     An httpx request hook runs on every hop and httpx carries the previous request's headers into
@@ -271,7 +272,7 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
         endpoint: The manifest's HTTP endpoint declaration.
 
     Returns:
-        A client the caller owns; `DegradingHttpConnector.close` is what releases it.
+        A client the MCP adapter owns and closes with the session it opened.
     """
     return httpx.AsyncClient(
         auth=auth_for(endpoint.auth, connector),
@@ -344,10 +345,9 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
     would otherwise harvest the caller's Entra oid and role set), `turn_identity_hook`, `auth_for`,
     and the split connect/read timeout. The library's own `timeout`/`auth`/`headers` arguments are
     deliberately *not* passed on the connection: the factory ignores what it is handed, and the
-    honest way to ignore an argument is to never let a caller supply one. Unlike MAF, the adapter
-    closes the client it builds through the factory — `_create_streamable_http_session` enters it
-    with `async with client` — so the D-119-class leak `DegradingHttpConnector.close` exists to
-    prevent cannot arise here.
+    honest way to ignore an argument is to never let a caller supply one. The adapter closes the
+    client it builds through the factory — `_create_streamable_http_session` enters it with `async
+    with client` — so the D-119-class connection leak cannot arise here.
     """
     if isinstance(endpoint, HttpEndpoint):
         return ConnectorSpec(
@@ -393,9 +393,9 @@ def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
 def mcp_connections() -> list[ConnectorSpec]:
     """One connection spec per enabled connector that declares an endpoint (unopened).
 
-    The LangGraph twin of `mcp_tools()`, and named to pair with it: this half is the deployment's
-    whole surface, and `chemclaw.agent.chemclaw_agent.connector_specs` is the profile-narrowed
-    half, exactly as `mcp_tools`/`connector_tools` divide the same work on the MAF engine.
+    The deployment's whole surface; `chemclaw.agent.chemclaw_agent.connector_specs` is the
+    profile-narrowed half. Split that way because enablement is a deployment decision and narrowing
+    is a per-turn one, and a profile must never be able to widen what the deployment enabled.
     """
     return [
         _mcp_connection(manifest, manifest.endpoint)
@@ -409,17 +409,34 @@ async def open_connector_specs(
 ) -> tuple[list[BaseTool], list[str]]:
     """Open every connector for this turn; return the tools that came up and the names that did not.
 
-    The LangGraph twin of `open_reachable`, and it returns the tools as well as the casualties
-    because on this engine a connector's tools do not exist until its session is open —
-    `load_mcp_tools` needs a live session. That is the whole structural difference between the two
-    engines' connector paths, and it is why this cannot simply be `open_reachable` with a different
-    element type.
+    The connector lifecycle in one place, used by every caller that runs a turn — the front-door
+    runner, the CLI, the template activities — so "how a turn reaches its connectors" has a single
+    definition rather than several loops that can drift.
 
-    Concurrent for the same reason, and safe to be: each `HeldConnectorSession` confines its
-    `anyio` cancel scope to a task of its own, so entering them together does not exit them from
-    the wrong task (see `chemclaw.connectors.transport.HeldConnectorSession`). The degradation is
-    announced here rather than left to the caller, matching `open_reachable` — a new caller must
-    not be able to reintroduce the silence by forgetting to read a return value.
+    **The tools come back with the casualties** because a connector's tools do not exist until its
+    session is open: `load_mcp_tools` needs a live session. That is why this returns a pair rather
+    than a list of names, and it is the one structural difference from the process-lived connector
+    objects this replaced.
+
+    Nothing is caught here: a session's `connect` is already non-fatal by construction
+    (`chemclaw.connectors.transport`), so an unreachable connector simply comes back not-connected,
+    contributes no tools to the turn, and is retried on the next one.
+
+    Concurrent, because these are independent hosts and the wait is the *sum* of their latencies
+    otherwise. On the healthy path that is a few hundred milliseconds; the case that matters is the
+    tail, where a dark fleet cost six sequential connect timeouts before the model was called at
+    all. Safe to be concurrent because each `HeldConnectorSession` confines its `anyio` cancel scope
+    to a task of its own, so entering them together does not exit them from the wrong task (see
+    `chemclaw.connectors.transport.HeldConnectorSession`).
+
+    **The degradation is announced here, not left to the caller** (REV-6). The return value once
+    said "for the caller to surface" and all four callers dropped it on the floor, so a turn that
+    lost half its capability answered exactly like one that had all of it — the model simply never
+    saw the tools and reasoned from what remained. Announcing it in the one place every caller
+    passes through means a new caller cannot reintroduce the silence by forgetting to read a return
+    value. A caller that can reach a *human* still reads the list and says so on its own surface
+    (the front door yields `CapabilityDegradedEvent`, the CLI prints to stderr); what is guaranteed
+    here is the operator-visible half.
 
     Args:
         stack: The caller's exit stack, which owns tearing the sessions down.
@@ -433,8 +450,9 @@ async def open_connector_specs(
     opened = await asyncio.gather(*(stack.enter_async_context(session) for session in held))
     unreachable = [session.name for session in held if not session.connected]
     if unreachable:
-        # WARNING rather than ERROR, and the counter is what makes it alertable — the same posture
-        # and the same metric as `open_reachable`, because it is the same operational fact.
+        # WARNING rather than ERROR: the turn still runs, and a connector that is down for a
+        # deployment is a normal transient. The counter is what makes it alertable — a rate that
+        # stays above zero across turns is a dark connector, not a restart.
         logger.warning(
             "%d connector(s) did not come up for this scope and contribute no tools: %s",
             len(unreachable),
@@ -464,67 +482,6 @@ def profiles_dirs() -> list[str]:
         if candidate.is_dir():
             dirs.append(str(candidate))
     return dirs
-
-
-async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[str]:
-    """Connect every connector for the caller's scope, and report the ones that did not come up.
-
-    The connector lifecycle in one place, used by all three callers that run a turn — the
-    front-door runner, the CLI, and the harness tests — so "how a turn reaches its connectors"
-    has a single definition rather than three loops that can drift.
-
-    Nothing is caught here: a connector's `connect` is already non-fatal by construction
-    (`chemclaw.connectors.transport`), because MAF re-connects an unconnected tool inside
-    `Agent.run` and
-    would
-    raise there even if this function swallowed the failure. So an unreachable connector simply
-    comes back not-connected, contributes no tools to the turn, and is retried on the next one.
-
-    **The degradation is announced here, not left to the caller** (REV-6). The return value said
-    "for the caller to surface" and all four callers dropped it on the floor, so a turn that lost
-    half its capability answered exactly like one that had all of it — the model simply never saw
-    the tools and reasoned from what remained. Announcing it in the one place every caller passes
-    through means a new caller cannot reintroduce the silence by forgetting to read a return value.
-    A caller that can reach a *human* still reads the list and says so on its own surface (the front
-    door yields `CapabilityDegradedEvent`, the CLI prints to stderr); what is guaranteed here is the
-    operator-visible half.
-
-    Args:
-        stack: The caller's exit stack, which owns tearing the connections down.
-        tools: This turn's connector tools (`chemclaw.agent.chemclaw_agent.connector_tools`).
-
-    Returns:
-        The names of the connectors that are not connected, for the caller to surface.
-    """
-    # Concurrently, because these are independent hosts and the wait is the *sum* of their
-    # latencies otherwise. On the healthy path that is a few hundred milliseconds; the case that
-    # matters is the tail, where a dark fleet cost six sequential connect timeouts before the model
-    # was called at all. `connectors.health.probe_connectors` already gathers its probes for
-    # exactly this reason ("the sum of the timeouts rather than the slowest one") — this is the
-    # same argument on the path every turn actually takes.
-    #
-    # Gathering is safe for the per-turn-instance rule this seam depends on
-    # (`agents.chemclaw_agent.connector_tools`): that rule is about object *lifetime*, not connect
-    # ordering, and MAF runs each connector's lifecycle on its own task, so no cancel scope is
-    # shared between them. Cancellation still propagates — `gather` cancels children with
-    # `task.cancel()`, which is precisely what `_is_really_cancelled` reads.
-    await asyncio.gather(*(stack.enter_async_context(tool) for tool in tools))
-    unreachable = [
-        getattr(tool, "name", "?") for tool in tools if not getattr(tool, "is_connected", False)
-    ]
-    if unreachable:
-        # WARNING rather than ERROR: the turn still runs, and a connector that is down for a
-        # deployment is a normal transient. The counter is what makes it alertable — a rate that
-        # stays above zero across turns is a dark connector, not a restart.
-        logger.warning(
-            "%d connector(s) did not come up for this scope and contribute no tools: %s",
-            len(unreachable),
-            ", ".join(unreachable),
-        )
-        record_metric(
-            lambda m: m.increment("chemclaw_connectors_unreachable_total", len(unreachable))
-        )
-    return unreachable
 
 
 def job_tools() -> list[CapabilityTool]:

@@ -51,7 +51,7 @@ class RepeatedCallRefusal(ChemclawError):
 
     A `ChemclawError` so the two mechanisms that already exist do the work: the audit middleware
     records it as an `error` outcome, and `surface_domain_errors` hands the message to the model
-    verbatim instead of MAF's opaque "Function failed." — which matters more here than anywhere
+    verbatim instead of an opaque "Function failed." — which matters more here than anywhere
     else, since the whole point is to tell the model something it can act on.
     """
 
@@ -116,11 +116,11 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
 
 
 @wrap_tool_call
-async def lg_refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> Any:
+async def refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> Any:
     """The LangGraph wiring of `refuse_repeated_calls` — same counter, same threshold, same words.
 
     Raised rather than returned as a `ToolMessage`, unlike the gates in `tool_authz`: a
-    `RepeatedCallRefusal` is a `ChemclawError`, so `lg_surface_domain_errors` is what turns it into
+    `RepeatedCallRefusal` is a `ChemclawError`, so `surface_domain_errors` is what turns it into
     the message the model reads. That keeps one converter responsible for how a refusal reaches the
     model, instead of this gate having its own opinion about it.
     """

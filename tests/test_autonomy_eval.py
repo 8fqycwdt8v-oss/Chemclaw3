@@ -8,10 +8,10 @@ for:
   scores a fiction, reports healthy numbers, and gates nothing. So one test here drives the real
   `run_turn` with a fake agent and asserts the events it produces are exactly what the committed
   cases contain — that is the only assertion that makes the other ones mean anything.
-- **The iteration cap used to emit no event, and the metric paid for it.** `AgentLoopMiddleware`
-  stops at `harness_max_loop_iterations` and returns normally, so `runaway_rate` inferred a cap
-  from residue — an answer sent with todos still open — and thereby scored a turn that correctly
-  deferred to a durable job as a runaway, because `mark_awaiting_job` leaves exactly that residue.
+- **The iteration cap used to emit no event, and the metric paid for it.** A loop that stops at
+  `harness_max_loop_iterations` and returns normally left `runaway_rate` inferring a cap from
+  residue — an answer sent with todos still open — and thereby scoring a turn that correctly
+  deferred to a durable job as a runaway, because a deferral leaves exactly that residue.
   The cap is observable now (`chemclaw.agent.loop_cap` → `ErrorEvent(code="loop_cap_reached")`),
   so the metric reads the outcome instead of guessing at it. Both halves are pinned below: the
   deferral is not a runaway, and the explicit signal is.

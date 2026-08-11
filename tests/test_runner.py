@@ -20,7 +20,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_framework import Content
 
 import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
@@ -180,36 +179,6 @@ def _events(agent: ScriptedTurn, session: TurnSession | None = None) -> list[Any
     return asyncio.run(_collect())
 
 
-class _ApprovalRequestingAgent(ScriptedTurn):
-    """Streams a real MAF `function_approval_request` mid-turn, as a gated tool would.
-
-    Stays a MAF-shaped fake — the content it emits is MAF's own type and the branch that reads it
-    is MAF's — so `stream` yields updates rather than text and `run` passes them through. The class
-    is a `ScriptedTurn` only so the shared driver can ask it for a `graph_factory`; the test that
-    uses it is `maf_engine_only`, and on the graph engine that factory is never called.
-    """
-
-    async def stream(self, message: str) -> AsyncIterator[Any]:
-        """The MAF-shaped stream: text, then MAF's own approval-request content, then text."""
-        yield FakeUpdate(text="I need to run a DFT job. ")
-        update = FakeUpdate()
-        update.contents = [
-            Content.from_function_approval_request(
-                id="appr-1",
-                function_call=Content.from_function_call(
-                    call_id="c1", name="submit_dft_job", arguments={"smiles": "CCO"}
-                ),
-            )
-        ]
-        yield update
-        yield FakeUpdate(text="waiting.")
-
-    def run(  # noqa: D102 - see the class docstring
-        self, message: str, *, stream: bool, session: Any, **_run_options: Any
-    ) -> AsyncIterator[Any]:
-        return self.stream(message)
-
-
 def test_launched_job_is_announced_to_the_streaming_turn() -> None:
     """A job launched by a tool surfaces as a JobStartedEvent — not silence until push-back."""
     events = _events(_JobLaunchingAgent("qm-abc"))
@@ -270,7 +239,8 @@ class _PlanClearingAgent(ScriptedTurn):
 class _CappedLoopAgent(ScriptedTurn):
     """An agent whose loop still wanted another iteration when it stopped — a capped turn.
 
-    Calls `record_loop_cap`, which is what `lg_loop_cap` calls when it fires, rather than poking
+    Calls `record_loop_cap`, which is what `enforce_loop_cap` calls when it fires, rather than
+    poking
     the contextvar: what the runner then reads is what a genuinely capped loop leaves behind. That
     the real cap calls it is pinned in `tests/test_langgraph_stream.py`; this is the front-door
     half — the turn says so.

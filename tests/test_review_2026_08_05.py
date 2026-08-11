@@ -124,7 +124,7 @@ def test_a_job_that_fails_inside_the_wait_is_framed_wherever_it_was_awaited() ->
     It was written at one of the two awaits. The freshly-started branch had it; the *re-joined*
     branch — a second chemist asking for a job already running — did not, so a rejoined run that
     failed handed MAF a raw `WorkflowFailureError`. That type is neither a `ChemclawError` nor a
-    `SubsystemUnavailableError`, so `agent.tool_authz.lg_surface_domain_errors` passes it through
+    `SubsystemUnavailableError`, so `agent.tool_authz.surface_domain_errors` passes it through
     and the model reads a wordless failure — which three earlier incidents
     established is read as *proceed*.
     """

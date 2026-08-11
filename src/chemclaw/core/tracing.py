@@ -40,7 +40,7 @@ from chemclaw.core.config import settings
 logger = logging.getLogger(__name__)
 
 # The instrumentation scope every first-party span is created under, so a collector can separate
-# "spans Chemclaw wrote" from the ones MAF and the OTel instrumentations produce.
+# "spans Chemclaw wrote" from the ones the framework and the OTel instrumentations produce.
 TRACER_NAME = "chemclaw"
 
 # The standard W3C trace-context headers. Named here rather than reached for through the propagator

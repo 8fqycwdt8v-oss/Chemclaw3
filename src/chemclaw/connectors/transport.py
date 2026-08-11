@@ -1,41 +1,31 @@
-"""How a connector is reached, on both engines, so an unreachable connector degrades.
+"""How a connector is reached, so an unreachable connector degrades instead of failing the turn.
 
 Out-of-process capability makes every connector a network dependency in the tool path, and the
-default MAF behavior for a connector that will not connect is to raise — which turns one dead
-sidecar into a dead conversation. That is the wrong trade: losing a capability is a much smaller
-failure than losing the turn, and it is the trade decision 7 of
-`docs/archive/plans/connector-plan.md` records.
+default behaviour for a connector that will not connect is to raise — which turns one dead sidecar
+into a dead conversation. That is the wrong trade: losing a capability is a much smaller failure
+than losing the turn, and it is the trade decision 7 of `docs/archive/plans/connector-plan.md`
+records.
 
-Making it non-fatal at the *caller* is not possible, and finding that out is what shaped this
-module: `Agent.run` re-enters any `mcp_tools` entry that is not connected
-(`agent_framework/_agents.py:1363`), so a caller that catches the failure just has it raised again
-from inside the run. The behavior has to belong to the tool.
+`absorb_connect_failure` is the whole policy — degrade, unless the caller is what cancelled us —
+and it is one function on purpose. A second copy of that sentence somewhere else would let a dead
+connector fail the turn on one path and cost only its tools on another, which is a difference a
+chemist would meet as an outage.
 
-`connect()` is the one choke point every path funnels through — the context manager calls it, and so
-does MAF's run loop — so overriding it is enough, and it leaves the rest of MAF's lifecycle
-untouched. A failed connect leaves `is_connected` False and the loaded tool set empty, which gives
-exactly the semantics wanted: the connector contributes no tools this turn, the turn proceeds
-without them, and the *next* turn tries again — so a connector that comes back needs no restart to
-be picked up.
+**Why a held session rather than a lazily-connecting tool object.** `langchain-mcp-adapters` has no
+tool object that can be handed out unconnected: `load_mcp_tools` needs a *live* session, so a
+connector's tools do not exist until it is open. `HeldConnectorSession` is therefore the unit, and
+it holds its session inside a task of its own for a measured reason, not a stylistic one. The MCP
+client's session is an `anyio` cancel scope, and anyio refuses to let a scope be exited by a task
+other than the one that entered it. Opening the sessions the natural concurrent way — `asyncio.
+gather` over `AsyncExitStack.enter_async_context` — enters each on a child task and exits it on the
+caller's, which raises `RuntimeError: Attempted to exit cancel scope in a different task than it
+was entered in` (measured; the sequential form of the same code passes). Holding the whole
+lifecycle on one task is what makes the concurrent form legal again, and concurrency is kept: every
+connector still opens in parallel, each in its own task.
 
-**Both engines live here, over one decision** (M7, D-2026-08-10), the same shape M3 gave the tool
-middleware: `absorb_connect_failure` is the whole policy — degrade, unless the caller is what
-cancelled us — and each engine supplies only the plumbing that reaches it. A second copy of that
-sentence would let a dead connector fail the turn on one engine and cost only its tools on the
-other, which is a difference a chemist would meet as an outage.
-
-**The LangGraph half is not a translation of the MAF half, because the lifecycle differs.** MAF
-hands out an unconnected tool object that is connected later; `langchain-mcp-adapters` has no such
-object — `load_mcp_tools` needs a *live* session, so a connector's tools do not exist until it is
-open. `HeldConnectorSession` is therefore the unit, and it holds its session inside a task of its
-own for a measured reason, not a stylistic one: the MCP client's session is an `anyio` cancel
-scope, and anyio refuses to let a scope be exited by a task other than the one that entered it.
-Entering the sessions concurrently the way `open_reachable` does — `asyncio.gather` over
-`AsyncExitStack.enter_async_context` — enters each on a child task and exits it on the caller's,
-which raises `RuntimeError: Attempted to exit cancel scope in a different task than it was entered
-in` (measured; the sequential form of the same code passes). MAF never met this because it runs
-each connector's lifecycle on its own task internally, which is exactly what this class does
-explicitly. Concurrency is kept: every connector still opens in parallel, each in its own task.
+A failed open leaves the session not-connected and its tool set empty, which gives exactly the
+semantics wanted: the connector contributes no tools this turn, the turn proceeds without them, and
+the *next* turn tries again — so a connector that comes back needs no restart to be picked up.
 """
 
 import asyncio
@@ -99,10 +89,9 @@ class ConnectorSpec:
     a connection from a `Connection` mapping, and `load_mcp_tools` needs the live session before any
     tool exists. So the thing built per turn is this, and the thing opened per turn is the session.
 
-    `allowed_tools` is carried here rather than applied at build time for the same reason it is a
-    constructor argument on the MAF side: it is the manifest's agent-facing allow-list, narrowed
-    again by a profile, and it has to be applied to what the *server* advertises — which is not
-    knowable until the session is open.
+    `allowed_tools` is carried here rather than applied at build time because it is the manifest's
+    agent-facing allow-list, narrowed again by a profile, and it has to be applied to what the
+    *server* advertises — which is not knowable until the session is open.
     """
 
     name: str
@@ -116,22 +105,19 @@ class HeldConnectorSession:
     **The task is the point, and it is a measured requirement rather than a style.** The MCP
     client's session is an `anyio` cancel scope, and anyio refuses to let a scope be exited by a
     task other than the one that entered it. The natural concurrent shape — `asyncio.gather` over
-    `AsyncExitStack.enter_async_context`, which is exactly what `open_reachable` does for MAF —
-    enters each session on a child task and exits it on the caller's, and raises
-    `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`. The
-    sequential form of the same code passes, which is what identifies the cause as task affinity
-    rather than the session. MAF never met this because it runs each connector's lifecycle on its
-    own task internally; this class does the same thing where a reader can see it.
+    `AsyncExitStack.enter_async_context` — enters each session on a child task and exits it on the
+    caller's, and raises `RuntimeError: Attempted to exit cancel scope in a different task than it
+    was entered in`. The sequential form of the same code passes, which is what identifies the
+    cause as task affinity rather than the session.
 
     So the session is opened, used and closed entirely within `_hold`, and the caller only ever
     signals: `__aenter__` waits for the tools, `__aexit__` asks the task to stop. Both of those
     happen on the caller's task, which is what makes this safe to `gather` — every connector still
-    opens in parallel, which is the property `open_reachable` bought and must not be given back
-    (a dark fleet otherwise costs the sum of its connect timeouts before the model is called).
+    opens in parallel, which must not be given back (a dark fleet otherwise costs the sum of its
+    connect timeouts before the model is called).
 
-    A connector that fails to open leaves `tools` empty and its name in `unreachable`, which is the
-    same degradation the MAF path produces — the turn proceeds without it and the next turn tries
-    again.
+    A connector that fails to open leaves `tools` empty and its name in `unreachable`: the turn
+    proceeds without it and the next turn tries again.
     """
 
     def __init__(self, spec: ConnectorSpec) -> None:
@@ -150,7 +136,7 @@ class HeldConnectorSession:
 
     @property
     def connected(self) -> bool:
-        """Whether the session came up — the LangChain twin of MAF's `is_connected`."""
+        """Whether the session came up, which is what the degradation report is derived from."""
         return self._failure is None and self._task is not None
 
     async def __aenter__(self) -> list[BaseTool]:
@@ -211,10 +197,9 @@ class HeldConnectorSession:
 def _allowed(tools: list[BaseTool], allowed: tuple[str, ...] | None) -> list[BaseTool]:
     """Keep only the tools a connector's allow-list names.
 
-    MAF enforced this inside the tool object (`_filtered_functions`); `load_mcp_tools` returns
-    whatever the server advertises, so the allow-list has to be applied here or a profile's
-    narrowing would stop at the process boundary. `None` means the manifest declared no allow-list,
-    which is "everything this server offers" — the same meaning MAF gives it.
+    `load_mcp_tools` returns whatever the server advertises, so the allow-list has to be applied
+    here or a profile's narrowing would stop at the process boundary. `None` means the manifest
+    declared no allow-list, which is "everything this server offers".
     """
     if allowed is None:
         return list(tools)

@@ -158,7 +158,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
         ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
             own always-safe "bad input" contract (`chemclaw.core.errors`), so
             `chemclaw.agent.tool_authz`
-            surfaces this message to the model verbatim instead of MAF's opaque generic
+            surfaces this message to the model verbatim instead of an opaque generic
             failure — the common real cause is a citation to a note still pending PR-gate
             review (D-018: a fingerprint-indexed reaction whose note has not yet been merged),
             which the chemist can otherwise not distinguish from a typo or a deleted note.

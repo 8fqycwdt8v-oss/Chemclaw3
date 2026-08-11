@@ -1,15 +1,15 @@
 """Turning a compiled graph's stream into the turn event contract (M8, D-2026-08-10).
 
 `api/events.py` is the conformance boundary of this migration: a LangGraph turn either emits the
-same events a MAF turn does, or the rebuild is not done. This module is the half that makes that
-true — the LangGraph twin of the `async for update in stream:` loop in `chemclaw.api.runner`.
+same events the previous engine's turn did, or the rebuild is not done. That is what let the two be
+scored against each other rather than argued about, and it is why this module exists at all.
 
-**Why a translator and not a MAF-shaped adapter.** The tempting move is to make the graph yield
-objects with `.text` and `.contents` so the runner's existing loop consumes it unchanged. That
-would be faking one framework's private update shape with another's, and the shape is not stable
-enough to be worth impersonating — `runner_trace` says so in its own docstring, and it is why that
-module duck-types rather than importing MAF's content classes. Emitting the *contract* directly is
-both simpler and the thing that is actually pinned by tests.
+**Why a translator and not an update-shaped adapter.** The tempting move was to make the graph
+yield objects with `.text` and `.contents` so the old runner loop consumed it unchanged. That would
+have been faking one framework's private update shape with another's, and such a shape is not
+stable enough to be worth impersonating — `runner_trace` says so in its own docstring, and it is
+why that module duck-types rather than importing any concrete content class. Emitting the
+*contract* directly is both simpler and the thing that is actually pinned by tests.
 
 **What each stream mode is for**, with `stream_mode=["messages", "updates", "custom"]` and
 `subgraphs=True`, which yields `(namespace, mode, payload)` three-tuples (measured against
@@ -19,15 +19,15 @@ different branch and yields two-tuples instead):
 - `messages` carries `(chunk, metadata)` per token, which is `TokenEvent`, and it is the only mode
   that arrives *while* the model is producing rather than after the node finishes. Tool calls are
   deliberately **not** read from here even though the chunks carry `tool_call_chunks`: that is the
-  streamed, fragmented shape whose reassembly cost MAF two live-run defects (D-138, and the
-  OpenAI-Responses case that announced ten `tool_call` events for one call).
+  streamed, fragmented shape whose reassembly cost the previous engine two live-run defects
+  (D-138, and the OpenAI-Responses case that announced ten `tool_call` events for one call).
 - `updates` carries `{node: state_update}` once a node completes, so a tool call arrives *whole*.
   That is where calls, results and the todo list are read.
 - `custom` carries what a *node* chose to publish about itself. Today that is the evidence
   fan-out's per-branch report (`chemclaw.retrieval.fanout`), which reaches here from inside a tool
-  call because a branch's writer surfaces under the `tools:<id>` namespace. Chemclaw's other
-  out-of-band signals still travel by contextvar (`core/turn_signals.py`), which both engines
-  drain; M13 is where that becomes a stream write too.
+  call because a branch's writer surfaces under the `tools:<id>` namespace, and every other
+  out-of-band signal a turn raises (`core/turn_signals.py` publishes them through
+  `get_stream_writer()`).
 
 **The ordering rule is the runner's, reproduced rather than re-derived**: a signal is drained
 before the content of the update it arrived with, because a tool that ran while the model was
@@ -98,7 +98,7 @@ async def graph_events(
         usage: The turn's token ledger; fed from each message chunk's `usage_metadata`.
 
     Yields:
-        `Event`s in the same order and with the same meanings the MAF loop yields them.
+        `Event`s in the order and with the meanings `api/events.py` declares.
     """
     todos: list[str] = []
     async for namespace, mode, payload in graph.astream(
@@ -245,8 +245,8 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
     """The plan a node's state update carries, or `None` when it carries none.
 
     `TodoListMiddleware` keeps `{content, status}` items, so the rendered line is the content —
-    the same text `agent/plan_gate.py` renders for the MAF path, so a surface showing a plan
-    cannot tell which engine produced it.
+    the same text `agent/plan_gate.py` hashes, which is what makes the plan a surface displays and
+    the plan the gate binds an approval to literally the same strings.
     """
     todos = update.get("todos")
     if todos is None:
@@ -258,9 +258,9 @@ def _signal_event(signal: Signal) -> Event:
     """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift).
 
     It used to live in `chemclaw.api.runner` and be imported here at call time, because the runner
-    owned the MAF loop that drained the signal buffer and this module could not import it back
-    without a cycle. Both reasons are gone: there is one loop, it is this one, and a signal reaches
-    it as a stream payload rather than out of a contextvar.
+    owned the loop that drained the signal buffer and this module could not import it back without
+    a cycle. Both reasons are gone: there is one loop, it is this one, and a signal reaches it as a
+    stream payload rather than out of a contextvar.
     """
     if isinstance(signal, JobSignal):
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)

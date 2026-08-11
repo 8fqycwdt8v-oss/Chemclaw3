@@ -420,9 +420,9 @@ class Note(TemporalWindow):
         """Every *unconstrained* string this note carries must survive UTF-8.
 
         Walked off `model_fields` rather than spelled out, for the reason `skill_tool_names` reads
-        MAF's own constants: a note that grows another string field would otherwise gain an
-        unchecked one silently, and the whole point is that any unencodable value breaks every
-        writer rather than the one that happened to be tested.
+        the framework's own constants: a note that grows another string field would otherwise
+        gain an unchecked one silently, and the whole point is that any unencodable value breaks
+        every writer rather than the one that happened to be tested.
 
         **Four fields are deliberately not walked, because something already refuses them.**
         Measured: pydantic's own constrained-string validation rejects a surrogate in `id`, `type`

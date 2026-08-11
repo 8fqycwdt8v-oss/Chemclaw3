@@ -22,10 +22,10 @@ of the conversation graph. Measured, that still streams: a branch's `get_stream_
 surfaces in the parent agent's `astream` under the `tools:<id>` namespace, so each leg is
 individually observable exactly as the plan wanted.
 
-**It runs on both engines**, which is what keeps `gather_evidence` one tool rather than two. Inside
-a compiled graph there is always a runtime, so the branches execute the same way under a MAF turn;
-only the *visibility* differs, because nothing is consuming a custom stream there. A tool whose
-results depended on which engine invoked it is the one divergence this migration forbids.
+**It runs wherever `gather_evidence` does**, which is what keeps that one tool rather than two.
+Inside a compiled graph there is always a runtime, so the branches execute identically under a CLI
+sweep or a Temporal activity; only the *visibility* differs, because nothing is consuming a custom
+stream there. A tool whose results depended on who invoked it would be the worse trade.
 
 **Fan-in order is not the order the branches finish, and that is load-bearing.** `operator.add`
 appends whichever branch completes first, while both merge modes downstream depend on stable input
@@ -112,7 +112,7 @@ def _report(name: str, found: int) -> None:
     what makes a starved leg visible *while* the sweep runs; the counter is what makes it alertable
     across turns, because a leg that returns nothing on one query is normal and a leg that returns
     nothing on every query is a broken deployment. The writer call is guarded because this graph is
-    also invoked outside any streaming consumer (the MAF engine, the CLI, a Temporal activity), and
+    also invoked outside any streaming consumer (the CLI, a Temporal activity), and
     a sweep must not fail for want of an audience.
     """
     record_metric(

@@ -231,7 +231,7 @@ async def consume_turn_approval(session_id: str) -> None:
 
 
 @wrap_tool_call
-async def lg_enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
+async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Refuse a state-changing tool whose session has no approval for its current plan.
 
     The LangGraph twin of `enforce_plan_approval`, over the same identity (`plan_identity`), the
@@ -253,7 +253,7 @@ async def lg_enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) 
 
     Raises:
         PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;
-            the audit middleware records the refusal and `lg_surface_authorization_denials` relays
+            the audit middleware records the refusal and `surface_authorization_denials` relays
             the reason to the model.
     """
     name = request.tool_call["name"]
@@ -262,7 +262,7 @@ async def lg_enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) 
     session_id = get_current_session_id()
     # No session means no plan to approve and no autonomous loop to gate — a template activity's
     # tool step, or a one-shot CLI call. Not a hole: those paths still pass through
-    # `lg_enforce_tool_authz` and `authorize_trigger`, which is what governs them.
+    # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
     if not session_id:
         return await handler(request)
     todos = (request.state or {}).get("todos") or []

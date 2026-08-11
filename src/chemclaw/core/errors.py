@@ -44,7 +44,7 @@ class SubsystemUnavailableError(Exception):
     Raisers therefore keep it free of hostnames, ports and driver text — the underlying exception
     carries all of that as `__cause__`, for the log and the operator.
 
-    Why it exists at all: an unreachable Temporal broker reached the model as MAF's opaque
+    Why it exists at all: an unreachable Temporal broker reached the model as an opaque
     "Error: Function failed.", and in the 2026-08-03 live run the model responded to that by
     **writing the entire development report by hand** — tables, executive summary, numbers,
     citations — and presenting it as having entered the PR-gate. The generator never ran. An error

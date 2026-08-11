@@ -1,34 +1,29 @@
-"""Make the harness loop's runaway cap observable, so a capped turn stops looking finished.
+"""Make the model loop's runaway cap observable, so a capped turn stops looking finished.
 
-`AgentLoopMiddleware` stops at `harness_max_loop_iterations` and **returns normally, emitting
-nothing** — so a capped turn is externally identical to one that finished its work. That silence
-cost twice. A deployment had no signal to alert on (`docs/planning/BACKLOG.md`), and
+A loop that stops at its iteration cap and **returns normally, emitting nothing** is externally
+identical to one that finished its work. That silence cost twice under the framework this layer was
+first built on. A deployment had no signal to alert on (`docs/planning/BACKLOG.md`), and
 `chemclaw.evals.autonomy.runaway_rate` was reduced to inferring a runaway from *residue*: an answer
 sent while the plan still held unchecked steps. Residue cannot tell "abandoned a step" from
-"correctly deferred to a durable job", because `chemclaw.agent.harness_todo.mark_awaiting_job`
-leaves exactly the same trace — an open todo — behind a turn that did the right thing.
+"correctly deferred to a durable job", because a turn that defers correctly leaves exactly the same
+trace — an open todo — behind.
 
-**Where the signal comes from.** MAF offers no hook on the cap itself: `_evaluate_stop`
-short-circuits `should_continue` once the cap is reached, and the middleware is constructed inside
-`create_harness_agent` rather than handed in. What it does hand in is the loop predicate, which is
-ours — and one fact about the loop is enough:
+**The cap is now a counted state field, not an inference.** `enforce_loop_cap` is a `before_model`
+hook over `ChemclawState.model_calls`: it counts each model call, and when the count reaches
+`harness_max_loop_iterations` it jumps the graph to `end` and marks the turn. So the number that
+enforces the limit and the number that records it are the same number, and there is nothing to
+reason about. What this replaced was an inference — "the loop stopped at the cap exactly when its
+last stop decision was keep going" — which was sound and had a hole at a cap of 1, where the
+predicate was never consulted at all and a capped turn reported no cap.
 
-    the loop stopped at the cap exactly when its last stop decision was "keep going".
-
-Every other way the loop ends is the predicate returning `False` (no todos left, the session is no
-longer in execute mode, the plan is unapproved). Once it has said "keep going", the only thing that
-can stop the loop without asking it again is the cap. So this module records each decision and the
-runner reads the last one.
-
-A cap of `1` makes the loop single-shot and MAF never consults the predicate at all, so nothing is
-recorded and the turn reports no cap. That is the honest reading rather than a hole: a loop that
-never got to want another iteration was not stopped from taking one.
-
-The carrier is a contextvar holding a *mutable* record, for the reasons
-`chemclaw.core.turn_signals` gives for its buffer: it is task-local (concurrent turns cannot see
-each other's loops), it is empty off the request path (CLI, tests, the classic agent), and it is
-mutated rather than rebound — so the decision is visible to the runner even when the agent's stream
-is driven from a task of its own.
+**Two readers, because they ask from different places.** `loop_capped(state)` reads the count off
+a finished graph's state, which is what a test or a template step holds. `loop_hit_cap()` reads a
+contextvar the hook marks on its way out, which is what `chemclaw.api.runner` holds — a streaming
+driver never gets the final state back. The carrier is a contextvar holding a *mutable* record, for
+the reasons `chemclaw.core.turn_signals` gives for its buffer: it is task-local (concurrent turns
+cannot see each other's loops), it is empty off the request path (CLI, tests), and it is mutated
+rather than rebound — so the mark is visible to the runner even when the stream is driven from a
+task of its own.
 """
 
 import logging
@@ -46,9 +41,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _LoopWatch:
-    """One turn's last loop decision — `True` when the loop still wanted another iteration."""
+    """One turn's cap mark — `True` once the loop was stopped by its iteration cap."""
 
-    wants_more: bool = False
+    capped: bool = False
 
 
 _watch: ContextVar[_LoopWatch | None] = ContextVar("chemclaw_loop_watch", default=None)
@@ -65,14 +60,13 @@ def end_loop_watch(token: object) -> None:
 
 
 def loop_hit_cap() -> bool:
-    """Whether the harness loop was stopped by its iteration cap during this turn.
+    """Whether this turn's model loop was stopped by its iteration cap.
 
-    `False` off the request path and for every agent that does not loop, which is what makes this
-    safe to ask unconditionally: no watch, no cap. See the module docstring for why "the last
-    decision was keep going" is the same statement as "the cap fired".
+    `False` off the request path, which is what makes this safe to ask unconditionally: no watch,
+    no cap. The state-side answer is `loop_capped`; this is the one a streaming driver can reach.
     """
     watch = _watch.get()
-    return watch is not None and watch.wants_more
+    return watch is not None and watch.capped
 
 
 # `can_jump_to` is not decoration, it is the edge. **Without it the cap was inert**, and inert in
@@ -87,7 +81,7 @@ def loop_hit_cap() -> bool:
 # `to_regclass` guard M6 nearly shipped — a check that runs, returns the right answer, and is wired
 # to nothing.
 @before_model(can_jump_to=["end"])
-def lg_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
+def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
     """Count this turn's model calls and end the run when it reaches the cap.
 
     **Why a counter here rather than `ModelCallLimitMiddleware`.** That middleware enforces exactly
@@ -98,14 +92,15 @@ def lg_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None
     middleware and counting again here would have meant two counters for one number; enforcing here
     means one number that is both the limit and the record.
 
-    That is the whole point. MAF's cap fired inside `create_harness_agent` where nothing could
-    observe it, so a capped turn was externally identical to a finished one and `loop_hit_cap` had
-    to *infer* it — an inference blind at a cap of 1, because the loop never consults the predicate
-    there. Here the count is a declared state field, so a cap of 1 leaves a count of 1.
+    That is the whole point. The cap this replaced fired inside the framework's own loop where
+    nothing could observe it, so a capped turn was externally identical to a finished one and
+    `loop_hit_cap` had to *infer* it — an inference blind at a cap of 1, because the loop never
+    consulted the predicate there. Here the count is a declared state field, so a cap of 1 leaves
+    a count of 1.
 
-    Ending the run rather than raising, matching MAF: the answer the last iteration managed still
-    goes out, and a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`).
-    A raised error would discard work a chemist is entitled to see.
+    Ending the run rather than raising: the answer the last iteration managed still goes out, and
+    a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`). A raised error
+    would discard work a chemist is entitled to see.
     """
     calls = int(state.get("model_calls", 0))
     if calls >= settings.harness_max_loop_iterations:
@@ -116,47 +111,43 @@ def lg_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None
 
 
 def record_loop_cap() -> None:
-    """Tell this turn's watch the cap fired, so **one** reader answers for both engines.
+    """Mark this turn's watch, so the runner can see a cap it cannot read off the state.
 
-    Without this the count was kept where nothing on the turn path read it. `chemclaw.api.runner`
-    decides whether to emit `loop_cap_reached` and increment `chemclaw_turn_loop_caps_total` by
-    calling `loop_hit_cap()`, which reads the ambient watch — and only `observe_loop_cap`, the MAF
-    half, ever wrote it. `loop_capped(state)` answers the same question from graph state and has no
-    caller in the runner, because a compiled graph's final state is not something the streaming
-    driver hands back.
+    `chemclaw.api.runner` decides whether to emit `loop_cap_reached` and increment
+    `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`. It has no other way to ask: a
+    compiled graph's final state is not something the streaming driver is handed back, so
+    `loop_capped(state)` — the authoritative reader — is unreachable from there.
 
-    So a capped turn on the graph engine was externally identical to a finished one: no error
-    event, no counter, nothing for a surface to mark the answer partial with. That is precisely the
-    defect `lg_loop_cap` exists to fix — "MAF's cap fired inside `create_harness_agent` where
-    nothing could observe it" — reintroduced one layer up by wiring the runner to the wrong reader.
+    Without this mark a capped turn was externally identical to a finished one: no error event, no
+    counter, nothing for a surface to mark the answer partial with. That is the very defect
+    `enforce_loop_cap` exists to fix, reintroduced one layer up by leaving the runner with no
+    reader at all.
 
-    Marking the watch rather than branching in the runner is what keeps it one number: the count
-    still lives in `model_calls` and `loop_capped` still reads it, and this records only the *fact*
-    the runner asks about. A second branch there would be a second place for the two engines to
-    disagree about whether a turn was cut off.
+    Marking rather than branching in the runner is what keeps it one number: the count still lives
+    in `model_calls` and `loop_capped` still reads it, and this records only the *fact* the runner
+    asks about.
     """
     watch = _watch.get()
     if watch is not None:
-        # `wants_more` means "the loop asked to continue and something else stopped it", which is
-        # exactly what a cap is. Mutated rather than rebound for the reason the module docstring
-        # gives: the runner must see it even when the stream is driven from a task of its own.
-        watch.wants_more = True
+        # Mutated rather than rebound, for the reason the module docstring gives: the runner must
+        # see it even when the stream is driven from a task of its own.
+        watch.capped = True
 
 
 def loop_capped(state: Mapping[str, Any]) -> bool:
     """Whether this turn's model loop was stopped by its cap — **read, not inferred**.
 
-    The LangGraph counterpart of `loop_hit_cap`, and a different kind of answer. MAF offers no hook
-    on its cap: `_evaluate_stop` short-circuits the predicate once the limit is reached, and the
-    middleware is constructed inside `create_harness_agent` rather than handed in, so the only
-    signal available was the shape of the *last decision the loop asked for* — "it wanted another
-    iteration, and something other than the predicate stopped it". That inference is sound and it
-    has a hole its own docstring records: at `harness_max_loop_iterations == 1` the loop never
-    consults the predicate at all, so nothing is recorded and a capped turn reports no cap.
+    The authoritative answer, and a different kind of answer from `loop_hit_cap`. The framework
+    this layer was first built on offered no hook on its cap — it short-circuited the loop
+    predicate once the limit was reached — so the only signal available was the shape of the *last
+    decision the loop asked for*: "it wanted another iteration, and something other than the
+    predicate stopped it". That inference was sound and had a hole: at
+    `harness_max_loop_iterations == 1` the predicate was never consulted at all, so nothing was
+    recorded and a capped turn reported no cap.
 
-    `lg_loop_cap` keeps the count in a declared state field, so here the question is answered by
-    reading the number rather than by reasoning about a decision. The hole closes with it: a cap of
-    1 that fired leaves a count of 1, which is exactly what this compares.
+    `enforce_loop_cap` keeps the count in a declared state field, so here the question is answered
+    by reading the number rather than by reasoning about a decision. The hole closes with it: a cap
+    of 1 that fired leaves a count of 1, which is exactly what this compares.
 
     Args:
         state: The turn's final graph state.

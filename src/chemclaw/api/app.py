@@ -210,7 +210,7 @@ def create_app(
     # Both called once per *turn*, not once per process. A connector's session belongs to a single
     # turn, and a graph binds its tools at construction — so the graph's lifetime is pinned to its
     # connectors' (`chemclaw.agent.langgraph_agent`). There used to be an `agents` dict beside
-    # these, holding one process-lived MAF `Agent` per profile; nothing outlives a turn now.
+    # these, holding one process-lived agent per profile; nothing outlives a turn now.
     app.state.connector_factory = connector_factory
     app.state.graph_factory = graph_factory
 

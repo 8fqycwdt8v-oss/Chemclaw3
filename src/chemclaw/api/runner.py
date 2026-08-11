@@ -1,11 +1,10 @@
 """The per-turn run lifecycle (plan step F2-T1): the missing caller that actually runs the agent.
 
 `run_turn` owns exactly what the agent's own docstring says a caller must own: it opens the MCP
-tool connectors for the turn (`agent.mcp_tools`), runs the turn against the session's thread,
-and translates the model's streamed updates into the typed `chemclaw.api.events` the surfaces
-render.
-When the harness is enabled the *same* call drives its completion loop (MAF's loop middleware
-runs inside `agent.run`), so plan/execute autonomy needs no separate driver here.
+tool connectors for the turn (`connectors.registry.open_connector_specs`), compiles the turn's
+graph over them, and translates the graph's stream into the typed `chemclaw.api.events` the
+surfaces render (`api/graph_stream.py`). When the harness is enabled the *same* stream drives its
+completion loop, so plan/execute autonomy needs no separate driver here.
 
 Errors are turned into a single `ErrorEvent` with a user-safe message rather than propagating a
 stack trace to the browser — a failed turn must not take down the stream or leak internals.
@@ -184,9 +183,6 @@ async def run_turn(
     # Stamp the turn's session so a job-launching tool (compute_dft_energy) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
-    # The live session object too, so a job-launching tool can mark the harness todo it's
-    # waiting on (`agents.harness_todo`) — the id alone cannot reach the session's own todo-list
-    # state.
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     # One correlation id per *turn*, stamped here rather than bound inside `build_agent`: agents
@@ -212,8 +208,9 @@ async def run_turn(
     # that never finished, so the next turn would read a plan claiming steps it never took.
     #
     # Only `session.state` is rolled back, and that is the whole rollback now. It used to have a
-    # durable half: a pre-turn watermark over `session_messages`, because MAF wrote the stored
-    # thread incrementally and fed it back to the model, so a disconnect mid-tool-call committed a
+    # durable half: a pre-turn watermark over `session_messages`, because the previous engine wrote
+    # the stored thread incrementally and fed it back to the model, so a disconnect mid-tool-call
+    # committed a
     # `tool_use` with no matching `tool_result` and every later turn replayed it — the model
     # rejected the thread outright ("tool_use ids found without tool_result blocks") and one
     # dropped connection permanently bricked the conversation. The graph reads its own
@@ -224,7 +221,7 @@ async def run_turn(
     try:
         async with AsyncExitStack() as stack:
             # The turn span, which is the parent every other span in this request hangs from — the
-            # model calls MAF emits, the tool spans `agent/audit.py` opens, and (through
+            # model calls the graph emits, the tool spans `agent/audit.py` opens, and (through
             # `traceparent`) whatever a connector does on our behalf. Pushed onto the stack that is
             # already here rather than wrapping the body, so the span's lifetime is exactly the
             # turn's teardown and there is no second place that has to remember to close it.
@@ -236,10 +233,9 @@ async def run_turn(
             )
             # This turn's own connector tools, connected for its duration and torn down after.
             # Built per turn rather than held on the agent because a connector's connection must
-            # belong to exactly one turn — see `agents.chemclaw_agent.connector_tools`. Whichever
-            # engine runs, the model ends up seeing one combined surface: MAF appends these to the
-            # agent's configured tools at `agent.run`, the graph binds them at construction. An
-            # unreachable connector costs its tools, not the turn.
+            # belong to exactly one turn — see `chemclaw.connectors.transport`. The graph binds
+            # them alongside the profile's in-process tools at construction, so the model sees one
+            # combined surface. An unreachable connector costs its tools, not the turn.
             #
             # Surfaced before the first token rather than discarded (REV-6): the model cannot tell
             # the chemist that a tool was missing, because it never saw one missing — it answers
@@ -635,11 +631,8 @@ def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
     """The completed jobs, worded and framed as the message that continues the turn.
 
     A function of its own rather than a string inlined at the resume site, because it is the
-    *decision* the resume carries and it was extracted while two engines had to agree on it — MAF
-    resumed with a second `agent.run`, the graph with a second `graph_events`, and a chemist must
-    not have got a differently-worded or differently-framed continuation depending on which was
-    configured. One engine is left and the wording still belongs here, beside the framing rule it
-    depends on rather than buried in the turn loop.
+    *decision* the resume carries: a chemist meets this text as the reason their turn continued,
+    and it belongs beside the framing rule it depends on rather than buried in the turn loop.
 
     The results are handed to the model as *framed data*, not as an instruction: they arrive from
     a workflow, and the same injection discipline that applies to retrieved notes applies here
@@ -666,9 +659,9 @@ async def _record_transcript(
 
     **The read model, and the reason it is written here rather than derived.** `session_messages`
     backs `GET /sessions/{id}/messages` — what a chemist sees after a reload — and it used to be
-    filled as a side effect of MAF's history provider, which the engine called on every run. The
-    graph keeps its thread in the checkpointer and calls no such hook, so when the MAF branch went
-    the table stopped being written at all: measured, a complete turn left **0 rows** while the
+    filled as a side effect of the previous engine's history provider, which it called on every
+    run. The graph keeps its thread in the checkpointer and calls no such hook, so when that engine
+    went the table stopped being written at all: measured, a complete turn left **0 rows** while the
     same session accumulated 8 checkpoint rows. The conversation was never lost — the checkpointer
     is what the next turn reads — but the transcript route returned `[]` for every session.
 

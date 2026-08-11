@@ -1,4 +1,4 @@
-"""The MAF conversational agent: model, skills, capabilities, compaction, harness.
+"""The conversational agent: model, skills, capabilities, compaction, harness.
 
 One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
 every section into the one config object and owns the env prefix, the `.env` loading and the
@@ -14,11 +14,11 @@ from pydantic_settings import BaseSettings
 
 
 class AgentSettings(BaseSettings):
-    """The MAF conversational agent: model, skills, capabilities, compaction, harness.
+    """The conversational agent: model, skills, capabilities, compaction, harness.
 
-    Grouped because everything here shapes how `build_agent` assembles one agent — which model
-    orchestrates, which skills and MCP capability servers attach, how the conversation context
-    is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
+    Grouped because everything here shapes how `build_langgraph_agent` compiles one turn's graph —
+    which model orchestrates, which skills and MCP capability servers attach, how the conversation
+    context is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
     """
 
     # Suffix for the `<retrieved-note-...>` envelope that marks untrusted retrieved content as
@@ -44,8 +44,8 @@ class AgentSettings(BaseSettings):
     # this flag — is what decides whether the default changes. LangGraph only.
     agent_teams_enabled: bool = False
 
-    # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
-    # (ENV-overridable); the provider's API key is read by the chat client from its own env var
+    # The agent (plan step 1.5). `agent_model` is the orchestration model name
+    # (ENV-overridable); the provider's API key is read by the chat model from its own env var
     # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers
     # SKILL.md files — one or more directories, delimited by the OS path separator (like PATH),
     # so an admin can add a second (e.g. team-private) skills directory without code changes.
@@ -65,7 +65,7 @@ class AgentSettings(BaseSettings):
     # default = every skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # Conversation context management (MAF compaction). The agent keeps a session thread and
+    # Conversation context management. The agent keeps a session thread and
     # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
     # long chat would grow unbounded. Compaction runs only when the included context exceeds
     # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
@@ -103,13 +103,13 @@ class AgentSettings(BaseSettings):
     # consequence of naming two unrelated things the same way.
     cli_admin_roles: list[str] = Field(default_factory=list)
 
-    # MAF Agent Harness (plan Phase F1) — the autonomous plan/execute backbone (the
-    # Claude-Code-like experience). When `harness_enabled`, `build_agent` wires MAF's
-    # `create_harness_agent` (todo list + plan/execute mode + a bounded completion loop) over
-    # the *same* tools/skills/audit/ compaction as the classic agent, with MAF's generic
-    # batteries (file memory/access, web search, shell) OFF — capability comes from our MCP
-    # servers and tools, not the harness's built-ins. Off by default so today's classic
-    # single-turn agent stays the safe fallback against the harness's `[Experimental]` API.
+    # The agent harness (plan Phase F1) — the autonomous plan/execute backbone (the
+    # Claude-Code-like experience). When `harness_enabled`, `build_langgraph_agent` attaches
+    # `TodoListMiddleware` and the plan gate (a todo list + plan/execute approval + a counted
+    # completion cap) over the *same* tools/skills/audit/compaction as the single-turn agent, with
+    # every generic battery (file memory/access, web search, shell) OFF — capability comes from our
+    # MCP servers and tools, not from the harness. Off by default so the single-turn agent stays
+    # the safe fallback.
     # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
     # starts in plan mode and presents a plan for human approval before any execution — the
     # pre-execution GxP gate — and only loops once approval switches it to execute; `execute`

@@ -40,7 +40,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 
-from chemclaw.agent.audit import AuditSink, make_langgraph_audit_middleware
+from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.ids import stable_hash
 
@@ -92,8 +92,8 @@ async def invoke_governed(
     Raises:
         AuthorizationError, PlanNotApprovedError, DryRunRefusal, ChemclawError: whatever the chain
             or the tool raised, **unconverted**. That is the difference between this and a chat
-            turn, and it is deliberate: `lg_surface_authorization_denials` and
-            `lg_surface_domain_errors` exist to hand a *model* something readable instead of an
+            turn, and it is deliberate: `surface_authorization_denials` and
+            `surface_domain_errors` exist to hand a *model* something readable instead of an
             exception, and a template step has no model. Converting here made a refused `job` step
             return the refusal as its resolved payload and launch the workflow anyway, and a
             refused `tool` step interpolate "you are not authorized" into a later step as though it
@@ -104,7 +104,7 @@ async def invoke_governed(
     # pay that at import time. It is the same deferral `template_activities._agent_surface` makes.
     from chemclaw.agent.langgraph_agent import tool_governance_middleware
 
-    audit = make_langgraph_audit_middleware(correlation_id=correlation_id, actor=actor, sink=sink)
+    audit = make_audit_middleware(correlation_id=correlation_id, actor=actor, sink=sink)
 
     async def _call(request: ToolCallRequest) -> Any:
         """The innermost handler: the tool body itself."""

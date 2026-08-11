@@ -85,15 +85,15 @@ class TranscriptToolCall(BaseModel):
 class TranscriptMessage(BaseModel):
     """One stored message of a session's transcript, as a chat surface renders it.
 
-    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization, and
-    exposing it would make a MAF version bump a breaking change to the HTTP contract.
+    Role plus text rather than the stored row's own shape: that row is a library serialization,
+    and exposing it would make a dependency bump a breaking change to the HTTP contract.
 
     **`tool_calls` is the part that was missing, and it was never missing from storage.** The live
     SSE stream carries fourteen event types; a reload got `role` and `text`, so everything the
     agent *did* vanished and a UI could not render history at parity with the live view — the
-    largest single blocker for the frontend repo. But a MAF message already holds
-    `function_call`/`function_result` contents; the route was flattening them away. Nothing new is
-    persisted here: this reads what was always there.
+    largest single blocker for the frontend repo. But a stored message already holds its
+    `tool_calls` and the `tool_call_id` answering them; the route was flattening them away. Nothing
+    new is persisted here: this reads what was always there.
 
     `index` is the message's position in the transcript, so a client has a stable key without the
     HTTP contract having to expose a database row id.

@@ -29,7 +29,7 @@ class ObservabilitySettings(BaseSettings):
     # two formats to keep in step is how one of them goes stale.
     log_json: bool = False
     # GxP tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
-    # outcome, latency) by one MAF function middleware. Arguments are truncated to this many
+    # outcome, latency) by one tool-call middleware. Arguments are truncated to this many
     # characters so a large payload (a full optimization problem, an observation list) cannot
     # flood the log; raise it when a fuller argument record is needed for an audit.
     agent_audit_max_arg_chars: int = Field(default=200, ge=0)

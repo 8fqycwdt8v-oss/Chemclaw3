@@ -52,6 +52,13 @@ gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap 
 field rather than an inference (`agent/loop_cap.py`); and a specialist team (`agent/team.py`) is
 available but off by default until its routing is measured.
 
+M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
+green with it uninstalled, which is how that was verified. Taking it out is also what exposed
+readers that only knew the *old* stored message shape — `chemclaw.cli.explain` was rendering every
+current session's audit reconstruction blank — so `session_store.message_from_row` is now the one
+function allowed to decide which serialization a `session_messages` row holds
+(D-2026-08-11-what-the-removal-found).
+
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See
 `docs/planning/BACKLOG.md` for the exact list.

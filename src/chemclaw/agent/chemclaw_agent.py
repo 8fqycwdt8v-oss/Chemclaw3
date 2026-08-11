@@ -1,16 +1,24 @@
-"""The Chemclaw MAF agent (plan step 1.5).
+"""What one profile advertises: the instructions, the tools, and the connectors (plan step 1.5).
 
-`build_agent` wires the conversation agent: the tools, a `SkillsProvider` over the `SKILL.md` files
-found under the configured skills directories (progressive disclosure — the model sees skill
-names/descriptions and loads a skill body only when it needs the judgment), narrowed to the ones
-this agent can actually act on (`skills_source`), an in-memory
-session history so a chat accumulates a thread, and a `CompactionProvider` that keeps that
-thread within a token budget (see `_build_compaction`). The chat client is injectable so the
-wiring can be built and tested without live credentials; the default is the config-selected
-provider (`chemclaw.agent.llm_provider.build_chat_client` — the internal OpenAI-compatible endpoint
-or
-the Anthropic dev path), so which LLM the agent talks to is a config change, not a code edit
-here.
+**The agent's surface, not the agent.** `langgraph_agent.build_langgraph_agent` compiles the graph;
+this module answers the three questions it asks first — which instructions this profile runs under
+(`instructions_for`), which in-process tools it may see (`_capability_tools`), and which connector
+bundles it may reach (`connector_specs`). They are here rather than in the builder because the
+answers are also what `make prose-validate`, the profile validator and the skill gate need, and
+none of those may build a graph to find out: doing so would need a model credential to ask a
+question about a YAML file.
+
+Tools come from the capability-tool registry, populated as a side effect of the imports below, so
+adding a tool is a `@tool` at its definition site rather than an edit here. Skills are not in this
+list at all — they reach the model through `skill_backend`, narrowed by the same predicates
+(`skill_access`) — which is why `available_tool_names` unions four name spaces rather than reading
+one (D-117 records what an omitted name space costs).
+
+**Every narrowing here attenuates and none widens.** A profile selects a subset of what the
+deployment enabled, and `_reject_unknown_tool_names` fails the build on a name nothing provides, so
+a typo is a startup error rather than a capability that silently vanishes from the surface. That
+property is what makes a specialist safe to define as a profile (`agent/team.py`): a subagent
+cannot be handed a tool its caller does not have.
 """
 
 from dataclasses import replace
@@ -252,11 +260,11 @@ def instructions_for(profile: AgentProfile) -> str:
     """This profile's system prompt: its own override, or the module default.
 
     One line, extracted rather than repeated, because repeating it has already cost once. The
-    harness builder re-derived the same fallback from the same rule instead of taking the resolved
-    value, so the prompt was resolved twice and the two could disagree — `_build_harness_agent`'s
-    signature comment records the fix. `build_graph` is the third caller, and a third copy of a
-    rule that has already drifted once is how the LangGraph engine would come to answer "what is
-    the agent told" differently from the MAF one.
+    builders that once re-derived the same fallback from the same rule instead of taking the
+    resolved value, so the prompt was resolved twice and the two could disagree. The callers now
+    are `build_langgraph_agent`, the team's specialist builder and `tests/surface.py` — three
+    readers of one answer, which is the arrangement that keeps "what is the agent told" a single
+    fact rather than a rule copied three times.
     """
     return profile.instructions if profile.instructions is not None else _INSTRUCTIONS
 
@@ -299,7 +307,7 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     inprocess = registered_tools()
     if prof.tool_names is not None:
         _reject_unknown_tool_names(prof)
-        # Names belonging to a connector are not missing, just not *here* — `connector_tools`
+        # Names belonging to a connector are not missing, just not *here* — `connector_specs`
         # applies them to the allow-lists. So this half narrows without complaining about them.
         keep = prof.tool_names & set(registered_tool_names())
         inprocess = [tool for tool in inprocess if tool.__name__ in keep]
@@ -309,8 +317,8 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
 def skill_tool_names() -> set[str]:
     """The tools an agent gains by having skills attached.
 
-    One name now. It was four while both engines were live — MAF's three `SkillsProvider`
-    constants unioned with this one — because the four callers are validators asking a
+    One name now. It was four while both engines were live — the previous framework's three
+    skills-provider constants unioned with this one — because the callers are validators asking a
     deployment-wide question ("does anything provide this name?"), and branching would have made
     `make prose-validate` pass or fail depending on which engine happened to be configured.
 
@@ -456,7 +464,7 @@ def _narrow(
 ) -> list[Any]:
     """Keep only tools whose advertised name is in `keep`, raising if `keep` names an absent tool.
 
-    MAF advertises an in-process tool under its `__name__` and a connector's MCP tool under its
+    An in-process tool is advertised under its `__name__` and a connector's MCP tool under its
     `.name`; both expose the advertised name, so `getattr(t, "name", t.__name__)` reads either.
     A profile listing a name nothing provides is a configuration error surfaced at build time,
     not a tool that silently vanishes from the agent's surface.
