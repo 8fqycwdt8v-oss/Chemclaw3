@@ -267,11 +267,15 @@ the workflow to carry the context), and no FastAPI/httpx/Temporal auto-instrumen
 builds the `TracerProvider`, the `BatchSpanProcessor` and the OTLP span exporter itself rather than
 calling `agent_framework.observability.configure_otel_providers`, so removing that package cannot
 silently stop tracing — spans carry `service.name=chemclaw` and `service.version=<revision>`, and
-`OTEL_SERVICE_NAME` splits the processes into separate services if you want that. What is genuinely
-lost, and is deliberately not faked: the framework's per-model `gen_ai.client.token.usage` histogram
-stops being exported the moment this pipeline replaces its own (a span pipeline exports no metrics),
-and its model-call spans stop being produced when the package itself goes. Nothing in
-`langchain`/`langgraph`/`langsmith` emits either (`docs/guides/runbook.md` § OpenTelemetry).
+`OTEL_SERVICE_NAME` splits the processes into separate services if you want that. The framework's per-model
+`gen_ai.client.token.usage` histogram stopped being exported the moment this pipeline replaced its
+own — a span pipeline exports no metrics — and nothing in `langchain`/`langgraph`/`langsmith` emits
+it. `CHEMCLAW_OTEL_LLM_SPANS: "true"` answers the same question in the pipeline that *is* here: one
+span per model call carrying its token counts, model name and provider, through OpenInference's
+LangChain instrumentation, with content suppressed unless
+`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` says otherwise (`docs/guides/runbook.md` § OpenTelemetry).
+Point the collector at Arize Phoenix to read those conventions natively — any OTLP backend receives
+them, and the instrumentation in this image is Apache-2.0 where Phoenix's server is ELv2.
 Metrics and logs are unchanged and are deliberately not exported over OTLP — `/metrics` is scraped
 per pod and logs are JSON on stdout.
 

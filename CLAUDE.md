@@ -64,7 +64,13 @@ sweep put the LangGraph checkpoint tables into `durable/retention.py` — pruned
 `parent_checkpoint_id` chains them — and gave the CLI the checkpointer two of its docstrings already
 described. **LangSmith is declined** (D-2026-08-11-the-observability-gap…): it is proprietary with no
 OSS self-host, and its core value is prompt/response content in a third-party service, which four
-merged decisions forbid; the gaps behind the ask are in-house work plus one eval-lane spike.
+merged decisions forbid. The trace half of what it was wanted for is now first-party
+(D-2026-08-11-a-model-call-is-a-span…): `CHEMCLAW_OTEL_LLM_SPANS` attaches OpenInference's LangChain
+instrumentation, so a **model call is a span** carrying its token counts, model name and provider —
+closing the two regressions the framework removal left — with content suppressed by default and
+`otel_include_sensitive_data` restored as the one knob that decides it. The instrumentation is
+Apache-2.0 and speaks plain OTLP, so **Arize Phoenix is a deployment choice rather than a
+dependency**; what stays open is AG-13's eval surface, which wants that backend actually run.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed

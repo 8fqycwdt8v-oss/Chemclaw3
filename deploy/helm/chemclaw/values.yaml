@@ -354,6 +354,18 @@ config:
   CHEMCLAW_ENTRA_PRIVILEGED_ROLES: ""
   CHEMCLAW_OTEL_ENABLED: "true"
   CHEMCLAW_OTEL_ENDPOINT: "http://otel-collector.observability.svc:4317"
+  # A span per model call, with its token counts, model name and provider — the two things this
+  # deployment could not ask after the agent framework left with `gen_ai.client.token.usage`. On
+  # here because the collector two lines up already exists and the spans have nowhere else to be;
+  # off in code, where there is no collector to send them to.
+  #
+  # Content stays off: `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` is unset, so every OpenInference hide
+  # flag is set and a span carries identifiers and counts. Measured — suppression costs none of the
+  # counts, so this is not a trade the chart is making on an operator's behalf.
+  #
+  # Point the collector at Arize Phoenix to read these natively; nothing here requires it, and the
+  # instrumentation in the image is Apache-2.0 where Phoenix's server is Elastic License 2.0.
+  CHEMCLAW_OTEL_LLM_SPANS: "true"
   # The runaway-cost guard, on in production (REV-16). Off is the *code* default because a CLI or
   # a test must not 429, but a deployment serving real users has no reason to be unguarded: a turn
   # is iteration-capped and the number of turns is not, so a client or an automated push-back loop

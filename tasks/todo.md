@@ -1591,3 +1591,52 @@ third-party service, which four merged decisions forbid (`core/tracing.py`, `cor
 cleanly: per-model attribution, model-call spans and dashboards are in-house work through the
 collector the chart already runs, and the eval/experiment gap (AG-13) is a scoped spike on the eval
 lane where a *self-hostable* tool — Phoenix or Langfuse — is the candidate, not LangSmith.
+
+---
+
+# Phoenix / OpenInference: a model call becomes a span (2026-08-11)
+
+Prompted by: "then go with implementation of phoenix", after the licence comparison. Decided in
+[`D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`](../docs/decisions/D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment.md).
+
+**What working it out changed.** "Implement Phoenix" turned out not to mean adopting Phoenix.
+`openinference-instrumentation-langchain` and its closure are **Apache-2.0**; only the Phoenix
+server image is ELv2, and the instrumentation emits OpenInference spans over plain OTLP without
+speaking to Phoenix at all. So the backend is a deployment choice, nothing ELv2 enters this tree,
+and the change closes two backlog rows that were never vendor-shaped.
+
+## Steps
+
+- [x] Dependency: one Apache-2.0 package, with the reason in `pyproject.toml` beside it.
+- [x] `otel_llm_spans` (new, off in code / on in the chart) and **`otel_include_sensitive_data`
+      revived** — it had no consumer and a warning; this asks the identical question, so it gets the
+      flag back rather than a second knob.
+- [x] `_instrument_llm_calls` + `_trace_config` in `core/logging.py`, lazy-imported, raising the
+      same directive `RuntimeError` the SDK check raises when the extras are missing.
+- [x] `tests/test_llm_spans.py` — five tests, with the content assertion written as a **sweep over
+      every exported attribute** rather than a list of keys.
+- [x] `.env.example`, `values.yaml`, `docs/guides/runbook.md`, `deploy/README.md` — the three places
+      that said per-model attribution was gone now say what replaced it and in which pipeline.
+- [x] ADR + ledger row; the two backlog rows closed, the AG-13 row narrowed to the backend.
+
+## Review
+
+**Measured before a line was written.** An overlay venv (`.pth` onto the project's site-packages, so
+`.venv` was untouched while the gate ran) drove a scripted model through the real
+`build_langgraph_agent` with spans in an `InMemorySpanExporter`. Content allowed → 5 attributes
+carry the question or the answer; suppressed → **0**, with `llm.token_count.*` and `llm.provider`
+byte-identical across the two runs. That is what made suppression a default rather than a trade-off:
+it costs none of what the instrumentation was added for.
+
+A tool-calling turn exports 8 spans — `AGENT` ×1, `LLM` ×2, `CHAIN` ×4, `TOOL` ×1 — so the
+per-*call* attribution the backlog row asked for is there, not a per-turn total.
+
+**The test earned its shape immediately.** `test_every_hide_flag_is_set_together` compares against
+`TraceConfig`'s own dataclass fields rather than a list written twice, and it failed on the first
+run: three embedding flags were missing from the suppression list. `hide_embeddings_text` is the one
+that mattered — the text being embedded is a chemist's question or a note's body — so a list-versus-
+list test would have passed while the default configuration leaked content.
+
+**What this does not do.** It does not close AG-13. That row wants datasets, run-over-run diffing
+and annotation on the eval lane, which is a Phoenix *deployment* run against the probe transcripts.
+What changed is that the trace half of the original ask no longer needs a platform at all.
