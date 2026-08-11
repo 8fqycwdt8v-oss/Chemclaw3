@@ -458,8 +458,23 @@ arranged to keep that commit small and the suite green at each step.
       Two findings, both recorded against the steps they belong to (3a and 4 below).
 - [ ] **Step 1 — `harness_types.py`** (6 files). Not free: its importers are the MAF halves of
       `loop_cap` and `plan_gate`, so it lands with them.
-- [ ] **Step 2 — port `turn_signals` to the stream writer** (~18 files). Before the runner, so both
-      engines stay green.
+- [ ] **Step 2 — port `turn_signals` to the stream writer** (~18 files). **Its stated ordering —
+      "before the runner, so both engines stay green" — is wrong, measured 2026-08-11.** The
+      premise was that the contextvar side-channel is MAF-shaped and would strand the graph engine.
+      It does not: `graph_stream.graph_events` drains the same buffer the MAF loop drains, and
+      `CHEMCLAW_AGENT_ENGINE=langgraph pytest tests/test_turn_signals.py` is **11 passed / 2
+      skipped**, the two skips being plan-rendering, not signals. A tool appends to a list held in
+      a contextvar, and a list mutated inside a graph node, a `Send` branch or a subgraph is the
+      same list the runner reads — contextvar *copies* into child tasks do not copy the object.
+
+      So this is not a prerequisite for anything; it is post-MAF cleanup and belongs **after**
+      Step 3, not before it. What porting actually buys is deleting the contextvar and the
+      non-awaiting `finally` that polices its lifetime, and that cannot be collected while a second
+      drainer exists: `drain()` has six call sites today, four in `api/runner.py` (two on the MAF
+      branch, one in `_resume`, one shared post-resume) and two in `api/graph_stream.py`. Step 3
+      removes three of the four. Doing it first would mean tools writing to *both* channels for the
+      duration of the dual-engine window — a second copy of one decision, which is the exact
+      duplication this migration's discipline forbids.
 - [ ] **Step 3 — the switch and the runner's MAF branch** (~8 files). The checkpoint that proves
       the graph engine carries production alone. Two things verified while it was attempted with
       Step 0, both of which survive the re-ordering:
