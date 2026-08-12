@@ -16,11 +16,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from deepagents.backends import FilesystemBackend
 from deepagents.backends.protocol import BackendProtocol
 
 from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, skill_read_tool
 
 _SKILLS = ("alpha", "beta", "gamma")
+
+# The verbs the gate refuses outright rather than narrowing, sync and async. Written down in one
+# place because two tests need the same answer: one calls every name here and requires a
+# `PermissionError`, the other requires that this set plus the reach probes account for every
+# public method the backend exposes. Neither is a list of what upstream had when it was written —
+# the second test fails if it becomes one.
+_WRITE_METHODS = frozenset(
+    {"write", "edit", "delete", "upload_files", "awrite", "aedit", "adelete", "aupload_files"}
+)
 
 
 @pytest.fixture
@@ -99,10 +109,10 @@ def test_the_async_twins_go_through_the_same_gate(tree: str) -> None:
 def test_path_traversal_is_refused(tree: str) -> None:
     """Virtual mode is on, so `..` cannot leave the skills tree.
 
-    deepagents' own warning says the default (`virtual_mode=False`) "allows absolute paths and
-    `'..'` to bypass `root_dir`". A filesystem tool that could read any file the pod's service
-    account can is not something to leave to a default, so the constructor sets it and this asserts
-    it stayed set.
+    deepagents' warning on the old default (`virtual_mode=False`) said it "allows absolute paths and
+    `'..'` to bypass `root_dir`". 0.7 flipped the default to `True` and dropped the warning, which
+    makes this assertion more useful rather than less: the constructor still sets it explicitly, and
+    what is checked here is the *behaviour*, which no longer depends on whose default is in force.
     """
     backend = _backend(tree, lambda _: True)
     with pytest.raises(ValueError, match="traversal"):
@@ -110,24 +120,44 @@ def test_path_traversal_is_refused(tree: str) -> None:
 
 
 def test_the_skills_tree_is_read_only(tree: str) -> None:
-    """An agent that can edit `SKILL.md` can rewrite its own instructions."""
+    """An agent that can edit — or delete — a `SKILL.md` decides what judgment the next turn loads.
+
+    Every write verb is probed, not a chosen three: `delete` arrived in deepagents 0.7 and was
+    inherited working, which is why the classification below is the thing under test rather than
+    the three calls that used to be here.
+    """
     backend = _backend(tree, lambda _: True)
-    writes: tuple[Callable[[], Any], ...] = (
-        lambda: backend.write("/alpha/SKILL.md", "rewritten"),
-        lambda: backend.edit("/alpha/SKILL.md", "body", "rewritten"),
-        lambda: backend.upload_files({}),
-    )
-    for call in writes:
-        with pytest.raises(PermissionError):
-            call()
+    writes: dict[str, Callable[[], Any]] = {
+        "write": lambda: backend.write("/alpha/SKILL.md", "rewritten"),
+        "edit": lambda: backend.edit("/alpha/SKILL.md", "body", "rewritten"),
+        "delete": lambda: backend.delete("/alpha/SKILL.md"),
+        "upload_files": lambda: backend.upload_files([]),
+        "awrite": lambda: backend.awrite("/alpha/SKILL.md", "rewritten"),
+        "aedit": lambda: backend.aedit("/alpha/SKILL.md", "body", "rewritten"),
+        "adelete": lambda: backend.adelete("/alpha/SKILL.md"),
+        "aupload_files": lambda: backend.aupload_files([]),
+    }
+    assert set(writes) == _WRITE_METHODS, "every write verb the gate refuses must be called here"
+
+    for name, call in writes.items():
+        assert _call(call) == "refused: PermissionError", f"{name} did not refuse"
+
+    assert Path(tree, "alpha", "SKILL.md").exists(), "a refused write still changed the tree"
 
 
-def test_every_reach_path_the_protocol_exposes_is_gated(tree: str) -> None:
-    """No method reaches a refused skill — enumerated from the protocol, not from a written list.
+def test_every_method_the_backend_exposes_is_either_gated_or_refused(tree: str) -> None:
+    """No method reaches a refused skill — enumerated from the backend, not from a written list.
 
     The point of deriving the list is that it survives an upstream release adding a method. A new
     reach path that this class does not override shows up here as an unexpected mention of `beta`,
     rather than as a quiet hole a hand-maintained list would never have mentioned.
+
+    **The classification is what is derived, and that is the change 0.7 forced.** This used to
+    subtract a hand-written set of write methods and check only the remainder, so a name added to
+    that set was exempted from every assertion in the file — a hole in the shape of the one it
+    existed to close. Now the reach probes and `_WRITE_METHODS` must *together* cover the surface,
+    so an upstream addition has to be triaged into one or the other before this file passes.
+    `delete` is the case that proves it: 0.7 added it, and neither list mentioned it.
     """
     backend = _backend(tree, _only_alpha)
     probes: dict[str, Callable[[], Any]] = {
@@ -135,33 +165,23 @@ def test_every_reach_path_the_protocol_exposes_is_gated(tree: str) -> None:
         "read": lambda: backend.read("/beta/SKILL.md"),
         "glob": lambda: backend.glob("**/*"),
         "grep": lambda: backend.grep("body"),
-        "ls_info": lambda: backend.ls_info("/"),
-        "glob_info": lambda: backend.glob_info("**/*"),
-        "grep_raw": lambda: backend.grep_raw("body"),
         "download_files": lambda: backend.download_files(["/beta/SKILL.md"]),
         "als": lambda: backend.als("/"),
         "aread": lambda: backend.aread("/beta/SKILL.md"),
         "aglob": lambda: backend.aglob("**/*"),
         "agrep": lambda: backend.agrep("body"),
-        "als_info": lambda: backend.als_info("/"),
-        "aglob_info": lambda: backend.aglob_info("**/*"),
-        "agrep_raw": lambda: backend.agrep_raw("body"),
         "adownload_files": lambda: backend.adownload_files(["/beta/SKILL.md"]),
     }
 
-    # **Derived, and now actually derived.** This is the assertion the docstring above always
-    # promised and the probe dict did not deliver: it was a hand-written literal, so an upstream
-    # release adding a reach method left a hole the "enumeration" never mentioned. Not
-    # hypothetical — `download_files` was exactly such a method, it returns a file's full bytes,
-    # and it was ungated when this was written.
-    #
-    # Write methods are excluded because they are refused wholesale rather than narrowed, and a
-    # refusal cannot leak. Everything else the protocol exposes must be probed above.
-    writes = {"write", "edit", "upload_files", "awrite", "aedit", "aupload_files"}
-    reach = {m for m in dir(BackendProtocol) if not m.startswith("_")} - writes
-    assert reach <= set(probes), (
-        "the protocol exposes reach path(s) this test does not probe: "
-        f"{sorted(reach - set(probes))} — gate them, or state why they cannot leak"
+    # The concrete class as well as the protocol: what a model can reach is what
+    # `NarrowedSkillsBackend` inherits, and a public method upstream adds to `FilesystemBackend`
+    # alone would be invisible to a protocol-only derivation. The two surfaces are identical today,
+    # which is a fact worth failing on rather than an assumption worth resting on.
+    surface = {m for m in (*dir(BackendProtocol), *dir(FilesystemBackend)) if not m.startswith("_")}
+    unclassified = surface - set(probes) - _WRITE_METHODS
+    assert not unclassified, (
+        f"the backend exposes method(s) this file classifies as neither reach nor write: "
+        f"{sorted(unclassified)} — probe them here, or add them to _WRITE_METHODS and refuse them"
     )
 
     leaked = {
@@ -170,6 +190,20 @@ def test_every_reach_path_the_protocol_exposes_is_gated(tree: str) -> None:
         if "beta" in repr(result := _call(probe))
     }
     assert not leaked, f"reach path(s) returned a refused skill: {sorted(leaked)}"
+
+
+def test_grep_forwards_the_arguments_upstream_introspects_for() -> None:
+    """`max_count` and `context_lines` must be accepted, because upstream asks whether they are.
+
+    `protocol._method_accepts_max_count` decides whether the cap is pushed down to the backend or
+    applied above it, so an override that dropped the keyword would change how many matches a
+    caller gets depending on which class is underneath — the quietest kind of difference.
+    """
+    accepted = set(inspect.signature(NarrowedSkillsBackend.grep).parameters)
+    declared = set(inspect.signature(FilesystemBackend.grep).parameters)
+    assert declared <= accepted, (
+        f"the gate's `grep` drops argument(s) the backend accepts: {sorted(declared - accepted)}"
+    )
 
 
 def _call(probe: Callable[[], Any]) -> Any:

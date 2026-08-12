@@ -21,18 +21,28 @@ bypasses open. The async twins need no override: `FilesystemBackend` implements 
 by `tests/test_skill_backend.py` rather than assumed, because it is exactly the kind of upstream
 detail that changes quietly.
 
-**`virtual_mode=True` is not a default we accept, it is a decision.** deepagents' own deprecation
-warning is explicit: *"leaving `virtual_mode=False` allows absolute paths and `'..'` to bypass
-`root_dir`"*. Under the default, a model handed a filesystem tool could read any file the pod's
-service account can — in a GxP system, over a tool surface whose whole point is that capability is
-enumerated. Virtual mode roots every path at `/`, refuses traversal with a `ValueError`, and has
-the useful side effect that a path's first segment *is* its skill, which is what makes the
-predicate below a one-line lookup.
+**`virtual_mode=True` is not a default we accept, it is a decision.** It was the *non*-default when
+this was written, under a deprecation warning that said so outright: *"leaving `virtual_mode=False`
+allows absolute paths and `'..'` to bypass `root_dir`"*. deepagents 0.7 made it the default and
+dropped the warning, so the citation is gone and the argument is not: under `False`, a model handed
+a filesystem tool could read any file the pod's service account can — in a GxP system, over a tool
+surface whose whole point is that capability is enumerated. It stays written out rather than
+inherited, because a security property that arrives as somebody else's default can leave the same
+way. Virtual mode roots every path at `/`, refuses traversal with a `ValueError`, and has the useful
+side effect that a path's first segment *is* its skill, which is what makes the predicate below a
+one-line lookup.
 
 **The write half is refused outright.** A skill is judgment this system ships and a human reviews;
 an agent that can edit `SKILL.md` can rewrite its own instructions, and D-038 disabled MAF's
 file-write batteries for the same reason. Refusing is not a narrowing that could be configured
 open — there is no deployment for which a writable skills tree is correct.
+
+**That half grows, and it grew here.** deepagents 0.7 added `delete` to the protocol; nothing in
+this class refused it, so a bump alone would have inherited a working delete into the one backend
+whose reason to exist is that skills are read-only. It was caught by the derived enumeration in
+`tests/test_skill_backend.py` rather than by review, which is the argument for deriving it: the
+methods this class must answer for are whatever upstream declares this week, and a hand-written list
+is a list of what upstream declared the week it was written.
 """
 
 from collections.abc import Callable
@@ -109,9 +119,25 @@ class NarrowedSkillsBackend(FilesystemBackend):
             return result
         return GlobResult(error=result.error, matches=self._permitted(result.matches))
 
-    def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
-        """Search files, dropping every hit outside a permitted skill."""
-        result = super().grep(pattern, path, glob)
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+        context_lines: int = 0,
+    ) -> GrepResult:
+        """Search files, dropping every hit outside a permitted skill.
+
+        The two keyword-only arguments are forwarded rather than accepted-and-ignored because
+        upstream *introspects* for them: `protocol._method_accepts_max_count` decides whether to
+        push the cap down to the backend or apply it itself, so an override that quietly dropped
+        them would change how many matches a caller gets depending on which class is underneath.
+        Filtering after the fact is still correct with a cap in play — `max_count` bounds what the
+        tree returns, and this gate only ever removes from that.
+        """
+        result = super().grep(pattern, path, glob, max_count=max_count, context_lines=context_lines)
         if not result.matches:
             return result
         return GrepResult(error=result.error, matches=self._permitted(result.matches))
@@ -141,6 +167,15 @@ class NarrowedSkillsBackend(FilesystemBackend):
 
     def edit(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
+        raise PermissionError("the skills tree is read-only")
+
+    def delete(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse, for the reason `write` gives — and it is the newest way in.
+
+        `delete` arrived with deepagents 0.7. Unrefused it is worse than `write`, not milder: a
+        turn that cannot rewrite a `SKILL.md` but can remove it still decides what judgment the
+        next turn is able to load.
+        """
         raise PermissionError("the skills tree is read-only")
 
     def upload_files(self, *args: Any, **kwargs: Any) -> Any:
