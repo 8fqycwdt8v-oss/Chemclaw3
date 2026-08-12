@@ -16,6 +16,7 @@ import pytest
 from langchain_core.messages import HumanMessage, message_to_dict
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
 from chemclaw.agent.message_migration import to_langchain
 from chemclaw.agent.message_pairing import droppable_rows, unmatched_result_ids
 from chemclaw.core import db
@@ -559,17 +560,32 @@ def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
     everything else.
 
     **This test drops shared tables, so it fails beside a running stack rather than because of a
-    defect.** It `DROP`s `checkpoints`, `checkpoint_blobs` and `checkpoint_writes` from the same
-    database `make up` serves, and a front door started by `make live-up` recreates them on first
-    use — its checkpointer migrates lazily. Observed on 2026-08-11: one failure in an otherwise
-    green 4206-test run, passing in isolation and passing again with the lane stopped. If this is
-    the only red test, check for a live lane before reading it as a regression.
+    defect.** It `DROP`s the checkpointer's tables from the same database `make up` serves, and a
+    front door started by `make live-up` recreates them on first use — its checkpointer migrates
+    lazily. Observed on 2026-08-11: one failure in an otherwise green 4206-test run, passing in
+    isolation and passing again with the lane stopped. If this is the only red test, check for a
+    live lane before reading it as a regression.
+
+    **`checkpoint_migrations` goes with them, and leaving it behind wedged the database.** Dropping
+    only the three data tables produces a state no deployment can reach: the version ledger says
+    all ten migrations are applied while the tables they created are gone. `AsyncPostgresSaver
+    .setup()` is idempotent *against that ledger*, so it then applies nothing, and every turn on
+    the stack dies with `psycopg.errors.UndefinedTable: relation "checkpoints" does not exist` —
+    permanently, because the mechanism that would repair it is the one being lied to. Measured the
+    hard way on 2026-08-11: a live concurrency sweep reported 0 accepted turns at every admission
+    cap, and the cause was this test, run hours earlier. The docstring's own claim that a front
+    door "recreates them on first use" was true only while the ledger went with them.
     """
 
     async def _run() -> RetentionOutcome:
         await migrated_db_or_skip()
         async with db.connection(settings.postgres_dsn) as conn:
-            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+            # Derived from the declaration rather than re-listed, so a fourth data table added
+            # to the checkpointer is dropped here too. `checkpoint_migrations` is appended because
+            # `CHECKPOINT_TABLES` deliberately omits it — that list is the *erasure* set, and a
+            # schema-version row is nobody's conversation. Here it must go, and it goes last, so a
+            # crash mid-loop leaves `setup()` able to rebuild instead of wedged.
+            for table in (*reversed(CHECKPOINT_TABLES), "checkpoint_migrations"):
                 await conn.execute(f"DROP TABLE IF EXISTS {table}")
             await conn.commit()
         monkeypatch = pytest.MonkeyPatch()
