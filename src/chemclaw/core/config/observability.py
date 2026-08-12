@@ -105,6 +105,28 @@ class ObservabilitySettings(BaseSettings):
     # Apache-2.0 while Phoenix's server is Elastic License 2.0. The licence question is about the
     # container an operator runs, not about this tree.
     otel_llm_spans: bool = False
+    # Whether Chemclaw leaves LangSmith's own tracing switches alone. Off, so it does not.
+    #
+    # Beside `otel_llm_spans` because it answers the neighbouring question — where model-call
+    # telemetry is allowed to go — and gives the opposite answer for a different destination.
+    # OTLP spans go to a collector this deployment runs; LangSmith tracing posts prompts and
+    # completions to api.smith.langchain.com, which D-2026-08-11 declined for the production path
+    # (proprietary, no OSS self-host, third-party content storage that four merged decisions
+    # forbid).
+    #
+    # `langsmith` enables itself from ambient environment and is in the closure regardless of that
+    # decision — a hard requirement of `langchain-core`, pulled again by `deepagents`. So the
+    # decision has to be *applied*, which `chemclaw.core.egress.pin_langsmith_egress` does at
+    # import of this package. Until then it was applied only by the Helm chart, leaving every
+    # other way of starting a process (`make chat`, `make connectors`, a hand-started worker, CI,
+    # `docker run`) governed by whatever the environment happened to hold.
+    #
+    # **True does not turn tracing on.** It stops Chemclaw overriding `LANGSMITH_TRACING` /
+    # `LANGCHAIN_TRACING_V2`, handing the choice back to the operator's own environment — for a
+    # developer deliberately debugging against their own LangSmith project. Setting it in a
+    # deployment is a decision about chemists' questions leaving the pod for a third party, on the
+    # same footing as `otel_include_sensitive_data` and with less control over where they land.
+    langsmith_tracing_allowed: bool = False
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
     # the in-cluster collector address is one value like every other endpoint.

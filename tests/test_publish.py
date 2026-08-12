@@ -24,7 +24,12 @@ from chemclaw.agent.profile_discovery import ProfileError
 from chemclaw.connectors.registry import ConnectorError
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
-from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, publish_note_best_effort
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    agent_step_retry,
+    note_publish_retry,
+    publish_note_best_effort,
+)
 from chemclaw.ingest.sources.registry import DataSourceError
 from chemclaw.templates.registry import TemplateError
 from chemclaw.templates.resolve import UnresolvedReference
@@ -174,6 +179,57 @@ def test_note_publish_retry_shares_the_bad_data_types() -> None:
     policy = note_publish_retry()
     assert policy.maximum_attempts == settings.note_write_max_attempts
     assert "NoteError" in (policy.non_retryable_error_types or [])
+
+
+def test_the_agent_step_bound_is_narrower_than_the_shared_one() -> None:
+    """The agent step is retried less than everything else, because its retry is not free.
+
+    Every other activity recomputes on a retry. An agent step replays the whole turn from the
+    prompt — an activity has no checkpointer behind it — so every tool the failed attempt already
+    ran runs again with its side effects; measured, one provider 503 produced two PR-gate branches
+    and two audit rows for one logical note. Strictly less than `BAD_DATA_RETRY`, because equal
+    would mean the narrowing had been quietly undone while both settings still existed.
+
+    It shares the bad-data list, and that is the point of the pairing: the two policies differ in
+    *how many* transient attempts, never in *which* failures count as transient.
+    """
+    policy = agent_step_retry()
+
+    assert policy.maximum_attempts == settings.agent_step_max_attempts
+    assert (policy.maximum_attempts or 0) < (BAD_DATA_RETRY.maximum_attempts or 0)
+    assert policy.non_retryable_error_types == BAD_DATA_RETRY.non_retryable_error_types
+
+
+def test_no_provider_transient_name_is_listed_non_retryable() -> None:
+    """The other way someone could "fix" the duplicate-note bug, and it would be wrong.
+
+    The pairing to `test_no_subsystem_outage_error_is_listed_non_retryable` above: that one guards
+    the hierarchy this repo owns, this one guards the names it does not. Filing an LLM provider's
+    503/429/connection error as bad data would stop the duplicate turns — by declaring a failure
+    that *does* succeed on retry to be one that never will, which is false in exactly the direction
+    this list exists to keep straight, and would make every workflow give up on a provider blip it
+    would otherwise ride out. `agent_step_retry`'s bound is the honest lever instead.
+
+    Worse than merely wrong, it would be wrong at a distance. Temporal matches by bare class name,
+    `anthropic` and `openai` use the *same* class names for these, and `_BAD_DATA_TYPES` is shared
+    by every activity — so one entry here would silently reclassify these failures for the QM, BO
+    and report workflows too, none of which involve a model call at all.
+    """
+    provider_transient = {
+        "InternalServerError",
+        "OverloadedError",
+        "APIConnectionError",
+        "RateLimitError",
+    }
+
+    listed = provider_transient & set(BAD_DATA_RETRY.non_retryable_error_types or [])
+
+    assert not listed, (
+        f"{listed} is registered non-retryable, but a provider 503/429/connection failure is "
+        "transient by definition — the identical call succeeds once the provider recovers. If this "
+        "was added to stop a retried agent step duplicating notes, the lever is "
+        "agent_step_max_attempts, not the bad-data list, which every other activity shares."
+    )
 
 
 def _fake_workflow(*, raises: bool, replaying: bool = False) -> types.SimpleNamespace:

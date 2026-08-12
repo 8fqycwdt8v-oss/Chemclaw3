@@ -6,6 +6,18 @@
 # component is PID 1 and receives SIGTERM directly for graceful shutdown on pod termination.
 set -euo pipefail
 
+# Defence in depth for the LangSmith egress decision, not the control itself. The real control is
+# in-process — `chemclaw.core.egress.pin_langsmith_egress`, called from `chemclaw.core.config`,
+# which every component below imports — because langsmith's env read is `lru_cache`d and an
+# ambient truthy value is already cached by the time any shell here could matter. These two lines
+# only cover what a shell can: they give the process a false value when the image is run with
+# neither name set, so `docker run` of this image starts from the declined posture even before
+# Python loads. Defaulting rather than overriding, deliberately: overriding an operator's
+# deliberate value is a decision, and the decision belongs to
+# CHEMCLAW_LANGSMITH_TRACING_ALLOWED, one layer up, where it can be read and audited.
+export LANGSMITH_TRACING="${LANGSMITH_TRACING:-false}"
+export LANGCHAIN_TRACING_V2="${LANGCHAIN_TRACING_V2:-false}"
+
 component="${CHEMCLAW_COMPONENT:-service}"
 
 case "${component}" in

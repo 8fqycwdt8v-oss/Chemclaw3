@@ -139,6 +139,38 @@ def note_publish_retry() -> RetryPolicy:
     )
 
 
+def agent_step_retry() -> RetryPolicy:
+    """A narrow outer bound for the one activity whose retry is not free.
+
+    Config `agent_step_max_attempts`.
+
+    Every other activity is safe to retry: it recomputes, and recomputing costs time. A template's
+    **agent** step is not, because a Temporal retry replays the turn from the prompt — an activity
+    has no checkpointer behind it — so every tool the failed attempt already ran runs again with
+    its side effects. Measured: one provider 503 produced two PR-gate branches and two audit rows
+    for one logical note.
+
+    Same bad-data type list as every policy here, deliberately and without exception: an outer
+    bound is a bound on *transient* retries, and which failures are transient is one classification
+    that must not depend on which activity asked. In particular a provider 503 stays **retryable**
+    — `SubsystemUnavailableError` and the provider SDKs' own exception names are absent from
+    `_BAD_DATA_TYPES` on purpose (`tests/test_publish.py` asserts the absence). Filing a 503 as bad
+    data would be false in exactly the direction that list exists to keep straight, and Temporal
+    matches by bare class name, which `anthropic` and `openai` share. The right lever is how many
+    attempts, not what kind of failure it was.
+
+    **The accepted cost, named rather than discovered:** the retry that helps already happens
+    inside the SDK (`llm_max_retries=3` is 4 HTTP attempts), so a blip is still ridden out — but a
+    *long* provider outage now fails the step in ~4 attempts instead of riding it out over 20
+    (4 × `activity_max_attempts`). A cleanly failed run that a person re-runs costs less than
+    duplicate notes and duplicate audit rows that a person has to find and reconcile.
+    """
+    return RetryPolicy(
+        maximum_attempts=settings.agent_step_max_attempts,
+        non_retryable_error_types=list(_BAD_DATA_TYPES),
+    )
+
+
 async def publish_note(activity: Any, args: list[Any]) -> str:
     """Run a note-publish activity with the shared queue/timeout/retry discipline."""
     result: str = await workflow.execute_activity(
