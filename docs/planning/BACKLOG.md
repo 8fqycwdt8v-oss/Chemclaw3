@@ -196,7 +196,9 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       can see `_bind_caller_per_tool_call` (handshake as alice, `tools/call` as bob, asserts the body
       reads bob); a renamed attribute `AttributeError`s at bundle build. What is missing is only the
       ceiling: `pyproject.toml:45` is `mcp>=1.2.0`, unbounded, resolving **1.28.1**, while
-      `deepagents` was capped `<0.7` on the identical argument. The swallowed-SSE behaviour in the
+      `deepagents` is capped `<0.8` on the identical argument — and that cap has since paid for
+      itself once (`D-2026-08-12-the-cap-was-right-and-what-it-was-holding-back`: 0.7 added a
+      `delete` verb the skills gate did not refuse). The swallowed-SSE behaviour in the
       MCP-timeout row above is version-specific too, which is a second reason to cap.
 
 - [ ] **Two shipped settings govern nothing** — [S]. `calibration_conformal_coverage` and

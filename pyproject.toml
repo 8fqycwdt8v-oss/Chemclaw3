@@ -10,15 +10,20 @@ dependencies = [
     # unconditionally (bofire.data_models.features.feature -> mordred); without it a
     # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
     "bofire[optimization,cheminfo]>=0.4.1",
-    # Capped below 0.7 deliberately. `deepagents` is a 0.x package and its own
-    # `backends/protocol.py` already carries `removal="0.7.0"` markers, so an unpinned upgrade walks
-    # into a release that announces it removes API — and what this repo reaches for there is the
-    # skills backend, which is where role-gated skill *visibility* is enforced. Lift the cap after
-    # reading 0.7's protocol, not before. (It also drags `langchain-google-genai` in as a hard
-    # requirement: ~22 MB of Google client and `langsmith` that nothing here imports. That closure
-    # is a known cost of this dependency, recorded rather than discovered in an image scan; the
-    # chart pins `LANGSMITH_TRACING` off so the tracer cannot be switched on by ambient env.)
-    "deepagents>=0.6.12,<0.7",
+    # The cap was `<0.7` until 0.7's protocol had been read, because the `removal="0.7.0"` markers
+    # meant an unpinned upgrade walked into a release that announces it removes API — and what this
+    # repo reaches for there is the skills backend, which is where role-gated skill *visibility* is
+    # enforced. It has now been read, diff by diff, and three things in it touch this tree: the
+    # protocol gained a `delete` **write** verb that `agent/skill_backend.py` had no refusal for,
+    # `grep` gained keyword-only `max_count`/`context_lines` that upstream *introspects* an override
+    # for, and `FilesystemBackend.virtual_mode` now defaults to the `True` this repo already passes
+    # explicitly. All three are handled there; the cap moves up a major rather than off, because the
+    # argument for capping a 0.x package whose protocol is a security surface did not change.
+    # (It also drags `langchain-google-genai` in as a hard requirement: ~22 MB of Google client and
+    # `langsmith` that nothing here imports. That closure is a known cost of this dependency,
+    # recorded rather than discovered in an image scan; the chart pins `LANGSMITH_TRACING` off so
+    # the tracer cannot be switched on by ambient env.)
+    "deepagents>=0.7.5,<0.8",
     # Imported directly — `evals/live_judge.py` and `cli/mock_llm.py` name the provider SDKs' own
     # response types — so they are declared rather than relied on through the `langchain-*` wrappers
     # that happen to pull them today.
