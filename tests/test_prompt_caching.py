@@ -54,12 +54,20 @@ def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
     monkeypatch.setattr(provider, "settings", Settings(_env_file=None, **overrides))  # type: ignore[call-arg]
 
 
-def _captured_payload(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def _captured_payload(
+    monkeypatch: pytest.MonkeyPatch, profile: Any | None = None
+) -> dict[str, Any]:
     """The Anthropic request payload `build_langgraph_agent` produces. No network call.
 
     The graph is invoked for real up to the point the provider would open a socket, and the payload
     is taken there — so this reads what the assembled middleware chain actually built rather than
     what re-assembling it by hand would build.
+
+    Args:
+        monkeypatch: Used to install the capture and a dummy credential.
+        profile: The agent profile to build, or `None` for the default. Passed through rather than
+            given a second helper, because a narrowed profile's payload differs from the default's
+            in exactly the way the floor test measures — its tool schemas.
     """
     import asyncio
 
@@ -82,7 +90,11 @@ def _captured_payload(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         timeout=None,
         stop=None,
     )
-    agent = build_langgraph_agent(model=model)
+    agent = (
+        build_langgraph_agent(model=model, profile=profile)
+        if profile
+        else build_langgraph_agent(model=model)
+    )
     with pytest.raises(_StopBeforeRequest):
         asyncio.run(agent.ainvoke({"messages": [{"role": "user", "content": "hi"}]}))
     return captured[0]
@@ -306,3 +318,65 @@ def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
     # handful of tokens after the last breakpoint.
     assert second.input < first.input + first.cache_write
     assert second.cache_read >= first.cache_write
+
+
+# The floors, measured 2026-08-12 by bisecting a synthetic prefix to ±1 token and reading
+# `cache_creation_input_tokens`. They live in a test rather than in `src/` deliberately:
+# `llm_provider.prompt_caching_middleware` argues that a provider threshold copied into the code
+# path would be a second, staler statement of a number only the provider knows, and that argument
+# survived the measurement. A test is where such a number belongs — when the provider moves it,
+# this fails and someone re-measures, which is the opposite of a constant nobody rechecks.
+#
+# Note the shape: the *smaller* model has the *higher* floor. Any rule of the form "the newer or
+# cheaper the model, the lower the minimum" is wrong here.
+_MEASURED_FLOORS = {"claude-sonnet-5": 1024, "claude-haiku-4-5-20251001": 4096}
+
+# Profiles known to sit below the haiku floor, and therefore never to cache on it. Recorded rather
+# than fixed: enlarging a prompt to clear a cache floor would pay tokens to save tokens, and the
+# provider's boundary is not a defect in a narrow profile. What this pins is that the *set* does
+# not grow silently — a prompt edit that pushes `design` (5,625) or `evidence` (5,803) under 4,096
+# is a cost regression nobody would otherwise see, because it has no symptom except a bill.
+_BELOW_HAIKU_FLOOR = {"property-lookup", "safety"}
+
+
+@pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")
+def test_which_shipped_profiles_clear_the_cache_floor() -> None:
+    """Every profile's real prefix, against the floor of the model it runs on.
+
+    **This is the check the original reasoning could not make, because its number was wrong.** The
+    docstring said the minimum was "roughly 1,024 tokens" and the ADR said every prefix was "far
+    above every model's minimum"; measured, haiku's floor is 4,096 and two of the seven shipped
+    profiles are under it. Confirmed live at the time: `safety` sent 2,958 input tokens on two
+    identical back-to-back calls with both cache counters zero on each.
+
+    Costs nothing in tokens — `count_tokens` is not billed — so this runs wherever a credential
+    does. What it counts is `tools` + `system`, which is the prefix upstream's breakpoints cover.
+    """
+    import anthropic
+
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profiles import get_profile, registered_profile_names
+
+    load_profiles()
+    client = anthropic.Anthropic(api_key=os.environ["API-KEY"])
+    model = "claude-haiku-4-5-20251001"
+    floor = _MEASURED_FLOORS[model]
+
+    below: set[str] = set()
+    for name in registered_profile_names():
+        with pytest.MonkeyPatch.context() as patch:
+            payload = _captured_payload(patch, get_profile(name))
+        prefix = client.messages.count_tokens(
+            model=model,
+            tools=payload.get("tools") or anthropic.NOT_GIVEN,
+            system=[{"type": "text", "text": block["text"]} for block in payload["system"]],
+            messages=[{"role": "user", "content": "hi"}],
+        ).input_tokens
+        if prefix < floor:
+            below.add(name)
+
+    assert below == _BELOW_HAIKU_FLOOR, (
+        f"the set of profiles that cannot cache on {model} changed: {sorted(below)} "
+        f"(recorded: {sorted(_BELOW_HAIKU_FLOOR)}). A profile that dropped under {floor} tokens "
+        "now pays full price on every model call, and the only symptom is the bill."
+    )
