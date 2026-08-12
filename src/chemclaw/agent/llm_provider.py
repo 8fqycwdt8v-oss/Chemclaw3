@@ -77,16 +77,35 @@ def prompt_caching_middleware() -> list[Any]:
     prefix the previous call wrote, which is what makes a long tool loop cheap rather than only the
     first hop of it. Four breakpoints is the API's limit; three is what this uses.
 
-    **Below the minimum cacheable prefix it degrades silently, and that is a property of the API
-    rather than a check here.** Anthropic requires a prefix of roughly 1,024 tokens to create an
-    entry at all (2,048–4,096 on some models — it is per-model and not monotonic across
-    generations). Under that, the breakpoint is accepted, no entry is created, `cache_creation` and
-    `cache_read` both come back zero, and the request is answered normally at full price. There is
-    no error to handle and nothing here counts tokens to pre-empt one: a threshold copied into this
-    repo would be a second, staler statement of a number only the provider knows. What makes the
-    difference *visible* rather than assumed is the ledger — `api/runner_usage.graph_usage_tokens`
-    reads `cache_read`/`cache_creation` off every chunk and `turn_costs` stores both columns, so a
-    prefix that is not caching reads as zeros there instead of as a belief.
+    **Below the minimum cacheable prefix it degrades silently, and two shipped profiles are below
+    it.** The sentence that stood here said the minimum was "roughly 1,024 tokens" and the ADR
+    beside it said every prefix was "far above every model's minimum". Both came from the spec;
+    neither had been run. Measured on 2026-08-12 by bisecting the prefix to ±1 token and reading
+    `cache_creation_input_tokens`:
+
+    - `claude-sonnet-5` — **1,024**. The spec number, for the model `agent_model` defaults to.
+    - `claude-haiku-4-5` — **4,096**. Four times that, for the model the live probe lane pins.
+
+    So the floor is per-model and **not ordered by model size** — the smaller, cheaper model has the
+    higher one, which is the shape "not monotonic" was gesturing at and the direction that makes it
+    a trap. Against those floors the shipped prefixes (tools + system, which is what the breakpoint
+    covers) are: `default` 21,321 · `computation` 8,708 · `reporting` 7,490 · `evidence` 5,803 ·
+    `design` 5,625 · `property-lookup` 3,092 · `safety` 2,933. The last two are below haiku's floor
+    and above sonnet's, so **whether a narrow profile caches is decided by `model_routes`, not by
+    the profile** — and on haiku those two pay full price on every call, confirmed by sending each
+    profile's real payload twice and getting `cache_read` and `cache_creation` of zero both times
+    while `computation` wrote 8,734 and read all 8,734 back.
+
+    Under the floor the breakpoint is accepted, no entry is created, both counters come back zero,
+    and the request is answered normally at full price. There is still no error to handle, and
+    still nothing here counts tokens to pre-empt one — that part of the original reasoning holds
+    and is why the numbers above live in a docstring and a test rather than in an `if`: a threshold
+    copied into the code would be a second, staler statement of a number only the provider knows,
+    and this one moved by 4× between two models of the same generation. What makes the difference
+    *visible* rather than assumed is the ledger — `api/runner_usage.graph_usage_tokens` reads
+    `cache_read`/`cache_creation` off every chunk and `turn_costs` stores both columns — and, per
+    profile, `chemclaw_cache_write_tokens_total{profile=...}`: a profile with input tokens and no
+    cache series is one below the floor, which is the reading an operator can act on.
 
     **Two gates, because they answer different questions.** `settings.llm_provider` decides whether
     the *deployment* is on Anthropic at all, so the production `openai_compatible` target gets an

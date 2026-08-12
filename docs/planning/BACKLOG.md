@@ -8,24 +8,49 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 Detail and measurements in `tasks/review-2026-08-12-{maf-removal,langgraph-native,migration-findings}.md`.
 Ordered by impact × safety: the first six are additive and cannot regress a working deployment.
 
-- [ ] **No prompt caching, and input outweighs output 122:1** — [M]. Measured live on haiku:
-      `cache_read_tokens = 0` and `cache_write_tokens = 0` on every one of 7 billed turns, with
-      1,484,119 input tokens against 8,844 output and single turns reaching 189k-210k input. The
-      ledger *reads* both columns (`api/runner_usage.py:85`, and `turn_costs` stores them) so the
-      observability is already there, but nothing requests caching: `cache_control`/`ephemeral` have
-      zero hits across the agent layer. Every model call re-sends the full system prompt and all 28
-      tool schemas at full price. The prefix is large and static and reads bill at a tenth of input,
-      so this is the largest cost lever in the system and it is untouched. Full numbers in
-      `tasks/live-test-2026-08-12/report.md`.
+- [x] **Prompt caching ships, and the minimum cacheable prefix is per-model — closed** — [M].
+      Caching landed in `45f49ab`; what was still wrong was the one number in it nobody had run.
+      Measured 2026-08-12 by bisecting a synthetic prefix to ±1 token: `claude-sonnet-5` **1,024**,
+      `claude-haiku-4-5-20251001` **4,096** — the *smaller* model carries the 4× *higher* floor, so
+      every "newer or cheaper ⇒ lower minimum" rule is wrong here, and `agent_model` defaults to
+      sonnet while the live probe lane pins haiku. Shipped prefixes (`tools` + `system`, via
+      `count_tokens`): default 21,321 · computation 8,708 · reporting 7,490 · evidence 5,803 ·
+      design 5,625 · property-lookup 3,092 · safety 2,933. **`property-lookup` and `safety` sit
+      under haiku's floor and never cache on it** — confirmed live, two identical calls each with
+      both cache counters zero, against a `computation` control that wrote 8,734 and read them back.
+      Nothing enters the code path: no threshold check (the number moved 4× between two models of
+      one generation), no padding, and a ratchet in `tests/test_prompt_caching.py` pinning the *set*
+      of below-floor profiles instead. Cost ~$0.27.
+      D-2026-08-12-the-cache-floor-is-per-model-and-two-profiles-are-under-it.
 
-- [ ] **The team costs 31% more and delegates once in fifteen — measured, and the flag stays off**
-      — [M]. `make live-routing` ran after `2a59a02` fixed the build defect that made it report 0/15.
-      Measured on haiku: the team arm delegated **1 of 15** probes at **2,309,667** tokens against the
-      single agent's **1,759,062** — the whole surface is paid for on every turn whether or not it
-      routes. Accuracy reads 100%, on a denominator of one, so it says nothing yet about routing
-      *quality*. This is the measurement D-2026-08-10 said would decide the default, and it does not
-      favour turning it on. What is still open is quality: it needs a model that delegates often
-      enough to score, and a probe set that provokes delegation rather than hoping for it.
+- [x] **The team's 31% cost figure is withdrawn, and delegation is not measurable here — closed** —
+      [M]. The old comparison was two arms both measured *before* prompt caching existed.
+      Re-measured with both arms on one build: single control **1,779,642** tokens, team
+      **1,745,087** — the team is **1.9% cheaper**, not 31% more expensive, so the cost objection
+      that carried the flag is withdrawn. Delegation held at 1/15, 1/15 and 2/15 across three arms,
+      and **every delegation in all three went to `safety`** (2 of 3 safety probes, 0 of the other
+      12) — the one specialist the supervisor prompt gives an unconditional, non-capability reason
+      to consult. The cause is structural: `reject_widening` makes the supervisor a superset of
+      every specialist, so it is never missing the tool that answers a question and delegating is
+      always a strictly longer path to one already in hand. Routing is therefore scored on the
+      **surface a turn used**, not on whether it delegated: single 12 self-answered, 10 within the
+      expected specialist's surface (83%); team 10 self-answered, 8 within (80%). **The flag stays
+      off, on the new reason** — at 2 in 15 the team does nothing while carrying five compiled
+      specialists and a widening guard on every turn. Three arms cost **$0.96** against ~$2.30 for
+      one arm before caching. The narrowed supervisor that would make delegation a capability
+      question is a `DEFERRED.md` row with its trigger, because it inverts D-2026-08-10's invariant
+      1. D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate.
+
+- [ ] **The routing corpus cannot express a question that spans two specialists** — [S].
+      `expects_specialist` in `data/evals/probes/m12/routing.yaml` is a single name, and the surface
+      score found two probes it cannot describe: `rt-13` reaches `find_past_jobs` and
+      `gather_evidence`, `rt-14` reaches `gather_evidence`, both declared `reporting`, and both fall
+      outside their declared surface **in both arms** — which is what identifies this as a corpus
+      property rather than a supervisor one. Writing a report about past work requires finding the
+      work first, so those questions genuinely span `evidence` and `reporting`. Until the field can
+      carry a set (and the surface check scores membership in it), the 83%/80% readings above have a
+      floor of two probes that cannot pass, and a supervisor that delegated `rt-13` to `reporting`
+      would have handed it a specialist without the tools to start and been scored *correct* for it.
 
 - [x] **The DARK-1 re-gate check is a probe defect, not a gate defect — closed** — [S]. Scored 4/5 on
       haiku with `plan hash UNCHANGED`, and **identically on `claude-sonnet-5`**, which is what ruled

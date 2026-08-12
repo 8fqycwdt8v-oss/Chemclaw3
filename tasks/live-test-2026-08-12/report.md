@@ -1,6 +1,7 @@
 # Live test report — Phase 5 (2026-08-12)
 
-**Total spend: $11.13 ≈ €10.24** against a €10 target and a €16 hard stop.
+**Total spend: $12.36 ≈ €11.37** — $11.13 ≈ €10.24 on the first pass against a €10 target and a €16
+hard stop, plus **$1.23 ≈ €1.13** on the second pass (§6, §7).
 
 Haiku (`claude-haiku-4-5-20251001`) throughout, with **one authorised escalation**: three turns on
 `claude-sonnet-5` to settle the DARK-1 check (§3). Those three turns cost **€5.38 — more than all
@@ -181,3 +182,125 @@ cost lever available and it is untouched. Backlog row added.
 - **T-10's failure mode** (a start-to-close timeout on the non-heartbeating `run_agent_step`) still
   needs a deliberate broker-level test; it was not exercised here.
 - `make live-storm` (chaos/stress on the mock model, €0) was not run.
+
+---
+
+## Second pass (2026-08-12, later) — **$1.23 ≈ €1.13**
+
+Two things the first pass left behind were taken up: routing quality, owed above, and the minimum
+cacheable prefix the caching commit assumed. Both changed what the first pass wrote down. **§5's
+headline number is withdrawn here**, and so is the "31% more tokens" line in *What remains owed*:
+that comparison put a pre-caching team arm against a pre-caching single arm and read the difference
+as the team's cost. Re-measured with both arms on one build, it is not.
+
+Everything below is haiku (`claude-haiku-4-5-20251001`) except the sonnet half of the floor
+bisection. Two ADRs carry the reasoning:
+`D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate` and
+`D-2026-08-12-the-cache-floor-is-per-model-and-two-profiles-are-under-it`.
+
+### 6. Routing, re-measured — the cost objection falls, delegation does not move
+
+Three arms on the 15-probe corpus (`data/evals/probes/m12/routing.yaml`), plus a fresh single
+control on the same build so the comparison is not across builds again:
+
+| arm | delegated | correct | tokens | vs the control |
+|---|---:|---:|---:|---|
+| single (control) | 0 / 15 | — | 1,779,642 | — |
+| team B — the control's build | **2 / 15** | 2 | **1,745,087** | **−1.9%** |
+| *team A — one build earlier* | *1 / 15* | *1* | *2,060,498* | *not comparable — different build* |
+| *team, first pass, pre-caching* | *1 / 15* | *1* | *2,309,667* | *not comparable — old build* |
+
+**Only the first two rows are a comparison**, and that is the point: they are the same build, which
+the withdrawn 31% figure's two arms were not. The team arm is now marginally *cheaper* than the
+single agent. The A→B drop is 15.3%, and it is the `task` tool description: upstream's is 6,573
+characters, Chemclaw's is ~1,100, and the difference is paid on every model call of every turn.
+
+**Both prompt fixes are null results and are reported as such.** The specialist menu carried no
+capability information — `_description` took the first sentence, and all five profiles open with the
+same "You are Chemclaw's `<name>` specialist" identity line, so the supervisor chose between five
+descriptions that said nothing the name had not. Fixed; **still 1 of 15**. The `task` tool then
+described delegation as a context-window optimisation while Chemclaw's system prompt described a
+capability partition. Fixed; **2 of 15**. One probe is not a result, and neither fix is offered as
+the cause of the change — both are kept because each was a real defect, not because either moved the
+rate.
+
+**What the run does establish is why the rate does not move.** Every delegation in all three arms
+went to `safety` — 2 of the 3 safety probes, 0 of the other 12. `safety` is the only specialist the
+supervisor prompt gives an unconditional, non-capability reason to consult. `reject_widening`
+requires specialists ⊆ supervisor, so the supervisor is never missing the tool that answers a
+question and delegating is always a strictly longer path to one it already holds. **Spontaneous
+delegation is not a measurable quantity on this architecture**, and a probe set built to provoke it
+would be measuring the strength of its own phrasing — the same defect the DARK-1 probe was fixed for
+in §3.
+
+So routing is scored on the surface a turn used instead:
+
+| arm | self-answered | within expected surface | share |
+|---|---:|---:|---:|
+| single | 12 | 10 | 83% |
+| team | 10 | 8 | 80% |
+
+That score immediately found something accuracy on a denominator of one structurally could not:
+`rt-13` reaches `find_past_jobs` and `gather_evidence`, `rt-14` reaches `gather_evidence`, both
+declared `reporting`, **and both fall outside their declared surface in both arms**. Appearing in
+both is what makes it a corpus property rather than a supervisor one — writing a report about past
+work means finding the work first, and `expects_specialist` is a single name that cannot say so. New
+backlog row.
+
+**Not established:** whether the supervisor routes *well*. Two delegated turns, both correct, is a
+denominator of two, and no number in this section speaks to judgement. Also not established: whether
+the surface score would survive a corpus whose partition is sound — two of its fifteen probes cannot
+pass it today. `agent_teams_enabled` stays `False`, now because the team does nothing at 2 in 15
+rather than because it costs more.
+
+**Cost:** the three arms together **$0.96**, against ~$2.30 for a single arm before prompt caching —
+the same 15 questions, 84% cheaper. That is what the caching commit bought, measured on a real
+workload rather than a replay.
+
+### 7. The minimum cacheable prefix, measured — two shipped profiles are under it
+
+The caching ADR asserted "~1,024 tokens, not monotonic across models" from the vendor's
+documentation, and that our prefix is "far above every model's minimum". The number entered the tree
+three times in three mutually inconsistent forms, nothing read any of them at runtime, and no test
+pinned one. Measured by bisecting a synthetic prefix to ±1 token, each probe nonced at its head so
+it could not read the previous probe's entry:
+
+| model | floor | monotone across a seven-point scan |
+|---|---:|---|
+| `claude-sonnet-5` | **1,024** | yes |
+| `claude-haiku-4-5-20251001` | **4,096** | yes |
+
+Both boundaries exact, both a power of two. **The smaller model has the four times higher floor**,
+which is the direction the vendor sentence did not give — and `agent_model` defaults to sonnet while
+every live probe here pins haiku, so the two models this system runs on sit at opposite ends.
+
+Shipped prefixes (`tools` + `system`, counted with `count_tokens` on payloads captured from
+`build_langgraph_agent`):
+
+| profile | prefix | vs haiku's 4,096 |
+|---|---:|---|
+| `default` | 21,321 | 5.21× |
+| `computation` | 8,708 | 2.13× |
+| `reporting` | 7,490 | 1.83× |
+| `evidence` | 5,803 | 1.42× |
+| `design` | 5,625 | 1.37× |
+| `property-lookup` | 3,092 | **0.75× — never caches** |
+| `safety` | 2,933 | **0.72× — never caches** |
+
+Confirmed live rather than inferred from the synthetic boundary, by replaying each profile's own
+captured payload twice: `safety` and `property-lookup` both showed write = 0 and read = 0 on both
+calls, against a `computation` control that wrote 8,734 on call 1 and read exactly those back on
+call 2. A run where nothing cached would have proved the harness broken instead of the profiles
+below-floor, which is why the control was run.
+
+Both below-floor profiles are **above** sonnet's 1,024, so whether a narrow profile caches is
+decided by `model_routes` and not by the profile. Nothing was changed in the code path: no threshold
+check (a number that moved 4× between two models of one generation does not belong copied here), no
+padding a prompt to clear a biller's boundary, and a ratchet test pinning the *set* of below-floor
+profiles instead.
+
+**Cost:** 22 calls on haiku, 23 on sonnet, ~**$0.27**.
+
+**Not established:** the floor for any model other than these two, and whether either floor is
+stable over time — nothing recompiles when the vendor changes it, which is why the measurement
+carries its date and method.

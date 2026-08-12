@@ -385,6 +385,34 @@ def _routing_report(scores: dict[str, RoutingScore]) -> str:
             tokens = score.tokens_by_specialist.get(name, 0)
             lines.append(f"| {name} | {turns} | {tokens} | {tokens // max(turns, 1)} |")
 
+    if any(score.self_answered for score in scores.values()):
+        lines.append("\n## Turns the supervisor answered itself\n")
+        lines.append(
+            "Scored against the surface the question was declared to belong to, so a run that "
+            "delegates little still measures something. This is a claim about the corpus's "
+            "partition — *was `expects_specialist` the right answer* — and not about the "
+            "supervisor's judgement, which only the delegated turns above can speak to."
+        )
+        lines.append("")
+        lines.append("| arm | self-answered | within expected surface | share |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for arm in sorted(scores):
+            score = scores[arm]
+            if not score.self_answered:
+                continue
+            share = score.within_expected_surface / score.self_answered
+            lines.append(
+                f"| {arm} | {score.self_answered} | {score.within_expected_surface} | {share:.0%} |"
+            )
+        outside = {
+            a: s.outside_expected_surface for a, s in scores.items() if s.outside_expected_surface
+        }
+        for arm, strayed in sorted(outside.items()):
+            for probe_id, tools in sorted(strayed.items()):
+                lines.append(
+                    f"- **{arm}** {probe_id} reached outside its surface: {', '.join(tools)}"
+                )
+
     misroutes = {arm: score.misroutes for arm, score in scores.items() if score.misroutes}
     if misroutes:
         lines.append("\n## Mis-routes\n")
@@ -400,6 +428,28 @@ def _routing_report(scores: dict[str, RoutingScore]) -> str:
             "it against does not answer the question M9 deferred."
         )
     return "\n".join(lines) + "\n"
+
+
+def _specialist_surfaces() -> dict[str, set[str]]:
+    """Each specialist's advertised tools, for scoring the turns that were never delegated.
+
+    The agent layer is imported here rather than at module scope for the reason `evals/live.py`
+    takes these as a parameter at all: the scorer stays a pure function of what it is given, and
+    only this CLI — which is already the thing that runs against a live deployment — knows how to
+    open the profiles.
+
+    `load_profiles` is called because this CLI is a *different process* from the front door: the
+    profiles are files, and only `api/app.py` had ever registered them at startup, so
+    `specialist_profiles()` in this process raised `unknown agent profile 'evidence'`. It is
+    idempotent, so calling it here costs a directory scan and cannot conflict with a registry some
+    other entry point has already filled.
+    """
+    from chemclaw.agent.chemclaw_agent import advertised_tool_names
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.team import specialist_profiles
+
+    load_profiles()
+    return {profile.name: set(advertised_tool_names(profile)) for profile in specialist_profiles()}
 
 
 async def _run_routing(args: argparse.Namespace) -> int:
@@ -424,7 +474,7 @@ async def _run_routing(args: argparse.Namespace) -> int:
             )
             outcomes.append(outcome)
 
-    score = score_routing(probes, outcomes, arm=args.arm)
+    score = score_routing(probes, outcomes, arm=args.arm, surfaces=_specialist_surfaces())
     (directory / f"arm-{args.arm}.json").write_text(
         json.dumps(
             {
