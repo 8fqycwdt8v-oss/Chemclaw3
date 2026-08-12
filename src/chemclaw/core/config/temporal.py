@@ -57,8 +57,8 @@ class TemporalSettings(BaseSettings):
     # assuming it was.
     #
     # The retry that actually helps is already there and is much cheaper: the provider SDK retries
-    # a 503 in-process, `llm_max_retries=3` giving 4 HTTP attempts (`anthropic/_base_client.py`
-    # loops `range(max_retries + 1)`), with none of the replay. Wrapping that in
+    # a 503 in-process, `llm_max_retries=3` giving 4 HTTP attempts (the SDK's base client loops
+    # `range(max_retries + 1)` — measured, not assumed), with none of the replay. Wrapping that in
     # `activity_max_attempts=5` meant up to 20 HTTP attempts and up to 5 duplicated turns for one
     # blip.
     #
