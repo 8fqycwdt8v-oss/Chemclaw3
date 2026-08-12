@@ -70,8 +70,8 @@ class AgentSettings(BaseSettings):
     # long chat would grow unbounded. Compaction runs only when the included context exceeds
     # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
     # then reclaims tokens cheapest-first: replace stale tool results with a short placeholder
-    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
-    # groups beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
+    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then cut older conversation back
+    # to the same budget on a group boundary. System instructions/skills are always
     # kept — they are not in the message list at all. No LLM summarizer — deterministic and
     # credential-free, which is also what keeps a summarizer from becoming an injection surface
     # over retrieved evidence (D-025).
@@ -86,6 +86,14 @@ class AgentSettings(BaseSettings):
     # groups: the strategy behind it is upstream's `ClearToolUsesEdit` and that is what it counts.
     # The name is D-025's and stays, because it is ENV-visible and renaming it would cost every
     # deployment that sets it to buy a more accurate word.
+    #
+    # `agent_keep_last_conversation_groups` is a **floor on the cut, not the rule**, for that same
+    # reason. The conversation window cuts to `agent_context_token_budget` — a count of groups
+    # cannot bound anything, because what a group costs is whatever was said in it, and the
+    # count-only version left a 300k-token thread at 180k against this 100k budget. So groups older
+    # than the newest N always go and the budget may drop more; raising N no longer raises what a
+    # request can cost, it only drops more. The one thing that is never dropped is the newest group,
+    # because an empty message list is rejected by the provider (`agent/compaction.py`).
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)

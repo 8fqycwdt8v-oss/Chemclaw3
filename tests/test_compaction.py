@@ -2,12 +2,14 @@
 
 Three things are worth proving here and they are not the same thing:
 
-1. **The window edit does what D-025 says.** Below the budget it is inert; above it, the oldest
-   conversation groups go and the newest `keep` stay. Unit-level, against the edit itself.
+1. **The window edit *bounds* the thread.** Below the budget it is inert; above it, what survives
+   fits the budget — not "eight groups went and the request is still 80% over", which is what the
+   count-only version did while its docstring claimed bounding. Unit-level, against the edit itself,
+   at the shipped defaults.
 2. **It cannot break a thread.** The safety claim in `KeepLastConversationGroupsEdit` is that a cut
-   at a group boundary can never separate a tool call from its result. That is asserted with
-   `agent/message_pairing.py`'s own `calls_without_adjacent_results` — the on-the-wire rule — rather
-   than by re-reasoning about it here.
+   at a group boundary can never separate a tool call from its result, and that it never empties the
+   list. Both are asserted across a sweep of budgets with `agent/message_pairing.py`'s own
+   `calls_without_adjacent_results` — the on-the-wire rule — rather than by re-reasoning here.
 3. **A compiled graph actually reduces what the model is sent.** This is the one that matters, and
    the reason the previous state of this subsystem went unnoticed for a whole phase: three settings,
    a config comment and a system-prompt sentence all described a mechanism, and every unit test
@@ -19,6 +21,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from langchain.agents.middleware import ClearToolUsesEdit
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -91,17 +94,25 @@ def test_the_window_is_inert_below_the_budget() -> None:
     assert messages == original, "the window fired below its trigger"
 
 
-def test_the_window_keeps_the_newest_groups_and_starts_at_a_human_message() -> None:
-    """Above the trigger the oldest groups go and the cut lands on a group boundary.
+def test_the_window_honours_its_group_floor_and_starts_at_a_human_message() -> None:
+    """The floor still drops everything older than the newest `keep`, on a group boundary.
 
-    Two assertions in one test because they are one property: keeping the newest `keep` groups is
-    only meaningful if the survivors still begin where a conversation begins. A thread whose first
-    message is an assistant turn answering a question that is no longer there is not a shorter
-    conversation, it is a broken one.
+    Two assertions in one test because they are one property: dropping down to the newest `keep`
+    groups is only meaningful if the survivors still begin where a conversation begins. A thread
+    whose first message is an assistant turn answering a question that is no longer there is not a
+    shorter conversation, it is a broken one.
+
+    **The budget here is real rather than 0.** The earlier version passed `trigger=0`, which is now
+    a budget of zero tokens: `trim_messages` returns `[]`, the clamp leaves exactly the newest
+    group, and the floor is invisible because the budget always wins. A budget wide enough for the
+    whole thread but a trigger that has already fired is the only shape in which the floor is the
+    binding constraint — so `trigger` is set to just under what 10 groups cost, which fires it while
+    leaving the token cut smaller than the floor's.
     """
     messages = _thread(10)
+    budget = _count(messages) - 1
 
-    KeepLastConversationGroupsEdit(trigger=0, keep=3).apply(messages, count_tokens=_count)
+    KeepLastConversationGroupsEdit(trigger=budget, keep=3).apply(messages, count_tokens=_count)
 
     humans = [m for m in messages if isinstance(m, HumanMessage)]
     assert len(humans) == 3, f"expected the newest 3 groups, got {len(humans)}"
@@ -112,35 +123,84 @@ def test_the_window_keeps_the_newest_groups_and_starts_at_a_human_message() -> N
     assert "question 7" in str(humans[0].content), f"cut at the wrong group: {humans[0].content!r}"
 
 
-def test_the_window_is_inert_when_there_are_no_groups_to_spare() -> None:
-    """A thread with fewer groups than `keep` is left alone however far over budget it is.
+def test_the_window_never_cuts_into_the_newest_group() -> None:
+    """A single group is left whole however far over budget it is — the clamp, not inertness.
 
-    The honest failure: there is nothing this edit can reclaim from a single enormous group, and
-    dropping a partial group to try would break the pairing the next test pins. Being inert here is
-    what leaves the tool-result edit as the strategy that answers that case.
+    This test used to assert the *opposite* of a bug fix: that a thread with no more groups than
+    `keep` was left alone entirely, which is where the count-only window returned without cutting
+    and is exactly why it bounded nothing. What is actually inviolable is narrower — the newest
+    group. `ContextEditingMiddleware` checks for an empty message list only *before* running its
+    edits, so an emptied list reaches the provider, which rejects it; and below the size of one
+    group `trim_messages` returns `[]`. So the honest failure is that a single enormous group is
+    sent over budget, and the tool-result edit is the strategy that answers that case.
     """
-    messages = _thread(2)
+    messages = _thread(1)
     original = list(messages)
 
     KeepLastConversationGroupsEdit(trigger=0, keep=5).apply(messages, count_tokens=_count)
 
-    assert messages == original
+    assert messages, "the window emptied the request; the provider rejects that outright"
+    assert messages == original, "the window cut into the newest group"
 
 
-def test_the_window_never_strands_a_tool_call() -> None:
-    """Every surviving tool call still has its result in the very next message.
+def test_the_window_bounds_the_thread_at_the_shipped_defaults() -> None:
+    """The headline claim, at the settings a deployment actually runs.
 
-    Asserted with `message_pairing.calls_without_adjacent_results` — the strict, on-the-wire form of
-    the rule, the one a provider actually enforces — rather than with a weaker exists-somewhere
-    check, because a reduction that leaves a call unanswered is rejected by the API outright and
-    every later turn replays it.
+    This is the assertion the count-only window failed and its docstring asserted anyway. Measured
+    before the fix on exactly this thread: 300,300 tokens in, **180,180 out** against a 100,000
+    budget — the edit fired, logged, dropped eight groups, and left the request 80% over. "Bounded"
+    was prose; here it is a number, and a tool-free conversation is the shape that isolates it,
+    because there is nothing for the tool-result edit to reclaim.
     """
-    messages = _thread(12, with_tool_calls=True)
+    budget = settings.agent_context_token_budget
+    messages = _thread(20, filler="x" * 60_000)
+    assert _count(messages) > budget, "the fixture is inside the budget; it proves nothing"
 
-    KeepLastConversationGroupsEdit(trigger=0, keep=4).apply(messages, count_tokens=_count)
+    KeepLastConversationGroupsEdit(
+        trigger=budget, keep=settings.agent_keep_last_conversation_groups
+    ).apply(messages, count_tokens=_count)
 
+    assert _count(messages) <= budget, (
+        f"the window left {_count(messages)} tokens against a {budget} budget; it reduced, "
+        "it did not bound"
+    )
+    assert messages, "the window emptied the request"
+    assert isinstance(messages[0], HumanMessage), (
+        f"the surviving thread starts at {type(messages[0]).__name__}, not a human message"
+    )
+    assert calls_without_adjacent_results(messages) == set()
+
+
+@pytest.mark.parametrize("groups", [1, 3, 12, 25])
+@pytest.mark.parametrize("budget", [1, 500, 5_000, 50_000])
+def test_the_window_strands_no_tool_call_at_any_budget(groups: int, budget: int) -> None:
+    """Across budgets and thread lengths, every surviving tool call still has its result.
+
+    The sweep exists because the cut is now token arithmetic rather than an index into a list of
+    group starts, so "it lands on a boundary" is a property of `trim_messages(start_on="human")`
+    rather than something the code can be read off. Measured without that argument over 565 budgets,
+    24 of them left a leading `ToolMessage` whose `tool_use` had just been dropped — a `tool_result`
+    with no call, which a provider rejects outright and every later turn replays. That is the
+    orphan the `messages[0]` assertion below catches; `calls_without_adjacent_results` catches the
+    mirror image, and suffix trimming is what makes the mirror image unreachable in the first place.
+    Both are asserted because "unreachable" is the kind of claim this module has been wrong about.
+
+    The list being non-empty is asserted in the same place for the same reason: an empty request is
+    the third way this edit could produce something no provider will take.
+
+    This sweep replaces the single fixed case that used to carry the claim; that case is
+    `budget=1, groups=12` here.
+    """
+    messages = _thread(groups, with_tool_calls=True, filler="y" * 400)
+
+    KeepLastConversationGroupsEdit(trigger=budget, keep=4).apply(messages, count_tokens=_count)
+
+    assert messages, f"emptied the request at budget={budget}, groups={groups}"
+    assert isinstance(messages[0], HumanMessage), (
+        f"cut mid-group at budget={budget}, groups={groups}: starts at {type(messages[0]).__name__}"
+    )
     assert calls_without_adjacent_results(messages) == set(), (
-        "the window separated a tool call from its result"
+        f"stranded a tool call at budget={budget}, groups={groups}"
     )
 
 
@@ -187,17 +247,31 @@ def _turn_sending(thread: list[AnyMessage]) -> tuple[list[Any], dict[str, Any]]:
 def test_a_turn_clears_stale_tool_results_before_it_drops_conversation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cheapest-first: with the window wide open, the tool-result edit alone does the reducing.
+    """Cheapest-first: when clearing tool results is enough, the window never fires.
 
-    The window is set beyond any thread this test builds, so what reaches the model can only be the
-    work of the first edit. That separation is what the first version of this test got wrong — with
-    a two-group window the cleared results were themselves dropped, and a placeholder assertion
-    failed while both edits were working exactly as specified.
+    **The isolation is now the budget, and it has to be.** This test used to open the window by
+    setting `agent_keep_last_conversation_groups` to 1000, which worked only while that number was
+    the rule; it is a floor now, and the budget is the rule, so a budget of 1 cuts to the newest
+    group whatever the floor says. The honest way to isolate the first edit is the situation the
+    ordering exists for: a budget that clearing tool results alone gets under. Then the window's own
+    trigger leaves it inert, which is the cheapest-first claim stated as a condition rather than as
+    a wide-open knob.
+
+    The budget is measured rather than guessed — the first edit is run against a copy to find the
+    number it lands on. Guessing it is what the previous version of this test did with 1000, and a
+    guess that stops isolating anything still passes: with a two-group window the cleared results
+    were themselves dropped and the placeholder assertion failed while both edits worked exactly as
+    specified.
     """
-    monkeypatch.setattr(settings, "agent_context_token_budget", 1)
-    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
-    monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 1000)
     thread = _thread(10, with_tool_calls=True, filler="x" * 200)
+    # The request the graph will build, and what it costs once the tool-result edit has run on it.
+    after_clearing: list[AnyMessage] = [*thread, HumanMessage(content="and now?")]
+    ClearToolUsesEdit(trigger=0, keep=1, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
+        after_clearing, count_tokens=_count
+    )
+    monkeypatch.setattr(settings, "agent_context_token_budget", _count(after_clearing))
+    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
+    monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
 
     sent, state = _turn_sending(thread)
 

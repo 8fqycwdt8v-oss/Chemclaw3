@@ -28,22 +28,32 @@ as the mechanism. It is removed rather than filled in, by the rule immediately b
 field nothing consults reads as coverage while proving nothing, and prose about it reads as a
 design somebody can rely on.
 
-**Every field here is either per-turn or per-thread, and `turn_input` is what makes that true.**
+**Every field here is either per-turn or per-thread, and the *channel* is what makes that true.**
 The checkpointer persists the whole state under `thread_id`, and `thread_id` is the *session* id —
-so a field is per-thread by default and per-turn only if something resets it. Nothing did, and the
-consequence was not theoretical: `model_calls` accumulated across turns, so the runaway cap fired on
-the *session's* fourth model call rather than the turn's, and every later turn on that session ended
-before the model was called at all. Measured at `harness_max_loop_iterations=3`: turns 0-2 answered,
-turn 3 returned the user's own question. A session bricked with no way back.
+so a plain field resolves to a `LastValue` channel, which is checkpointed, which makes it per-thread
+whatever its docstring says. Nothing reset the two fields below and the consequence was not
+theoretical: `model_calls` accumulated across turns, so the runaway cap fired on the *session's*
+fourth model call rather than the turn's, and every later turn on that session ended before the
+model was called at all. Measured at `harness_max_loop_iterations=3`: turns 0-2 answered, turn 3
+returned the user's own question. A session bricked with no way back.
 
-Starting a turn therefore goes through `turn_input`, which names the per-turn fields and zeroes
-them. A caller that hand-builds `{"messages": ...}` gets the old defect back, which is why there is
-one function and `tests/test_langgraph_agent.py` asserts every invoke site uses it.
+That defect was first closed by zeroing both fields by hand in `turn_input`, which worked and was
+the wrong shape: it made "per-turn" a property of every *call site* rather than of the field, so a
+caller that hand-built `{"messages": ...}` — and `graph.ainvoke` accepts one — silently got the
+bricked session back. The fields are now `UntrackedValue` channels, which LangGraph never
+checkpoints (`checkpoint()` returns `MISSING`), so they start empty on every run of the graph
+because there is nothing for the checkpoint to restore. The invariant moved out of a convention and
+into the schema, and there is no longer a way to spell the mistake.
+
+`ModelCallLimitMiddleware` upstream declares its own per-run counter exactly this way
+(`run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]`), which is
+where the shape comes from — minus `PrivateStateAttr`, for the reason the fields below give.
 """
 
-from typing import Any
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
+from langgraph.channels.untracked_value import UntrackedValue
 
 
 class ChemclawState(PlanningState):
@@ -51,34 +61,53 @@ class ChemclawState(PlanningState):
 
     Fields arrive with the phase that reads one — a declared field nothing consults is the same
     stub as a function nothing calls, and reads as coverage while proving nothing.
+
+    **Neither field carries `PrivateStateAttr`**, and that is deliberate rather than an omission
+    from the upstream declaration they otherwise copy. `PrivateStateAttr` is
+    `OmitFromSchema(input=True, output=True)`, so it would strip the field from what `ainvoke`
+    *returns* — and once the value is out of the checkpoint, the return is the only place left to
+    read it. `loop_cap.loop_capped(state)` is that reader: it takes "the turn's final graph state",
+    which callers get from `ainvoke`, and hiding the field from the output would leave it with
+    nothing to read — a capped turn unreportable again, which is the defect `agent/loop_cap.py`
+    exists to fix.
     """
 
     # How many model calls *this turn* has made — the runaway guard's counter
     # (`agent/loop_cap.py`). A field rather than a framework internal because the whole defect being
-    # fixed is that the previous engine's cap fired where nothing could observe it. Reset by
-    # `turn_input`; see the module docstring for what it cost when nothing did.
-    model_calls: int
+    # fixed is that the previous engine's cap fired where nothing could observe it.
+    #
+    # `UntrackedValue` is what makes "this turn" true of it: the channel is never written to a
+    # checkpoint, so a new run of the graph on the same `thread_id` starts it empty and
+    # `enforce_loop_cap`'s `state.get("model_calls", 0)` reads 0. See the module docstring for what
+    # the checkpointed version cost, and why a hand-written reset was not the fix.
+    model_calls: NotRequired[Annotated[int, UntrackedValue]]
 
     # Whether the runaway guard stopped this turn. Written only by the branch of
     # `enforce_loop_cap` that fires, because the count above cannot answer it: that branch stops
     # the loop *without* incrementing, so a capped turn and one that spent its last allowed call
     # and finished normally both end at exactly the cap.
-    loop_capped: bool
+    #
+    # Untracked for the same reason as the count — a session whose third turn hit the cap would
+    # otherwise report every later turn as capped, marking complete answers partial forever. The
+    # cost is that `get_state(config).values` no longer carries it: the value lives only in what the
+    # run returns, which is where every reader already looks.
+    loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
 
 
 def turn_input(message: str) -> dict[str, Any]:
-    """The graph input that starts one turn: the user's message, plus every per-turn field zeroed.
+    """The graph input that starts one turn: the user's message.
 
-    **The reset is the point, not the message.** Handing the graph `{"messages": [...]}` alone
-    resumes the checkpointed thread *including* counters that are only meaningful within a turn, and
-    the checkpointer's whole job is that nothing is forgotten between turns. Naming the per-turn
-    fields in one place is what keeps "this counts the turn" true of a field the thread outlives.
+    **This is no longer where per-turn-ness comes from** — the two fields above are untracked
+    channels, so they reset because the checkpoint cannot restore them, not because a caller
+    remembered to zero them. What is left here is the one-line shape of a turn's input, kept as a
+    function for two reasons rather than inlined at its four call sites: it is the seam a turn's
+    invocation shape belongs to (a `recursion_limit` config sibling is the next thing to land beside
+    it), and it keeps `("user", message)` — the tuple form the graph coerces — written once.
 
     Args:
         message: The user's message for this turn.
 
     Returns:
-        The mapping to pass to `ainvoke`/`astream`. Every caller that starts a turn uses this;
-        a caller that builds the mapping itself reintroduces the defect the docstring above records.
+        The mapping to pass to `ainvoke`/`astream`.
     """
-    return {"messages": [("user", message)], "model_calls": 0, "loop_capped": False}
+    return {"messages": [("user", message)]}

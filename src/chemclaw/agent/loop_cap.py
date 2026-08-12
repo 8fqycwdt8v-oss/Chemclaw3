@@ -16,10 +16,17 @@ reason about. What this replaced was an inference — "the loop stopped at the c
 last stop decision was keep going" — which was sound and had a hole at a cap of 1, where the
 predicate was never consulted at all and a capped turn reported no cap.
 
-**Two readers, because they ask from different places.** `loop_capped(state)` reads the count off
-a finished graph's state, which is what a test or a template step holds. `loop_hit_cap()` reads a
-contextvar the hook marks on its way out, which is what `chemclaw.api.runner` holds — a streaming
-driver never gets the final state back. The carrier is a contextvar holding a *mutable* record, for
+**The count is per *turn*, and that is a property of the channel rather than of the caller.**
+`model_calls` and `loop_capped` are declared `UntrackedValue` in `chemclaw.agent.state`, so the
+checkpointer never persists them and every run of the graph starts the count at 0 — including a run
+on a `thread_id` a previous turn already used. Nothing here has to be reset, and nothing here can
+be forgotten.
+
+**Two readers, because they ask from different places.** `loop_capped(state)` reads the flag off
+the state a finished run *returns* — the untracked channel is absent from `get_state()`, by
+design — which is what a test or a template step holds. `loop_hit_cap()` reads a contextvar the
+hook marks on its way out, which is what `chemclaw.api.runner` holds — a streaming driver never
+gets the final state back. The carrier is a contextvar holding a *mutable* record, for
 the reasons `chemclaw.core.turn_signals` gives for its buffer: it is task-local (concurrent turns
 cannot see each other's loops), it is empty off the request path (CLI, tests), and it is mutated
 rather than rebound — so the mark is visible to the runner even when the stream is driven from a
@@ -158,7 +165,9 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
     finished both end at exactly `cap`.
 
     Args:
-        state: The turn's final graph state.
+        state: The state the finished run **returned**. Not `graph.get_state(config).values`:
+            `loop_capped` is an untracked channel, so it is deliberately absent from the
+            checkpoint a later read would restore, and asking there gets a silent `False`.
 
     Returns:
         Whether the run reached the configured iteration cap.

@@ -687,10 +687,16 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
     )
     capped = _graph([calling] * 4)
     config = {"configurable": {"thread_id": "capped-1"}}
-    asyncio.run(capped.ainvoke(turn_input("go"), config=config))
+    # **The value `ainvoke` returns, not `get_state(config).values`.** `loop_capped` is an
+    # `UntrackedValue` channel, so it is never written to the checkpoint — reading it back through
+    # `get_state` gets `MISSING`, i.e. a silent `False`, and this assertion would have inverted into
+    # one that passes with the cap deleted. That is the same vacuous shape the comment above records
+    # for the earlier version of this test, reintroduced by the reader rather than by the script.
+    state = asyncio.run(capped.ainvoke(turn_input("go"), config=config))
 
-    assert loop_capped(capped.get_state(config).values), (
-        "a looping turn at a cap of 1 was not capped"
+    assert loop_capped(state), "a looping turn at a cap of 1 was not capped"
+    assert "loop_capped" not in capped.get_state(config).values, (
+        "the cap flag was checkpointed; it is per turn and the thread outlives the turn"
     )
 
     # And the other side, which is the half the count could never express: a turn that spends its
@@ -698,29 +704,30 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
     # Reporting that one as capped marks a complete answer partial.
     finished = _graph([AIMessage(content="done")])
     done_config = {"configurable": {"thread_id": "capped-2"}}
-    asyncio.run(finished.ainvoke(turn_input("go"), config=done_config))
+    done = asyncio.run(finished.ainvoke(turn_input("go"), config=done_config))
 
-    assert not loop_capped(finished.get_state(done_config).values), (
-        "a turn that answered within the cap was reported as capped"
-    )
+    assert not loop_capped(done), "a turn that answered within the cap was reported as capped"
 
 
 def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
-    """The cap is per turn; the checkpointer makes every field per *session* unless it is reset.
+    """The cap is per turn, and it is the *channel* that makes it so — not the call site.
 
-    This is the defect the reset exists for, and it bricked a conversation outright. `model_calls`
-    is a declared channel on a thread keyed by the session id, so with nothing zeroing it the count
-    accumulated: measured at `harness_max_loop_iterations=3`, turns 0-2 answered and turn 3 ended
-    before the model was called at all — the last message was the chemist's own question, and every
-    later turn on that session did the same. There is no recovery path from a durable counter that
-    has already passed the cap.
+    `model_calls` was a plain field, which resolves to a checkpointed `LastValue` on a thread keyed
+    by the session id, so the count accumulated across turns: measured at
+    `harness_max_loop_iterations=3`, turns 0-2 answered and turn 3 ended before the model was called
+    at all — the last message was the chemist's own question, and every later turn on that session
+    did the same. There is no recovery path from a durable counter that has already passed the cap.
+
+    **The input here is deliberately bare `{"messages": ...}`**, with nothing zeroing anything. That
+    is what distinguishes the fix from the one it replaced: hand-zeroing in `turn_input` made
+    per-turn-ness a property of every caller, and `graph.ainvoke` accepts a caller that forgets.
+    Under `Annotated[int, UntrackedValue]` there is nothing to forget — the checkpoint has no copy
+    of the count to restore. A test that went through `turn_input` could not tell the two apart.
 
     Four turns at a cap of 3, on one thread, is therefore the shape: the fourth is the one that
-    would have failed. Mutation-checked — dropping `"model_calls": 0` from `turn_input` fails here.
+    would have failed. Mutation-checked — dropping `UntrackedValue` from either field fails here.
     """
     from langgraph.checkpoint.memory import InMemorySaver
-
-    from chemclaw.agent.state import turn_input
 
     async def _scenario() -> list[str]:
         saver = InMemorySaver()
@@ -732,7 +739,7 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
                 audit_sink=NullAuditSink(),
                 checkpointer=saver,
             )
-            state = await graph.ainvoke(turn_input(f"question {turn}"), config=config)
+            state = await graph.ainvoke({"messages": [("user", f"question {turn}")]}, config=config)
             answers.append(str(state["messages"][-1].content))
         return answers
 
