@@ -33,7 +33,7 @@ from chemclaw.agent.message_migration import (
     convert_stored_messages,
     to_langchain,
 )
-from chemclaw.agent.session_store import SessionOwnerStore
+from chemclaw.agent.session_store import SessionOwnerStore, message_from_row
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.migrate import migrate
@@ -423,3 +423,114 @@ def test_erasure_still_works_where_the_checkpointer_has_never_run() -> None:
 
     assert {erased[table] for table in CHECKPOINT_TABLES} == {0}
     assert erased["session_messages"] == 0, "the rest of the sweep must still have run"
+
+
+def test_a_row_answering_parallel_calls_is_refused_rather_than_truncated() -> None:
+    """The destructive case: one stored `tool` row holds one result per parallel call.
+
+    A `ToolMessage` answers exactly one call, so converting such a row can only keep one — and
+    keeping the first silently destroyed the rest, in the pass this module's own docstring calls
+    the irreversible step. The second-order damage is worse than the loss: the assistant message
+    still carries all three calls, so the converted thread acquires unanswered `tool_use` blocks
+    that a provider rejects outright — the poison pill `agent/message_pairing.py` exists to keep
+    out of a conversation.
+
+    Refusing costs nothing visible. The row keeps its `maf` stamp and `session_store
+    .message_from_row` still reads it, so the conversation renders exactly as it did.
+    """
+    row = legacy_message(
+        "tool",
+        result_content("c1", "pKa 9.95"),
+        result_content("c2", "logP 1.46"),
+        result_content("c3", "mp 41 C"),
+    )
+
+    with pytest.raises(UnconvertibleMessage, match="answers 3 calls"):
+        to_langchain(row)
+
+    # And it is still readable in the shape it is stored in, which is what makes refusing safe.
+    assert message_from_row(row, MAF_SHAPE).content
+
+
+def test_an_unknown_content_type_is_refused_as_both_the_docstring_and_the_ddl_promise() -> None:
+    """The claim was in two places and true in neither: unknown parts were dropped to empty text.
+
+    Nothing matched them, so they vanished and the row was stamped converted — a silent drop in an
+    irreversible pass, invisible because what came out still looked like a message.
+    """
+    row = legacy_message("assistant", text_content("here it is"))
+    row["contents"].append({"type": "image", "uri": "s3://bucket/spectrum.png"})
+
+    with pytest.raises(UnconvertibleMessage, match="image"):
+        to_langchain(row)
+
+
+def test_streamed_call_arguments_are_parsed_rather_than_discarded() -> None:
+    """Both forms are in the table, and only the decoded one was read.
+
+    A call assembled from streamed fragments stores its `arguments` as a JSON *string*, so every
+    streamed call in the archive converted to `args: {}` — losing exactly what a GxP reviewer asks
+    a tool call about, permanently.
+    """
+    streamed = legacy_message(
+        "assistant",
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "predict_pka",
+            "arguments": '{"smiles": "CCO"}',
+            "additional_properties": {},
+        },
+    )
+
+    converted = to_langchain(streamed)
+
+    assert isinstance(converted, AIMessage)
+    assert converted.tool_calls[0]["args"] == {"smiles": "CCO"}
+
+    # A half-streamed fragment still degrades rather than failing the row: the blob is already
+    # unreconstructable, and the call stays visible with its name and id.
+    broken = legacy_message(
+        "assistant",
+        {
+            "type": "function_call",
+            "call_id": "c2",
+            "name": "predict_pka",
+            "arguments": '{"smiles": "CC',
+            "additional_properties": {},
+        },
+    )
+    degraded = to_langchain(broken)
+    assert isinstance(degraded, AIMessage)
+    assert degraded.tool_calls[0]["args"] == {}
+
+
+def test_the_erased_table_list_is_derived_from_upstream_not_asserted_against_itself() -> None:
+    """`CHECKPOINT_TABLES` says its test "has to prove the list is complete". This is that proof.
+
+    The erasure test next door sums `report.erased[t] for t in CHECKPOINT_TABLES` against a baseline
+    counted over **the same constant** — so both sides move together and a fourth
+    conversation-bearing table would be missed by the sweep with the test still green. A departing
+    person's turn state surviving an erasure that reports success is the one outcome a right-to-be-
+    forgotten path must never produce, and it would have been invisible.
+
+    The truth is derivable: `AsyncPostgresSaver.setup()` runs `base.MIGRATIONS`, so the tables it
+    creates are what a thread's state can live in. `checkpoint_migrations` is excluded by name and
+    with a reason — it records which of those statements have run and holds no conversation — so a
+    *new* table joining the set fails here instead of silently outliving a data-subject request.
+    """
+    import re
+
+    from langgraph.checkpoint.postgres import base
+
+    created = {
+        match.group(1)
+        for statement in base.MIGRATIONS
+        if (match := re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", statement))
+    }
+    assert created, "no CREATE TABLE found in the checkpointer's migrations — the parse is broken"
+
+    assert set(CHECKPOINT_TABLES) == created - {"checkpoint_migrations"}, (
+        "the checkpointer creates a table the erasure sweep does not clear (or clears one it does "
+        "not create): " + str(sorted(created ^ set(CHECKPOINT_TABLES)))
+    )

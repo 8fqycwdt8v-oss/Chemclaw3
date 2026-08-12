@@ -53,15 +53,15 @@ zustandsbehaftete Liste — und was nicht sichtbar ist, kann niemand vor der Aus
 ## 2. Woraus der Harness besteht
 
 Er ist kein Framework-Baustein, den man einschaltet, sondern **vier Teile**, die
-`langgraph_agent._harness_middleware` und `langgraph_agent._middleware` an den kompilierten Graphen
+`langgraph_agent._harness_middleware` und `langgraph_agent.tool_call_middleware` an den kompilierten Graphen
 hängen — beide nur, wenn `harness_enabled_for(profile)` wahr ist, damit der klassische Agent
 unverändert der ist, der er ohne Harness war.
 
 | Baustein | Was er tut |
 |---|---|
 | **`TodoListMiddleware`** (LangChain) | Stellt dem Modell `write_todos` bereit und besitzt das Feld `todos` im Graph-State. Ein `Todo` ist `{content, status}` — **ohne** Beschreibungsfeld, was in §4 wichtig wird. |
-| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um genau **ein** Feld: `model_calls` (der Zähler der Runaway-Bremse). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. Ein zweites, `awaiting_jobs`, stand hier, bis auffiel, dass es nie jemand geschrieben oder gelesen hat (§4). |
-| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Zahl zurück. |
+| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um zwei Felder: `model_calls` (der Zähler der Runaway-Bremse) und `loop_capped` (ob sie gefeuert hat). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. Ein drittes, `awaiting_jobs`, stand hier, bis auffiel, dass es nie jemand geschrieben oder gelesen hat (§4). `turn_input` setzt beide Felder beim Turn-Start zurück — der Checkpointer hält den Thread, also ist ein Feld ohne Reset **pro Session** und nicht pro Turn. |
+| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end", "loop_capped": True}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Tatsache zurück — ein Flag, keine Zahl: der stoppende Zweig zählt nicht hoch, also endet ein gedeckelter Turn bei genau derselben Zahl wie einer, der seinen letzten erlaubten Aufruf verbraucht und dann geantwortet hat. |
 | **`enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
 
 **Warum der Deckel ein eigener Zähler ist und nicht `ModelCallLimitMiddleware`.** Die
@@ -102,7 +102,7 @@ Fire-and-Forget-Aufruf an Temporal — der Harness ändert daran nichts, er *seq
 der Aufruf passiert.
 
 **Blast-Radius im Code:** klein und an einer Stelle. `_harness_middleware` entscheidet, ob die
-Todo-Liste und der Deckel überhaupt hängen; `_middleware` schiebt das Freigabe-Gate ein, wenn
+Todo-Liste und der Deckel überhaupt hängen; `tool_call_middleware` schiebt das Freigabe-Gate ein, wenn
 `gate_applies(profile)`. Tools und Skills bleiben unverändert, weil der Harness dieselbe
 Registrierung nutzt.
 

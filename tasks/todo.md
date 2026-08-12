@@ -1810,3 +1810,68 @@ fix for "a mechanism whose description and behaviour had drifted apart", and all
 above are that same defect. Writing the fix does not confer immunity. The docstring that argued for
 the async-only hook was *specific and confident* and wrong — which is the case for measuring rather
 than reasoning, applied to one's own prose.
+
+---
+
+# Post-migration review (2026-08-12)
+
+The rebuild shipped green — `make lint type test`, every validator, CI, 4155 tests — and then a
+16-lane review with adversarial verification (181 agents; 81 findings raised, 72 survived) found
+three separate defects that each ended in a permanently unusable conversation. All three are fixed;
+`docs/decisions/D-2026-08-12-a-review-the-migration-did-not-get.md` records what a green suite could
+not see and why.
+
+**The third was found twice.** While this review ran, the deep-agents audit above reached the same
+missing context bound from the opposite direction and shipped `agent/compaction.py` first — a
+better fix, because it restores all three of D-025's settings rather than two and gives the policy
+a counter. This branch's `_context_middleware` is deleted rather than merged beside it, and the
+setting it had removed as unread (`agent_keep_last_conversation_groups`) is restored. Two reviews
+with no contact finding one defect within a day is the strongest evidence here that the class is
+structural rather than incidental.
+
+**The one lesson worth carrying forward.** Sixteen of the confirmed findings are the same shape: a
+property was moved to a new mechanism and *only the declaration moved*. The specialist attenuation
+compared profiles while the tools were passed down already open; `awaiting_jobs` was declared as a
+replacement and never written; the skills backend's "every reach path" was seven of twenty-two; the
+test asserting that enumeration was a hand-written list. In each case the sentence was written by
+the same change that removed the old mechanism, so there was never a moment when it was true — which
+is why review found them and the suite did not.
+
+Three follow-on habits, each cheap:
+
+- **A checkpointed field is per-session until something resets it.** Per-turn is a claim that needs
+  a mechanism, and a single-turn test cannot see the difference. `state.turn_input` is that
+  mechanism; anything hand-building `{"messages": ...}` reintroduces the defect.
+- **A test that drives one request cannot see a batch.** The plan gate's whole suite drove the
+  middleware one call at a time, and the bypass needed two calls in one assistant message.
+- **When a docstring claims a set is derived, derive it in the test.** Two of the six unfalsifiable
+  tests said "enumerated from the protocol" / "proves the list is complete" over a literal.
+
+## What merging this into `main` found (a fourth defect, in the seam between two fixes)
+
+The branch sat behind 21 commits that had independently fixed overlapping ground, so the merge was
+semantic rather than textual. Three of its resolutions are just "main's version is more complete"
+— `agent/compaction.py` over `_context_middleware`, handoff-tracked attribution over the namespace
+read, `calls_without_adjacent_results` restored because main gave the function a real caller after
+this branch deleted it as dead. Deleting it was right on the evidence available and wrong within a
+day, which is the ordinary cost of removing a thing whose next caller is being written elsewhere.
+
+The fourth is a defect **neither branch had alone**, and it is the interesting one:
+
+- On `main`, a specialist's tokens stream **unattributed**, and `api/runner` concatenates every
+  `TokenEvent` into `answer_parts` — which is both the text a chemist reads and the durable
+  transcript. So a delegated turn splices the specialist's working prose into the supervisor's
+  answer, interleaved in production order. Measured by mutating the producer back: the stream is
+  `[('', 'no genotoxic alert matched'), ('', 'done')]` — two agents, one voice.
+- This branch's fix dropped sub-root tokens entirely, which is silent for the whole delegation and
+  contradicts `main`'s new test that a specialist's output must land *inside* its handoff span.
+
+Neither test could see the other's defect: one asserted the specialist is visible, the other that
+the answer is clean, and the shipped code satisfied exactly one at a time. The resolution uses the
+mechanism the contract already had — `TokenEvent` gains the same additive, defaulted `agent` field
+five other events carry, the producer stamps it, and the runner concatenates only unattributed
+chunks. Both properties now hold and one test asserts both directions.
+
+**The lesson is about merges, not about tokens.** Two correct branches can compose into a defect
+that is in neither, and the place to look is where each side's *test* stops: a test pins one
+direction of a property, and merging two one-directional pins is not a two-directional pin.

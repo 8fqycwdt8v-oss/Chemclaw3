@@ -55,7 +55,8 @@ spec:
           command:
             - sh
             - -c
-            - python -m chemclaw.core.migrate && python -m chemclaw.core.grants
+            - python -m chemclaw.core.migrate && python -m chemclaw.agent.message_migration
+              && python -m chemclaw.core.grants
           env:
             {{- include "chemclaw.env" . | nindent 12 }}
             {{- include "chemclaw.migrationEnv" . | nindent 12 }}

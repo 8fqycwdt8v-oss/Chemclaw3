@@ -14,6 +14,7 @@ unconditionally: `authorize_tool` is a no-op unless `entra_required`, so the dev
 still recorded as an `error` outcome before the exception surfaces.
 """
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +25,8 @@ from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effect
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.turn_signals import record_tool_failure
+
+logger = logging.getLogger(__name__)
 
 # How much of a failure message reaches the trace. Long enough for a chemist to recognise the
 # problem, short enough that an unexpected exception's text cannot flood the stream.
@@ -75,6 +78,22 @@ def domain_error_result(exc: BaseException) -> str:
 def failure_detail(exc: BaseException) -> str:
     """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood."""
     return f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS]
+
+
+def unexpected_error_result() -> str:
+    """What the model is told when a tool raised something outside the two safe families.
+
+    Deliberately says nothing about the exception. The two safe families are safe *because* someone
+    decided their messages are fit for a model to read; anything else is an internal fault whose
+    text can carry a DSN, a path or a row of data, which is why `include_detailed_errors` is off by
+    default. The chemist's transcript still gets the type and message through
+    `announce_tool_failures` — a person debugging their own deployment is a different audience from
+    a model composing an answer.
+    """
+    return (
+        "Error: that tool failed unexpectedly and returned nothing. Do not retry it with the same "
+        "arguments; say what you were unable to do, and continue with what you can."
+    )
 
 
 # --- the wiring ----------------------------------------------------------------------------------
@@ -134,11 +153,35 @@ async def surface_authorization_denials(request: Any, handler: Callable[[Any], A
 
 @wrap_tool_call
 async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Hand a bad-input or outage error to the model in its own words (`surface_domain_errors`)."""
+    """Turn any tool exception into a result the model can read, rather than ending the turn.
+
+    The two safe families keep their own words; **everything else is converted too**, and that is
+    the half that was missing. `announce_tool_failures` records a failure and re-raises, neither
+    converter caught anything outside those two families, and `ToolNode`'s default handler re-raises
+    what it is given — so a `KeyError` from a parser, a `TimeoutError`, or a driver's
+    `ConnectionError` escaped the graph and killed the whole turn. The chemist lost the answer, the
+    tokens and every other tool the turn had already run, for one failed step.
+
+    That is a regression rather than a choice: the framework this replaced collapsed *any* tool
+    exception into a result, so a failed tool had always been a recoverable step. The model is told
+    something deliberately contentless (`unexpected_error_result`) because an unclassified
+    exception's text is not vetted for a model to read; the *transcript* still carries the type and
+    message, which is the audience that wants it.
+
+    `BaseException` is not caught: `CancelledError` is how a disconnect and the turn deadline
+    arrive, and converting one into a tool result would swallow the cancellation.
+    """
     try:
         return await handler(request)
     except (ChemclawError, SubsystemUnavailableError) as exc:
         return _refusal_message(request, domain_error_result(exc))
+    except AuthorizationError:
+        # Left for `surface_authorization_denials`, which sits outside this one and words a refusal
+        # differently from a fault. Catching it here would make every denial read as a crash.
+        raise
+    except Exception:
+        logger.exception("tool %s raised an unhandled error", request.tool_call["name"])
+        return _refusal_message(request, unexpected_error_result())
 
 
 @wrap_tool_call

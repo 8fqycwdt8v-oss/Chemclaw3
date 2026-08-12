@@ -331,14 +331,22 @@ def test_the_document_share_is_read_only_and_only_on_the_worker_that_crawls_it()
             )
 
 
-def test_the_hook_job_reconciles_grants_after_it_migrates() -> None:
-    """The grants name tables the migrations create, so the order is not optional.
+def test_the_hook_job_migrates_then_converts_then_reconciles_grants() -> None:
+    """Three steps whose order is not optional, in one container so the shell enforces it.
 
-    One container rather than a second hook Job, so the ordering is the shell's `&&` rather than a
-    weight in a different file — and so a failed migration is never followed by a grant run.
+    The grants name tables the migrations create; the stored-message conversion writes a column a
+    migration adds. One container rather than three hook Jobs, so the ordering is the shell's `&&`
+    rather than three weights in three files — and so a failed step is never followed by the next.
+
+    The conversion is its own command rather than a step inside `core.migrate` because the kernel
+    imports no other subpackage and the converter is layer 1's; `tests/test_layering.py` caught that
+    when it was first wired the other way.
     """
-    job = (_CHART / "templates" / "migrate-job.yaml").read_text()
-    assert "chemclaw.core.migrate && python -m chemclaw.core.grants" in job
+    job = " ".join((_CHART / "templates" / "migrate-job.yaml").read_text().split())
+    assert (
+        "python -m chemclaw.core.migrate && python -m chemclaw.agent.message_migration "
+        "&& python -m chemclaw.core.grants"
+    ) in job
 
 
 def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:

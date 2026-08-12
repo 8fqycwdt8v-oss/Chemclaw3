@@ -1,6 +1,6 @@
 """Run one tool through the governed chain when no graph is driving (M13 Step 6).
 
-A chat turn's tool call is wrapped by six `wrap_tool_call` middlewares — two error converters,
+A chat turn's tool call is wrapped by seven `wrap_tool_call` middlewares — two error converters,
 the audit trail, the authorization gate, the dry-run and repeat guards, and the failure announcer
 — and LangChain composes them inside `create_agent`'s tool node. A Temporal activity replaying a
 template's `tool` step has the same obligation and no tool node: the whole point of

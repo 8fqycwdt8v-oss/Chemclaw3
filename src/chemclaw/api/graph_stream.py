@@ -39,8 +39,9 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, ToolMessage
 
+from chemclaw.agent.state import turn_input
 from chemclaw.api.events import (
     ApprovalRequestEvent,
     Event,
@@ -82,6 +83,7 @@ async def graph_events(
     trace: ToolCallTrace,
     on_signal: Any,
     usage: Any,
+    exchanges: list[Any] | None = None,
 ) -> AsyncIterator[Event]:
     """Drive one turn on a compiled graph, yielding the turn's events in order.
 
@@ -99,6 +101,11 @@ async def graph_events(
             keep its own ledger (the job ids a mid-turn resume waits on) without this module
             knowing what a session is.
         usage: The turn's token ledger; fed from each message chunk's `usage_metadata`.
+        exchanges: Appended with the tool-bearing messages the graph produced, in order, for the
+            transcript projection (`api/runner._record_transcript`). Collected here because this is
+            the only place they exist as messages — the events carry no call id, so a projection
+            rebuilt from them could not pair a result with its call. `None` collects nothing, which
+            is what a caller that only wants the event stream passes.
 
     Yields:
         `Event`s in the order and with the meanings `api/events.py` declares.
@@ -107,15 +114,29 @@ async def graph_events(
     # Who is currently answering, tracked across the stream by the handoff pair rather than
     # inferred per event. `""` is the main agent, which is every turn without a team.
     agent = ""
-    async for _namespace, mode, payload in graph.astream(
-        {"messages": [("user", message)]}, config, stream_mode=_MODES, subgraphs=True
+    async for namespace, mode, payload in graph.astream(
+        turn_input(message), config, stream_mode=_MODES, subgraphs=True
     ):
         if mode == "messages":
             chunk, _metadata = payload
             usage.add(graph_usage_tokens(chunk))
             text = _text_of(chunk)
+            # **Only the root's tokens are the answer, and the attribution is what says so.**
+            # The runner concatenates unattributed `TokenEvent`s into the turn's final answer, so
+            # a specialist's working prose has to arrive marked or it is spliced into another
+            # agent's answer, interleaved with the supervisor's own text in whatever order the two
+            # happened to produce it.
+            #
+            # The *namespace* is what identifies a chunk as a specialist's — non-empty means "below
+            # the root" — while the *name* comes from the handoff pair above, because the namespace
+            # never held it (D-2026-08-11-the-specialists-name-is-not-in-the-namespace). Between a
+            # handoff and its hand back the two agree; a chunk from below the root with no handoff
+            # open still gets a non-empty marker rather than passing as the answer, which is the
+            # direction that fails safe.
+            #
+            # The usage is counted either way: a specialist's tokens cost the same money.
             if text:
-                yield TokenEvent(text=text)
+                yield TokenEvent(text=text, agent=agent or ("subagent" if namespace else ""))
         elif mode == "custom":
             event = _custom_event(payload, on_signal)
             if isinstance(event, HandoffEvent):
@@ -126,7 +147,7 @@ async def graph_events(
             if event is not None:
                 yield event
         elif mode == "updates":
-            async for event in _from_update(payload, agent, trace, todos):
+            async for event in _from_update(payload, agent, trace, todos, exchanges):
                 yield event
 
 
@@ -155,9 +176,17 @@ def _custom_event(payload: Any, on_signal: Any) -> Event | None:
 
 
 async def _from_update(
-    payload: Any, agent: str, trace: ToolCallTrace, todos: list[str]
+    payload: Any,
+    agent: str,
+    trace: ToolCallTrace,
+    todos: list[str],
+    exchanges: list[Any] | None = None,
 ) -> AsyncIterator[Event]:
     """The events one completed node produces: its calls, its results, and any new plan.
+
+    `exchanges`, when given, collects the tool-bearing messages for the transcript projection. Here
+    rather than in the caller because this is where they exist as *messages*: the events carry no
+    call id, so a projection rebuilt from them could not pair a result with the call it answers.
 
     `agent` is the specialist currently running, tracked by the caller from the handoff pair, and
     it becomes the `agent` attribution on every event that specialist raises (M9) — which is what
@@ -185,6 +214,10 @@ async def _from_update(
         if not isinstance(update, dict):
             continue
         for message in update.get("messages") or []:
+            if exchanges is not None and (
+                getattr(message, "tool_calls", None) or isinstance(message, ToolMessage)
+            ):
+                exchanges.append(message)
             for call in getattr(message, "tool_calls", None) or []:
                 yield _attributed(
                     trace.issued(
@@ -192,13 +225,30 @@ async def _from_update(
                     ),
                     agent,
                 )
-            if message.__class__.__name__ == "ToolMessage":
-                yield _attributed(
-                    await trace.returned(
-                        str(getattr(message, "tool_call_id", "")), message_text(message)
-                    ),
-                    agent,
-                )
+            # `isinstance`, not a class-name test: `ToolMessageChunk` is a real subclass, and a
+            # name comparison misses it — silently, since the branch simply does not run. The
+            # consequence would be a result never traced: no `result_ref` stored, and a transcript
+            # showing a call with no answer.
+            if isinstance(message, ToolMessage):
+                # **A failed call is not a result, and must not become evidence.** `trace.returned`
+                # appends to `outputs`, which the answer gate reads to decide whether a claim was in
+                # front of the model — so emitting a failure here fed an error string to the
+                # grounding check as though it were retrieved data, and reported the call as
+                # `tool_result` while `announce_tool_failures` had already raised `tool_failed` for
+                # it. Two events for one outcome, one of them wrong, and the pair is documented as
+                # exhaustive.
+                if getattr(message, "status", "success") == "error":
+                    logger.debug(
+                        "tool call %s returned an error result; already reported as tool_failed",
+                        getattr(message, "tool_call_id", ""),
+                    )
+                else:
+                    yield _attributed(
+                        await trace.returned(
+                            str(getattr(message, "tool_call_id", "")), message_text(message)
+                        ),
+                        agent,
+                    )
         plan = _todo_titles(update)
         if plan is not None and plan != todos:
             # Only on change and never empty, matching `runner._PlanEmitter`: an unchanged plan
@@ -240,16 +290,27 @@ def _text_of(chunk: Any) -> str:
 
 
 def _todo_titles(update: dict[str, Any]) -> list[str] | None:
-    """The plan a node's state update carries, or `None` when it carries none.
+    """The plan a node's state update carries as a checklist, or `None` when it carries none.
 
-    `TodoListMiddleware` keeps `{content, status}` items, so the rendered line is the content —
-    the same text `agent/plan_gate.py` hashes, which is what makes the plan a surface displays and
-    the plan the gate binds an approval to literally the same strings.
+    `TodoListMiddleware` keeps `{content, status}` items and **both halves reach the surface**. The
+    status was being dropped, so every step rendered identically whether it was done, in progress or
+    untouched — against an event whose own contract says "rendered as a checklist" and a plan that
+    is re-emitted on every change, giving a client churn it could not interpret. Completion state is
+    the one thing a surface must not have to infer.
+
+    The checkbox is a *rendering*; `agent/plan_gate.plan_identity` hashes the bare `content`, and
+    `evals/autonomy._plan_steps` strips the prefix before scoring. So the approval a chemist gives
+    is bound to the work, not to how far along it was when they looked — which is what lets a plan
+    stay approved while its steps tick over.
     """
     todos = update.get("todos")
     if todos is None:
         return None
-    return [str(todo.get("content", "")) for todo in todos if isinstance(todo, dict)]
+    return [
+        f"[{'x' if todo.get('status') == 'completed' else ' '}] {todo.get('content', '')}"
+        for todo in todos
+        if isinstance(todo, dict)
+    ]
 
 
 def _signal_event(signal: Signal) -> Event:

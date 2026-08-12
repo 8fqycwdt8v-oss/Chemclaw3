@@ -36,8 +36,8 @@ from dataclasses import dataclass, field
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.session_store import _session_dsn
 from chemclaw.core import db
-from chemclaw.core.config import settings
 from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
 
@@ -177,7 +177,13 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
 
     report = ErasureReport(actor=actor, applied=apply)
     try:
-        async with db.connection(settings.postgres_dsn) as conn:
+        # `_session_dsn()`, not `postgres_dsn`: every table this sweep targets lives in the
+        # session store, which a deployment may point elsewhere (`CHEMCLAW_SESSION_STORE_DSN`,
+        # D-042) — the owner store, the transcript, the turn claims and, since the rebuild, the
+        # checkpointer's tables (`agent/checkpointer.py` opens its pool on the same DSN). Erasing
+        # against the default while the data lives on the configured one deletes nothing and
+        # reports success, which is the one outcome a right-to-erasure sweep must never produce.
+        async with db.connection(_session_dsn()) as conn:
             async with conn.cursor() as cur:
                 for table, columns, _ in _RETAINED:
                     # One row counts once however many of its columns name this actor: a proposal

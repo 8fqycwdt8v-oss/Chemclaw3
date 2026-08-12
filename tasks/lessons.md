@@ -1805,3 +1805,29 @@ the index at all.
 The cost of getting this wrong is not the lost edit — it is that the *next* thing you read looks
 correct-but-stale, so the mistake is discovered several steps later, by which point some of the
 intervening work has been built on the reverted file.
+
+## `git checkout <file>` after a mutation test — the third time (2026-08-12)
+
+Twice recorded already, and I did it again during the post-migration fix sweep: mutated
+`tests/test_skill_backend.py` to check a ratchet caught a missing probe, then ran
+`git checkout tests/test_skill_backend.py` to undo it. That file's edits were **uncommitted**, so
+the checkout did not undo the mutation — it discarded forty lines of new assertion. The production
+half survived only because it happened to live in a different file.
+
+The rule was already written down and it did not fire, so the rule is the problem, not the memory:
+"never `git checkout` a file to undo a mutation" is a prohibition, and prohibitions lose to muscle
+memory when the command is the obvious one. The replacement is a *procedure* with no prohibited step
+in it, and it takes one extra line:
+
+    cp <file> /tmp/.../scratchpad/<file>.bak     # before mutating
+    <mutate, run the test, read the result>
+    cp /tmp/.../scratchpad/<file>.bak <file>     # restore
+
+That is what I do for production files and it has never gone wrong; the failure both times was
+reaching for git on a *test* file because production was the thing I was thinking about. So: the
+backup goes on **whichever file is about to be edited**, and the question to ask before any
+`git checkout <path>` is not "is this a mutation?" but "does this path have uncommitted work?" — if
+the answer is yes or unknown, it is the wrong command regardless of why I am running it.
+
+Cheaper still, and the real lesson: commit the test *before* mutating it. A committed file makes
+`git checkout` correct and makes the whole question disappear.

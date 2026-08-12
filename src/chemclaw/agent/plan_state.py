@@ -30,8 +30,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-async def session_todos(session_id: str, *, saver: Any | None = None) -> list[str]:
-    """The todo lines a session is currently proposing, newest checkpoint first.
+async def session_todos(session_id: str, *, saver: Any | None = None) -> list[str] | None:
+    """The todo lines a session is currently proposing, or `None` when the plan is unreadable.
+
+    **`None` and `[]` are different answers and the callers act on them differently**, which is the
+    whole reason this does not return one list. `[]` means "this session has proposed nothing" — a
+    fact. `None` means "the plan could not be read": no checkpoint, an unreachable checkpointer, or
+    a checkpoint whose shape this does not recognise. Two of those three are upstream-owned literals
+    (`channel_values`, and `TodoListMiddleware`'s `todos` key), so a version bump can produce them.
+
+    Collapsing the two was a fail-*open*: `consume_turn_approval` hashes what this returns, and on
+    `[]` it found no decision and returned early **without spending the approval** — leaving a
+    one-shot human approval live for every later turn. Its sibling `enforce_plan_approval` fails
+    closed on the same input. One input, two opposite directions, is exactly the divergence a gate
+    must not have.
 
     Args:
         session_id: The session, which is the checkpointer's `thread_id`.
@@ -39,15 +51,21 @@ async def session_todos(session_id: str, *, saver: Any | None = None) -> list[st
             front door, which already holds it open for the turn path and must not open a second.
 
     Returns:
-        The todo `content` strings in order, or `[]` when the session has no checkpoint, no todos,
-        or the checkpointer cannot be reached. The last case is logged: a plan that reads as empty
-        because the database hiccuped is indistinguishable to a chemist from one that is empty, and
-        the difference decides whether "approve" is even offered.
+        The todo `content` strings in order; `[]` for a readable session proposing nothing; `None`
+        when the plan could not be read at all.
     """
     checkpoint = await _latest_checkpoint(session_id, saver)
     if checkpoint is None:
-        return []
-    todos = checkpoint.get("channel_values", {}).get("todos") or []
+        return None
+    values = checkpoint.get("channel_values")
+    if not isinstance(values, dict):
+        logger.warning(
+            "session %s's checkpoint carries no readable channel_values; treating its plan as "
+            "unreadable rather than as empty",
+            session_id,
+        )
+        return None
+    todos = values.get("todos") or []
     return [str(todo["content"]) for todo in todos if isinstance(todo, dict) and "content" in todo]
 
 

@@ -324,14 +324,43 @@ def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> 
     assert ctx.result == "Error: no note with id 'reaction-ghost'"
 
 
-def test_domain_errors_leave_other_exceptions_untouched() -> None:
-    """Only `ChemclawError` is caught — an unrelated failure still propagates as-is."""
+def test_an_unclassified_failure_becomes_a_result_rather_than_ending_the_turn() -> None:
+    """A failed tool is a recoverable step. It stopped being one, and nothing said so.
+
+    `announce_tool_failures` records and re-raises, neither converter caught anything outside the
+    two safe families, and `ToolNode`'s default handler re-raises what it is given — so a `KeyError`
+    from a parser or a driver's `TimeoutError` escaped the graph and killed the whole turn. The
+    chemist lost the answer, the tokens, and every other tool the turn had already run, for one
+    failed step. The framework this replaced collapsed any tool exception into a result, so this is
+    a regression rather than a decision.
+    """
+    ctx = _ctx("predict_pka")
 
     async def _boom() -> None:
-        raise RuntimeError("unrelated failure")
+        raise RuntimeError("psycopg: could not connect to host db-7.internal user=chemclaw")
 
-    with pytest.raises(RuntimeError, match="unrelated failure"):
-        _drive_domain_errors(_ctx("predict_pka"), _boom)
+    _drive_domain_errors(ctx, _boom)
+
+    assert ctx.result, "the turn was ended by a tool failure instead of continuing"
+    # And the model is told nothing about the exception: an unclassified fault's text is not vetted
+    # for a model to read, and this one carries a hostname and a role name.
+    assert "db-7.internal" not in str(ctx.result)
+    assert "chemclaw" not in str(ctx.result)
+    assert "failed unexpectedly" in str(ctx.result)
+
+
+def test_a_cancellation_is_never_converted_into_a_tool_result() -> None:
+    """`CancelledError` is how a disconnect and the turn deadline arrive.
+
+    Converting one into a result would swallow the cancellation and leave the turn running after
+    the client is gone — which is why the catch is `Exception` and not `BaseException`.
+    """
+
+    async def _cancelled() -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        _drive_domain_errors(_ctx("predict_pka"), _cancelled)
 
 
 def test_domain_errors_pass_a_successful_call_through_unchanged() -> None:

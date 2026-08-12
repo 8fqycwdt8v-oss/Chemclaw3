@@ -86,6 +86,9 @@ chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHR
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
 	uv run python -m chemclaw.core.migrate
+	@# The stored-message conversion is a second command, not a step inside the first: the kernel
+	@# imports no other subpackage, and the converter lives in layer 1 (tests/test_layering.py).
+	uv run python -m chemclaw.agent.message_migration
 
 db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on every deploy).
 	@# Not part of `db-migrate`: the migrations are applied once per file and tracked, while the

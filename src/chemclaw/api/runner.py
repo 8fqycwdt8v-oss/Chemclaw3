@@ -201,6 +201,9 @@ async def run_turn(
     loop_token = begin_loop_watch()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
+    # The tool-bearing messages this turn produced, for the transcript projection: the events
+    # carry no call id, so a projection rebuilt from them could not pair a result with its call.
+    tool_exchanges: list[Any] = []
     dry_run_token = set_dry_run(dry_run)
     # Snapshot the session state before the turn so a client disconnect can roll it back
     # (ISSUE-B-10). `session.state` is the harness's own bookkeeping — the todo list, the plan
@@ -292,8 +295,13 @@ async def run_turn(
                     started_jobs.append(s.job_id) if isinstance(s, JobSignal) else None
                 ),
                 usage=turn_usage,
+                exchanges=tool_exchanges,
             ):
-                if isinstance(event, TokenEvent):
+                # `not event.agent`: a specialist's tokens stream to the surface for the trace
+                # and are *not* the answer. Concatenating them would interleave one agent's
+                # working prose with the supervisor's, in the durable transcript as well as on
+                # screen, because both ends of this turn are built from `answer_parts`.
+                if isinstance(event, TokenEvent) and not event.agent:
                     answer_parts.append(event.text)
                 yield event
             # The stream is exhausted, so the graph has returned and the history provider has
@@ -337,9 +345,10 @@ async def run_turn(
                         trace=tool_trace,
                         on_signal=lambda _signal: None,
                         usage=turn_usage,
+                        exchanges=tool_exchanges,
                     )
                     async for event in continuation:
-                        if isinstance(event, TokenEvent):
+                        if isinstance(event, TokenEvent) and not event.agent:
                             answer_parts.append(event.text)
                         yield event
                     run_complete = True
@@ -403,7 +412,7 @@ async def run_turn(
                 correlation_id=correlation_id,
             )
         answer = await build_answer_event(text, tool_trace.outputs, tool_trace.called_tools)
-        await _record_transcript(history, session, user_message, text)
+        await _record_transcript(history, session, user_message, text, tool_exchanges)
         # **Before the yield, not after it.** The turn's rows are committed by now and they are a
         # complete, paired exchange — there is nothing half-written left to undo. The cancellation
         # that reaches a finished turn is delivered *while suspended in the yield below*, as
@@ -653,7 +662,11 @@ def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
 
 
 async def _record_transcript(
-    history: Any | None, session: Any, user_message: str, answer: str
+    history: Any | None,
+    session: Any,
+    user_message: str,
+    answer: str,
+    exchanges: list[Any] | None = None,
 ) -> None:
     """Write this turn's exchange to the session transcript, best-effort.
 
@@ -671,6 +684,14 @@ async def _record_transcript(
     so a turn killed before it answers leaves no transcript row — and that is the same exchange the
     teardown path deliberately rolls back anyway, so the two agree about what a half-turn is worth.
 
+    **The tool exchanges are stored too, and leaving them out was a silent regression.** The route
+    projects `tool_calls` and each call's `result_ref` out of these rows
+    (`api/schemas._transcript`), so a transcript of only the question and the answer made both
+    permanently empty: everything the agent *did* vanished on reload, and a stored result whose
+    bytes were sitting in `tool_result_blobs` had no handle to fetch it by. The pairing needs the
+    call ids, which exist only on the messages — hence `exchanges` rather than a rebuild from the
+    events, which carry no id.
+
     **Best-effort, like every other write on this path.** A transcript is a rendering; no rendering
     is worth failing an answered turn over, which is the rule `chemclaw.api.tool_results` already
     states for stored tool results. An empty answer is not written at all: the turn yielded an
@@ -687,7 +708,11 @@ async def _record_transcript(
     try:
         await history.save_messages(
             session_id,
-            [HumanMessage(content=user_message), AIMessage(content=answer)],
+            [
+                HumanMessage(content=user_message),
+                *(exchanges or []),
+                AIMessage(content=answer),
+            ],
             # `state` is where the in-memory provider keeps its thread, and the durable one
             # deliberately keeps nothing there. Passing it is what makes this one call correct
             # under both stores, which is the same reason the transcript route passes it on read.

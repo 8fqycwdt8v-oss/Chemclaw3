@@ -41,6 +41,7 @@ from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.state import turn_input
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
@@ -129,7 +130,7 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
     chart sets (D-152). A thread id is a string in a config dict; there is nothing to be absent.
     """
     result = await agent.ainvoke(
-        {"messages": [("user", prompt)]},
+        turn_input(prompt),
         {"configurable": {"thread_id": session_id}},
     )
     return _answer_text(result)
@@ -262,7 +263,10 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     from chemclaw.agent.plan_gate import plan_identity
     from chemclaw.agent.plan_state import session_todos
 
-    plan = await session_todos(_CLI_SESSION_ID, saver=saver)
+    # `or []`: `session_todos` answers `None` when the plan could not be *read* at all, which for
+    # this command is the same screen as a session that has proposed nothing — the gate is what
+    # must tell the two apart, not the display.
+    plan = await session_todos(_CLI_SESSION_ID, saver=saver) or []
     plan_hash = plan_identity(plan)
     if prompt.lower() == "/plan":
         lines = plan or ["(no plan yet)"]

@@ -30,6 +30,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
        `read_bytes()`. `enabled: false` is the deliberate plaintext choice, and it removes the env,
        the volume and the mount together — there is no state where one exists without the others. */ -}}
 {{- define "chemclaw.env" -}}
+{{- /* Declared off rather than left to a default. `langsmith` is in the runtime closure — a hard
+       requirement of `langchain-core` and pulled again by `deepagents` — and it enables itself from
+       ambient environment: either LANGSMITH_TRACING or LANGCHAIN_TRACING_V2 being truthy sends
+       conversation content to api.smith.langchain.com. It is off by default today (measured), which
+       is exactly the kind of fact that changes in a patch release or gets set by a base image. A
+       GxP deployment's egress posture should not rest on a library default, so both names are
+       pinned false here, beside the NetworkPolicy that is the other half of the control. */}}
+- name: LANGSMITH_TRACING
+  value: "false"
+- name: LANGCHAIN_TRACING_V2
+  value: "false"
 {{- if .Values.secrets.temporalTls.enabled }}
 - name: CHEMCLAW_TEMPORAL_TLS_CERT
   value: "{{ .Values.secrets.temporalTls.mountPath }}/tls.crt"
