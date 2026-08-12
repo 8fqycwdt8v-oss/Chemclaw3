@@ -81,6 +81,17 @@ class MemorySettings(BaseSettings):
     # The cost is stated rather than hidden: until an operator sets this, the table grows, and it
     # grows faster than the two above it. `infra/sql/README.md` says so in its Disposal column.
     retention_tool_results_days: int = Field(default=0, ge=0)
+    # The LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`).
+    # They held the same standing as the fingerprint tables in this module's opening complaint —
+    # nothing deleted from them, ever — with one difference that made it easy to miss: they are
+    # created by `AsyncPostgresSaver.setup()` rather than by a migration in `infra/sql`, so they are
+    # not in the schema anybody reviews. Erasure already reached them (`agent/leaver.py`); only
+    # disposal did not, so a deployment that erased no one accumulated every turn's state forever.
+    #
+    # Pruned by **thread**, not by row: a checkpoint's `parent_checkpoint_id` chains it to the one
+    # before, so deleting the old rows inside a live thread would leave a chain pointing at nothing.
+    # A thread expires when its newest checkpoint does.
+    retention_checkpoints_days: int = Field(default=0, ge=0)
     # How many expired sessions one conversation-prune pass may work
     # (D-2026-08-05-a-sweep-that-commits-once). The conversation prune costs three round trips per
     # session — it cannot be one `DELETE`, because whether an expired row may go depends on rows

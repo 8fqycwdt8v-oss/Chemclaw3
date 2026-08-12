@@ -41,11 +41,14 @@ any of those sentences would let an authorization decision, a dry-run refusal or
 depend on which engine a deployment happens to run, which is the one drift this migration must be
 incapable of.
 
-What is deliberately *not* here yet, because nothing calls it: the extra state fields (they arrive
-with the phase that reads them), the human gate and the plan-approval middleware (M5), a *durable*
-checkpointer (M6 — the parameter exists, the Postgres saver behind it does not) and the per-turn
-connector tools (M7). A stub advertising a capability this engine does not have would read as
-coverage while proving nothing.
+This paragraph used to list what was "deliberately not here yet, because nothing calls it" — the
+extra state fields, the plan-approval middleware, a durable checkpointer, the per-turn connector
+tools. Every item on it has since arrived (M5–M7), and the list outlived its subject: it was still
+telling a reader in M13 that the Postgres saver behind `checkpointer=` did not exist, four phases
+after `agent/checkpointer.py` shipped it. The rule it stated is the part worth keeping — a stub
+advertising a capability this engine does not have reads as coverage while proving nothing — and
+`agent/compaction.py` records what happens when the inverse is left standing: prose that keeps
+advertising a mechanism after the mechanism is gone.
 """
 
 import uuid
@@ -55,8 +58,7 @@ from typing import Any
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents import create_agent
-from langchain.agents.middleware import ContextEditingMiddleware, TodoListMiddleware
-from langchain.agents.middleware.context_editing import ClearToolUsesEdit
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.runnables import RunnableConfig
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -70,6 +72,7 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     instructions_for,
 )
+from chemclaw.agent.compaction import context_compaction_middleware
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -168,11 +171,16 @@ def build_langgraph_agent(
         system_prompt=instructions_for(prof),
         state_schema=ChemclawState,
         middleware=[
-            _context_middleware(),
             *_harness_middleware(prof),
             _skills_middleware(backend),
             *_team_middleware(prof, actor, correlation_id, audit_sink, connectors, tools),
             *tool_call_middleware(audit, prof),
+            # Unconditional, unlike the harness middleware above it: an unbounded thread is a
+            # property of a session, not of the plan/execute mode, and the single-turn agent
+            # accumulates one just as fast. Last in the list, so the reduction is the last thing
+            # between the assembled request and the model and it sees everything the middleware
+            # above added.
+            *context_compaction_middleware(),
         ],
         name="chemclaw",
         checkpointer=checkpointer,
@@ -230,45 +238,6 @@ def _without_cached_skills(state: Any) -> Any:
     real would be a side effect on everything downstream rather than on one method's view.
     """
     return {key: value for key, value in state.items() if key != "skills_metadata"}
-
-
-def _context_middleware() -> Any:
-    """Bound what the thread costs the model, deterministically and without a second model call.
-
-    **The checkpointer made this mandatory rather than nice.** Turn state is durable and keyed by
-    the session, so a thread only ever grows; nothing prunes `checkpoints*` and nothing trimmed the
-    messages. The end of that is not a slow degradation — it is a cliff. Once a session's thread
-    exceeds the provider's context window the turn fails, the oversized thread is still there, and
-    **every later turn on that session fails the same way**, with no path back. That is the same
-    "one event bricks the conversation" class as the read-time orphan the rebuild correctly deleted,
-    reached by a different route.
-
-    `ClearToolUsesEdit` is the strategy D-025 chose, expressed in the vocabulary this engine has: it
-    replaces *stale tool results* with a placeholder once the thread crosses a token budget, keeping
-    the most recent ones intact. Tool results are where the tokens are in this system — an evidence
-    sweep or a full ELN recipe dwarfs the prose around it — and clearing them is reversible from a
-    chemist's point of view, because the durable record is `session_messages` and the blob store,
-    not the model's view.
-
-    Deliberately **not** `SummarizationMiddleware`: it spends a model call to compress a thread, so
-    a turn's cost and its failure modes would depend on a second inference nobody asked for. D-025
-    ruled that out for the same reason and the reason has not changed.
-
-    What this does not bound is a conversation of pure prose with no tool calls, which grows far
-    more slowly and is a `docs/planning/BACKLOG.md` row with its own trigger.
-    """
-    return ContextEditingMiddleware(
-        edits=[
-            ClearToolUsesEdit(
-                trigger=settings.agent_context_token_budget,
-                keep=settings.agent_keep_last_tool_groups,
-            )
-        ],
-        # `approximate` rather than `model`: the exact count would cost a provider round trip per
-        # check, and the budget is a guard rail rather than a quota — the char/4 estimator is what
-        # the deleted strategy used, for the same reason.
-        token_count_method="approximate",
-    )
 
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
@@ -449,12 +418,26 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     though it were an answer. Governance must raise for a caller that has no model to read it.
     """
     return [
+        # Outside everything that *raises*, and inside both converters. Nesting is list order, so
+        # a middleware below this one cannot be seen by it: `announce_tool_failures` used to sit
+        # last — "innermost, closest to the tool body" — and that is exactly why a governance
+        # refusal never reached the chemist. `enforce_plan_approval` raises *before* calling its
+        # handler, so the announcer it wrapped never ran, and a gated call surfaced only as a
+        # `tool_result` whose text begins "Refused:". A surface renders that as a step that
+        # worked.
+        #
+        # Measured, because the opposite was written down and believed: `tests/test_m12_probes.py`
+        # asserted that a plan refusal and a broken tool "arrive on the stream as the same event
+        # type", and the live M12 plan-gate suite scored 0 refusals against a gate that had
+        # refused twice in the same run — the gate held, and nothing could see it hold.
+        # Innermost is the right place to catch a *tool body* raising and the wrong place to catch
+        # the chain above it; the announcement belongs where every refusal passes.
+        announce_tool_failures,
         audit,
         enforce_tool_authz,
         refuse_writes_on_dry_run,
         refuse_repeated_calls,
         *([enforce_plan_approval] if gate_applies(profile) else []),
-        announce_tool_failures,
     ]
 
 

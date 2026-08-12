@@ -14,16 +14,17 @@ checkpointer now (D-2026-08-10 §2), so what is left are the two jobs that were 
   rows goes through, so an age cutoff cannot take one half of a pair. It is used by
   `durable/retention.py`, and it contracts rather than expands, so the worst case is a straddling
   group surviving one more sweep.
-- **Assertions.** `unmatched_call_ids` and `unmatched_result_ids` are what a test uses to prove
-  code that deletes or assembles messages did not strand anything. Neither has a production caller,
-  and neither should acquire one: their value is that they refuse to fix what they find, so a bug
-  that strands a pairing fails a test instead of being cleaned up behind.
+- **Assertions.** `unmatched_call_ids`, `unmatched_result_ids` and
+  `calls_without_adjacent_results` are what a test uses to prove code that deletes or assembles
+  messages did not strand anything. None has a production caller, and none should acquire one:
+  their value is that they refuse to fix what they find, so a bug that strands a pairing fails a
+  test instead of being cleaned up behind.
 
-  A third, `calls_without_adjacent_results`, is gone. It checked the stricter on-the-wire rule —
-  an answer in the *immediately following* message — for the thread the previous framework assembled
-  and sent itself. The graph builds its thread from the checkpointer, so nothing here assembles a
-  wire payload any more; its only caller went with the engine, and a rule with no subject is not an
-  assertion, it is a function waiting to be miscalled.
+  The third was briefly deleted as having no subject — the previous framework assembled and sent
+  the wire payload it checked, and the graph builds its thread from the checkpointer instead. That
+  reasoning missed the one thing that *does* still assemble a payload: `agent/compaction.py` edits
+  the message list a model call is handed, and the on-the-wire rule is precisely what its tests
+  must hold it to. A narrowing that stranded a `tool_use` would brick the thread it was narrowing.
 
 **`droppable_rows` takes call ids, not messages, and that is the shape the rule always wanted.**
 Pairing is a relation between *identifiers*; the message around them was only ever how the caller
@@ -140,6 +141,36 @@ def _answered_id(message: BaseMessage) -> str | None:
     """
     answered = getattr(message, "tool_call_id", None)
     return str(answered) if answered else None
+
+
+def calls_without_adjacent_results(messages: Sequence[BaseMessage]) -> set[str]:
+    """Return the ids of tool calls whose answer is not in the *immediately following* message.
+
+    The stricter, on-the-wire form of the rule: the API does not merely require that an answer
+    exists somewhere, it requires it in the very next block — "tool_use ids were found without
+    tool_result blocks **immediately after**". The two checks differ exactly where duplicated
+    history does: replaying a call the transcript already answered leaves a second, unanswered copy
+    that an exists-somewhere check still considers satisfied, because the id does appear answered
+    once.
+
+    Use this to validate what is about to be sent. It is deliberately *not* the rule storage goes
+    by — there a merely out-of-order pair is intact history and must not be deleted, which is what
+    `droppable_rows` enforces.
+    """
+    missing: set[str] = set()
+    for index, message in enumerate(messages):
+        called = {
+            str(call["id"])
+            for call in getattr(message, "tool_calls", None) or []
+            if call.get("id") is not None
+        }
+        if not called:
+            continue
+        following = messages[index + 1] if index + 1 < len(messages) else None
+        next_id = _answered_id(following) if following is not None else None
+        answered = {next_id} if next_id is not None else set[str]()
+        missing |= called - answered
+    return missing
 
 
 def unmatched_call_ids(messages: Sequence[BaseMessage]) -> set[str]:

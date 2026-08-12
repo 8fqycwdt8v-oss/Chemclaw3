@@ -5,9 +5,7 @@
 Amends [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
 and [`D-2026-08-11-what-the-removal-found`](D-2026-08-11-what-the-removal-found.md). Both are merged
 and are left untouched, as a merged ADR must be; the claims of theirs that turned out to be false
-are corrected here rather than in place. Supersedes the *implementation* half of
-[`D-025`](D-025-the-agent-keeps-its-chat-thread-within-a-token.md): the mechanism it chose was
-deleted with the framework and this records what replaced it.
+are corrected here rather than in place.
 
 ## Context
 
@@ -53,10 +51,44 @@ store: the batch is atomic to the model, so "which came first" is unanswerable f
 
 Context compaction (D-025) went with the framework and nothing replaced it. Past the provider's
 window a turn fails, the oversized thread is still checkpointed, and every later turn fails
-identically. `ContextEditingMiddleware` with `ClearToolUsesEdit` is D-025's strategy in this
-engine's vocabulary — deterministic, no second model call — wired to the two settings that map.
-Measured: a 12-turn thread of evidence sweeps goes 180k → 30k estimated tokens once it crosses the
-budget, and a 2-turn thread under it is untouched.
+identically. Measured on the unbounded engine: a 12-turn thread of evidence sweeps stands at ~180k
+estimated tokens against a 100k budget, with nothing between it and the model.
+
+**This one was found twice, independently, and the other finder shipped first.**
+[`D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has`](D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has.md)
+reached the same defect from the opposite direction — auditing the deep-agents patterns rather than
+reviewing the diff — and its `agent/compaction.py` is the fix this repository has. That module is
+strictly the better one and this review's own attempt is deleted rather than merged beside it:
+where this branch wired only `ClearToolUsesEdit` and *removed* `agent_keep_last_conversation_groups`
+as a setting nothing honoured, `compaction.py` restores all three of D-025's settings by writing the
+conversation-window edit upstream does not ship, and adds the counter
+(`chemclaw_context_compactions_total`) that lets a deployment see the policy fire instead of reading
+a paragraph claiming it does. The setting this branch deleted is restored with it.
+
+So D-025's implementation half is superseded by that ADR, not by this one. What is worth recording
+here is that **two reviews with no contact found the same missing bound within a day**, which is the
+strongest evidence in this document that the defect class is structural: a policy whose only
+remaining trace is prose reads as present to every reader who is not measuring it.
+
+### 4. Found by merging, not by reviewing: two correct branches, one new defect
+
+This branch merged 21 commits behind it, and the merge produced a defect **neither side had**.
+`main` streams a specialist's tokens unattributed and `api/runner` concatenates every `TokenEvent`
+into `answer_parts` — which is both the chemist's answer and the durable transcript — so a
+delegated turn splices the specialist's working prose into the supervisor's answer. Measured by
+mutating the producer back to the merged-in behaviour: `[('', 'no genotoxic alert matched'),
+('', 'done')]`, two agents in one voice. This branch's own fix suppressed sub-root tokens outright,
+which is silent for the whole delegation and contradicts `main`'s new test that a specialist's
+output lands *inside* its handoff span.
+
+Each side had a test. Neither test could fail on the other's defect, because each pinned one
+direction: "the specialist is visible" and "the answer is clean" are satisfiable one at a time by
+code that is wrong. `TokenEvent` now carries the same additive, defaulted `agent` field five other
+events already carry, the producer stamps it, and the runner concatenates only unattributed chunks
+— so both hold, and one test asserts both directions.
+
+**Merging two one-directional pins does not produce a two-directional pin**, and the seam between
+two independently correct fixes is where to look for what neither suite covers.
 
 ## The pattern behind most of the rest
 

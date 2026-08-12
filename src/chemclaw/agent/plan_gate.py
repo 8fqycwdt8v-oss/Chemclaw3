@@ -322,6 +322,12 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     closed, costs a legitimate turn one retry (the model re-issues the call in the next message,
     against the plan it just wrote, and a human approves that plan), and needs no cross-call state.
 
+    **Waiting jobs need no exclusion here.** Under MAF a todo waiting on a durable job was marked by
+    prefixing its description, and the identity had to filter those out or an approved plan revoked
+    its own approval the moment it launched a job. Nothing writes that bookkeeping into `todos` now
+    — a launched job is a `job_records` row and a `session_events` push-back — so the list this
+    hashes is the plan and only the plan, and there is nothing to filter.
+
     Raises:
         PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;
             the audit middleware records the refusal and `surface_authorization_denials` relays

@@ -75,12 +75,36 @@ class ObservabilitySettings(BaseSettings):
     # this stack emits. It is gone; `chemclaw_*_tokens_total` and the `turn_costs` table are where
     # spend is answered now (`docs/guides/runbook.md` says so where an operator looks).
     #
-    # `otel_include_sensitive_data` had exactly one consumer — that framework's instrumentation —
-    # so it governs nothing today and `configure_telemetry` warns when it is set. Kept rather than
-    # deleted because a deployment may still have it in its values file, and a silently-ignored
-    # knob is worse than one that says so.
+    # `otel_include_sensitive_data` **has a consumer again**, and it is the same consumer it always
+    # had: whether prompts and completions are attached to spans. It lost the last one with the
+    # agent framework and spent a phase as a knob `configure_telemetry` warned about;
+    # `otel_llm_spans` below asks the identical question, so it gets this flag back rather than a
+    # second one beside it. False (the default) builds an OpenInference `TraceConfig` with every
+    # hide flag set, so a model-call span carries identifiers and counts and nothing else — the rule
+    # `core/tracing.py` states. It still governs nothing when `otel_llm_spans` is off, and
+    # `configure_telemetry` still says so out loud in that case.
+    #
+    # **Setting it True is a decision about data leaving the pod**, not a debugging convenience: it
+    # puts a chemist's question and the model's answer on a span that travels to the collector, and
+    # `SECURITY.md`'s note about the audit trail applies to the collector's store in the same words.
     otel_enabled: bool = False
     otel_include_sensitive_data: bool = False
+    # A span per *model call*, through OpenInference's LangChain instrumentation. Off by default
+    # like every other observability switch.
+    #
+    # **What it buys.** `core/tracing.py` opens two spans — the turn and the tool call — so the
+    # model call between them is invisible, and `chemclaw_*_tokens_total` carries `profile` rather
+    # than model (D-152, deliberately). Both were named regressions once the agent framework left
+    # with `gen_ai.client.token.usage`. The instrumentation emits one span per model call carrying
+    # `llm.token_count.prompt`/`.completion`/`.total`, `llm.model_name` and `llm.provider`, plus the
+    # chain and tool spans around them, over plain OTLP — so the collector this chart already points
+    # at is the whole delivery mechanism.
+    #
+    # **Arize Phoenix reads these conventions natively and is what this was measured against**, but
+    # nothing here depends on it: any OTLP backend receives the same spans, and the package is
+    # Apache-2.0 while Phoenix's server is Elastic License 2.0. The licence question is about the
+    # container an operator runs, not about this tree.
+    otel_llm_spans: bool = False
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
     # the in-cluster collector address is one value like every other endpoint.

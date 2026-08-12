@@ -232,8 +232,11 @@ never what a deployment gets.
 - [ ] Supervisor routing measured. `SubAgentMiddleware`'s `task` tool is the delegation path;
       `Command(goto=…, graph=Command.PARENT)` and a routing *node* are the alternative the ADR
       prefers for trace legibility, and choosing between them is an M12 measurement, not a guess.
-- [ ] Emitting `HandoffEvent` from the stream — the event exists and `graph_stream` already
-      attributes by subgraph namespace; nothing raises the handoff itself yet.
+- [x] Emitting `HandoffEvent` from the stream — raised as a pair by `team.running_specialist`
+      (enter, then `to=""` in the `finally`), so the trace's span and the audit trail's span are
+      the same `try`/`finally`. Observed at the *invocation* rather than at the dispatch, which is
+      what un-entangles it from the routing row above: both candidate mechanisms invoke the
+      compiled specialist. `D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`.
 
 ### M10 — `Send` fan-out
 - [x] `chemclaw/retrieval/fanout.py` — one `Send` branch per source into an `operator.add` field,
@@ -1356,11 +1359,109 @@ middle of the trail as tampered with. It is now a version→shape table, so addi
 
 **What is not done.** Supervisor *routing quality* is unmeasured, and that is the whole reason the
 team ships disabled: a supervisor that mis-routes is worse than the single agent it replaces, and no
-unit test can establish which a deployment gets. `HandoffEvent` exists and `graph_stream` already
-attributes by subgraph namespace, but nothing raises the handoff itself yet. Whether delegation
-stays `SubAgentMiddleware`'s `task` tool or becomes a routing *node* with
-`Command(goto=…, graph=Command.PARENT)` — which the ADR prefers for trace legibility — is an M12
-measurement rather than a guess to make now.
+unit test can establish which a deployment gets. Whether delegation stays `SubAgentMiddleware`'s
+`task` tool or becomes a routing *node* with `Command(goto=…, graph=Command.PARENT)` — which the
+ADR prefers for trace legibility — is an M12 measurement rather than a guess to make now, though
+*trace legibility* is no longer part of what it has to settle: `HandoffEvent` is now raised from
+`team.running_specialist`, which both mechanisms pass through, so the comparison is down to routing
+accuracy and per-specialist cost (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
+
+**The handoff gap, closed.** `HandoffEvent` had shipped as a union member nothing produced — the
+one item on the migration's open list where the code made a promise it did not keep. The fix looked
+blocked behind the routing choice and was not: reading the `task` tool's arguments would have bound
+the contract to the delegation mechanism, while observing the specialist's *invocation* survives
+either mechanism, because both invoke the compiled specialist. Raised as a pair from
+`team.running_specialist`, which is already invariant 3's bracket, so the trace's span and the audit
+trail's span are the same `try`/`finally` and cannot drift apart.
+
+Falsified twice rather than asserted: stubbing the emitter fails all three new tests, and moving the
+entry announcement after execution — both events still firing, in the wrong order — passes the pair
+test and fails the ordering test, which is what earns the ordering test its place. `make lint type
+test` green at 4042 passed, 154 skipped, 0 failed (141 of the skips are the offline sandbox's
+missing Postgres, not this change).
+
+**M12 suite C, run live for the first time (2026-08-11).** Postgres + Temporal + the four workers +
+the front door, against a real credential. Three findings, and *two of them were in the reading
+rather than in the system* — which is the reason to run a harness before trusting the number it
+prints:
+
+1. **The `agent` attribution named the tool node, never the specialist.** Every specialist event
+   arrived as agent `"tools"`, so the suite scored its one observed delegation as
+   `expected evidence → tools` — reporting a supervisor mis-route that had not happened. The name
+   is not in the subgraph namespace under any dispatch through the `task` tool, so this was not a
+   formatting slip. Fixed by attributing from the handoff pair, which is the only reader that holds
+   the real name (`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`).
+2. **The cost column was `None` on every turn** while 26 rows sat in `turn_costs`. `session_tokens`
+   short-circuited on *the harness process's* `session_store`, which defaults to `memory` and is
+   exported by `processes.sh` only to the processes it starts. A local guess about a remote
+   process; the query is now the only reader.
+3. **The measurement itself: the supervisor delegated 0 times in 15 probes.** It answered every one
+   directly, and used only tools the expected specialist advertises in **14 of 15** (12 of those
+   unambiguously — `ask_clarifying_question` and `find_notes` are shared across profiles; rt-07
+   called no tool at all). So the shape here is *not* the mis-routing M9 feared. On this model the
+   single agent picks the right capability cluster on its own, and the team buys nothing it is
+   paying for. A five-probe sonnet-5 arm delegated once out of fifteen before the credential's
+   usage limit cut the run short, so "rarely, and model-dependent" is as far as the evidence goes.
+
+**Both arms, on haiku, 15 probes each.** The control arm ran once the credential recovered; the
+team arm's cost did not need re-running, because the ledger fix made it readable retroactively.
+
+| arm | delegated | tool calls | median tokens/turn | mean tokens/turn |
+| --- | ---: | ---: | ---: | ---: |
+| team | 0 | 19 | 95,313 | 101,858 |
+| single | — | 33 | 91,321 | 117,271 |
+
+**Read the median, not the mean.** The mean says the single agent costs 15% *more*, and that is an
+artefact of four high-variance turns (rt-01, rt-09, rt-13, rt-14) where it took extra tool-calling
+round trips. The median is the systematic part: the team costs **~4k tokens more per turn, on every
+turn**, which is the `task` tool and the supervisor prompt riding in every request. The single agent
+is cheaper on **11 of 15** probes.
+
+So the answer to M9's question, on this model and this corpus: **the team is a constant tax for a
+capability that fired zero times**, and the single agent reaches the right specialist's tools
+unaided in 14 of 15. `agent_teams_enabled` stays off — now on evidence rather than on caution. This
+also makes the routing-mechanism choice (`task` tool vs. routing node) moot until something
+actually routes: there is no trace to make legible.
+
+**M12 suite B (degradation): 3/3 PASS**, at zero token cost, with the broker deliberately stopped —
+the outage is announced, announced *before* the first token, and the durable launcher was genuinely
+reached. Getting there required fixing the mock (below).
+
+**The mock spoke a protocol nothing uses any more.** `cli/mock_llm` served only `/v1/responses`,
+because it was written when layer 1 ran on the Microsoft Agent Framework, whose client resolved to
+the Responses API. The LangGraph rebuild builds a `ChatOpenAI`, which posts to
+`/v1/chat/completions`. Nothing followed, so **every credential-free lane** — `live-degradation`,
+`live-storm`, `live-soak` — had been taking a bare `404` and dying with no answer and no tool call
+since M13. First run scored 1/3 with "the turn produced no token or answer at all" while the mock's
+own counter read `requests: 0`; after adding the route, 3/3 and `requests: 2` (the second call being
+the answer after the tool result, which is `already_has_tool_results` correctly recognising the
+chat-completions shape rather than looping to the cap).
+
+**M12 suite A (plan gate), run live — and it found the day's fourth reading defect.** First run:
+0/5, with state-changing calls apparently running unrefused. The gate was innocent twice over. The
+lane needed `CHEMCLAW_HARNESS_ENABLED=true` as well as `harness_autonomy=plan_only` (the Makefile
+target documents only the second), which took it to 4/5. The remaining failure was real and was
+*not* in the gate: `announce_tool_failures` sat innermost, so it nested **inside**
+`enforce_plan_approval`, which raises before calling its handler. The announcer never ran, and a
+refusal reached the chemist only as a `tool_result` reading "Refused: …" — which a surface renders
+as a step that worked. The front-door log recorded two refusals in a run the suite scored as zero.
+Fixed by moving the announcer outside everything that refuses
+(`D-2026-08-11-a-refusal-nobody-can-see-is-not-a-gate`); the refusal check now PASSes.
+
+Across the two post-fix runs every one of the five checks has passed, and none has failed for a
+system reason. DARK-1 shows FAIL in the latest run only because haiku left the todo list unchanged
+on the third turn, so the scenario was never exercised — the harness reporting an un-taken
+measurement as a miss rather than a pass, which is the rule
+`test_a_script_that_never_changes_the_plan_cannot_report_dark_1_as_passed` exists to enforce. It
+PASSed with a genuine hash change in the preceding run.
+
+**The pattern across all four findings, which is the thing worth keeping.** The handoff, the
+attribution, the mock protocol and the announcer were every one of them a defect in *observation*
+rather than in mechanism — the specialist ran, the gate refused, the delegation happened, the
+behaviour catalogue was right. Each had passing unit tests, and each test supplied the observation
+by hand (an invented namespace, a hand-written SSE frame, a protocol nobody re-checked after the
+engine changed). None was reachable without a live stack. The rule now written into the tests: **a
+test whose subject is a reader of an external shape may not supply that shape by hand.**
 
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
@@ -1517,13 +1618,216 @@ true after it, which is a better argument for renaming than brevity.
 plan→approve→execute round trip, and team routing accuracy. Each needs a credential or a tenant this
 environment does not have. `agent_teams_enabled` stays off by default for the third of them.
 
-## Post-migration review (2026-08-12)
+---
+
+# Deep-agents audit + the LangSmith question (2026-08-11)
+
+Prompted by: are the deep-agents patterns properly implemented, and is LangSmith implemented — if
+not, is it (or something comparable) worth adding? Audited against LangChain's own four pillars for
+Deep Agents plus the middleware `create_deep_agent` composes by default.
+
+Decided in [`D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has`](../docs/decisions/D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has.md)
+and [`D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape`](../docs/decisions/D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape.md).
+
+**The finding.** Five of six pillars are sound and each narrowing is already argued for in the tree.
+The sixth — context management — does not exist, and everything that *describes* it survived the
+framework removal: three settings with no reader, a config comment in the present tense, three
+`.env.example` rows, and a sentence in the system prompt telling the model its context is compacted.
+
+## Steps
+
+- [x] **Restore D-025's policy** as `agent/compaction.py`: upstream's `ClearToolUsesEdit` for the
+      tool-result half, first-party `KeepLastConversationGroupsEdit` for the conversation window,
+      both inside `wrap_model_call` (non-destructive), attached unconditionally.
+- [x] **Two counters** so the policy is checkable rather than believed —
+      `chemclaw_context_compactions_total`, `chemclaw_context_reclaimed_tokens_total`, incremented by
+      an observer nested inside the editor so it sees both the full thread and the edited request.
+- [x] **Prune the checkpoint tables by thread** (`retention_checkpoints_days`), all three in one
+      transaction, absent tables skipped rather than raised on.
+- [x] **`core.db.existing_tables`** — extracted from `agent/leaver.py` at its second caller.
+- [x] **Delete `ChemclawState.awaiting_jobs`** and rewrite the three docstrings that described it as
+      live.
+- [x] **Give the CLI the checkpointer it documents** (`cli_checkpointer`), handed to both the graph
+      and `_plan_command`.
+- [x] **Fix the stale prose**: `langgraph_agent`'s "not here yet" list, `infra/sql/README.md`'s
+      `session_messages` row, and the four checkpoint tables that inventory structurally cannot list.
+- [x] **Two ADRs + ledger rows + two BACKLOG rows** (the model-call span, the eval-lane spike).
+
+## Review
+
+**What the numbers say.** A thread of realistic turns (one 20,000-character evidence sweep each —
+the largest real result `api/tool_results.py` measured) under the shipped defaults, recorded off a
+fake model inside a real compiled graph. Below the budget the model gets the whole thread; above it
+the sent size stops tracking the thread size:
+
+| turns | thread tokens | sent to the model |
+|------:|--------------:|------------------:|
+| 10 | 51,610 | 51,616 |
+| 20 | 103,230 | **13,740** |
+| 80 | 412,950 | **25,140** |
+| 160 | 825,910 | **40,340** |
+
+`message_pairing.calls_without_adjacent_results` is empty on every one of those, asserted rather
+than reasoned about — a reduction that strands a tool call is rejected by the API outright and
+replayed on every later turn.
+
+**What the first failing test was worth.** The end-to-end test originally asserted a cleared
+placeholder *and* a shortened list in one run, and failed: with a two-group window the cleared
+results were themselves dropped, so both edits were working exactly as specified while the assertion
+was wrong. Split into two tests, one per edit, with the other edit's knob set out of range. The
+lesson is the file's own: an assertion that spans two mechanisms cannot tell you which one moved.
+
+**What could not be verified here.** This sandbox's pgvector is 0.6.0 and the full migration set
+needs 0.7+ (`bit_jaccard_ops`), so every Postgres-backed test skips locally and runs in CI. Rather
+than assert the checkpoint prune from the code, it was run against a live Postgres 16 with the
+checkpointer's own DDL: an expired thread left 0 rows in all three tables, a thread inside its window
+kept all 3, `_prune_checkpoints` reported per-table counts, and a schema with no checkpoint tables
+reported them skipped while `session_events` was still pruned.
+
+**What was declined and why it is a decision rather than a deferral.** LangSmith is proprietary —
+client SDKs open, backend/UI/storage closed, self-host Enterprise-only and sales-gated — so the one
+deployment shape this tree accepts is not on offer. Its core value is prompt/response content in a
+third-party service, which four merged decisions forbid (`core/tracing.py`, `core/logging.py`,
+`SECURITY.md`, D-049's self-hosted-Temporal argument). The gaps being used to argue for it split
+cleanly: per-model attribution, model-call spans and dashboards are in-house work through the
+collector the chart already runs, and the eval/experiment gap (AG-13) is a scoped spike on the eval
+lane where a *self-hostable* tool — Phoenix or Langfuse — is the candidate, not LangSmith.
+
+---
+
+# Phoenix / OpenInference: a model call becomes a span (2026-08-11)
+
+Prompted by: "then go with implementation of phoenix", after the licence comparison. Decided in
+[`D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`](../docs/decisions/D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment.md).
+
+**What working it out changed.** "Implement Phoenix" turned out not to mean adopting Phoenix.
+`openinference-instrumentation-langchain` and its closure are **Apache-2.0**; only the Phoenix
+server image is ELv2, and the instrumentation emits OpenInference spans over plain OTLP without
+speaking to Phoenix at all. So the backend is a deployment choice, nothing ELv2 enters this tree,
+and the change closes two backlog rows that were never vendor-shaped.
+
+## Steps
+
+- [x] Dependency: one Apache-2.0 package, with the reason in `pyproject.toml` beside it.
+- [x] `otel_llm_spans` (new, off in code / on in the chart) and **`otel_include_sensitive_data`
+      revived** — it had no consumer and a warning; this asks the identical question, so it gets the
+      flag back rather than a second knob.
+- [x] `_instrument_llm_calls` + `_trace_config` in `core/logging.py`, lazy-imported, raising the
+      same directive `RuntimeError` the SDK check raises when the extras are missing.
+- [x] `tests/test_llm_spans.py` — five tests, with the content assertion written as a **sweep over
+      every exported attribute** rather than a list of keys.
+- [x] `.env.example`, `values.yaml`, `docs/guides/runbook.md`, `deploy/README.md` — the three places
+      that said per-model attribution was gone now say what replaced it and in which pipeline.
+- [x] ADR + ledger row; the two backlog rows closed, the AG-13 row narrowed to the backend.
+
+## Review
+
+**Measured before a line was written.** An overlay venv (`.pth` onto the project's site-packages, so
+`.venv` was untouched while the gate ran) drove a scripted model through the real
+`build_langgraph_agent` with spans in an `InMemorySpanExporter`. Content allowed → 5 attributes
+carry the question or the answer; suppressed → **0**, with `llm.token_count.*` and `llm.provider`
+byte-identical across the two runs. That is what made suppression a default rather than a trade-off:
+it costs none of what the instrumentation was added for.
+
+A tool-calling turn exports 8 spans — `AGENT` ×1, `LLM` ×2, `CHAIN` ×4, `TOOL` ×1 — so the
+per-*call* attribution the backlog row asked for is there, not a per-turn total.
+
+**The test earned its shape immediately.** `test_every_hide_flag_is_set_together` compares against
+`TraceConfig`'s own dataclass fields rather than a list written twice, and it failed on the first
+run: three embedding flags were missing from the suppression list. `hide_embeddings_text` is the one
+that mattered — the text being embedded is a chemist's question or a note's body — so a list-versus-
+list test would have passed while the default configuration leaked content.
+
+**What this does not do.** It does not close AG-13. That row wants datasets, run-over-run diffing
+and annotation on the eval lane, which is a Phoenix *deployment* run against the probe transcripts.
+What changed is that the trace half of the original ask no longer needs a platform at all.
+
+### Run against a live Phoenix (2026-08-11, follow-up)
+
+The in-memory measurement covers spans as they are *built*. What a deployment gets is spans as they
+are *exported*, so the same turn went twice through the shipped path — `configure_telemetry()`, the
+real OTLP gRPC exporter, `CHEMCLAW_OTEL_ENDPOINT` — into Phoenix 20.0.0 running locally, read back
+out of Phoenix's own REST API:
+
+| | spans | traces | token counts | content-bearing attributes |
+|---|---|---|---|---|
+| suppressed (default) | 10 | 1 | 1234 / 56 / 1290 | **0** |
+| content allowed | 10 | 1 | 1234 / 56 / 1290 | **5** |
+
+Identical except for the one thing the flag governs, and the same five attributes the in-memory run
+found — nothing is added or removed on the way through the exporter.
+
+**The finding worth having run it for**: the first-party and OpenInference spans join into *one*
+trace. Phoenix shows `chemclaw.turn` as the root, with `chemclaw` (CHAIN) beneath it, the skills
+middleware (AGENT), `model` (CHAIN) → the model call (LLM) twice, `tools` (CHAIN) →
+`ask_clarifying_question` (TOOL), and our `chemclaw.tool` as a second child of the turn. An operator
+sees one turn, not two disconnected halves — which was an assumption until this run.
+
+Phoenix needed Python 3.12 to import (20.0.0 declares `>=3.10` and carries a dataclass default only
+3.12 accepts), so it ran in a venv of its own. That is the topology anyway.
+
+---
+
+# Review pass over the compaction + Phoenix change (2026-08-11)
+
+Prompted by: "Review all changes. Implement fixes automatically. Really make it production ready."
+Decided in [`D-2026-08-11-what-the-review-found-in-the-compaction-change`](../docs/decisions/D-2026-08-11-what-the-review-found-in-the-compaction-change.md).
+
+Three methods, three disjoint sets of findings — which is the argument for running all three rather
+than whichever is cheapest:
+
+- **The review skill at max effort** found six, including the one that mattered: the observer
+  middleware declared only the async hook, so every synchronous `graph.invoke()` raised.
+- **A hand pass over interactions** found the two a diff-shaped review cannot see: the privacy flag
+  that re-arms itself on upgrade, and the placeholder instructing the model to do what the repeat
+  guard refuses.
+- **A test written to compare against upstream's own dataclass fields** had already found the three
+  missing embedding hide flags, before either of the above ran.
+
+## Steps
+
+- [x] `RecordContextCompaction` declares **both** hooks; sync path pinned by a test.
+- [x] `_warn_about_sensitive_data` warns in both directions, naming the endpoint in the live case.
+- [x] Placeholder reduced to the fact; the guidance moved to the system prompt, where it is paid
+      for once rather than once per cleared result.
+- [x] `_plan_command`'s `saver` required; `threads_deferred` reported; `leaver._existing_tables`
+      inlined; the harness guide's `awaiting_jobs` and two `lg_`-prefixed names corrected; the
+      middleware diagram gained the context editor; the `DEFERRED.md` prompt-cache row now says
+      compaction moves the number it tells an operator to read.
+- [x] The `timestamptz` cast's failure mode written down as a considered answer rather than silence.
+- [x] ADR + ledger row; the merged ADRs are amended rather than edited.
+
+## Review
+
+**Re-verified against a live Phoenix after the fixes, not just re-reasoned.** Two turns — one
+async, one **sync** (the path that raised `NotImplementedError` before the fix) — both land as
+traces rooted at `chemclaw.turn`, each carrying an LLM span with `llm.token_count.prompt=99 /
+completion=5 / total=104`, and **zero** content-bearing attributes across all 10 spans, including no
+trace of the 20,000-character evidence payload compaction had cleared.
+
+**What is uncomfortable and worth keeping in the record:** the change being reviewed was itself a
+fix for "a mechanism whose description and behaviour had drifted apart", and all three findings
+above are that same defect. Writing the fix does not confer immunity. The docstring that argued for
+the async-only hook was *specific and confident* and wrong — which is the case for measuring rather
+than reasoning, applied to one's own prose.
+
+---
+
+# Post-migration review (2026-08-12)
 
 The rebuild shipped green — `make lint type test`, every validator, CI, 4155 tests — and then a
 16-lane review with adversarial verification (181 agents; 81 findings raised, 72 survived) found
 three separate defects that each ended in a permanently unusable conversation. All three are fixed;
 `docs/decisions/D-2026-08-12-a-review-the-migration-did-not-get.md` records what a green suite could
 not see and why.
+
+**The third was found twice.** While this review ran, the deep-agents audit above reached the same
+missing context bound from the opposite direction and shipped `agent/compaction.py` first — a
+better fix, because it restores all three of D-025's settings rather than two and gives the policy
+a counter. This branch's `_context_middleware` is deleted rather than merged beside it, and the
+setting it had removed as unread (`agent_keep_last_conversation_groups`) is restored. Two reviews
+with no contact finding one defect within a day is the strongest evidence here that the class is
+structural rather than incidental.
 
 **The one lesson worth carrying forward.** Sixteen of the confirmed findings are the same shape: a
 property was moved to a new mechanism and *only the declaration moved*. The specialist attenuation
@@ -1542,3 +1846,32 @@ Three follow-on habits, each cheap:
   middleware one call at a time, and the bypass needed two calls in one assistant message.
 - **When a docstring claims a set is derived, derive it in the test.** Two of the six unfalsifiable
   tests said "enumerated from the protocol" / "proves the list is complete" over a literal.
+
+## What merging this into `main` found (a fourth defect, in the seam between two fixes)
+
+The branch sat behind 21 commits that had independently fixed overlapping ground, so the merge was
+semantic rather than textual. Three of its resolutions are just "main's version is more complete"
+— `agent/compaction.py` over `_context_middleware`, handoff-tracked attribution over the namespace
+read, `calls_without_adjacent_results` restored because main gave the function a real caller after
+this branch deleted it as dead. Deleting it was right on the evidence available and wrong within a
+day, which is the ordinary cost of removing a thing whose next caller is being written elsewhere.
+
+The fourth is a defect **neither branch had alone**, and it is the interesting one:
+
+- On `main`, a specialist's tokens stream **unattributed**, and `api/runner` concatenates every
+  `TokenEvent` into `answer_parts` — which is both the text a chemist reads and the durable
+  transcript. So a delegated turn splices the specialist's working prose into the supervisor's
+  answer, interleaved in production order. Measured by mutating the producer back: the stream is
+  `[('', 'no genotoxic alert matched'), ('', 'done')]` — two agents, one voice.
+- This branch's fix dropped sub-root tokens entirely, which is silent for the whole delegation and
+  contradicts `main`'s new test that a specialist's output must land *inside* its handoff span.
+
+Neither test could see the other's defect: one asserted the specialist is visible, the other that
+the answer is clean, and the shipped code satisfied exactly one at a time. The resolution uses the
+mechanism the contract already had — `TokenEvent` gains the same additive, defaulted `agent` field
+five other events carry, the producer stamps it, and the runner concatenates only unattributed
+chunks. Both properties now hold and one test asserts both directions.
+
+**The lesson is about merges, not about tokens.** Two correct branches can compose into a defect
+that is in neither, and the place to look is where each side's *test* stops: a test pins one
+direction of a property, and merging two one-directional pins is not a two-directional pin.

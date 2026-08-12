@@ -230,6 +230,15 @@ stop_temporal() {
 
 case "${1:-up}" in
   up)
+    # Above the branch, because the note repo belongs to neither backend: `processes.sh` exports
+    # `CHEMCLAW_NOTE_REPO_DIR` unconditionally, so both paths need the clone. It used to sit in the
+    # native list only — below a hand-off that by definition never returns — so on the branch this
+    # file itself calls "the right way", the lane came up with no clone, `note_repo_dir` fell back
+    # to the working checkout, and the PR-gate refused every submission before running a git
+    # command. That is the whole knowledge-contribution half of a live run (D-005: job results,
+    # reports and distilled playbooks all take the gate), silently missing on exactly the machines
+    # most likely to run the lane.
+    ensure_note_repo
     if docker_available; then
       log "docker daemon reachable — using infra/docker-compose.yml"
       exec docker compose -f "$REPO_ROOT/infra/docker-compose.yml" up -d
@@ -237,7 +246,6 @@ case "${1:-up}" in
     log "no docker daemon — bringing the stack up natively"
     ensure_pgvector
     ensure_temporal_cli
-    ensure_note_repo
     ensure_cluster
     start_postgres
     start_temporal

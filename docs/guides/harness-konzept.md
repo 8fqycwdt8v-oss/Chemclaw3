@@ -60,8 +60,8 @@ unverändert der ist, der er ohne Harness war.
 | Baustein | Was er tut |
 |---|---|
 | **`TodoListMiddleware`** (LangChain) | Stellt dem Modell `write_todos` bereit und besitzt das Feld `todos` im Graph-State. Ein `Todo` ist `{content, status}` — **ohne** Beschreibungsfeld, was in §4 wichtig wird. |
-| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um genau zwei Felder: `awaiting_jobs` (laufende durable Jobs) und `model_calls` (der Zähler der Runaway-Bremse). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. |
-| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Tatsache zurück — ein Flag, keine Zahl: der stoppende Zweig zählt nicht hoch, also endet ein gedeckelter Turn bei genau derselben Zahl wie einer, der seinen letzten erlaubten Aufruf verbraucht und dann geantwortet hat. |
+| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um zwei Felder: `model_calls` (der Zähler der Runaway-Bremse) und `loop_capped` (ob sie gefeuert hat). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. Ein drittes, `awaiting_jobs`, stand hier, bis auffiel, dass es nie jemand geschrieben oder gelesen hat (§4). `turn_input` setzt beide Felder beim Turn-Start zurück — der Checkpointer hält den Thread, also ist ein Feld ohne Reset **pro Session** und nicht pro Turn. |
+| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end", "loop_capped": True}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Tatsache zurück — ein Flag, keine Zahl: der stoppende Zweig zählt nicht hoch, also endet ein gedeckelter Turn bei genau derselben Zahl wie einer, der seinen letzten erlaubten Aufruf verbraucht und dann geantwortet hat. |
 | **`enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
 
 **Warum der Deckel ein eigener Zähler ist und nicht `ModelCallLimitMiddleware`.** Die
@@ -83,7 +83,9 @@ Der Harness ist eine **reine Reasoning-Schicht-Erweiterung** und respektiert D-0
 │        │            │                │                                 │
 │        │            │                └─ enforce_plan_approval → Freigabe vor Wirkung
 │        │            └─ TodoListMiddleware  → write_todos, State-Feld `todos`
-│        │            └─ enforce_loop_cap         → `model_calls`, harte Obergrenze
+│        │            └─ enforce_loop_cap    → `model_calls`, harte Obergrenze
+│        │            └─ ContextEditingMiddleware → Kontext-Budget (`agent/compaction.py`,
+│        │                 **nicht** harness-bedingt: hängt immer, auch am Einzel-Turn-Agenten)
 │        │                                                                │
 │        └─ ruft pro Schritt vorhandene Tools auf:                        │
 │             • inline (xTB, Löslichkeit, pKa, Graph-Query) — synchron    │
@@ -114,17 +116,22 @@ zurück, das Ergebnis kommt später über den Push-Back in die Session. Ein naiv
 würde entweder blockieren (verbietet die Architektur) oder das Todo fälschlich abhaken, obwohl der
 Job noch läuft.
 
-**Lösung: `awaiting_jobs` ist ein eigenes State-Feld.** Ein Schritt, der einen Temporal-Job
-auslöst, hinterlässt die `job_id` dort — *nicht* im Plan. Der Agent formuliert den Zwischenstand
-(„DFT-Validierung gestartet, ID qm-8f2a"), der Turn gibt die Kontrolle ab, und der zurückgemeldete
-Abschluss bringt die Folgeschritte wieder in Gang.
+**Lösung: die Buchhaltung steht gar nicht erst im Plan.** Ein Schritt, der einen Temporal-Job
+auslöst, hinterlässt die `job_id` als `job_records`-Zeile und als `session_events`-Push-Back —
+*nicht* im Plan. Der Agent formuliert den Zwischenstand („DFT-Validierung gestartet, ID qm-8f2a"),
+der Turn gibt die Kontrolle ab, und der zurückgemeldete Abschluss bringt die Folgeschritte wieder in
+Gang.
+
+Ein State-Feld `awaiting_jobs` war dafür vorgesehen und wurde deklariert, bevor die durable Seite
+gebaut war; die ging dann in die beiden Stores oben. Geschrieben oder gelesen hat es nie jemand, und
+es ist entfernt statt nachgereicht (D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has).
 
 **Warum das mehr ist als Aufräumen.** Vorher wurde ein wartendes Todo dadurch markiert, dass sein
 Beschreibungsfeld mit `awaiting-job:` präfigiert wurde — eine Konvention, die es nur gab, weil das
 Todo-Objekt kein Feld dafür hatte. Der Plan-Identitätshash musste diese Einträge dann wieder
 herausfiltern, sonst hätte ein freigegebener Plan seine eigene Freigabe in dem Moment widerrufen,
-in dem er den ersten Job startet. Heute sind es schlicht **nicht dieselben Felder**: die
-Ausnahme, die das Gate braucht, ist strukturell statt geparst — und `Todo` hat kein
+in dem er den ersten Job startet. Heute steht die Buchhaltung schlicht **nicht in dieser Liste**:
+die Ausnahme, die das Gate braucht, ist strukturell statt geparst — und `Todo` hat kein
 Beschreibungsfeld mehr, in das die Konvention zurückkriechen könnte.
 
 **Durability-Grenze — was einen Absturz überlebt:**
@@ -265,7 +272,12 @@ Disclosure braucht ein Verb.
   rein beobachtenden `before_tool`/`after_tool`-Hook. Das ist ein realer Preis, und die
   Live-Revalidierung ist das, was ihn von einer Annahme in eine Messung verwandelt.
 - **Kontext-Kompaktierung** — sie darf die Provenienz-Trennung (episodisch vs. semantisch, §9 der
-  Architektur) nicht verwischen; bei Report-Läufen sind Zitate/Belege auszunehmen.
+  Architektur) nicht verwischen; bei Report-Läufen sind Zitate/Belege auszunehmen. Seit
+  `agent/compaction.py` ist das kein hypothetisches Risiko mehr, sondern ein benannter Handel: ein
+  geräumtes Werkzeugergebnis hinterlässt einen Platzhalter *ohne* die zitierte Spur, die D-025 noch
+  behielt. Der Handel greift erst oberhalb des Budgets, wo die Alternative ein harter Abbruch am
+  Kontextlimit ist; `exclude_tools` ist die Notbremse, falls eine Installation misst, dass sie eine
+  braucht.
 
 ## 10. Was der Wechsel auf LangGraph am Harness geändert hat
 

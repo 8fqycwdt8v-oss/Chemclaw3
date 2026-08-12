@@ -58,6 +58,18 @@ dependencies = [
     # that framework — is a hard requirement of `opentelemetry-sdk`, so it survived the removal.
     # Every `opentelemetry.*` import in `src/` is covered by these two distributions plus their own
     # closure.
+    # LLM-level spans, from `core.logging._instrument_llm_calls`. Apache-2.0, and that is worth
+    # stating: Arize Phoenix — the backend that reads these conventions natively — is Elastic
+    # License 2.0, but none of it is vendored here. This package emits OpenInference spans over
+    # plain OTLP, so the backend is a deployment choice and the only thing entering this tree is
+    # the instrumentation.
+    #
+    # Not speculative: it closes the two gaps the framework removal left behind, both of which
+    # `docs/guides/runbook.md` records as regressions — there is no span for a model call, and
+    # `chemclaw_*_tokens_total` carries `profile` rather than model. Its own closure adds
+    # `opentelemetry-instrumentation`, `openinference-instrumentation` and
+    # `openinference-semantic-conventions`, none of which any first-party module imports directly.
+    "openinference-instrumentation-langchain>=0.1.70",
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
     "pandas>=2.2",

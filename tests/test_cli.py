@@ -7,11 +7,16 @@ resolution, single-turn text extraction), not model behavior.
 
 import asyncio
 from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
+from langchain_core.language_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
 
 from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent import plan_state
+from chemclaw.agent.checkpointer import process_checkpointer
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
 from chemclaw.cli import chat as cli
@@ -186,14 +191,14 @@ def test_approve_refuses_a_session_with_no_plan(
 
     Its ancestor made the same point about a session holding *only* the launcher's `awaiting-job:`
     bookkeeping rows, which the display counted and the hash stripped — two questions, one guard.
-    That distinction is structural now rather than a parse: waiting jobs are a separate state field
-    (`agent/state.ChemclawState.awaiting_jobs`), so they are not in `todos` and such a session is
-    simply this one.
+    That distinction is structural now rather than a parse: nothing writes job bookkeeping into
+    `todos` at all (a launched job is a `job_records` row and a `session_events` push-back), so such
+    a session is simply this one.
     """
     cli_plan([])
 
     async def _run() -> tuple[str, tuple[bool, str] | None]:
-        reply = await cli._plan_command("/approve", settings.cli_admin_actor)
+        reply = await cli._plan_command("/approve", settings.cli_admin_actor, saver=None)
         return reply, await cli_approvals.decision(cli._CLI_SESSION_ID, EMPTY_PLAN_HASH)
 
     reply, recorded = asyncio.run(_run())
@@ -212,7 +217,7 @@ def test_approve_records_and_arms_a_real_plan(
     cli_plan(titles)
 
     async def _run() -> tuple[str, str, tuple[bool, str] | None]:
-        reply = await cli._plan_command("/approve", "alice@lab")
+        reply = await cli._plan_command("/approve", "alice@lab", saver=None)
         plan_hash = plan_identity(titles) or EMPTY_PLAN_HASH
         return reply, plan_hash, await cli_approvals.decision(cli._CLI_SESSION_ID, plan_hash)
 
@@ -237,8 +242,104 @@ def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
     cli_plan([])
 
     async def _run() -> str:
-        return await cli._plan_command("/plan", settings.cli_admin_actor)
+        return await cli._plan_command("/plan", settings.cli_admin_actor, saver=None)
 
     reply = asyncio.run(_run())
     assert "no approvable plan" in reply, f"the empty constant was shown as a plan: {reply}"
     assert EMPTY_PLAN_HASH not in reply
+
+
+# --- The checkpointer the CLI documented and did not have -------------------------------------
+
+
+def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI is a multi-turn conversation, which it was not.
+
+    `converse` documented that reusing one `session_id` "continues the thread the last one left",
+    and `_build_cli_agent` passed no checkpointer at all, so every turn began from an empty thread.
+    Asserted against what the *model* was handed on the second turn, because that is the only place
+    the difference is visible — a graph with no checkpointer answers both turns quite happily.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+
+    class _Recording(GenericFakeChatModel):
+        seen: list[list[Any]] = []
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            return self
+
+        def _generate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
+            type(self).seen.append(list(messages))
+            return super()._generate(messages, *args, **kwargs)
+
+    _Recording.seen = []
+
+    async def _run() -> None:
+        saver = await process_checkpointer()
+        agent = build_langgraph_agent(
+            model=_Recording(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
+            checkpointer=saver,
+        )
+        await cli.converse(agent, "first question")
+        await cli.converse(agent, "second question")
+
+    asyncio.run(_run())
+
+    second = _Recording.seen[1]
+    assert any("first question" in str(m.content) for m in second), (
+        "the second turn did not see the first; the CLI is not a conversation"
+    )
+
+
+def test_the_plan_command_reads_the_store_the_turns_wrote_to(
+    monkeypatch: pytest.MonkeyPatch, cli_approvals: InMemoryPlanApprovalStore
+) -> None:
+    """`/plan` shows the plan the session actually proposed — the defect the saver thread fixes.
+
+    Deliberately **not** stubbing `plan_state.session_todos`, which is what every other test in this
+    file does and what made the defect invisible: the real function resolves *the configured*
+    checkpointer, so with the graph built on a different one (or on none) `/plan` answered
+    "(no plan yet)" for every session under every configuration, and the harness this CLI exists to
+    exercise could not be exercised. One saver, handed to both, is the whole fix — so the test hands
+    it to neither and threads it exactly as `_run` does.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "entra_required", False)
+    plan = "screen three solvents"
+
+    async def _run() -> str:
+        saver = await process_checkpointer()
+        model = _WriteTodosThenAnswer(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "write_todos",
+                                "args": {"todos": [{"content": plan, "status": "pending"}]},
+                                "id": "call-1",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="done"),
+                ]
+            )
+        )
+        agent = build_langgraph_agent(model=model, checkpointer=saver)
+        await cli.converse(agent, "what should we try?")
+        return await cli._plan_command("/plan", settings.cli_admin_actor, saver)
+
+    reply = asyncio.run(_run())
+
+    assert plan in reply, f"/plan did not show the plan the turn proposed: {reply!r}"
+    assert "(no plan yet)" not in reply
+
+
+class _WriteTodosThenAnswer(GenericFakeChatModel):
+    """A model that writes a plan and then answers — the shape a harness turn actually takes."""
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Accept the binding; the script already names the call."""
+        return self

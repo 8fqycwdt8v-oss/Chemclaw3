@@ -284,9 +284,49 @@ def test_the_gate_is_attached_under_plan_only(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
     names = _middleware_names()
     assert "enforce_plan_approval" in names
-    # Inside audit (so a refusal is recorded) and not innermost (that is announce_tool_failures).
+    # Inside audit, so a refusal is recorded on the trail.
     assert names.index("enforce_plan_approval") > names.index("audit_tool_calls")
-    assert names.index("enforce_plan_approval") < names.index("announce_tool_failures")
+
+
+def test_a_refusal_is_announced_because_the_announcer_wraps_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`announce_tool_failures` must be *outside* the gate, and this assertion used to say inside.
+
+    Nesting is list order, so a middleware cannot see an exception raised by one above it.
+    `enforce_plan_approval` raises before calling its handler, so while the announcer sat innermost
+    it never ran for a refusal — and a gated call reached the chemist only as a `tool_result` whose
+    text begins "Refused:", which a surface renders as a step that worked.
+
+    The old assertion pinned that ordering with the comment "not innermost (that is
+    announce_tool_failures)", and `tests/test_m12_probes.py` asserted the opposite behaviour in
+    prose — "they arrive on the stream as the same event type". Both were believed; the live M12
+    plan-gate suite settled it by scoring **0** refusals in a run whose front-door log recorded two.
+    The gate held the whole time and nothing downstream could see it hold.
+
+    So the invariant is ordering-as-visibility: everything that refuses must nest *inside* the
+    thing that announces refusals, and the announcer must stay inside both converters so it still
+    sees the raw exception rather than the prose either one turns it into.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    names = _middleware_names()
+    announcer = names.index("announce_tool_failures")
+    for refuser in (
+        "enforce_plan_approval",
+        "enforce_tool_authz",
+        "refuse_writes_on_dry_run",
+        "refuse_repeated_calls",
+    ):
+        assert announcer < names.index(refuser), (
+            f"{refuser} raises before its handler, so an announcer nested inside it never runs; "
+            f"the refusal would reach the chemist as a tool_result reading 'Refused: …'"
+        )
+    for converter in ("surface_authorization_denials", "surface_domain_errors"):
+        assert names.index(converter) < announcer, (
+            f"{converter} turns an exception into prose for the model; the announcer must stay "
+            "inside it to see the raw exception"
+        )
 
 
 def test_the_default_deployment_has_no_plan_gate() -> None:

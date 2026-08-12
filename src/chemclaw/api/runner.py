@@ -297,7 +297,11 @@ async def run_turn(
                 usage=turn_usage,
                 exchanges=tool_exchanges,
             ):
-                if isinstance(event, TokenEvent):
+                # `not event.agent`: a specialist's tokens stream to the surface for the trace
+                # and are *not* the answer. Concatenating them would interleave one agent's
+                # working prose with the supervisor's, in the durable transcript as well as on
+                # screen, because both ends of this turn are built from `answer_parts`.
+                if isinstance(event, TokenEvent) and not event.agent:
                     answer_parts.append(event.text)
                 yield event
             # The stream is exhausted, so the graph has returned and the history provider has
@@ -344,7 +348,7 @@ async def run_turn(
                         exchanges=tool_exchanges,
                     )
                     async for event in continuation:
-                        if isinstance(event, TokenEvent):
+                        if isinstance(event, TokenEvent) and not event.agent:
                             answer_parts.append(event.text)
                         yield event
                     run_complete = True

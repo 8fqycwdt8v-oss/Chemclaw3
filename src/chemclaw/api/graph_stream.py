@@ -46,6 +46,7 @@ from chemclaw.api.events import (
     ApprovalRequestEvent,
     Event,
     EvidenceSourceEvent,
+    HandoffEvent,
     JobStartedEvent,
     NoteProposedEvent,
     PlanEvent,
@@ -59,6 +60,7 @@ from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
     ApprovalSignal,
+    HandoffSignal,
     JobSignal,
     QuestionSignal,
     Signal,
@@ -109,6 +111,9 @@ async def graph_events(
         `Event`s in the order and with the meanings `api/events.py` declares.
     """
     todos: list[str] = []
+    # Who is currently answering, tracked across the stream by the handoff pair rather than
+    # inferred per event. `""` is the main agent, which is every turn without a team.
+    agent = ""
     async for namespace, mode, payload in graph.astream(
         turn_input(message), config, stream_mode=_MODES, subgraphs=True
     ):
@@ -116,21 +121,33 @@ async def graph_events(
             chunk, _metadata = payload
             usage.add(graph_usage_tokens(chunk))
             text = _text_of(chunk)
-            # **Only the root's tokens are the answer.** The runner concatenates `TokenEvent` into
-            # the turn's final answer, and a subgraph namespace is a *specialist* thinking out loud
-            # — so streaming its tokens spliced one agent's working notes into another agent's
-            # answer, interleaved with the supervisor's own text in whatever order the two
-            # happened to produce it. Its tool calls and results still surface, attributed, which is
-            # what a trace panel needs; what a chemist reads stays the answer the supervisor wrote.
+            # **Only the root's tokens are the answer, and the attribution is what says so.**
+            # The runner concatenates unattributed `TokenEvent`s into the turn's final answer, so
+            # a specialist's working prose has to arrive marked or it is spliced into another
+            # agent's answer, interleaved with the supervisor's own text in whatever order the two
+            # happened to produce it.
+            #
+            # The *namespace* is what identifies a chunk as a specialist's — non-empty means "below
+            # the root" — while the *name* comes from the handoff pair above, because the namespace
+            # never held it (D-2026-08-11-the-specialists-name-is-not-in-the-namespace). Between a
+            # handoff and its hand back the two agree; a chunk from below the root with no handoff
+            # open still gets a non-empty marker rather than passing as the answer, which is the
+            # direction that fails safe.
+            #
             # The usage is counted either way: a specialist's tokens cost the same money.
-            if text and not namespace:
-                yield TokenEvent(text=text)
+            if text:
+                yield TokenEvent(text=text, agent=agent or ("subagent" if namespace else ""))
         elif mode == "custom":
             event = _custom_event(payload, on_signal)
+            if isinstance(event, HandoffEvent):
+                # The enter names the specialist, the hand back clears it. Safe to read as state
+                # because the pair brackets the specialist's execution in stream order, which
+                # `tests/test_agent_team.py` pins by asserting its output lands between them.
+                agent = event.to
             if event is not None:
                 yield event
         elif mode == "updates":
-            async for event in _from_update(payload, namespace, trace, todos, exchanges):
+            async for event in _from_update(payload, agent, trace, todos, exchanges):
                 yield event
 
 
@@ -160,22 +177,39 @@ def _custom_event(payload: Any, on_signal: Any) -> Event | None:
 
 async def _from_update(
     payload: Any,
-    namespace: tuple[str, ...],
+    agent: str,
     trace: ToolCallTrace,
     todos: list[str],
     exchanges: list[Any] | None = None,
 ) -> AsyncIterator[Event]:
     """The events one completed node produces: its calls, its results, and any new plan.
 
-    `namespace` is the path of node names down to the subgraph that produced this update — `()` at
-    the root. It becomes the `agent` attribution on every event a specialist raises (M9), which is
-    what stops a team's trace from reading as though one actor did everything.
-
     `exchanges`, when given, collects the tool-bearing messages for the transcript projection. Here
     rather than in the caller because this is where they exist as *messages*: the events carry no
     call id, so a projection rebuilt from them could not pair a result with the call it answers.
+
+    `agent` is the specialist currently running, tracked by the caller from the handoff pair, and
+    it becomes the `agent` attribution on every event that specialist raises (M9) — which is what
+    stops a team's trace from reading as though one actor did everything.
+
+    **It used to be derived from the subgraph namespace, and that was wrong on every real turn.**
+    `_agent_of(namespace)` took the node name before the colon, on the assumption that a
+    specialist's updates arrive under `("<specialist>:<task-id>",)`. They do not:
+    `SubAgentMiddleware` invokes the compiled specialist as an ordinary runnable *inside* the
+    `task` tool, so the only frame on the namespace is the parent's tool node and every specialist
+    event was attributed to the literal agent `"tools"`. The specialist's name is not in the
+    namespace at all, under any dispatch that routes through the task tool — so this was not a
+    formatting slip but a name that was never there to read.
+
+    Measured on the live lane before it was believed: a sonnet-5 routing arm scored its one
+    delegation as `expected evidence → tools`, i.e. reported as a supervisor mis-route what was
+    actually the harness reading the wrong field. The unit test that should have caught it passed
+    because it parametrized hand-written namespaces (`("evidence:7f3a",)`) the engine never emits —
+    the repo's recurring failure of asserting against an invented shape.
+
+    The handoff pair is the reader that *can* be right: `agent/team.running_specialist` raises it
+    with the name it was constructed with, rather than reconstructing one from a graph path.
     """
-    agent = _agent_of(namespace)
     for node, update in (payload or {}).items():
         if not isinstance(update, dict):
             continue
@@ -224,19 +258,6 @@ async def _from_update(
             if plan:
                 yield PlanEvent(todos=plan)
         logger.debug("graph node %r produced %d event source(s)", node, len(update))
-
-
-def _agent_of(namespace: tuple[str, ...]) -> str:
-    """Which agent produced an event, from the subgraph namespace it arrived under.
-
-    The root graph is Chemclaw itself and carries no attribution — an event with an empty `agent`
-    means "the agent you are talking to", which is what every event meant before teams existed and
-    is what keeps this field additive for an existing consumer. A subgraph's namespace entries are
-    `"<node>:<task-id>"`, so the node name is the part before the colon.
-    """
-    if not namespace:
-        return ""
-    return namespace[-1].split(":", 1)[0]
 
 
 def _attributed(event: Event, agent: str) -> Event:
@@ -311,4 +332,8 @@ def _signal_event(signal: Signal) -> Event:
         return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     if isinstance(signal, ToolFailureSignal):
         return ToolFailedEvent(tool=signal.tool, message=signal.message)
+    if isinstance(signal, HandoffSignal):
+        # Raised by `agent/team.running_specialist`, so the pair brackets exactly the interval the
+        # audit trail attributes to the specialist. `to=""` is the hand back, not a missing field.
+        return HandoffEvent(to=signal.to, reason=signal.reason)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)

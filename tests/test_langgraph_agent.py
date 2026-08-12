@@ -24,13 +24,12 @@ The claims under test, in the order the phases landed:
 
 import asyncio
 import re
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -771,58 +770,3 @@ def test_a_specialist_is_handed_only_the_connectors_its_profile_declares() -> No
     # A profile that narrows nothing keeps the supervisor's set — attenuate-only, at the top.
     wide = AgentProfile(name="reporting")
     assert len(_narrowed_connectors(wide, [calc, hazard], supervisor_surface)) == 2
-
-
-def test_the_thread_is_bounded_once_it_crosses_the_budget_and_untouched_below_it() -> None:
-    """The third way a session could be bricked, and the one with no recovery path at all.
-
-    Compaction went with the previous framework and nothing replaced it, so the durable thread only
-    grew: past the provider's window a turn fails, the oversized thread persists, and every later
-    turn on that session fails identically. Measured before the fix — messages per turn 2, 4, 6, 8
-    and nothing pruning `checkpoints*`.
-
-    Asserted on both sides of the trigger, because "it clears things" is not the property. A bound
-    that fired early would throw away context a chemist is mid-conversation with, and one that never
-    fired is what shipped.
-    """
-    from langchain.agents.middleware.context_editing import ClearToolUsesEdit
-
-    from chemclaw.agent.langgraph_agent import _context_middleware
-
-    fat = "x" * 60_000  # ~15k tokens by the char/4 estimate the middleware uses
-
-    def thread(turns: int) -> list[Any]:
-        out: list[Any] = []
-        for i in range(turns):
-            out += [
-                HumanMessage(content=f"q{i}"),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {"name": "gather_evidence", "args": {}, "id": f"c{i}", "type": "tool_call"}
-                    ],
-                ),
-                ToolMessage(content=fat, tool_call_id=f"c{i}"),
-                AIMessage(content=f"a{i}"),
-            ]
-        return out
-
-    def estimate(messages: Sequence[BaseMessage]) -> int:
-        return sum(len(str(m.content)) for m in messages) // 4
-
-    (edit,) = _context_middleware().edits
-    assert isinstance(edit, ClearToolUsesEdit)
-
-    under = thread(2)
-    edit.apply(under, count_tokens=estimate)
-    assert estimate(under) == estimate(thread(2)), "a thread under budget was edited"
-
-    over = thread(12)
-    before = estimate(over)
-    edit.apply(over, count_tokens=estimate)
-    assert before > settings.agent_context_token_budget, "the fixture never crossed the trigger"
-    assert estimate(over) < settings.agent_context_token_budget, (
-        "the thread stayed over budget after editing — the bound does not bind"
-    )
-    # The recent tool results survive: clearing everything would be a different defect.
-    assert any(str(m.content) == fat for m in over), "every tool result was cleared, not the stale"

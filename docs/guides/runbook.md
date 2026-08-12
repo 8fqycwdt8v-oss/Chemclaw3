@@ -41,18 +41,27 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
     to appear as separate services — unset, they are one. Traces only, on purpose: metrics are
     `/metrics` (Prometheus, scraped per pod) and logs are JSON on stdout, and neither needs a
     second copy over OTLP.
-  - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` no longer does anything** and the process says so at
-    WARNING if you set it. Its only consumer was the agent framework's own instrumentation, which
-    attached prompts and results to *its* spans; no first-party span carries turn content.
-  - **A real regression, named rather than papered over: per-model token attribution is gone.**
-    The agent framework's chat-client instrumentation recorded `gen_ai.client.token.usage` — an
-    OTel *metric* (a histogram), despite a name that reads like a span attribute — labelled by
-    request model, response model, provider and token type. Measured across the installed venv,
-    exactly one module emits it — the agent framework's own observability module; nothing in
-    `langchain`, `langgraph` or `langsmith` does. It goes in two steps and neither is faked: it
-    stops being exported now (this is a span pipeline, and there is no metric pipeline), and it
-    stops being produced when the package is removed. What remains is `/metrics`'s token counters,
-    which carry `profile` rather than model; §(viii) is the place that reads them.
+  - **`CHEMCLAW_OTEL_LLM_SPANS=true` gives you a span per model call** — token counts, model name
+    and provider, plus the chain and tool spans around them — through OpenInference's LangChain
+    instrumentation, over the same OTLP exporter. On in the shipped chart. Point the collector at
+    Arize Phoenix to read these conventions natively; any OTLP backend receives the same spans, and
+    nothing in the image depends on Phoenix.
+  - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` decides whether those spans carry content**, and it is
+    off. Off sets every OpenInference hide flag, so a span carries identifiers and counts and
+    nothing a chemist typed — measured by sweeping every exported attribute for the question and the
+    answer, not by naming the keys that might hold them. Turning it on is a decision about content
+    leaving the pod: the collector's store then holds the same class of data `SECURITY.md` describes
+    for the audit trail. It governs nothing while `CHEMCLAW_OTEL_LLM_SPANS` is off, and the process
+    says so at WARNING if you set it anyway.
+  - **This is what closed the per-model attribution regression.** The agent framework's chat-client
+    instrumentation recorded `gen_ai.client.token.usage` — an OTel *metric* (a histogram), despite a
+    name that reads like a span attribute — labelled by request model, response model, provider and
+    token type, and it went out with the framework: nothing in `langchain`, `langgraph` or
+    `langsmith` emits it. The replacement is not that metric. It is a *span* per model call carrying
+    `llm.token_count.prompt`/`.completion`/`.total` and `llm.model_name`, so the question is
+    answered in the trace pipeline rather than the metric one. `/metrics`'s token counters are
+    unchanged and still carry `profile` rather than model — deliberately, D-152 — and §(viii) is
+    the place that reads them.
 
 ## Exposing the front door (the two settings that decide whether it boots)
 
@@ -660,14 +669,42 @@ cost this review a wrong estimate:
   it to the system message, so the half that changes least is welded to the half that changes most.
   Marking it cacheable needs a change upstream, not in Chemclaw — the same conclusion the previous
   framework's `SkillsProvider` f-string forced, reached again for the same structural reason.
+- **Measure a session that is inside its context budget.** Above
+  `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET`, `agent/compaction.py` rewrites the *front* of the message
+  list on every model call — clearing older tool results, then dropping the oldest conversation
+  groups — so the cacheable prefix changes by construction. A `cache_read ≈ 0` measured on such a
+  session is compaction doing its job, not the provider failing to cache, and chasing it would be
+  chasing a saving that is not there. `chemclaw_context_compactions_total` (below) tells you which
+  kind of session you measured.
 
-Per-model attribution for the same spend **is not currently available**, and that is a regression
-worth naming rather than a gap that was always there: the old framework's own instrumentation
-emitted `gen_ai.client.token.usage` labelled by request model, response model, provider and token
-type, and it went out with the framework. Measured across the installed stack, the only package
-that emits that metric is the one that was removed — nothing in `langchain`, `langgraph` or
-`langsmith` does. So these counters are the whole picture today, and they carry `profile`, which
-OTel has never heard of.
+### Is the context policy firing, and is the budget set anywhere near the traffic?
+
+```
+chemclaw_context_compactions_total       # model calls whose message list was reduced
+chemclaw_context_reclaimed_tokens_total  # estimated prompt tokens those reductions saved
+```
+
+A model call that needed no reduction increments **neither**, which is what makes the two readings
+distinguishable — and that distinction is the whole reason these exist. The policy they report on
+was absent for a phase while three settings, a config comment and a sentence in the system prompt
+all described it, and nothing could have told you.
+
+| Reading | What it means | What to do |
+| --- | --- | --- |
+| flat zero | No session in this process has crossed the budget | Nothing. This is the healthy default, and it is also the state in which the cache table above is meaningful. |
+| the line is absent from `/metrics` | You are not scraping this process | Not a compaction signal at all: `core/metrics.py` pre-seeds every declared counter, so both names render at `0` from the first scrape of a process that has served nothing. An absent line means the worker's `/metrics` port is unscraped (`CHEMCLAW_WORKER_METRICS_PORT`), not that the policy is unwired. |
+| rising steadily, `reclaimed` large per compaction | Long sessions are routinely over budget | Expected on a deployment with real chemists. Read it against `chemclaw_turn_duration_seconds`: reduction is cheap (sub-millisecond to ~6 ms per call), so a slow turn is not this. |
+| rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
+
+Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
+old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
+provider and token type, and it went out with the framework — nothing in `langchain`, `langgraph`
+or `langsmith` emits it. What replaced it is not a metric: `CHEMCLAW_OTEL_LLM_SPANS=true` puts one
+span per model call in the trace pipeline carrying `llm.token_count.*` and `llm.model_name`, so
+"which model, how many tokens" is a trace query and "what is this deployment spending per hour" is
+these counters. They still carry `profile` rather than model, deliberately (D-152): the `turn_costs`
+ledger already holds per-turn model attribution, and a second, lossier answer as a counter label
+would be two systems to reconcile.
 
 ## (ix) Work the PR-gate review queue
 

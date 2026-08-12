@@ -38,6 +38,7 @@ from typing import Any
 
 from chemclaw.agent.audit import AuditSink
 from chemclaw.agent.audit_store import PostgresAuditSink
+from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.state import turn_input
@@ -52,9 +53,12 @@ _EXIT_WORDS = {"exit", "quit", ":q"}
 # to `GET /sessions/{id}/plan` and `POST /sessions/{id}/plan/decision`.
 _PLAN_COMMANDS = {"/plan", "/approve"}
 
-# The session id every CLI run uses. A fixed name, not a fresh uuid: under `session_store=postgres`
-# it makes a terminal session resumable across invocations, which is the CLI's actual use — and the
-# CLI is single-user admin by construction (`resolve_identity`), so there is no one to collide with.
+# The session id every CLI run uses. A fixed name, not a fresh uuid: it is the checkpointer's
+# `thread_id`, so under `session_store=postgres` it makes a terminal session resumable across
+# invocations, which is the CLI's actual use — and the CLI is single-user admin by construction
+# (`resolve_identity`), so there is no one to collide with. The resumability is
+# `checkpointer.process_checkpointer`'s to deliver; until that function existed this comment
+# described a property nothing provided.
 _CLI_SESSION_ID = "cli"
 
 
@@ -84,7 +88,9 @@ def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[
     return actor or settings.cli_admin_actor, frozenset(settings.cli_admin_roles)
 
 
-def _build_cli_agent(args: argparse.Namespace, actor: str, connectors: Sequence[Any]) -> Any:
+def _build_cli_agent(
+    args: argparse.Namespace, actor: str, connectors: Sequence[Any], saver: Any
+) -> Any:
     """Compile the graph for a CLI session from parsed args, the actor, and the open connectors.
 
     `actor` is only the build-time audit fallback (used if a code path runs outside the ambient
@@ -104,7 +110,9 @@ def _build_cli_agent(args: argparse.Namespace, actor: str, connectors: Sequence[
     # for the calculation cache who wants the audit chain written too, without switching
     # `session_store` for a terminal session.
     sink: AuditSink | None = PostgresAuditSink() if args.audit_postgres else None
-    return build_langgraph_agent(actor=actor, audit_sink=sink, connectors=list(connectors))
+    return build_langgraph_agent(
+        actor=actor, audit_sink=sink, connectors=list(connectors), checkpointer=saver
+    )
 
 
 async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -> str:
@@ -112,8 +120,9 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
 
     Reusing one `session_id` across successive calls is what makes the CLI a multi-turn
     conversation: it is the checkpointer's `thread_id`, so each turn continues the thread the last
-    one left. Under the CLI's in-memory checkpointer that lasts as long as the process, which is
-    the right lifetime for a terminal session.
+    one left. Which store that is, and how long it lasts, is `checkpointer.process_checkpointer`'s
+    decision — and until that function existed this sentence was false, because the graph was built
+    with no checkpointer at all and every turn started empty.
 
     **The `session=` parameter is gone, and so is the reason it was mandatory.** Under MAF the
     harness middleware raised "ToolApprovalMiddleware requires an AgentSession" on a session-less
@@ -171,21 +180,27 @@ async def _run(args: argparse.Namespace) -> None:
                     f"warning: connector {name!r} is unreachable; its tools are unavailable",
                     file=sys.stderr,
                 )
-            agent = _build_cli_agent(args, actor, connectors)
+            saver = await process_checkpointer()
+            agent = _build_cli_agent(args, actor, connectors, saver)
             if args.message is not None:
                 print((await converse(agent, args.message)).strip())
             else:
-                await _repl(agent, actor)
+                await _repl(agent, actor, saver)
     finally:
         reset_current_identity(identity_token)
 
 
-async def _repl(agent: Any, actor: str) -> None:
+async def _repl(agent: Any, actor: str, saver: Any) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
 
-    Both arguments are required. `actor` in particular must never default: it flows into
+    `saver` is the checkpointer the graph was built on, threaded through so `/plan` reads the store
+    the turns actually wrote to. Passing it rather than letting `session_todos` resolve one is the
+    whole fix: resolving gives the *configured* checkpointer, which under `session_store=memory` is
+    not the one the graph holds and under either setting was not the one an unwired graph wrote to.
+
+    All three arguments are required. `actor` in particular must never default: it flows into
     `plan_approval_store().record(...)`, whose entire purpose is that the GxP record names the
     identity that approved, and a default that would write an anonymous approval is not a safe
     fallback but one that must never be taken.
@@ -215,15 +230,21 @@ async def _repl(agent: Any, actor: str) -> None:
             return
         try:
             if prompt.lower() in _PLAN_COMMANDS:
-                print(await _plan_command(prompt, actor), file=sys.stderr)
+                print(await _plan_command(prompt, actor, saver), file=sys.stderr)
                 continue
             print((await converse(agent, prompt)).strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 
 
-async def _plan_command(prompt: str, actor: str) -> str:
+async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
+
+    **`saver` has no default**, and that is the fix rather than a style choice: `session_todos`
+    resolves the *configured* checkpointer when handed `None`, which under `session_store=memory`
+    is not the store this session's turns wrote to. A default here would leave the defect reachable
+    by omission — `/plan` answering "(no plan yet)" for a session that has one, and `/approve`
+    recording against the empty-plan constant every deployment shares.
 
     `/approve` binds to the plan as it stands *now*, exactly as
     `POST /sessions/{id}/plan/decision` does — there is no hash to mistype here, but there is also
@@ -242,7 +263,10 @@ async def _plan_command(prompt: str, actor: str) -> str:
     from chemclaw.agent.plan_gate import plan_identity
     from chemclaw.agent.plan_state import session_todos
 
-    plan = await session_todos(_CLI_SESSION_ID) or []
+    # `or []`: `session_todos` answers `None` when the plan could not be *read* at all, which for
+    # this command is the same screen as a session that has proposed nothing — the gate is what
+    # must tell the two apart, not the display.
+    plan = await session_todos(_CLI_SESSION_ID, saver=saver) or []
     plan_hash = plan_identity(plan)
     if prompt.lower() == "/plan":
         lines = plan or ["(no plan yet)"]

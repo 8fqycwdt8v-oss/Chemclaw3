@@ -68,10 +68,23 @@ class ToolCallEvent(BaseModel):
 
 
 class TokenEvent(BaseModel):
-    """One streamed chunk of the assistant's answer text."""
+    """One streamed chunk of assistant text: the answer, or a specialist's working prose.
+
+    **The attribution is load-bearing here in a way it is not on the other events.** `api/runner`
+    concatenates this stream into the turn's final answer and into the durable transcript, so an
+    unattributed specialist chunk is not a mislabelled trace line — it is another agent's working
+    notes spliced into the answer a chemist reads, interleaved with the supervisor's own text in
+    whatever order the two happened to produce it. The runner therefore concatenates only the
+    unattributed ones, and a surface rendering a timeline still sees a specialist's output land
+    inside its handoff span.
+
+    Dropping a specialist's tokens outright was the other candidate and is worse: it makes the
+    delegation silent for the entire time it runs, which is the longest part of a delegated turn.
+    """
 
     type: Literal["token"] = "token"
     text: str
+    agent: str = _AGENT_FIELD
 
 
 class JobStartedEvent(BaseModel):
@@ -384,6 +397,16 @@ class HandoffEvent(BaseModel):
     surface can render a turn's routing as a path rather than as a set of disconnected arrivals.
     `reason` is the supervisor's own stated reason where it gave one; it is prose for a human and
     nothing branches on it.
+
+    **Raised by `agent/team.running_specialist`**, the contextmanager that already brackets the
+    interval the audit trail attributes to a specialist — so the span a surface draws and the span
+    the GxP record claims are the same `try`/`finally` rather than two things that can disagree.
+    It shipped for one release as a declared member nothing produced
+    (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
+
+    Like every other signal-borne event, emitted only where a consumer is draining the graph's
+    custom stream: absence means "not reported", never "no delegation happened". A deployment with
+    `agent_teams_enabled` off has no specialists and therefore raises none of these at all.
     """
 
     type: Literal["handoff"] = "handoff"

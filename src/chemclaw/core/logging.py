@@ -230,15 +230,15 @@ def configure_telemetry() -> None:
     design, which is right for a turn and wrong for a deployment. The tests beside this function
     exist to make the silence audible.
 
-    **What is genuinely lost with MAF, and is not faked here.** MAF's chat-client instrumentation
-    recorded `gen_ai.client.token.usage` — an OTel *metric*, a histogram, despite the name reading
-    like a span attribute — labelled by request model, response model, provider and token type.
-    Measured across the installed venv it is emitted by exactly one module, MAF's own
-    `observability`; nothing in `langchain`, `langgraph` or `langsmith` emits it. So per-model
-    token attribution goes, in two steps: it stops being *exported* here (this bootstrap installs a
-    span pipeline and no metric pipeline, see below), and it stops being *produced* when the package
-    is removed. Nothing here fabricates a replacement. What remains is `core/metrics.py`'s
-    Prometheus token counters, which carry `profile` rather than model.
+    **What went with MAF, and what answers the same question now.** MAF's chat-client
+    instrumentation recorded `gen_ai.client.token.usage` — an OTel *metric*, a histogram, despite
+    the name reading like a span attribute — labelled by request model, response model, provider and
+    token type. Measured across the installed venv it is emitted by exactly one module, MAF's own
+    `observability`; nothing in `langchain`, `langgraph` or `langsmith` emits it. That metric is not
+    fabricated here. What replaces it is a different signal in the pipeline that *is* here:
+    `_instrument_llm_calls` puts one span per model call, carrying `llm.token_count.*` and
+    `llm.model_name`, behind `CHEMCLAW_OTEL_LLM_SPANS`. `core/metrics.py`'s Prometheus token
+    counters are unchanged and still carry `profile` rather than model, deliberately (D-152).
     `docs/guides/runbook.md` says the same where an operator would look.
 
     **Traces only, deliberately, and the other two signals have homes.** Metrics are
@@ -256,11 +256,13 @@ def configure_telemetry() -> None:
     tests call it repeatedly; a second call must not start a second export thread and a second gRPC
     channel that the API would then discard. The flag makes the second call a no-op.
 
-    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` had exactly one consumer — MAF's own instrumentation,
-    which attached prompts and results to its spans — and it goes with MAF. Nothing first-party puts
-    content on a span (`core/tracing.py`: "identifiers and counts, never a question, an argument or
-    an answer"), so the flag now buys nothing and says so out loud rather than reading as an
-    enabled-but-ineffective privacy switch.
+    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` **governs again**, and it is the same question it always
+    governed: whether prompts and completions ride on a span. It lost its only consumer with MAF's
+    instrumentation and spent a phase as a warned-about knob; `_instrument_llm_calls` gives it back
+    rather than adding a second flag beside it, because `CHEMCLAW_OTEL_LLM_SPANS` is the only thing
+    that puts content within reach. It still governs nothing when that is off — and the warning
+    below still says so out loud in exactly that case, rather than letting an
+    enabled-but-ineffective privacy switch read as an effective one.
 
     Raises:
         RuntimeError: `CHEMCLAW_OTEL_ENABLED=true` but the OpenTelemetry SDK / OTLP exporter is not
@@ -290,15 +292,148 @@ def configure_telemetry() -> None:
     # No endpoint argument: the exporter resolves it from the standard variables itself, which is
     # what keeps `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, the headers and the protocol settings working
     # without this module re-implementing OTel's own configuration precedence.
-    trace.set_tracer_provider(_build_tracer_provider(OTLPSpanExporter()))
+    provider = _build_tracer_provider(OTLPSpanExporter())
+    trace.set_tracer_provider(provider)
+    _instrument_llm_calls(provider)
     _TRACING_INSTALLED = True
     _install_noop_meter_provider()
     if settings.otel_include_sensitive_data:
-        logging.getLogger(__name__).warning(
-            "CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is set but has no effect: the only "
-            "instrumentation that attached prompts and results to spans was the agent framework's, "
-            "and no first-party span carries turn content"
+        _warn_about_sensitive_data()
+
+
+def _warn_about_sensitive_data() -> None:
+    """Say what `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` is doing — in *both* directions.
+
+    **The dangerous direction is the one that used to be silent, and that asymmetry was the
+    defect.** The flag spent a phase governing nothing, and this module warned about exactly that:
+    an enabled-but-ineffective privacy switch reads as an effective one. Giving the flag a consumer
+    back inverted which case needs saying. A deployment that set it while it was inert — and the
+    config comment kept it precisely "because a deployment may still have it in its values file" —
+    gets `CHEMCLAW_OTEL_LLM_SPANS` switched on by the shipped chart and starts exporting a chemist's
+    question and the model's answer to the collector, with nobody having decided that in this
+    release. A flag that changes meaning between versions has to announce the meaning it now has.
+
+    Not an error, and not a refusal: a deployment is entitled to make this choice, and failing to
+    start over a telemetry setting would be worse than the setting. What it is not entitled to is
+    making it without noticing, so the line names the endpoint the content is going to.
+    """
+    logger = logging.getLogger(__name__)
+    if not settings.otel_llm_spans:
+        logger.warning(
+            "CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is set but has no effect while "
+            "CHEMCLAW_OTEL_LLM_SPANS is off: no first-party span carries turn content, so there is "
+            "nothing for it to govern"
         )
+        return
+    logger.warning(
+        "CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is set and CHEMCLAW_OTEL_LLM_SPANS is on: prompts "
+        "and completions — a chemist's question and the model's answer — are being attached to "
+        "spans and exported to %s. Whatever stores traces behind that collector now holds the "
+        "class of data SECURITY.md describes for the audit trail, and must be covered by the same "
+        "retention, access-control and PII policy. Unset it unless that was a decision somebody "
+        "made for this release.",
+        settings.otel_endpoint
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "the configured OTLP endpoint"),
+    )
+
+
+def _instrument_llm_calls(provider: Any) -> None:
+    """Attach OpenInference's LangChain instrumentation, content suppressed unless asked.
+
+    A span per model call, plus the chain and tool spans around it, over the same OTLP exporter the
+    provider was just built with. Off unless `CHEMCLAW_OTEL_LLM_SPANS=true`, and a no-op then — the
+    instrumentation is not imported at all, so a deployment that does not want it pays nothing.
+
+    **Content is `otel_include_sensitive_data`'s decision, which is how that flag stops being
+    dead.** It had exactly one consumer, the agent framework's own instrumentation, and this asks
+    the identical question — so it gets the flag back rather than a second knob beside it. Off (the
+    default) sets every `TraceConfig` hide flag, and `core/tracing.py`'s rule survives intact:
+    identifiers and counts, never a question, an argument or an answer.
+
+    **Suppression costs none of what this was added for**, which is why it is a default rather than
+    a trade-off. Measured against a real compiled graph with a scripted model, scanning *every*
+    exported attribute value for the question and answer text: unsuppressed, five attributes carry
+    content (`input.value`, `output.value` and the three message contents); suppressed, **zero** —
+    while `llm.token_count.prompt`/`.completion`/`.total` and `llm.provider` are byte-identical
+    across the two runs. OpenInference's own `mask()` touches input, output, message, prompt,
+    choice, embedding, tool and invocation-parameter keys and nothing else, which is why.
+
+    **Not guarded against a second call**, deliberately: `configure_telemetry` already returns early
+    on `_TRACING_INSTALLED`, and the instrumentor is a `BaseInstrumentor` singleton that logs
+    "Attempting to instrument while already instrumented" rather than raising. A guard here would be
+    a second answer to a question one flag already answers.
+
+    Args:
+        provider: The tracer provider built for this process, passed explicitly rather than read
+            back from the global — the global is set one line above and reading it back would make
+            this depend on that ordering.
+
+    Raises:
+        RuntimeError: `CHEMCLAW_OTEL_LLM_SPANS=true` but the instrumentation is not installed — the
+            same directive message the SDK check raises, for the admin who flips the flag on an
+            install without it.
+    """
+    if not settings.otel_llm_spans:
+        return
+    try:
+        from openinference.instrumentation import TraceConfig
+        from openinference.instrumentation.langchain import LangChainInstrumentor
+    except ImportError as exc:
+        raise RuntimeError(
+            "CHEMCLAW_OTEL_LLM_SPANS=true but openinference-instrumentation-langchain is not "
+            "installed"
+        ) from exc
+    LangChainInstrumentor().instrument(tracer_provider=provider, config=_trace_config(TraceConfig))
+
+
+def _trace_config(trace_config: Any) -> Any:
+    """The OpenInference `TraceConfig` for this deployment — everything hidden, or nothing.
+
+    Two settings rather than eleven. Every hide flag is set together because they answer one
+    question ("may turn content leave this pod?") and a deployment that could answer it differently
+    per attribute would be one that had not answered it: a span carrying the *prompt* but not the
+    completion is still a span carrying a chemist's question.
+
+    The list is written out rather than derived from the dataclass's fields, because deriving it
+    would silently adopt whatever a future version adds — including a field whose default is the
+    permissive one. A new hide flag upstream should require a decision here, not inherit one.
+
+    Args:
+        trace_config: The `TraceConfig` class. Taken as an argument rather than imported here
+            because the import is lazy in `_instrument_llm_calls` — the caller has already resolved
+            it, and importing again would put a second `ImportError` site in the module for one
+            dependency. It also leaves this a pure function of (settings, class), which is what lets
+            `tests/test_llm_spans.py` check the flag set without building a tracer provider.
+
+    Returns:
+        The configuration to hand the instrumentor.
+    """
+    if settings.otel_include_sensitive_data:
+        return trace_config()
+    return trace_config(
+        hide_inputs=True,
+        hide_outputs=True,
+        hide_input_messages=True,
+        hide_output_messages=True,
+        hide_input_text=True,
+        hide_output_text=True,
+        hide_input_images=True,
+        hide_prompts=True,
+        hide_choices=True,
+        hide_llm_invocation_parameters=True,
+        hide_llm_tools=True,
+        # The embedding trio was missing from the first version of this list and
+        # `tests/test_llm_spans.py::test_every_hide_flag_is_set_together` is what found it — which
+        # is the whole reason that test compares against the dataclass's fields rather than against
+        # a list written twice. `hide_embeddings_text` is the one that mattered: the text being
+        # embedded is a chemist's question or a note's body, so leaving it unset would have put
+        # content on a span under the configuration whose entire purpose is that it does not.
+        # `hide_embedding_vectors` and `hide_embeddings_vectors` are upstream's spelling and its
+        # alias; both are set because either might be the one a given release reads.
+        hide_embedding_vectors=True,
+        hide_embeddings_vectors=True,
+        hide_embeddings_text=True,
+    )
 
 
 # The settings whose *values* must never appear in a log line. Redaction works by matching the

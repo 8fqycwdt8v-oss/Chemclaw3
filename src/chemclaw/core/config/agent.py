@@ -65,21 +65,30 @@ class AgentSettings(BaseSettings):
     # default = every skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # Conversation context management (`agent/langgraph_agent._context_middleware`). The thread is
-    # durable and keyed by the session, and this system's tool calls return large payloads (evidence
-    # sweeps, full ELN recipes), so an unbounded thread is not a slow cost — it is a cliff: past the
-    # provider's window every later turn on that session fails identically, with no way back.
-    # Editing runs only once the thread exceeds `agent_context_token_budget` (a char/4 estimate — no
-    # external tokenizer, no second model call), and reclaims the cheapest tokens first: stale
-    # tool-result dumps become a placeholder, keeping the newest `agent_keep_last_tool_groups`
-    # verbatim. System instructions and skills are always kept. Deterministic and credential-free.
+    # Conversation context management (`agent/compaction.py`). The agent keeps a session thread and
+    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
+    # long chat would grow unbounded. Compaction runs only when the included context exceeds
+    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
+    # then reclaims tokens cheapest-first: replace stale tool results with a short placeholder
+    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
+    # groups beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
+    # kept — they are not in the message list at all. No LLM summarizer — deterministic and
+    # credential-free, which is also what keeps a summarizer from becoming an injection surface
+    # over retrieved evidence (D-025).
     #
-    # (A third field bounded older *conversation* turns. It is gone rather than left unread: the
-    # editing strategy this engine has clears tool results only, so nothing honoured it, and a
-    # setting a deployment can move that changes nothing is worse than no setting. Prose-only growth
-    # is far slower and is a BACKLOG row with its own trigger.)
+    # **These three had no reader at all between M13 and the ADR that restored them**, because the
+    # policy lived in the framework the rebuild removed while the settings, this comment and a
+    # sentence in the system prompt stayed behind describing it.
+    # `chemclaw_context_compactions_total` is what a deployment now checks instead of re-reading
+    # this paragraph.
+    #
+    # `agent_keep_last_tool_groups` counts the newest *tool results* kept verbatim, not tool-call
+    # groups: the strategy behind it is upstream's `ClearToolUsesEdit` and that is what it counts.
+    # The name is D-025's and stays, because it is ENV-visible and renaming it would cost every
+    # deployment that sets it to buy a more accurate word.
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
+    agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
     # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
     # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
     # (architektur.md §7), not this. Because Entra enforcement defaults off in dev

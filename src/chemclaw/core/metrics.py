@@ -262,6 +262,24 @@ _COUNTERS: dict[str, str] = {
         "the openai_compatible provider, which reports cache reads but has no cache-write concept: "
         "an honest zero here is not a fault (REV-9)."
     ),
+    # Whether the context policy is running, and what it is buying. Two counters because they
+    # answer two operator questions and neither answers the other: the first says the mechanism
+    # fired at all, the second says whether the budget is set anywhere near the traffic. Both exist
+    # because the defect they close was a compaction policy that *appeared* to run — three settings
+    # with no reader, a config comment, and a sentence in the system prompt — for as long as nobody
+    # had a number (`agent/compaction.py`). A counter is what makes "it is compacting" checkable
+    # instead of believed.
+    #
+    # A model call that needed no reduction increments neither, so a flat zero means "never over
+    # budget" and an absent series means "not wired" — the distinction the previous state of this
+    # subsystem could not express.
+    "chemclaw_context_compactions_total": (
+        "Model calls whose message list was reduced to stay inside the context token budget."
+    ),
+    "chemclaw_context_reclaimed_tokens_total": (
+        "Estimated prompt tokens reclaimed by context compaction (char/4 estimate, not billed "
+        "tokens — the billed figure is chemclaw_input_tokens_total)."
+    ),
     # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
     # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
     # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,
