@@ -65,17 +65,21 @@ class AgentSettings(BaseSettings):
     # default = every skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # Conversation context management. The agent keeps a session thread and
-    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
-    # long chat would grow unbounded. Compaction runs only when the included context exceeds
-    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
-    # then reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace
-    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
-    # turns beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
-    # kept. No LLM summarizer — deterministic and credential-free.
+    # Conversation context management (`agent/langgraph_agent._context_middleware`). The thread is
+    # durable and keyed by the session, and this system's tool calls return large payloads (evidence
+    # sweeps, full ELN recipes), so an unbounded thread is not a slow cost — it is a cliff: past the
+    # provider's window every later turn on that session fails identically, with no way back.
+    # Editing runs only once the thread exceeds `agent_context_token_budget` (a char/4 estimate — no
+    # external tokenizer, no second model call), and reclaims the cheapest tokens first: stale
+    # tool-result dumps become a placeholder, keeping the newest `agent_keep_last_tool_groups`
+    # verbatim. System instructions and skills are always kept. Deterministic and credential-free.
+    #
+    # (A third field bounded older *conversation* turns. It is gone rather than left unread: the
+    # editing strategy this engine has clears tool results only, so nothing honoured it, and a
+    # setting a deployment can move that changes nothing is worse than no setting. Prose-only growth
+    # is far slower and is a BACKLOG row with its own trigger.)
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
-    agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
     # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
     # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
     # (architektur.md §7), not this. Because Entra enforcement defaults off in dev

@@ -37,6 +37,8 @@ survived the fold as aliases and were removed in D-149 — three had never had a
 fourth discarded the `kind` this module's whole point is to carry.
 """
 
+from typing import Any
+
 from langgraph.config import get_stream_writer
 from pydantic import BaseModel
 
@@ -130,11 +132,34 @@ def _emit(signal: Signal) -> None:
     stream and `api/graph_stream`, so a signal recorded in an activity had no reader before this
     either — it accumulated in a buffer nobody drained.
     """
-    try:
-        writer = get_stream_writer()
-    except (RuntimeError, KeyError):
+    writer = stream_writer_or_none()
+    if writer is None:
         return
     writer({_KEY: signal})
+
+
+def stream_writer_or_none() -> Any | None:
+    """The graph's custom-stream writer, or `None` where there is no graph to write to.
+
+    **One helper because two call sites were asserting two different things about one upstream
+    call.** This module caught `(RuntimeError, KeyError)` and `retrieval/fanout.py` caught
+    `(RuntimeError, LookupError)` — and since `KeyError` is a `LookupError`, the second strictly
+    subsumed the first, so a change upstream would have broken one and not the other.
+
+    The exception types are an accident of the implementation, not a contract: `get_stream_writer`
+    reaches a private config key by bare subscript, which is why it raises `RuntimeError` off any
+    runnable context but `KeyError` inside `StructuredTool.ainvoke` — both measured.
+    `AttributeError` is caught too, for the plausible upstream shape where the runtime resolves to
+    `None` and is then attributed.
+
+    The cost of getting this wrong is specific: the same tools run in a chat turn's tool node and in
+    a Temporal activity replaying a template step, where no graph exists. An unguarded call fails a
+    durable job because a tool tried to narrate.
+    """
+    try:
+        return get_stream_writer()
+    except (RuntimeError, LookupError, AttributeError):
+        return None
 
 
 def record_job_started(job_id: str, kind: str) -> None:

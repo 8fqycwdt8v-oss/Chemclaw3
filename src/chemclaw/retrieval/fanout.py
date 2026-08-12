@@ -42,12 +42,12 @@ import operator
 from typing import Annotated, Any
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from typing_extensions import TypedDict
 
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.turn_signals import stream_writer_or_none
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 
 logger = logging.getLogger(__name__)
@@ -118,10 +118,13 @@ def _report(name: str, found: int) -> None:
     record_metric(
         lambda m: m.increment("chemclaw_evidence_source_chunks_total", found, {"source": name})
     )
-    try:
-        get_stream_writer()({"evidence_source": name, "chunks": found})
-    except (RuntimeError, LookupError):  # no graph runtime, or nothing consuming a custom stream
+    # Through the shared guard, not a second `except` list: two sites catching different sets for
+    # one upstream call is how a change breaks one of them silently (`turn_signals` says which).
+    writer = stream_writer_or_none()
+    if writer is None:  # no graph runtime, or nothing consuming a custom stream
         logger.debug("evidence source %r contributed %d chunk(s)", name, found)
+    else:
+        writer({"evidence_source": name, "chunks": found})
 
 
 def _fan(state: FanState, config: RunnableConfig) -> list[Send]:

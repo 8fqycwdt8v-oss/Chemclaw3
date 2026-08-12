@@ -54,7 +54,8 @@ from typing import Any
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents import create_agent
-from langchain.agents.middleware import TodoListMiddleware
+from langchain.agents.middleware import ContextEditingMiddleware, TodoListMiddleware
+from langchain.agents.middleware.context_editing import ClearToolUsesEdit
 from langchain_core.runnables import RunnableConfig
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -166,6 +167,7 @@ def build_langgraph_agent(
         system_prompt=instructions_for(prof),
         state_schema=ChemclawState,
         middleware=[
+            _context_middleware(),
             *_harness_middleware(prof),
             _skills_middleware(backend),
             *_team_middleware(prof, actor, correlation_id, audit_sink, connectors, tools),
@@ -227,6 +229,45 @@ def _without_cached_skills(state: Any) -> Any:
     real would be a side effect on everything downstream rather than on one method's view.
     """
     return {key: value for key, value in state.items() if key != "skills_metadata"}
+
+
+def _context_middleware() -> Any:
+    """Bound what the thread costs the model, deterministically and without a second model call.
+
+    **The checkpointer made this mandatory rather than nice.** Turn state is durable and keyed by
+    the session, so a thread only ever grows; nothing prunes `checkpoints*` and nothing trimmed the
+    messages. The end of that is not a slow degradation — it is a cliff. Once a session's thread
+    exceeds the provider's context window the turn fails, the oversized thread is still there, and
+    **every later turn on that session fails the same way**, with no path back. That is the same
+    "one event bricks the conversation" class as the read-time orphan the rebuild correctly deleted,
+    reached by a different route.
+
+    `ClearToolUsesEdit` is the strategy D-025 chose, expressed in the vocabulary this engine has: it
+    replaces *stale tool results* with a placeholder once the thread crosses a token budget, keeping
+    the most recent ones intact. Tool results are where the tokens are in this system — an evidence
+    sweep or a full ELN recipe dwarfs the prose around it — and clearing them is reversible from a
+    chemist's point of view, because the durable record is `session_messages` and the blob store,
+    not the model's view.
+
+    Deliberately **not** `SummarizationMiddleware`: it spends a model call to compress a thread, so
+    a turn's cost and its failure modes would depend on a second inference nobody asked for. D-025
+    ruled that out for the same reason and the reason has not changed.
+
+    What this does not bound is a conversation of pure prose with no tool calls, which grows far
+    more slowly and is a `docs/planning/BACKLOG.md` row with its own trigger.
+    """
+    return ContextEditingMiddleware(
+        edits=[
+            ClearToolUsesEdit(
+                trigger=settings.agent_context_token_budget,
+                keep=settings.agent_keep_last_tool_groups,
+            )
+        ],
+        # `approximate` rather than `model`: the exact count would cost a provider round trip per
+        # check, and the budget is a guard rail rather than a quota — the char/4 estimator is what
+        # the deleted strategy used, for the same reason.
+        token_count_method="approximate",
+    )
 
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
