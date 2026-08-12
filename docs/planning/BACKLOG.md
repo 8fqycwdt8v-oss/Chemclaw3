@@ -3,6 +3,30 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the post-migration review (2026-08-12)
+
+- [ ] **A plan no longer shows which step is waiting on a durable job** — [M]. The previous engine
+      marked it by prefixing a todo's description (`awaiting-job:<id>`), and the rebuild replaced
+      that with a `ChemclawState.awaiting_jobs` field — which nothing ever wrote or read, so the
+      capability was lost rather than moved. The field is deleted (a declared field nothing consults
+      is a stub, which `state.py` says itself); what is missing is the behaviour: while a multi-hour
+      HPC job runs, the chemist's plan view shows the step as merely unfinished, and the job's
+      completion push-back closes nothing on the plan. Re-adding it needs a decision this review did
+      not make — a durable launcher would have to return a `Command(update=…)` rather than a string,
+      which changes what a tool *is* on this engine. The loop consequence the original marker
+      existed for is genuinely gone with the old predicate, so this is display, not correctness.
+      **Trigger**: the first chemist who asks why an approved plan looks stalled, or the frontend
+      building a plan panel that wants per-step state.
+
+- [ ] **A conversation of pure prose is still unbounded** — [S]. `ContextEditingMiddleware` clears
+      stale *tool results*, which is where the tokens are in this system, and a long chat with no
+      tool calls therefore still grows until it meets the provider's window — at which point the
+      session bricks, because the thread is durable. Far slower than the tool-result case that made
+      the fix urgent, and it needs a different mechanism (trimming or summarising conversation
+      turns) with its own decision about what a chemist is allowed to lose.
+      **Trigger**: a support report of a long-running session failing every turn, or
+      `chemclaw_turn_errors_total` correlating with session age.
+
 ## Open — Left by the LangGraph rebuild (2026-08-11, D-2026-08-11-what-the-removal-found)
 
 - [ ] **The three M12 probes are still unrun, and nothing in M13 measured them** — [M].

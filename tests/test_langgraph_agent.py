@@ -49,6 +49,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
 from chemclaw.agent.skill_manifest import declared_tools
+from chemclaw.agent.state import turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
@@ -668,16 +669,41 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 1)
-    graph = build_langgraph_agent(
-        model=_ScriptedModel(messages=iter([AIMessage(content="done")] * 3)),
-        audit_sink=NullAuditSink(),
-        checkpointer=InMemorySaver(),
+
+    def _graph(script: list[AIMessage]) -> Any:
+        return build_langgraph_agent(
+            model=_ScriptedModel(messages=iter(script)),
+            audit_sink=NullAuditSink(),
+            checkpointer=InMemorySaver(),
+        )
+
+    # **A model that keeps calling tools**, or the loop never re-enters and the cap is never
+    # consulted. The earlier version of this test scripted plain answers, so the turn ended after
+    # one model call having been stopped by nothing — and passed, because `loop_capped` compared the
+    # count and a finished one-call turn ends at exactly the cap. It passed with the cap deleted
+    # outright, which is the definition of a test that was measuring nothing.
+    calling = AIMessage(
+        content="",
+        tool_calls=[{"name": "list_skills", "args": {}, "id": "c1", "type": "tool_call"}],
     )
+    capped = _graph([calling] * 4)
     config = {"configurable": {"thread_id": "capped-1"}}
+    asyncio.run(capped.ainvoke(turn_input("go"), config=config))
 
-    asyncio.run(graph.ainvoke({"messages": [("user", "go")]}, config=config))
+    assert loop_capped(capped.get_state(config).values), (
+        "a looping turn at a cap of 1 was not capped"
+    )
 
-    assert loop_capped(graph.get_state(config).values)
+    # And the other side, which is the half the count could never express: a turn that spends its
+    # last allowed call and then answers is *not* capped, even though it ends at exactly the cap.
+    # Reporting that one as capped marks a complete answer partial.
+    finished = _graph([AIMessage(content="done")])
+    done_config = {"configurable": {"thread_id": "capped-2"}}
+    asyncio.run(finished.ainvoke(turn_input("go"), config=done_config))
+
+    assert not loop_capped(finished.get_state(done_config).values), (
+        "a turn that answered within the cap was reported as capped"
+    )
 
 
 def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:

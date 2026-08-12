@@ -278,8 +278,12 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
         assert not loop_hit_cap(), "counting is not capping"
 
         capped = enforce_loop_cap.before_model(cast(Any, {"model_calls": 1}), cast(Any, None))
-        assert capped == {"jump_to": "end"}, capped
-        assert loop_capped({"model_calls": 1}), "the state record missed the cap"
+        assert capped == {"jump_to": "end", "loop_capped": True}, capped
+        # The *flag*, not the count. The stopping branch does not increment, so a capped turn and
+        # one that spent its last allowed call and finished both end at exactly the cap — a
+        # comparison on `model_calls` cannot tell them apart in either direction.
+        assert loop_capped(capped), "the state record missed the cap"
+        assert not loop_capped({"model_calls": 1}), "a finished turn at the cap read as capped"
         assert loop_hit_cap(), "the cap fired but the runner's own reader never saw it"
     finally:
         end_loop_watch(token)

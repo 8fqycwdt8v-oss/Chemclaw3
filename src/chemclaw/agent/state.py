@@ -44,6 +44,12 @@ class ChemclawState(PlanningState):
     # `turn_input`; see the module docstring for what it cost when nothing did.
     model_calls: int
 
+    # Whether the runaway guard stopped this turn. Written only by the branch of
+    # `enforce_loop_cap` that fires, because the count above cannot answer it: that branch stops
+    # the loop *without* incrementing, so a capped turn and one that spent its last allowed call
+    # and finished normally both end at exactly the cap.
+    loop_capped: bool
+
 
 def turn_input(message: str) -> dict[str, Any]:
     """The graph input that starts one turn: the user's message, plus every per-turn field zeroed.
@@ -60,4 +66,4 @@ def turn_input(message: str) -> dict[str, Any]:
         The mapping to pass to `ainvoke`/`astream`. Every caller that starts a turn uses this;
         a caller that builds the mapping itself reintroduces the defect the docstring above records.
     """
-    return {"messages": [("user", message)], "model_calls": 0}
+    return {"messages": [("user", message)], "model_calls": 0, "loop_capped": False}
