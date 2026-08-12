@@ -41,6 +41,18 @@ class CalculatorSettings(BaseSettings):
     # Hessian. Set it to 1 only where many activities share a pod, to stop them
     # oversubscribing each other.
     xtb_cli_threads: int = 0
+    # How many media a solvent screen evaluates at once (`science/calc/reaction.py`).
+    #
+    # **Default 1 — today's behaviour exactly — and that is a measurement waiting to be taken
+    # rather than caution.** A screen is one reaction per solvent and they genuinely serialize, so
+    # the latency is there to win; the reason not to take it by default is directly above. With
+    # `xtb_cli_threads = 0` the binary "uses the machine", which is right for a worker pod running
+    # one job at a time and wrong the moment two branches run at once — six solvents would be six
+    # processes each sized for the whole box, which is the oversubscription that comment warns
+    # about. Raising this is therefore paired with pinning `xtb_cli_threads`, and which pair wins
+    # depends on the pod's cores. So the knob exists, costs nothing at 1, and lets a deployment
+    # with headroom answer it by measuring instead of by argument.
+    calc_screen_max_parallel: int = Field(default=1, ge=1)
     # CREST conformer/tautomer/protomer sampling (plan X6). GPL-3.0 and optional: absent,
     # the ensemble tasks say so and everything else works. `crest_effort` is the default
     # search depth, `crest_max_members` caps how many members a result reports (the

@@ -1463,6 +1463,34 @@ by hand (an invented namespace, a hand-written SSE frame, a protocol nobody re-c
 engine changed). None was reachable without a live stack. The rule now written into the tests: **a
 test whose subject is a reader of an external shape may not supply that shape by hand.**
 
+**`Send` fan-outs for solvent screens and conformer sweeps (2026-08-12): half the premise was
+false, and the other half is not a `Send`.** The plan named two serial fan-outs to parallelise.
+
+*Conformer sweeps do not serialize.* CREST forks its own worker subprocesses for the metadynamics
+and optimisation steps — `science/calc/xtb_cli.py` says so in its own docstring — and
+`conformers.py` has no fan-out loop at all: one ensemble run, parallel inside. There is nothing to
+`Send`. This is M10's discovery repeated exactly: the plan said the evidence sources "today
+serialize" and they had used `asyncio.gather` since they were written.
+
+*Solvent screens do serialize*, and the fix is not `Send`. `compare_solvent_effects` was a `for`
+loop with an `await` in it. But `tests/test_third_party_layering.py` allows `chemclaw.science` only
+rdkit, xtb, ml and postgres — LangGraph is not on that list, because `science/` is the physics.
+Running the fan-out a layer up would split one tool into two, which is the pairing
+`ARCHITECTURE.md` exists to keep intact. So it is `asyncio.gather` under a semaphore.
+
+*And the bound defaults to 1, which is the loop it replaces.* A branch spawns xtb, and
+`xtb_cli_threads = 0` means the binary sizes itself to the whole machine — the config comment
+directly above the new knob already warns that many activities sharing a pod oversubscribe each
+other. Six solvents at once would be six processes each expecting every core, so the latency win
+trades against per-calculation speed and which way it goes depends on the pod. `calc_screen_max_parallel`
+makes that a measurement a deployment can take instead of an assumption shipped for it. Three tests
+pin it: serial at the default, genuinely overlapping when raised, and the gas-phase reference still
+first when the branches finish out of order.
+
+The test for that last one was itself wrong first: the fake read `solvent` from `**kwargs` while the
+call site passes it positionally, so every branch saw `None` and the ordering assertion measured
+nothing. Same wrong-field read as four of this session's production findings, one layer in.
+
 **M10 done.** `make lint type test` green at 4174 passed, 36 skipped, 0 failed.
 
 **The plan's stated reason for this phase was wrong, and finding that out is most of what M10
