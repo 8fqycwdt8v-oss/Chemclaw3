@@ -6,7 +6,7 @@ invoke it, and lets `AuthorizationError` propagate to block the call. It general
 expensive-trigger gate (F4-T5) so per-tool RBAC is applied uniformly by one interceptor, not
 hand-wired into each tool — the same DRY move the audit trail makes.
 
-The decisions live in `chemclaw.agent.authz` (the one home for authorization) and in the four
+The decisions live in `chemclaw.agent.authz` (the one home for authorization) and in the
 framework-free functions below; the `wrap_tool_call` wrappers at the end are only the wiring,
 exactly as `chemclaw.agent.audit` is the wiring over the audit decision. They are safe to attach
 unconditionally: `authorize_tool` is a no-op unless `entra_required`, so the dev path is unaffected
@@ -21,6 +21,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
+from chemclaw.agent.audit import returned_failure
 from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -47,7 +48,7 @@ class DryRunRefusal(AuthorizationError):
 
 # --- the decisions, framework-free ---------------------------------------------------------------
 #
-# Each of the five gates below is one sentence of policy wrapped in the framework's plumbing. The
+# Each of the decisions below is one sentence of policy wrapped in the framework's plumbing. The
 # sentence lives here, apart from that plumbing, because it was written while two engines had to
 # agree on it: a dry-run refusal worded one way under one engine, or a denial the model is told
 # about under one and not the other, was the drift the migration was arranged to be incapable of.
@@ -80,6 +81,22 @@ def failure_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS]
 
 
+def returned_failure_detail(message: ToolMessage) -> str:
+    """The same sentence for a tool that *returned* its failure instead of raising one.
+
+    Beside `failure_detail` rather than folded into it because the two have nothing to render in
+    common: a raised failure has an exception class worth naming, while a returned one has only the
+    server's own words — an MCP tool's error content is already a sentence someone wrote for a
+    reader, and prefixing it with a type name would be inventing a classification nobody made.
+
+    `message.text` rather than `message.content`: MCP content arrives as a list of content blocks,
+    so a chemist reading `content` would get `[{'type': 'text', 'text': …}]` — a repr of the
+    transport where the explanation should be. Bounded by the same `_FAILURE_CHARS` for the same
+    reason: a remote error is exactly the text that can be arbitrarily long.
+    """
+    return message.text[:_FAILURE_CHARS]
+
+
 def unexpected_error_result() -> str:
     """What the model is told when a tool raised something outside the two safe families.
 
@@ -98,7 +115,7 @@ def unexpected_error_result() -> str:
 
 # --- the wiring ----------------------------------------------------------------------------------
 #
-# Five `wrap_tool_call` wrappers over the four decisions above. A gate stops a call by returning a
+# The `wrap_tool_call` wrappers over the decisions above. A gate stops a call by returning a
 # `ToolMessage` instead of calling `handler` — "the tool body never ran and this is what the model
 # is told instead" — which is why `_refusal_message` is shared rather than written out five times.
 
@@ -186,14 +203,27 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
 
 @wrap_tool_call
 async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Tell the chemist's stream a tool raised, then let it continue (`announce_tool_failures`).
+    """Tell the chemist's stream a tool failed, then let it continue (`announce_tool_failures`).
 
     Innermost, closest to the tool body, so it sees the raw exception before either converter turns
     it into a result — whether the *model* got a readable explanation is a separate question from
     whether the step worked, and the transcript answers the second.
+
+    **Two ways to fail, and only one of them raises.** A connector tool reaches this through
+    `langchain_mcp_adapters`, which handles the error itself and *returns* a
+    `ToolMessage(status="error")` — so catching exceptions announced nothing for exactly the tools
+    that run out of process. Worse than silence: `api/graph_stream` suppresses an error
+    `ToolMessage` on the documented ground that it "is already reported as tool_failed", so a failed
+    connector call left a `tool_call` event with no result and no failure beside it and vanished
+    from the transcript entirely. Checking the returned message closes that, and cannot
+    double-report — `returned_failure` is `None` for anything that signalled by raising.
     """
     try:
-        return await handler(request)
+        result = await handler(request)
     except Exception as exc:
         record_tool_failure(request.tool_call["name"], failure_detail(exc))
         raise
+    failed = returned_failure(result)
+    if failed is not None:
+        record_tool_failure(request.tool_call["name"], returned_failure_detail(failed))
+    return result

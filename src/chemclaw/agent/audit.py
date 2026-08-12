@@ -25,6 +25,17 @@ of those is the GxP trail, and "who attempted what" is exactly what the trail is
 attempt is now its own `cancelled` outcome, distinguishable from both a success and a failure,
 written on a shielded task so the write outlives the cancellation that caused it.
 
+**And control flow alone does not tell a success from a failure.** The three outcomes above were
+each derived from whether the handler returned, raised, or was cancelled — which is complete only
+for tools that signal failure by raising. An **MCP tool never raises**: `langchain_mcp_adapters`
+attaches a `handle_tool_error` callback, so an `isError=True` result is converted *inside*
+`StructuredTool.ainvoke` and comes back as a `ToolMessage(status="error")`. The handler returned,
+so every failed connector call was written to the GxP trail as `ok` — with the error text sitting
+in `detail`, the field an auditor reads as the call's *effect*. `returned_failure` is the missing
+half of the test: a returned failure is recorded under `error` like a raised one, so the outcome
+column means the same thing for a tool that runs in this process and one that runs behind a
+connector.
+
 Note: tool arguments and confirmed-answer payloads are user free text, so audit records may
 contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail accordingly.
 """
@@ -37,6 +48,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
 from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
+from langchain_core.messages import ToolMessage
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
@@ -106,7 +118,8 @@ class AuditEvent(BaseModel):
     # has none (`infra/sql/006`), and adding one to a hash-chained append-only table to police three
     # literals would cost a migration on every future outcome. The producer is this module alone.
     outcome: str
-    # Result summary on success, exception text on failure, why the attempt was cut short on a
+    # Result summary on success, the exception text — or the failure the tool *returned*, for a
+    # connector tool, which never raises — on failure, why the attempt was cut short on a
     # cancellation.
     detail: str = ""
     latency_ms: float
@@ -172,6 +185,29 @@ def _truncate(value: object) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def returned_failure(result: object) -> ToolMessage | None:
+    """The failure a tool *returned* instead of raising, or `None` if the call really succeeded.
+
+    Why this has to exist: **an MCP tool never raises.** `langchain_mcp_adapters` builds each
+    connector tool with a `handle_tool_error` callback, so a server that reports `isError=True` is
+    converted inside `StructuredTool.ainvoke` and surfaces as an ordinary *return* —
+    a `ToolMessage` whose `status` is `"error"`. Every reader that decides success by control flow
+    therefore reads a failed connector call as a success: the audit trail wrote `ok` with the error
+    text in `detail`, and the chemist's transcript announced no failure at all. In-process tools and
+    job tools do raise, so this returns `None` for them and nothing is reported twice.
+
+    `isinstance`, deliberately, and not a class-name test: `ToolMessageChunk` is a real subclass, so
+    a name comparison misses it *silently* — the branch simply does not run, and the outcome is the
+    same wrong `ok`. `api/graph_stream.py` makes the identical point at its own `ToolMessage` check.
+
+    Returned rather than reduced to a bool so the one caller that needs the message's text
+    (`agent/tool_authz.returned_failure_detail`) does not have to re-test the type to get it.
+    """
+    if isinstance(result, ToolMessage) and result.status == "error":
+        return result
+    return None
+
+
 def make_audit_middleware(
     *,
     correlation_id: str,
@@ -206,20 +242,32 @@ def make_audit_middleware(
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)
+            # The `ToolMessage` test lives in `returned_failure`, and what crosses into `_recording`
+            # is the *decision* — a string or nothing — never the library class. That is the same
+            # line the name/arguments split above draws, and it is what keeps the recording itself
+            # framework-free.
+            failed = returned_failure(result)
+            recorded.returned_error = None if failed is None else _truncate(failed.content)
             return result
 
     return audit_tool_calls
 
 
 class _Recorded:
-    """The one value the caller must hand back: what the tool returned, for the `ok` detail.
+    """What the caller must hand back: the tool's result, and whether that result *was* a failure.
 
     A mutable holder rather than a return value because `_recording` is a context manager, and the
     result is only known inside the block — the wrapper assigns what `handler` returned before the
     block exits and the row is written.
+
+    `returned_error` is set when the tool reported its failure by returning rather than raising (an
+    MCP tool always does; see `returned_failure`). It is a plain string so the recording below stays
+    framework-free: the wrapper does the `ToolMessage` test, and what crosses this boundary is the
+    decision it reached.
     """
 
     result: object | None = None
+    returned_error: str | None = None
 
 
 @asynccontextmanager
@@ -328,6 +376,22 @@ async def _recording(
         raise
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     _observe_tool_latency(elapsed_ms)
+    if recorded.returned_error is not None:
+        # The handler returned, and what it returned was a failure. Recorded exactly like a raised
+        # one — same outcome, same WARNING — because the difference between raising and returning is
+        # a property of the tool's transport, and an auditor reading the `outcome` column is asking
+        # about the call's effect.
+        logger.warning(
+            "tool %s returned a failure after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
+            name,
+            elapsed_ms,
+            event_cid,
+            event_actor,
+            recorded.returned_error,
+            args,
+        )
+        await _emit(sink, event_for("error", recorded.returned_error, elapsed_ms))
+        return
     detail = _truncate(recorded.result) if recorded.result is not None else ""
     logger.info(
         "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",

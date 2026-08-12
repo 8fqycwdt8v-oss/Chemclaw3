@@ -37,7 +37,9 @@ from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.connectors.identity import HEADER_ACTOR
 from chemclaw.connectors.registry import open_connector_specs
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_signals import _KEY, Signal, ToolFailureSignal
 from tests.conftest import _free_port
 from tests.fakes_langgraph import ScriptedChatModel
 
@@ -49,8 +51,10 @@ endpoint:
   url: {url}
   tools:
     - echo_subject
+    - fail_subject
   read_only:
     - echo_subject
+    - fail_subject
 """
 
 
@@ -120,6 +124,18 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
         observed.invocations.append(subject)
         return f"echoed {subject}"
 
+    @server.tool()
+    async def fail_subject(subject: str) -> str:
+        """Fail the way a connector tool actually fails: raise *over there*, out of core's reach.
+
+        The exception never crosses the process boundary as an exception. MCP reports it as a result
+        with `isError=True`, which `langchain_mcp_adapters` converts inside `StructuredTool.ainvoke`
+        into a returned `ToolMessage(status="error")` — so nothing raises in this process, and every
+        reader that decides success by control flow calls this a success.
+        """
+        observed.invocations.append(subject)
+        raise ChemclawError("the instrument is offline")
+
     app = connector_app(server, name="governed")
 
     @app.middleware("http")
@@ -142,21 +158,52 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
         yield observed
 
 
+async def _turn_calling(tool_name: str, sink: _RecordingSink, stack: AsyncExitStack) -> Any:
+    """The compiled graph for one turn whose scripted model calls `tool_name`.
+
+    Split out of `_run_turn_calling` because the signal test needs the *same* turn driven on the
+    custom stream rather than through `ainvoke` — two ways of running one graph, not two graphs.
+    """
+    connectors, _unreachable = await open_connector_specs(stack, connector_specs())
+    return build_langgraph_agent(
+        model=ScriptedChatModel([{"name": tool_name, "args": {"subject": "benzene"}}, "done"]),
+        audit_sink=sink,
+        connectors=connectors,
+    )
+
+
 def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:
     """Drive one real agent turn whose scripted model calls `tool_name`, and return its text."""
 
     async def _go() -> str:
         async with AsyncExitStack() as stack:
-            connectors, _unreachable = await open_connector_specs(stack, connector_specs())
-            graph = build_langgraph_agent(
-                model=ScriptedChatModel(
-                    [{"name": tool_name, "args": {"subject": "benzene"}}, "done"]
-                ),
-                audit_sink=sink,
-                connectors=connectors,
-            )
+            graph = await _turn_calling(tool_name, sink, stack)
             result = await graph.ainvoke({"messages": [("user", "check the subject")]})
             return str(result["messages"][-1].content)
+        raise AssertionError("unreachable")  # pragma: no cover - satisfies the type checker
+
+    return asyncio.run(_go())
+
+
+def _signals_from_turn_calling(tool_name: str, sink: _RecordingSink) -> list[Signal]:
+    """Drive the same turn on the graph's custom stream and return what it announced.
+
+    The chemist's transcript is fed by `chemclaw.core.turn_signals`, which publishes through
+    `get_stream_writer()` — so the only honest way to ask "did the chemist see this fail" is to
+    consume the real custom stream of the real graph, exactly as `tests/signals.collect_signals`
+    does for a bare tool body. `stream_mode="custom"` yields only those payloads.
+    """
+
+    async def _go() -> list[Signal]:
+        async with AsyncExitStack() as stack:
+            graph = await _turn_calling(tool_name, sink, stack)
+            signals: list[Signal] = []
+            async for payload in graph.astream(
+                {"messages": [("user", "check the subject")]}, stream_mode="custom"
+            ):
+                if isinstance(payload, dict) and isinstance(payload.get(_KEY), Signal):
+                    signals.append(payload[_KEY])
+            return signals
         raise AssertionError("unreachable")  # pragma: no cover - satisfies the type checker
 
     return asyncio.run(_go())
@@ -189,6 +236,78 @@ def test_a_connector_tool_call_is_recorded_in_the_gxp_audit_trail(governed: _Obs
     # one.
     assert governed.invocations == ["benzene"]
     assert governed.actors and set(governed.actors) == {"user-42"}
+
+
+def test_a_failed_connector_tool_is_audited_as_an_error_not_a_success(
+    governed: _Observed,
+) -> None:
+    """Invariant 1's other half: the trail's `outcome` means the same thing across the boundary.
+
+    An in-process tool signals failure by raising, and the audit middleware reads that off control
+    flow. **An MCP tool never raises**: `langchain_mcp_adapters` attaches `handle_tool_error`, so an
+    `isError=True` result is converted inside `StructuredTool.ainvoke` and returned as a
+    `ToolMessage(status="error")`. Deriving the outcome from control flow alone therefore wrote `ok`
+    for every failed connector call — with the error text in `detail`, the field an auditor reads as
+    the call's *effect*. A GxP trail that records a failure as a success is worse than one that
+    records nothing, because it looks answered.
+    """
+    sink = _RecordingSink()
+    identity = set_current_identity("user-42", frozenset({"process-chemist"}))
+    try:
+        answer = _run_turn_calling("fail_subject", sink)
+    finally:
+        reset_current_identity(identity)
+
+    # The turn survives the failed step — that part was never broken and must stay true.
+    assert answer == "done"
+    assert governed.invocations == ["benzene"]  # the tool really did run, and really did fail
+    recorded = {event.tool: event for event in sink.events}
+    event = recorded["fail_subject"]
+    assert event.outcome == "error", "a failed connector call was recorded as a success"
+    assert "the instrument is offline" in event.detail
+    assert event.actor == "user-42"  # still attributed to the turn's user
+
+
+def test_a_failed_connector_tool_is_announced_to_the_chemist(governed: _Observed) -> None:
+    """The transcript says the step did not work — the other reader control flow had misled.
+
+    `announce_tool_failures` only caught exceptions, so a connector failure raised no
+    `ToolFailureSignal`. That is not merely a missing announcement: `api/graph_stream` suppresses a
+    `ToolMessage` with `status == "error"` on the documented ground that it is "already reported as
+    tool_failed" — false for exactly these tools — so the failed call left a `tool_call` event with
+    no result and no failure beside it, and vanished from the transcript entirely.
+    """
+    sink = _RecordingSink()
+    identity = set_current_identity("user-42", frozenset({"process-chemist"}))
+    try:
+        signals = _signals_from_turn_calling("fail_subject", sink)
+    finally:
+        reset_current_identity(identity)
+
+    failures = [signal for signal in signals if isinstance(signal, ToolFailureSignal)]
+    assert [failure.tool for failure in failures] == ["fail_subject"], (
+        f"the chemist was never told the step failed; saw {signals}"
+    )
+    assert "the instrument is offline" in failures[0].message
+
+
+def test_a_successful_connector_tool_announces_no_failure(governed: _Observed) -> None:
+    """The mirror of the two tests above: nothing is reported for a call that worked.
+
+    Worth pinning because the fix widened what `announce_tool_failures` inspects. A predicate that
+    fired on any returned `ToolMessage` — or on a *refusal*, which is deliberately not
+    `status="error"` — would flood the transcript with failures for calls that succeeded, which is
+    the same class of defect as the one being fixed, mirrored.
+    """
+    sink = _RecordingSink()
+    identity = set_current_identity("user-42", frozenset({"process-chemist"}))
+    try:
+        signals = _signals_from_turn_calling("echo_subject", sink)
+    finally:
+        reset_current_identity(identity)
+
+    assert [signal for signal in signals if isinstance(signal, ToolFailureSignal)] == []
+    assert {event.tool: event.outcome for event in sink.events}["echo_subject"] == "ok"
 
 
 def test_a_denied_connector_tool_never_runs_and_is_still_audited(
