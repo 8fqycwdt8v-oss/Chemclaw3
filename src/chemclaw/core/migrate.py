@@ -54,7 +54,6 @@ an artefact of the QM cache having been the first thing to need a table.
 import asyncio
 import hashlib
 from pathlib import Path
-from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
@@ -206,36 +205,6 @@ async def migrate(dsn: str | None = None) -> list[str]:
     return applied
 
 
-async def _migrate_and_convert() -> tuple[list[str], Any]:
-    """Apply the schema, then convert the stored messages the schema made room for.
-
-    **Two steps, one command, because the second had no caller at all.**
-    `043_session_message_shape.sql` adds the stamp and `agent/message_migration` writes it, but
-    nothing ran the pass — so a deployment that applied its migrations still had every historical
-    row in the old shape, and the "resumable, run it again" property everything was designed around
-    described a pass no operator had a way to start. Here rather than in a separate target for the
-    same reason `db-grants` is separate and this is not: the grants are a *deployment* step that
-    outlives any one schema change, while this conversion belongs to the migration that introduced
-    the column it fills.
-
-    Order matters and is the obvious one: the column has to exist before anything stamps it.
-    """
-    names = await migrate()
-    from chemclaw.agent.message_migration import convert_stored_messages
-
-    return names, await convert_stored_messages()
-
-
 if __name__ == "__main__":
-    applied, converted = asyncio.run(_migrate_and_convert())
-    print(f"applied migrations: {', '.join(applied) or '(none — already up to date)'}")
-    print(
-        f"converted {converted.converted} stored message(s)"
-        + (
-            f"; refused {len(converted.refused)} (row ids: "
-            f"{', '.join(str(i) for i in converted.refused[:20])}) — these stay readable in their "
-            "original shape and need a look"
-            if converted.refused
-            else ""
-        )
-    )
+    names = asyncio.run(migrate())
+    print(f"applied migrations: {', '.join(names) or '(none — already up to date)'}")

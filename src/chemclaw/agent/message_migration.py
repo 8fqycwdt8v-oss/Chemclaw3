@@ -32,6 +32,7 @@ being silently coerced into text — a message that arrives at the model subtly 
 migration that stops and says which row it could not read.
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -296,3 +297,21 @@ async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
                     await cur.executemany(_MARK_CONVERTED, updates)
                 await conn.commit()
                 converted += len(updates)
+
+
+if __name__ == "__main__":
+    # Its own entrypoint rather than a step inside `core.migrate`, because the kernel imports no
+    # other subpackage — `tests/test_layering.py` caught exactly that when this was first wired
+    # there, and it was right: a schema applier that reaches into layer 1 to convert its data is
+    # the dependency direction this tree is arranged to prevent.
+    #
+    # Ordered after the schema by whoever runs them (`make db-migrate`, the chart's hook Job), for
+    # the obvious reason: the stamp's column has to exist before anything writes it.
+    outcome = asyncio.run(convert_stored_messages())
+    print(f"converted {outcome.converted} stored message(s)")
+    if outcome.refused:
+        ids = ", ".join(str(row_id) for row_id in outcome.refused[:20])
+        print(
+            f"refused {len(outcome.refused)} row(s) (ids: {ids}) — these keep their original shape,"
+            " stay readable, and need a look"
+        )
