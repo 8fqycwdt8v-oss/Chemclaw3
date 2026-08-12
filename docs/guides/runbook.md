@@ -46,6 +46,18 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
     instrumentation, over the same OTLP exporter. On in the shipped chart. Point the collector at
     Arize Phoenix to read these conventions natively; any OTLP backend receives the same spans, and
     nothing in the image depends on Phoenix.
+  - **`make phoenix-up` gives the eval lane one to point at**, on 6006 (UI) and 4317 (OTLP), from
+    `infra/docker-compose.observability.yml`. `infra/live/processes.sh` probes 4317 and turns the
+    exporter on only when something is listening, so a lane started without it is unchanged.
+    Content stays suppressed unless you set the flag below deliberately. It is **not** in the Helm
+    chart and is not meant to be: production traces go to whatever collector your org runs, and
+    this is the reader for archived probe runs.
+  - **`make phoenix-publish DIR=<transcripts> NAME=<experiment>` publishes a run you already
+    have.** It calls no model — `evals/live.py` already wrote `{probe, outcome}` per probe and the
+    judge's verdicts sit in `grades.json` beside them, so the comparison surface is built from the
+    record rather than from a re-run. The dataset is the *corpus* (`data/evals/probes/`) and each
+    run is an experiment over it, so a run that covered fewer probes shows as coverage rather than
+    as a corpus that shrank. Publish two runs into the same dataset and Phoenix diffs them.
   - **`CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` decides whether those spans carry content**, and it is
     off. Off sets every OpenInference hide flag, so a span carries identifiers and counts and
     nothing a chemist typed — measured by sweeping every exported attribute for the question and the

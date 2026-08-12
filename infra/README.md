@@ -8,6 +8,16 @@ Ports and credentials mirror `.env.example` and `chemclaw/config.py`, so a fresh
 checkout connects with no extra setup. This is a **dev** topology only — not a
 production deployment (plan step 0.5).
 
+`docker-compose.observability.yml` is a **second, separate stack**: one Phoenix
+container (UI + REST on :6006, OTLP/gRPC on :4317), started via `make phoenix-up`.
+It is the eval lane's reader — where an archived probe run is published so two
+runs can be diffed (`make phoenix-publish`, AG-13) and where the live lane's
+spans land. Separate from the file above because that one is what you need to run
+anything and this one is opened deliberately to ask a question about a run; it
+carries its own compose project name so `phoenix-down` cannot reach the spine's
+Postgres. Not part of the Helm chart, and not meant to be — production traces go
+to whatever collector the cluster runs.
+
 `live/` holds the two scripts the live-test lane is made of: `bootstrap.sh`
 provides what `make up` provides on a machine with no Docker daemon (it defers to
 the compose file whenever one is reachable), and `processes.sh` starts and stops

@@ -24,6 +24,14 @@ dependencies = [
     # recorded rather than discovered in an image scan; the chart pins `LANGSMITH_TRACING` off so
     # the tracer cannot be switched on by ambient env.)
     "deepagents>=0.7.5,<0.8",
+    # The *client* half of Phoenix, and only the client half (AG-13). `evals/phoenix.py` publishes
+    # archived probe transcripts as a dataset plus one experiment per run; the server is a
+    # container an operator runs, which is the licence line
+    # `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment` drew and this keeps:
+    # `arize-phoenix-client` is **Apache-2.0**, only the server image is Elastic-2.0, so nothing
+    # ELv2 enters this tree. Its closure is almost entirely already here — `httpx`,
+    # `openinference-*`, `opentelemetry-sdk` — so it is a small addition rather than a platform.
+    "arize-phoenix-client>=3.1",
     # Imported directly — `evals/live_judge.py` and `cli/mock_llm.py` name the provider SDKs' own
     # response types — so they are declared rather than relied on through the `langchain-*` wrappers
     # that happen to pull them today.

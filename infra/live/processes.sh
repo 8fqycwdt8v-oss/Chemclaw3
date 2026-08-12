@@ -45,6 +45,17 @@ export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
 export CHEMCLAW_SESSION_STORE="${CHEMCLAW_SESSION_STORE:-postgres}"
 export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
+# Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
+# with nothing there the exporter retries in the background and the run is unaffected, which is why
+# this is a probe rather than a flag somebody has to remember. Content stays suppressed:
+# `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` is left alone, so spans carry token counts, model names and
+# durations and not a word the chemist typed. A lane that wants the prompts sets it deliberately.
+if (exec 3<>/dev/tcp/127.0.0.1/4317) 2>/dev/null; then
+  exec 3>&- 3<&-
+  export CHEMCLAW_OTEL_ENABLED="${CHEMCLAW_OTEL_ENABLED:-true}"
+  export CHEMCLAW_OTEL_LLM_SPANS="${CHEMCLAW_OTEL_LLM_SPANS:-true}"
+  export CHEMCLAW_OTEL_ENDPOINT="${CHEMCLAW_OTEL_ENDPOINT:-http://127.0.0.1:4317}"
+fi
 # The PR-gate's dedicated clone, created by bootstrap.sh. Without it `note_repo_dir`
 # defaults to "." — this checkout — and every note submission is refused before a git
 # command runs, which silently removes the whole knowledge-contribution half of a run.

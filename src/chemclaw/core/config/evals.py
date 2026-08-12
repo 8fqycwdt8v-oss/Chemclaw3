@@ -90,6 +90,21 @@ class EvalSettings(BaseSettings):
     # this bounds the wait rather than expressing an expectation about it. Exceeded, the turn is
     # recorded as *unmeasured* rather than as free.
     live_probe_cost_wait_seconds: float = Field(default=5.0, gt=0)
+    # Where an archived probe run is published so it can be diffed against the next one (AG-13,
+    # `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment` left this half open).
+    #
+    # **A URL rather than a switch, and it points at localhost.** Phoenix is a container an
+    # operator runs beside the eval lane, not a dependency of this system: the publisher is a
+    # client, so the only thing this repo needs to know is where that process is. The default is
+    # the eval lane's own — nothing is published anywhere until somebody runs `make phoenix-up`
+    # and then the CLI, which is the same posture `live_probe_base_url` takes toward the front
+    # door it points at.
+    phoenix_base_url: str = "http://127.0.0.1:6006"
+    # The dataset an archived run is published *into*. One name across runs on purpose: Phoenix
+    # versions a dataset when its examples change and hangs every experiment off it, so
+    # re-publishing the same probe set under the same name is what makes two runs comparable.
+    # A second name would produce two datasets that cannot be diffed, which is the whole ask.
+    phoenix_dataset_name: str = "chemclaw-live-probes"
     # Share of the team arm's delegated turns that must reach the specialist the routing corpus
     # names, before a team is worth enabling. The M9 ADR shipped `agent_teams_enabled=false`
     # precisely because a supervisor that mis-routes is *worse* than the single agent it replaces,
