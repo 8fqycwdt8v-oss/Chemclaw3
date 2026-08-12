@@ -73,7 +73,7 @@ from chemclaw.agent.chemclaw_agent import (
     instructions_for,
 )
 from chemclaw.agent.compaction import context_compaction_middleware
-from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
@@ -190,6 +190,13 @@ def build_langgraph_agent(
                 [*tools, *(connectors or [])],
             ),
             *tool_call_middleware(audit, prof),
+            # Above the compaction group so that group keeps the innermost position its own
+            # docstring argues for. The two do not contend: caching marks the *system prompt and
+            # tool schemas*, which compaction never touches, and the message-tail breakpoint is
+            # placed by the provider at request time — on whatever list compaction hands it.
+            # Provider-specific, so which middleware this is (or that it is none) is decided in the
+            # F0 seam rather than here.
+            *prompt_caching_middleware(),
             # Unconditional, unlike the harness middleware above it: an unbounded thread is a
             # property of a session, not of the plan/execute mode, and the single-turn agent
             # accumulates one just as fast. Last in the list, so the reduction is the last thing

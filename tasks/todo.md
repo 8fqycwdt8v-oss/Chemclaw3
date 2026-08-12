@@ -2004,3 +2004,34 @@ it with 9999).
 Phases 0–4 complete. **Phase 5 (live tests) and Phase 6 (refactor execution) are gated on
 sign-off**, per the brief. The ranked execution order, the risk register, and the proposed live-test
 set are in `tasks/review-2026-08-12-migration-findings.md`.
+
+---
+
+# Prompt caching (D-2026-08-12-the-prefix-is-static-so-stop-paying-for-it)
+
+- [x] Verify the finding: no `cache_control` anywhere in a captured Anthropic payload; the ledger
+      already has the columns and the reader.
+- [x] Determine the API at these versions from installed source (`langchain_anthropic` 1.5.1).
+- [x] `llm_prompt_caching` setting + `.env.example` row.
+- [x] `agent/llm_provider.prompt_caching_middleware()`, spliced by `build_langgraph_agent`.
+- [x] Fix `runner_usage._cache_creation` — the per-TTL key upstream zeroes the flat one for.
+- [x] Tests: request shape, seam decision per provider, ledger, live two-call cache hit.
+- [x] Mutation-check every new test (5 mutations, each failing only its own tests).
+- [x] `make lint` · `make type` · full `make test` (4278 passed, 14 skipped, 10:31).
+
+## Review
+
+The seam placement was forced by `tests/test_third_party_layering.py`, and it turned out to be the
+right answer anyway — `("chemclaw.agent", "llm")` is a function-scope-only row, so the
+`langchain_anthropic` import had to be inside a function in `agent/`, and `llm_provider.py` is the
+module whose whole job is answering provider questions. A cache breakpoint is a provider question.
+
+The unplanned finding is the ledger one. The task asked to *confirm* the cache plumbing rather than
+assume it, and confirming is what turned it up: `cache_read` was carried end to end correctly and
+`cache_write` was never non-zero, because LangChain zeroes `cache_creation` whenever it emits the
+per-TTL breakdown — which Anthropic always sends. Every cache write was booked as full-price input.
+A payload-shape assertion would not have found this; only the live call did.
+
+Not done, deliberately: no per-TTL split of `cache_write_tokens` (a migration for a distinction no
+caller can make while the TTL is fixed at 5m), and no token-count pre-check against the provider's
+minimum cacheable prefix (a number only the provider knows, and it degrades silently anyway).
