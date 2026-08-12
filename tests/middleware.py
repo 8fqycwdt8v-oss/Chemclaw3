@@ -7,8 +7,14 @@ call, and a handler it controls, so a failure names the decision rather than the
 The halves these replaced were plain async functions, so a test called them directly:
 `await enforce_tool_authz(ctx, call_next)`. A `@wrap_tool_call` middleware is an `AgentMiddleware`
 *instance* with an `awrap_tool_call(request, handler)` method, so the same test needs three lines
-of adapter. They live here rather than in each file for the reason `tests/fakes_langgraph.py`
+of adapter. It lives here rather than in each file for the reason `tests/fakes_langgraph.py`
 exists: a double five modules need is a double that must have one definition.
+
+Deliberately *one* helper. This module briefly also carried a `run_chain` that reimplemented
+upstream's composition so a test could drive several middlewares at once — with no caller, and
+duplicating the very thing it claimed to model. A test that wants the real composition should
+compile a real graph (`tests/test_connector_safety_rubric.py` does), because a hand-rolled stand-in
+can only ever prove the stand-in is consistent with itself.
 """
 
 from collections.abc import Awaitable, Callable
@@ -37,28 +43,3 @@ async def run_middleware(
 ) -> Any:
     """Call `middleware` around `handler` for `request`, and return what came back."""
     return await middleware.awrap_tool_call(request, handler)
-
-
-async def run_chain(
-    middlewares: list[Any], request: Any, handler: Callable[[Any], Awaitable[Any]]
-) -> Any:
-    """Nest `middlewares` outermost-first around `handler` — the composition `create_agent` uses.
-
-    For the tests that are about the *order* rather than about one decision: audit outside
-    authorization is what makes a denied attempt a recorded attempt, and only a chain can show it.
-    """
-    composed = handler
-    for middleware in reversed(middlewares):
-        composed = _bind(middleware, composed)
-    return await composed(request)
-
-
-def _bind(
-    middleware: Any, handler: Callable[[Any], Awaitable[Any]]
-) -> Callable[[Any], Awaitable[Any]]:
-    """One layer, as its own closure — a lambda here would late-bind the loop variable."""
-
-    async def _layer(request: Any) -> Any:
-        return await middleware.awrap_tool_call(request, handler)
-
-    return _layer

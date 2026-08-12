@@ -9,12 +9,14 @@ Every test here therefore asks the same question twice: is it hidden, and is it 
 """
 
 import asyncio
+import inspect
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from deepagents.backends.protocol import BackendProtocol
 
 from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, skill_read_tool
 
@@ -136,7 +138,31 @@ def test_every_reach_path_the_protocol_exposes_is_gated(tree: str) -> None:
         "ls_info": lambda: backend.ls_info("/"),
         "glob_info": lambda: backend.glob_info("**/*"),
         "grep_raw": lambda: backend.grep_raw("body"),
+        "download_files": lambda: backend.download_files(["/beta/SKILL.md"]),
+        "als": lambda: backend.als("/"),
+        "aread": lambda: backend.aread("/beta/SKILL.md"),
+        "aglob": lambda: backend.aglob("**/*"),
+        "agrep": lambda: backend.agrep("body"),
+        "als_info": lambda: backend.als_info("/"),
+        "aglob_info": lambda: backend.aglob_info("**/*"),
+        "agrep_raw": lambda: backend.agrep_raw("body"),
+        "adownload_files": lambda: backend.adownload_files(["/beta/SKILL.md"]),
     }
+
+    # **Derived, and now actually derived.** This is the assertion the docstring above always
+    # promised and the probe dict did not deliver: it was a hand-written literal, so an upstream
+    # release adding a reach method left a hole the "enumeration" never mentioned. Not
+    # hypothetical — `download_files` was exactly such a method, it returns a file's full bytes,
+    # and it was ungated when this was written.
+    #
+    # Write methods are excluded because they are refused wholesale rather than narrowed, and a
+    # refusal cannot leak. Everything else the protocol exposes must be probed above.
+    writes = {"write", "edit", "upload_files", "awrite", "aedit", "aupload_files"}
+    reach = {m for m in dir(BackendProtocol) if not m.startswith("_")} - writes
+    assert reach <= set(probes), (
+        "the protocol exposes reach path(s) this test does not probe: "
+        f"{sorted(reach - set(probes))} — gate them, or state why they cannot leak"
+    )
 
     leaked = {
         name: repr(result)
@@ -147,11 +173,22 @@ def test_every_reach_path_the_protocol_exposes_is_gated(tree: str) -> None:
 
 
 def _call(probe: Callable[[], Any]) -> Any:
-    """Run a probe, treating a raised error as a refusal rather than a leak."""
+    """Run a probe, treating a raised error as a refusal rather than a leak.
+
+    Awaitables are driven to completion: the protocol's async twins are half its reach surface, and
+    a coroutine object's `repr` names no skill at all — so leaving them unawaited would make every
+    one of them pass by never running.
+    """
     try:
-        return probe()
+        result = probe()
+        return asyncio.run(_awaited(result)) if inspect.isawaitable(result) else result
     except (PermissionError, ValueError, NotImplementedError) as exc:
         return f"refused: {type(exc).__name__}"
+
+
+async def _awaited(result: Any) -> Any:
+    """`await` whatever a probe returned — `asyncio.run` wants a coroutine, not any awaitable."""
+    return await result
 
 
 def _p(hit: Any) -> str:

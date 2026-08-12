@@ -53,7 +53,10 @@ def test_events_round_trip_with_type_discriminator() -> None:
     """Each event serializes to JSON carrying its `type`, and reloads to the same values."""
     token = TokenEvent(text="hi")
     payload = json.loads(token.model_dump_json())
-    assert payload == {"type": "token", "text": "hi"}
+    # `agent` is on the wire and empty, which is the whole additive contract: a chunk with no
+    # specialist named is the main agent's, so an existing consumer that ignores the field reads
+    # exactly what it read before teams existed.
+    assert payload == {"type": "token", "text": "hi", "agent": ""}
     assert ToolCallEvent(tool="predict_pka").type == "tool_call"
 
 

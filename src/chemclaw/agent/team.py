@@ -17,7 +17,7 @@ yet known to help is not a default.
 **The four invariants, and where each one lives.** They are what the ADR records, and three of them
 needed code that did not exist:
 
-1. **A subagent's surface is an attenuation of its caller's, never a widening.** `_reject_widening`
+1. **A subagent's surface is an attenuation of its caller's, never a widening.** `reject_widening`
    compares the *advertised* names of parent and child and fails the build on any addition. This is
    new: `_reject_unknown_tool_names` already checked a profile against the whole deployment, which
    catches a typo and says nothing about privilege — a specialist naming a tool the caller does not
@@ -62,6 +62,7 @@ from deepagents.middleware.subagents import CompiledSubAgent, SubAgentMiddleware
 from langchain_core.runnables import Runnable
 
 from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.connectors.registry import endpoint_tool_names
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -257,6 +258,7 @@ def build_team_middleware(
     *,
     names: tuple[str, ...] = SPECIALISTS,
     build: Any = None,
+    supervisor_tool_names: frozenset[str] | None = None,
     **build_kwargs: Any,
 ) -> SubAgentMiddleware:
     """Compile the team and hand back the middleware that lets a supervisor delegate to it.
@@ -271,9 +273,13 @@ def build_team_middleware(
         names: Which specialists to build. Defaults to all five.
         build: The specialist builder, injectable so a test can compile against a scripted model.
             Defaults to `build_langgraph_agent`.
+        supervisor_tool_names: Every name the supervisor's own surface advertises, for the
+            runtime half of invariant 1 (see `_narrowed_connectors`). `None` skips that check,
+            which is what a unit test constructing a team without a supervisor surface wants.
         **build_kwargs: Passed to each specialist's build — the audit sink, the actor, the
             correlation id and this turn's connectors, so a specialist reaches out-of-process
-            capability over the same per-turn sessions the supervisor does.
+            capability over the same per-turn sessions the supervisor does. `connectors` is
+            narrowed per specialist before it is passed down.
 
     Returns:
         The `SubAgentMiddleware` carrying one compiled, attributed specialist per name.
@@ -286,8 +292,10 @@ def build_team_middleware(
     builder = build if build is not None else build_langgraph_agent
     profiles = specialist_profiles(names)
     subagents: list[CompiledSubAgent] = []
+    connectors = build_kwargs.pop("connectors", None)
     for profile in profiles:
         reject_widening(supervisor, profile)
+        narrowed = _narrowed_connectors(profile, connectors, supervisor_tool_names)
         subagents.append(
             CompiledSubAgent(
                 name=profile.name,
@@ -298,7 +306,10 @@ def build_team_middleware(
                 # `RunnableSerializable` would drag in a serialization contract this has no use for.
                 runnable=cast(
                     "Runnable[Any, Any]",
-                    _AttributedSpecialist(profile.name, builder(profile=profile, **build_kwargs)),
+                    _AttributedSpecialist(
+                        profile.name,
+                        builder(profile=profile, connectors=narrowed, **build_kwargs),
+                    ),
                 ),
             )
         )
@@ -313,6 +324,47 @@ def build_team_middleware(
         # exists to close. An empty one is the right thing for a lookup that must find nothing.
         backend=StateBackend(),
     )
+
+
+def _narrowed_connectors(
+    profile: AgentProfile,
+    connectors: list[Any] | None,
+    supervisor_tool_names: frozenset[str] | None,
+) -> list[Any]:
+    """The turn's open connector tools, narrowed to what this specialist's profile declares.
+
+    **Invariant 1 has a runtime half, and this is it.** `reject_widening` compares *declarations* —
+    it proves the specialist's profile names no tool and no bundle the supervisor's does not. That
+    is necessary and it is not sufficient, because the connector tools are handed down **already
+    open**: a specialist declaring `mcp_server_names: [calc]` was receiving every bundle the
+    supervisor had opened, so the profile bounded only the in-process half of its surface and
+    delegation *widened* the out-of-process half. Declaring one thing and receiving another is
+    precisely what the invariant forbids.
+
+    A profile that narrows nothing (`mcp_server_names is None`) keeps the supervisor's set, which is
+    what "attenuate-only" means at the top of the lattice.
+
+    The `supervisor_tool_names` check is the assertion, not the narrowing: a name that survives here
+    and is absent from the supervisor's own surface would be a widening this function failed to
+    prevent, and it raises rather than being dropped quietly.
+    """
+    if not connectors:
+        return []
+    if profile.mcp_server_names is None:
+        kept = list(connectors)
+    else:
+        allowed = set(endpoint_tool_names(profile.mcp_server_names))
+        kept = [tool for tool in connectors if getattr(tool, "name", None) in allowed]
+    if profile.tool_names is not None:
+        kept = [tool for tool in kept if getattr(tool, "name", None) in profile.tool_names]
+    if supervisor_tool_names is not None:
+        widened = {getattr(t, "name", "") for t in kept} - supervisor_tool_names
+        if widened:
+            raise TeamError(
+                f"specialist {profile.name!r} would reach connector tool(s) "
+                f"{sorted(widened)} that its supervisor cannot — a delegation must attenuate"
+            )
+    return kept
 
 
 def _stated_reason(state: Any) -> str:

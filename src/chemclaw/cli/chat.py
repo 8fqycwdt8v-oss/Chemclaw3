@@ -41,6 +41,7 @@ from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.state import turn_input
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
@@ -129,7 +130,7 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
     chart sets (D-152). A thread id is a string in a config dict; there is nothing to be absent.
     """
     result = await agent.ainvoke(
-        {"messages": [("user", prompt)]},
+        turn_input(prompt),
         {"configurable": {"thread_id": session_id}},
     )
     return _answer_text(result)
@@ -236,8 +237,14 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
             print(f"error: {exc}", file=sys.stderr)
 
 
-async def _plan_command(prompt: str, actor: str, saver: Any = None) -> str:
+async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
+
+    **`saver` has no default**, and that is the fix rather than a style choice: `session_todos`
+    resolves the *configured* checkpointer when handed `None`, which under `session_store=memory`
+    is not the store this session's turns wrote to. A default here would leave the defect reachable
+    by omission — `/plan` answering "(no plan yet)" for a session that has one, and `/approve`
+    recording against the empty-plan constant every deployment shares.
 
     `/approve` binds to the plan as it stands *now*, exactly as
     `POST /sessions/{id}/plan/decision` does — there is no hash to mistype here, but there is also
@@ -256,7 +263,10 @@ async def _plan_command(prompt: str, actor: str, saver: Any = None) -> str:
     from chemclaw.agent.plan_gate import plan_identity
     from chemclaw.agent.plan_state import session_todos
 
-    plan = await session_todos(_CLI_SESSION_ID, saver=saver)
+    # `or []`: `session_todos` answers `None` when the plan could not be *read* at all, which for
+    # this command is the same screen as a session that has proposed nothing — the gate is what
+    # must tell the two apart, not the display.
+    plan = await session_todos(_CLI_SESSION_ID, saver=saver) or []
     plan_hash = plan_identity(plan)
     if prompt.lower() == "/plan":
         lines = plan or ["(no plan yet)"]

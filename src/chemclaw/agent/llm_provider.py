@@ -93,6 +93,7 @@ def _openai_compatible_model(model: str | None = None) -> Any:
         max_retries=settings.llm_max_retries,
         http_async_client=_tls_http_client(),
         stream_usage=settings.llm_stream_usage,
+        **_generation_options(),
     )
 
 
@@ -111,7 +112,27 @@ def _anthropic_model(model: str | None = None) -> Any:
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         stop=None,
+        **_generation_options(),
     )
+
+
+def _generation_options() -> dict[str, Any]:
+    """The deployment's generation caps, as constructor kwargs both providers accept.
+
+    **Shared because a per-response cap that applies on one provider and not the other is not a
+    cap.** These were lost in the rebuild — the agent builder that used to thread them was deleted
+    and neither replacement passed them on — and the failure was silent in the expensive direction:
+    with `llm_max_tokens=4096` configured, the Anthropic model resolved to the library's own
+    default, measured at 128000. A deployment that had bounded its worst-case answer no longer had.
+
+    `temperature` is omitted rather than sent as `None` when unset. That is the rule
+    `core/config/llm.py` records having broken every turn once: some OpenAI-compatible endpoints
+    reject an explicit null, so "unset" has to mean *absent from the request*, not present-and-null.
+    """
+    options: dict[str, Any] = {"max_tokens": settings.llm_max_tokens}
+    if settings.llm_temperature is not None:
+        options["temperature"] = settings.llm_temperature
+    return options
 
 
 def _require_anthropic_key() -> None:

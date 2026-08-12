@@ -198,7 +198,7 @@ def test_approve_refuses_a_session_with_no_plan(
     cli_plan([])
 
     async def _run() -> tuple[str, tuple[bool, str] | None]:
-        reply = await cli._plan_command("/approve", settings.cli_admin_actor)
+        reply = await cli._plan_command("/approve", settings.cli_admin_actor, saver=None)
         return reply, await cli_approvals.decision(cli._CLI_SESSION_ID, EMPTY_PLAN_HASH)
 
     reply, recorded = asyncio.run(_run())
@@ -217,7 +217,7 @@ def test_approve_records_and_arms_a_real_plan(
     cli_plan(titles)
 
     async def _run() -> tuple[str, str, tuple[bool, str] | None]:
-        reply = await cli._plan_command("/approve", "alice@lab")
+        reply = await cli._plan_command("/approve", "alice@lab", saver=None)
         plan_hash = plan_identity(titles) or EMPTY_PLAN_HASH
         return reply, plan_hash, await cli_approvals.decision(cli._CLI_SESSION_ID, plan_hash)
 
@@ -242,7 +242,7 @@ def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
     cli_plan([])
 
     async def _run() -> str:
-        return await cli._plan_command("/plan", settings.cli_admin_actor)
+        return await cli._plan_command("/plan", settings.cli_admin_actor, saver=None)
 
     reply = asyncio.run(_run())
     assert "no approvable plan" in reply, f"the empty constant was shown as a plan: {reply}"

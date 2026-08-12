@@ -53,37 +53,39 @@ def test_a_plan_written_in_a_turn_is_readable_after_it() -> None:
     """
     saver = InMemorySaver()
 
-    async def _run() -> list[str]:
+    async def _run() -> list[str] | None:
         await _graph(saver).ainvoke({"todos": []}, {"configurable": {"thread_id": "sess-plan-1"}})
         return await session_todos("sess-plan-1", saver=saver)
 
     assert asyncio.run(_run()) == ["screen the species", "compute the barrier"]
 
 
-def test_a_session_that_never_took_a_turn_has_no_plan() -> None:
-    """No checkpoint is "no plan yet", not an error.
+def test_a_session_that_never_took_a_turn_reads_as_unreadable_not_as_an_empty_plan() -> None:
+    """No checkpoint is `None` — "there is nothing to read" — and that is not "the plan is empty".
 
-    The route renders that as an empty plan and `/approve` refuses to act on it, so returning `[]`
-    is what lets both callers treat "never asked anything" and "asked, proposed nothing" the same
-    way — which is correct, because to a chemist they are the same thing.
+    The two displays are the same to a chemist, and the two *authorizations* are not. `[]` hashes
+    to a real plan identity that a decision row can match; `None` cannot, and the caller that spends
+    a one-shot approval has to tell them apart or it leaves a live approval unspent for every later
+    turn (`plan_state.session_todos` records what that cost). The read-only callers coalesce with
+    `or []`, which is why the route still renders "no plan yet".
     """
-    assert asyncio.run(session_todos("sess-never-used", saver=InMemorySaver())) == []
+    assert asyncio.run(session_todos("sess-never-used", saver=InMemorySaver())) is None
 
 
 def test_an_unreadable_checkpointer_reads_as_no_plan_rather_than_failing() -> None:
     """A plan is a display concern; failing to read it must not fail the request that asked.
 
-    Deliberately the same posture the runner takes for the plan event it yields mid-turn. The cost
-    is stated rather than hidden: the WARNING this logs is the only thing that distinguishes "the
-    database hiccuped" from "there is no plan", and that difference decides whether a chemist is
-    offered an approve button.
+    Deliberately the same posture the runner takes for the plan event it yields mid-turn — but it
+    returns `None`, not `[]`. The WARNING is no longer the *only* thing distinguishing "the database
+    hiccuped" from "there is no plan": the return value is, which is what lets the approval-spending
+    path refuse to treat an outage as a session that proposed nothing.
     """
 
     class _BrokenSaver:
         async def aget_tuple(self, config: dict[str, Any]) -> Any:
             raise ConnectionError("Postgres unreachable at postgresql://h/db")
 
-    assert asyncio.run(session_todos("sess-broken", saver=_BrokenSaver())) == []
+    assert asyncio.run(session_todos("sess-broken", saver=_BrokenSaver())) is None
 
 
 def test_a_todo_without_content_is_skipped_rather_than_crashing_the_read() -> None:

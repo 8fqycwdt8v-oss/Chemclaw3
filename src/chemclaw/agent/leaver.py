@@ -32,13 +32,12 @@ pattern match and no "all users matching". The default is a dry run.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.session_store import _session_dsn
 from chemclaw.core import db
-from chemclaw.core.config import settings
 from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
 
@@ -79,7 +78,8 @@ _SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = %(actor)s
 # not work: Postgres resolves `DELETE FROM checkpoints` at *parse* time, so the guard never gets
 # evaluated and the whole erasure fails with `relation "checkpoints" does not exist`. Measured
 # against a schema with no checkpointer, which is exactly what every current deployment is. Hence
-# `_existing_tables` below — the check has to be a separate query.
+# `core.db.existing_tables` — the check has to be a separate query, which is also why the retention
+# sweep shares it rather than owning a second copy.
 _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = tuple(
     (table, f"DELETE FROM {table} WHERE thread_id IN ({_SESSION_SCOPED})")
     for table in CHECKPOINT_TABLES
@@ -150,18 +150,6 @@ class ErasureReport:
         return sum(self.retained.values())
 
 
-async def _existing_tables(cur: Any, tables: set[str]) -> set[str]:
-    """Which of `tables` exist on this connection's `search_path`.
-
-    A thin pass-through since the nightly retention sweep needed the same answer about the same
-    tables for the same reason (`core.db.existing_tables`, which carries the explanation). Kept as a
-    name here because every table in `_ERASE` is checked, not just the checkpointer's, so the answer
-    does not depend on remembering which ones might be missing — and that framing is this module's,
-    not the helper's.
-    """
-    return await existing_tables(cur, tables)
-
-
 async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
     """Count — and, with `apply`, delete — one actor's conversational rows.
 
@@ -189,7 +177,13 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
 
     report = ErasureReport(actor=actor, applied=apply)
     try:
-        async with db.connection(settings.postgres_dsn) as conn:
+        # `_session_dsn()`, not `postgres_dsn`: every table this sweep targets lives in the
+        # session store, which a deployment may point elsewhere (`CHEMCLAW_SESSION_STORE_DSN`,
+        # D-042) — the owner store, the transcript, the turn claims and, since the rebuild, the
+        # checkpointer's tables (`agent/checkpointer.py` opens its pool on the same DSN). Erasing
+        # against the default while the data lives on the configured one deletes nothing and
+        # reports success, which is the one outcome a right-to-erasure sweep must never produce.
+        async with db.connection(_session_dsn()) as conn:
             async with conn.cursor() as cur:
                 for table, columns, _ in _RETAINED:
                     # One row counts once however many of its columns name this actor: a proposal
@@ -200,7 +194,9 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                     )
                     row = await cur.fetchone()
                     report.retained[table] = int(row[0]) if row else 0
-                present = await _existing_tables(cur, {table for table, _ in _ERASE})
+                # Every table in `_ERASE` is asked about, not just the checkpointer's, so the
+                # answer does not depend on remembering which ones might be missing.
+                present = await existing_tables(cur, {table for table, _ in _ERASE})
                 for table, statement in _ERASE:
                     if table not in present:
                         # Reported as zero rather than omitted: "this deployment holds none of your

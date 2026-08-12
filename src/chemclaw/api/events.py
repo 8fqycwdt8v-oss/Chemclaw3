@@ -68,10 +68,23 @@ class ToolCallEvent(BaseModel):
 
 
 class TokenEvent(BaseModel):
-    """One streamed chunk of the assistant's answer text."""
+    """One streamed chunk of assistant text: the answer, or a specialist's working prose.
+
+    **The attribution is load-bearing here in a way it is not on the other events.** `api/runner`
+    concatenates this stream into the turn's final answer and into the durable transcript, so an
+    unattributed specialist chunk is not a mislabelled trace line — it is another agent's working
+    notes spliced into the answer a chemist reads, interleaved with the supervisor's own text in
+    whatever order the two happened to produce it. The runner therefore concatenates only the
+    unattributed ones, and a surface rendering a timeline still sees a specialist's output land
+    inside its handoff span.
+
+    Dropping a specialist's tokens outright was the other candidate and is worse: it makes the
+    delegation silent for the entire time it runs, which is the longest part of a delegated turn.
+    """
 
     type: Literal["token"] = "token"
     text: str
+    agent: str = _AGENT_FIELD
 
 
 class JobStartedEvent(BaseModel):

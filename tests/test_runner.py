@@ -935,3 +935,54 @@ def test_a_content_carrying_only_a_call_id_is_still_read() -> None:
         "the full result text is what the answer verifier scores against; without it every "
         "citation in the turn reads as fabricated"
     )
+
+
+def test_the_transcript_stores_what_the_agent_did_not_only_what_it_said() -> None:
+    """The turn's tool exchanges reach `session_messages`, or the reload contract is empty forever.
+
+    `api/schemas._transcript` projects `tool_calls` and each call's `result_ref` out of the stored
+    rows. Writing only the question and the answer therefore made both permanently empty — not
+    degraded, *empty* — so on reload everything the agent did was gone and a stored result whose
+    bytes were sitting in `tool_result_blobs` had no handle to fetch it by. The live SSE stream
+    showed all of it, which is exactly what made the loss easy to miss.
+
+    Asserted on the stored rows rather than on the route, because the route was never the defect:
+    it reads what is there correctly, and there was nothing there.
+    """
+
+    class _Recorder:
+        """A history provider that keeps what it was handed, which is the whole assertion."""
+
+        def __init__(self) -> None:
+            self.rows: list[Any] = []
+
+        async def save_messages(self, session_id: str, messages: Any, **_kw: Any) -> None:
+            self.rows.extend(messages)
+
+    history = _Recorder()
+    agent = _CitingAgent("THF was the solvent [[compound-thf]].", tool_result="THF, 65 C")
+
+    async def _collect() -> list[Any]:
+        session = TurnSession(session_id="s-transcript")
+        return [
+            event
+            async for event in runner.run_turn(
+                session,
+                "which solvent?",
+                connectors=[],
+                graph_factory=agent.graph_factory,
+                history=history,
+            )
+        ]
+
+    events = asyncio.run(_collect())
+
+    assert any(e.type == "tool_result" for e in events), "the fixture never ran a tool"
+    calls = [m for m in history.rows if getattr(m, "tool_calls", None)]
+    results = [m for m in history.rows if getattr(m, "tool_call_id", None)]
+
+    assert calls, "the assistant's tool call was not stored — the transcript cannot show it"
+    assert results, "the tool result was not stored — no past result is fetchable on reload"
+    # And the pairing survives, which is what the ref join needs: a result whose call id matches no
+    # stored call is worse than an absent one, because the transcript would render it under nothing.
+    assert {c["id"] for m in calls for c in m.tool_calls} == {m.tool_call_id for m in results}

@@ -43,7 +43,7 @@ worked** while every unit test passed. What stands in their place: `agent/langgr
 builds a compiled graph over `create_agent` — per turn, because LangGraph binds tools at
 construction and a connector session belongs to exactly one turn; turn state lives in a Postgres
 checkpointer (`agent/checkpointer.py`) on its own autocommit pool instead of being hand-built;
-the tool chain is six `@wrap_tool_call` middlewares in the old nesting order over the *same*
+the tool chain is seven `@wrap_tool_call` middlewares in the old nesting order over the *same*
 extracted decision functions, so an authorization refusal or an audit row cannot depend on which
 engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
 three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents

@@ -669,6 +669,32 @@ cost this review a wrong estimate:
   it to the system message, so the half that changes least is welded to the half that changes most.
   Marking it cacheable needs a change upstream, not in Chemclaw — the same conclusion the previous
   framework's `SkillsProvider` f-string forced, reached again for the same structural reason.
+- **Measure a session that is inside its context budget.** Above
+  `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET`, `agent/compaction.py` rewrites the *front* of the message
+  list on every model call — clearing older tool results, then dropping the oldest conversation
+  groups — so the cacheable prefix changes by construction. A `cache_read ≈ 0` measured on such a
+  session is compaction doing its job, not the provider failing to cache, and chasing it would be
+  chasing a saving that is not there. `chemclaw_context_compactions_total` (below) tells you which
+  kind of session you measured.
+
+### Is the context policy firing, and is the budget set anywhere near the traffic?
+
+```
+chemclaw_context_compactions_total       # model calls whose message list was reduced
+chemclaw_context_reclaimed_tokens_total  # estimated prompt tokens those reductions saved
+```
+
+A model call that needed no reduction increments **neither**, which is what makes the two readings
+distinguishable — and that distinction is the whole reason these exist. The policy they report on
+was absent for a phase while three settings, a config comment and a sentence in the system prompt
+all described it, and nothing could have told you.
+
+| Reading | What it means | What to do |
+| --- | --- | --- |
+| flat zero | No session in this process has crossed the budget | Nothing. This is the healthy default, and it is also the state in which the cache table above is meaningful. |
+| the line is absent from `/metrics` | You are not scraping this process | Not a compaction signal at all: `core/metrics.py` pre-seeds every declared counter, so both names render at `0` from the first scrape of a process that has served nothing. An absent line means the worker's `/metrics` port is unscraped (`CHEMCLAW_WORKER_METRICS_PORT`), not that the policy is unwired. |
+| rising steadily, `reclaimed` large per compaction | Long sessions are routinely over budget | Expected on a deployment with real chemists. Read it against `chemclaw_turn_duration_seconds`: reduction is cheap (sub-millisecond to ~6 ms per call), so a slow turn is not this. |
+| rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
 
 Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
 old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,

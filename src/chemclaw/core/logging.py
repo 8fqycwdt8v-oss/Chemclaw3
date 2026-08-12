@@ -230,15 +230,15 @@ def configure_telemetry() -> None:
     design, which is right for a turn and wrong for a deployment. The tests beside this function
     exist to make the silence audible.
 
-    **What is genuinely lost with MAF, and is not faked here.** MAF's chat-client instrumentation
-    recorded `gen_ai.client.token.usage` — an OTel *metric*, a histogram, despite the name reading
-    like a span attribute — labelled by request model, response model, provider and token type.
-    Measured across the installed venv it is emitted by exactly one module, MAF's own
-    `observability`; nothing in `langchain`, `langgraph` or `langsmith` emits it. So per-model
-    token attribution goes, in two steps: it stops being *exported* here (this bootstrap installs a
-    span pipeline and no metric pipeline, see below), and it stops being *produced* when the package
-    is removed. Nothing here fabricates a replacement. What remains is `core/metrics.py`'s
-    Prometheus token counters, which carry `profile` rather than model.
+    **What went with MAF, and what answers the same question now.** MAF's chat-client
+    instrumentation recorded `gen_ai.client.token.usage` — an OTel *metric*, a histogram, despite
+    the name reading like a span attribute — labelled by request model, response model, provider and
+    token type. Measured across the installed venv it is emitted by exactly one module, MAF's own
+    `observability`; nothing in `langchain`, `langgraph` or `langsmith` emits it. That metric is not
+    fabricated here. What replaces it is a different signal in the pipeline that *is* here:
+    `_instrument_llm_calls` puts one span per model call, carrying `llm.token_count.*` and
+    `llm.model_name`, behind `CHEMCLAW_OTEL_LLM_SPANS`. `core/metrics.py`'s Prometheus token
+    counters are unchanged and still carry `profile` rather than model, deliberately (D-152).
     `docs/guides/runbook.md` says the same where an operator would look.
 
     **Traces only, deliberately, and the other two signals have homes.** Metrics are
@@ -256,11 +256,13 @@ def configure_telemetry() -> None:
     tests call it repeatedly; a second call must not start a second export thread and a second gRPC
     channel that the API would then discard. The flag makes the second call a no-op.
 
-    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` had exactly one consumer — MAF's own instrumentation,
-    which attached prompts and results to its spans — and it goes with MAF. Nothing first-party puts
-    content on a span (`core/tracing.py`: "identifiers and counts, never a question, an argument or
-    an answer"), so the flag now buys nothing and says so out loud rather than reading as an
-    enabled-but-ineffective privacy switch.
+    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` **governs again**, and it is the same question it always
+    governed: whether prompts and completions ride on a span. It lost its only consumer with MAF's
+    instrumentation and spent a phase as a warned-about knob; `_instrument_llm_calls` gives it back
+    rather than adding a second flag beside it, because `CHEMCLAW_OTEL_LLM_SPANS` is the only thing
+    that puts content within reach. It still governs nothing when that is off — and the warning
+    below still says so out loud in exactly that case, rather than letting an
+    enabled-but-ineffective privacy switch read as an effective one.
 
     Raises:
         RuntimeError: `CHEMCLAW_OTEL_ENABLED=true` but the OpenTelemetry SDK / OTLP exporter is not
@@ -295,12 +297,44 @@ def configure_telemetry() -> None:
     _instrument_llm_calls(provider)
     _TRACING_INSTALLED = True
     _install_noop_meter_provider()
-    if settings.otel_include_sensitive_data and not settings.otel_llm_spans:
-        logging.getLogger(__name__).warning(
+    if settings.otel_include_sensitive_data:
+        _warn_about_sensitive_data()
+
+
+def _warn_about_sensitive_data() -> None:
+    """Say what `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` is doing — in *both* directions.
+
+    **The dangerous direction is the one that used to be silent, and that asymmetry was the
+    defect.** The flag spent a phase governing nothing, and this module warned about exactly that:
+    an enabled-but-ineffective privacy switch reads as an effective one. Giving the flag a consumer
+    back inverted which case needs saying. A deployment that set it while it was inert — and the
+    config comment kept it precisely "because a deployment may still have it in its values file" —
+    gets `CHEMCLAW_OTEL_LLM_SPANS` switched on by the shipped chart and starts exporting a chemist's
+    question and the model's answer to the collector, with nobody having decided that in this
+    release. A flag that changes meaning between versions has to announce the meaning it now has.
+
+    Not an error, and not a refusal: a deployment is entitled to make this choice, and failing to
+    start over a telemetry setting would be worse than the setting. What it is not entitled to is
+    making it without noticing, so the line names the endpoint the content is going to.
+    """
+    logger = logging.getLogger(__name__)
+    if not settings.otel_llm_spans:
+        logger.warning(
             "CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is set but has no effect while "
             "CHEMCLAW_OTEL_LLM_SPANS is off: no first-party span carries turn content, so there is "
             "nothing for it to govern"
         )
+        return
+    logger.warning(
+        "CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is set and CHEMCLAW_OTEL_LLM_SPANS is on: prompts "
+        "and completions — a chemist's question and the model's answer — are being attached to "
+        "spans and exported to %s. Whatever stores traces behind that collector now holds the "
+        "class of data SECURITY.md describes for the audit trail, and must be covered by the same "
+        "retention, access-control and PII policy. Unset it unless that was a decision somebody "
+        "made for this release.",
+        settings.otel_endpoint
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "the configured OTLP endpoint"),
+    )
 
 
 def _instrument_llm_calls(provider: Any) -> None:

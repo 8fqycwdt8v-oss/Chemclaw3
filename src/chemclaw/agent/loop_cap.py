@@ -106,7 +106,13 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     if calls >= settings.harness_max_loop_iterations:
         logger.warning("the model loop hit its %d-iteration cap", calls)
         record_loop_cap()
-        return {"jump_to": "end"}
+        # `loop_capped` is written here and nowhere else, because **the count cannot answer the
+        # question**. This branch stops the loop without incrementing, so a capped turn and a turn
+        # that used its last allowed call and then finished normally both end at exactly `cap` —
+        # measured at a cap of 1, where a one-call turn that answered was reported as capped and its
+        # complete answer was marked partial. A comparison on the count is a guess either way round;
+        # a flag set by the branch that fires is the fact.
+        return {"jump_to": "end", "loop_capped": True}
     return {"model_calls": calls + 1}
 
 
@@ -145,9 +151,11 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
     `harness_max_loop_iterations == 1` the predicate was never consulted at all, so nothing was
     recorded and a capped turn reported no cap.
 
-    `enforce_loop_cap` keeps the count in a declared state field, so here the question is answered
-    by reading the number rather than by reasoning about a decision. The hole closes with it: a cap
-    of 1 that fired leaves a count of 1, which is exactly what this compares.
+    `enforce_loop_cap` sets `loop_capped` on the branch that stops the loop, so here the question is
+    answered by reading the fact rather than by reasoning about a decision — or, as an earlier
+    version did, by comparing the count, which cannot distinguish the two cases: the stopping branch
+    does not increment, so a capped turn and a turn that spent its last allowed call and then
+    finished both end at exactly `cap`.
 
     Args:
         state: The turn's final graph state.
@@ -155,4 +163,8 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
     Returns:
         Whether the run reached the configured iteration cap.
     """
-    return int(state.get("model_calls", 0)) >= settings.harness_max_loop_iterations
+    # `>`, not `>=`. `enforce_loop_cap` increments *before* the model call and jumps to `end` when
+    # the count has already reached the cap — so a turn that used its last allowed call and then
+    # finished normally leaves `model_calls == cap` without ever having been stopped. Reading that
+    # as "capped" marks a complete answer partial, which is the opposite of this function's job.
+    return bool(state.get("loop_capped", False))

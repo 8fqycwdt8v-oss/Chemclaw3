@@ -421,6 +421,37 @@ def test_the_specialists_own_output_falls_between_its_handoff_and_its_hand_back(
     assert back < kinds.index("tool_result"), kinds
 
 
+def test_a_specialists_prose_is_streamed_but_is_not_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A specialist's tokens reach the surface marked, and reach the answer not at all.
+
+    Both halves, because each without the other is a defect that already had a candidate fix. Drop
+    a specialist's tokens and the delegation goes silent for the longest stretch of the turn, and
+    the test above — which pins the specialist's output *inside* its handoff span — has nothing to
+    find. Stream them unattributed and `api/runner` concatenates them into `answer_parts`, which is
+    both the text a chemist reads and the durable transcript: one agent's working prose interleaved
+    with the supervisor's, in whatever order the two produced it.
+
+    Asserted through the real stream rather than on `TokenEvent`'s default, because the field being
+    *declared* was never in doubt — what was in doubt is whether the producer sets it.
+    """
+    from chemclaw.api.events import TokenEvent
+
+    specialist_answer = "no genotoxic alert matched"
+    events = _delegating_turn(monkeypatch, specialist_answer)
+    tokens = [e for e in events if isinstance(e, TokenEvent)]
+
+    attributed = "".join(e.text for e in tokens if e.agent)
+    assert specialist_answer in attributed, (
+        f"the specialist's prose never reached the stream: {[(e.agent, e.text) for e in tokens]}"
+    )
+    answer = "".join(e.text for e in tokens if not e.agent)
+    assert specialist_answer not in answer, (
+        f"the specialist's prose was spliced into the answer the runner builds: {answer!r}"
+    )
+
+
 def test_a_specialists_events_are_attributed_to_the_specialist_not_to_the_tool_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

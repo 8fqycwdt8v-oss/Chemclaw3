@@ -3,6 +3,21 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the post-migration review (2026-08-12)
+
+- [ ] **A plan no longer shows which step is waiting on a durable job** — [M]. The previous engine
+      marked it by prefixing a todo's description (`awaiting-job:<id>`), and the rebuild replaced
+      that with a `ChemclawState.awaiting_jobs` field — which nothing ever wrote or read, so the
+      capability was lost rather than moved. The field is deleted (a declared field nothing consults
+      is a stub, which `state.py` says itself); what is missing is the behaviour: while a multi-hour
+      HPC job runs, the chemist's plan view shows the step as merely unfinished, and the job's
+      completion push-back closes nothing on the plan. Re-adding it needs a decision this review did
+      not make — a durable launcher would have to return a `Command(update=…)` rather than a string,
+      which changes what a tool *is* on this engine. The loop consequence the original marker
+      existed for is genuinely gone with the old predicate, so this is display, not correctness.
+      **Trigger**: the first chemist who asks why an approved plan looks stalled, or the frontend
+      building a plan panel that wants per-step state.
+
 ## Open — Left by the LangGraph rebuild (2026-08-11, D-2026-08-11-what-the-removal-found)
 
 - [x] **M12 probe (a), concurrency** — **Ran 2026-08-12** against Postgres + Temporal + the front
@@ -3474,8 +3489,8 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/planning/i
 ### Phase F1 — Harness backbone (autonomous plan/execute)
 The framework of the day shipped a harness natively, so F1 was *wiring* it rather than
 reimplementing providers. That premise did not survive the rebuild: today's harness is assembled
-from parts rather than switched on — `TodoListMiddleware` for the plan, `lg_loop_cap` for the
-runaway bound, `lg_enforce_plan_approval` for the gate, hung on the graph by
+from parts rather than switched on — `TodoListMiddleware` for the plan, `enforce_loop_cap` for the
+runaway bound, `enforce_plan_approval` for the gate, hung on the graph by
 `agent/langgraph_agent.py` (D-2026-08-10, `docs/guides/harness-konzept.md`). The tickets below are
 the record of the original wiring.
 - [x] **F1-T1** Harness config (`harness_enabled`/`harness_autonomy`/`harness_max_loop_iterations`).

@@ -46,7 +46,7 @@ from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
-from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.session_context import get_current_session_id
 
 logger = logging.getLogger(__name__)
@@ -206,7 +206,19 @@ async def consume_turn_approval(session_id: str) -> None:
     an approval.
     """
     try:
-        plan_hash = plan_identity(await session_todos(session_id))
+        todos = await session_todos(session_id)
+        if todos is None:
+            # Unreadable, not absent. Returning here would leave a live one-shot approval unspent
+            # for every later turn, which is the direction this must never fail in — so it is
+            # logged and counted rather than passing silently as "this session proposed nothing".
+            logger.warning(
+                "could not read session %s's plan to spend its approval; the approval stays live "
+                "and the gate will refuse on the next call, which is the safe direction",
+                session_id,
+            )
+            record_metric(lambda m: m.increment("chemclaw_plan_unreadable_total", 1))
+            return
+        plan_hash = plan_identity(todos)
         if plan_hash is None:
             return
         decision = await plan_approval_store().decision(session_id, plan_hash)
@@ -230,20 +242,85 @@ async def consume_turn_approval(session_id: str) -> None:
 # --- the LangGraph wiring ------------------------------------------------------------------------
 
 
+# The tool `TodoListMiddleware` exposes for rewriting the plan. Named here rather than imported
+# because it is the *model-facing* name the batch is inspected for, and the middleware publishes it
+# as a literal too — a rename upstream must fail this file's test, not silently reopen the hole.
+_PLAN_WRITE_TOOL = "write_todos"
+
+
+def rewrites_the_plan_in_this_batch(request: Any) -> bool:
+    """Whether the assistant message carrying this call also rewrites the plan.
+
+    The batch is read off the *message*, not the state, because that is the only place the other
+    calls in it are visible: `ToolNode` hands each call a runtime built from one pre-batch snapshot,
+    so state cannot answer "what else is running right now" by construction.
+
+    Returns `False` when the message cannot be found rather than guessing. That is not a hole: the
+    approval check still runs, so the worst case is the behaviour this function was added to
+    correct, not a new one.
+    """
+    messages = (request.state or {}).get("messages") or []
+    this_call = request.tool_call.get("id")
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None) or []
+        if any(call.get("id") == this_call for call in calls):
+            return any(call.get("name") == _PLAN_WRITE_TOOL for call in calls)
+    return False
+
+
+async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
+    """The plan this call is being judged against, or `None` when there is none to judge against.
+
+    Normally the turn's own state: `TodoListMiddleware` owns `todos` and `request.state` is this
+    turn's view of it.
+
+    **Inside a specialist there is no such view, and reading the absence as an empty plan refused
+    everything.** `SubAgentMiddleware` builds a subagent's input from the supervisor's state minus
+    `_EXCLUDED_STATE_KEYS`, which contains `todos` — so under the shipped `plan_only` posture a
+    delegated specialist saw no plan, matched no approval, and every state-changing call it made was
+    refused. The team was unusable with the default autonomy, and the failure looked like an
+    authorization decision rather than a missing key.
+
+    So an *absent* `todos` key falls back to the session's checkpointed plan — the same source
+    `api/routes/plan.py` shows a chemist and `consume_turn_approval` spends against, which is what
+    keeps the three from disagreeing. An absent key and an empty list are told apart deliberately:
+    a supervisor that genuinely proposed nothing still has the key, and still gets refused.
+    """
+    state = request.state or {}
+    if "todos" in state:
+        return [todo["content"] for todo in state.get("todos") or []]
+    return await session_todos(session_id)
+
+
 @wrap_tool_call
 async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Refuse a state-changing tool whose session has no approval for its current plan.
 
-    The LangGraph twin of `enforce_plan_approval`, over the same identity (`plan_identity`), the
+    The decision behind `enforce_plan_approval`, over the same identity (`plan_identity`), the
     same durable store (`approval_stands`) and the same sentence (`plan_approval_refusal`). An
     approval is a *durable row* that outlives the turn that wrote it, so the two engines agreeing on
     what it identifies matters more here than anywhere else in the migration: a hash computed
     differently would silently invalidate every decision a chemist has already made.
 
     **The plan is read from graph state, not from an ambient session object.** `TodoListMiddleware`
-    owns `todos` and the `write_todos` tool that maintains them, and `request.state` is this turn's
-    view of it — so the gate asks the plan as it stands at this instant, which is the property
-    `plan_is_approved`'s docstring insists on and had to arrange deliberately under MAF.
+    owns `todos` and the `write_todos` tool that maintains them, and `request.state` is the turn's
+    view of it.
+
+    **`request.state` is a snapshot taken before the whole tool batch, and that is a hole this gate
+    has to close itself.** `ToolNode` builds every call's runtime from one `_extract_state` and then
+    `asyncio.gather`s them, so a `write_todos` in the *same assistant message* has not landed yet
+    when this runs. Reproduced against the real graph: turn 1 writes plan A and a chemist approves
+    it; turn 2 emits `write_todos(plan B)` and `propose_knowledge_note(...)` together; the gate sees
+    plan A, the approval stands, and the write executes under an approval given for a different
+    plan. That is the DARK-1 sequence this module exists to prevent, and the same batch then leaves
+    the approval *unspent*, because `consume_turn_approval` hashes the new plan and finds no
+    decision for it.
+
+    So a gated call that arrives beside a plan rewrite is **refused**, without asking the store. It
+    is the one shape in which "the plan this call was approved against" is unanswerable: the batch
+    is atomic to the model and the two orders are indistinguishable from here. Refusing fails
+    closed, costs a legitimate turn one retry (the model re-issues the call in the next message,
+    against the plan it just wrote, and a human approves that plan), and needs no cross-call state.
 
     **Waiting jobs need no exclusion here.** Under MAF a todo waiting on a durable job was marked by
     prefixing its description, and the identity had to filter those out or an approved plan revoked
@@ -265,7 +342,9 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
     if not session_id:
         return await handler(request)
-    todos = (request.state or {}).get("todos") or []
-    if await approval_stands(session_id, plan_identity([todo["content"] for todo in todos])):
+    if rewrites_the_plan_in_this_batch(request):
+        raise plan_approval_refusal(name)
+    lines = await _plan_behind(request, session_id)
+    if lines is not None and await approval_stands(session_id, plan_identity(lines)):
         return await handler(request)
     raise plan_approval_refusal(name)

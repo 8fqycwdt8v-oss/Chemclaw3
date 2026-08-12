@@ -33,12 +33,13 @@ because deepagents publishes skill paths into the system prompt and expects a fi
 fetch the bodies. `agent/skill_backend.py` says why that difference is a security property and not
 an API detail.
 
-**The middleware chain is the same chain** (M3). Six `@wrap_tool_call` wrappers in the same nesting
-order as the MAF agent's, over the *same* decision functions — `tool_authz.dry_run_refusal`,
-`.denial_result`, `.domain_error_result`, `.failure_detail`, `repeat_guard.count_call`, and
-`audit._recording`. Only the plumbing was ported; a second copy of any of those sentences would let
-an authorization decision, a dry-run refusal or a GxP audit row depend on which engine a deployment
-happens to run, which is the one drift this migration must be incapable of.
+**The middleware chain is the same chain** (M3). Seven `@wrap_tool_call` wrappers in the same
+nesting order as the previous engine's, over the *same* decision functions —
+`tool_authz.dry_run_refusal`, `.denial_result`, `.domain_error_result`, `.failure_detail`,
+`repeat_guard.count_call`, and `audit._recording`. Only the plumbing was ported; a second copy of
+any of those sentences would let an authorization decision, a dry-run refusal or a GxP audit row
+depend on which engine a deployment happens to run, which is the one drift this migration must be
+incapable of.
 
 This paragraph used to list what was "deliberately not here yet, because nothing calls it" — the
 extra state fields, the plan-approval middleware, a durable checkpointer, the per-turn connector
@@ -172,7 +173,7 @@ def build_langgraph_agent(
         middleware=[
             *_harness_middleware(prof),
             _skills_middleware(backend),
-            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors),
+            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors, tools),
             *tool_call_middleware(audit, prof),
             # Unconditional, unlike the harness middleware above it: an unbounded thread is a
             # property of a session, not of the plan/execute mode, and the single-turn agent
@@ -261,6 +262,7 @@ def _team_middleware(
     correlation_id: str | None,
     audit_sink: AuditSink | None,
     connectors: list[Any] | None,
+    supervisor_tools: list[Any],
 ) -> list[Any]:
     """The specialist team, when this deployment routes turns through one (M9).
 
@@ -274,9 +276,11 @@ def _team_middleware(
     membership in `SPECIALISTS` rather than a depth counter, because "a specialist does not have a
     team" is the rule, and a depth counter would merely bound how badly it was broken.
 
-    The turn's identity, sink and connectors are passed down so a specialist audits under the same
-    correlation id and reaches the same per-turn connector sessions as the supervisor. Its *tools*
-    are narrowed by its own profile, and `team.reject_widening` refuses any that would widen.
+    The turn's identity and sink are passed down so a specialist audits under the same correlation
+    id. Its connectors are **narrowed to its own profile before they are passed**, which
+    `build_team_middleware` does — handing them down whole was a real widening: `reject_widening`
+    compares *declarations*, and the connector tools arrive already open, so a specialist declaring
+    two bundles received every bundle the supervisor had.
     """
     if not team_enabled() or profile.name in SPECIALISTS:
         return []
@@ -287,6 +291,10 @@ def _team_middleware(
             correlation_id=correlation_id,
             audit_sink=audit_sink,
             connectors=connectors,
+            supervisor_tool_names=frozenset(
+                str(getattr(t, "name", None) or getattr(t, "__name__", ""))
+                for t in supervisor_tools
+            ),
         )
     ]
 
