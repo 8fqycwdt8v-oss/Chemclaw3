@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
 from chemclaw.agent.profiles import get_profile
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
@@ -381,7 +381,10 @@ async def run_agent_step(step: AgentStepInput) -> str:
                 correlation_id=step.identity.correlation_id,
                 connectors=connectors,
             )
-            result = await graph.ainvoke(turn_input(step.prompt))
+            # No thread — a template step is one bounded turn — but the step ceiling still
+            # applies, and it matters more here: this path runs with the harness off, so
+            # `enforce_loop_cap` is not attached and this is the only bound on the loop.
+            result = await graph.ainvoke(turn_input(step.prompt), turn_config())
             return _answer_text(result)
     finally:
         reset_current_identity(tokens)

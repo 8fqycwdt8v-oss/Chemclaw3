@@ -48,7 +48,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
 from chemclaw.agent.skill_manifest import declared_tools
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
@@ -777,3 +777,33 @@ def test_a_specialist_is_handed_only_the_connectors_its_profile_declares() -> No
     # A profile that narrows nothing keeps the supervisor's set — attenuate-only, at the top.
     wide = AgentProfile(name="reporting")
     assert len(_narrowed_connectors(wide, [calc, hazard], supervisor_surface)) == 2
+
+
+def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> None:
+    """The graph's runaway backstop is this deployment's number, not one inherited from upstream.
+
+    `create_agent` bakes `recursion_limit=9999` (verified: a built agent's `.config` carries it) and
+    nothing here had ever chosen otherwise, so the only bound on a turn was thousands of model calls
+    — measured by binary search at 2 supersteps per call with the harness off and 4 with it on, i.e.
+    roughly 5,000 and 2,500. Reaching it raises `GraphRecursionError`, which discards the work the
+    turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial
+    answer still goes out. So the cap is the graceful stop and this is the backstop under it.
+
+    Asserted against the derivation rather than a literal, so the test says *why* 151 is the number
+    and follows the two settings it comes from. `9999` is named explicitly because that is the value
+    this exists to displace.
+    """
+    config = turn_config("session-1")
+
+    assert config["recursion_limit"] == settings.agent_recursion_limit
+    assert config["recursion_limit"] != 9999
+    assert config["recursion_limit"] == (
+        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 1
+    )
+    assert config["configurable"] == {"thread_id": "session-1"}
+
+    # A template step has no thread — one bounded turn, no conversation before or after it — and
+    # still gets the ceiling. That path runs with the harness off, so `enforce_loop_cap` is not
+    # attached and this is its only bound.
+    assert "configurable" not in turn_config()
+    assert turn_config()["recursion_limit"] == settings.agent_recursion_limit

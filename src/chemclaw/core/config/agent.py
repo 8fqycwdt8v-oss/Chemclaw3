@@ -140,6 +140,29 @@ class AgentSettings(BaseSettings):
     harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
+    # Supersteps one model call costs, for deriving the graph's own step ceiling below.
+    #
+    # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999` and
+    # nothing here ever chose otherwise, so a turn's real bound was thousands of model calls — and
+    # it fails by raising `GraphRecursionError`, which discards whatever the turn had produced.
+    # That is the opposite of the position `agent.loop_cap` takes deliberately: end the run, let the
+    # partial answer out, mark it. The loop cap above is the graceful stop; this is the backstop
+    # under it, and it also bounds the classic agent, which has no loop cap at all.
+    #
+    # **A superstep is not a model call, which is why this is a multiplier.** One model/tool round
+    # trip is several graph nodes — the model node, the tools node, and one per hook-bearing
+    # middleware. Measured by binary search on the minimal limit that completes N calls: `2N + 1`
+    # on a bare agent and with the harness off, `4N + 1` with the harness on. **Approximate on
+    # purpose**: the constant is the middleware *count*, so adding a middleware moves it, and a
+    # number with no headroom turns "we added a middleware" into "long turns started failing". 6 is
+    # the measured 4 with 50% headroom, and still bounds a runaway to ~25 model calls at the
+    # default cap rather than ~2,500.
+    #
+    # An earlier draft of this reasoning used 1.83, taken from counting streamed `updates` events.
+    # Those are node updates, not supersteps; a ceiling derived from it would sit *below* what a
+    # healthy 25-iteration turn needs and would have truncated good turns.
+    agent_supersteps_per_model_call: int = Field(default=6, ge=2)
+
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
     # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with
@@ -200,3 +223,22 @@ class AgentSettings(BaseSettings):
         rather than JSON — these are names, not config-carrying objects.
         """
         return [s for s in self.skills_enabled.split(os.pathsep) if s]
+
+    @property
+    def agent_recursion_limit(self) -> int:
+        """The graph step ceiling one turn runs under (`agent.state.turn_config`).
+
+        Derived from `harness_max_loop_iterations` rather than set directly, because the two are one
+        decision: the cap is what a deployment says a turn may cost, and a step ceiling that did not
+        follow it would either fire first — discarding an answer the cap would have let out — or
+        never fire at all, which is what `create_agent`'s baked 9999 does today.
+
+        `+ 1` is measured, not decorative: the minimal working limit is `k*N + 1`, the one superstep
+        before the loop is entered.
+
+        At the shipped defaults this is `25 * 6 + 1 = 151`, against the 101 a 25-iteration harness
+        turn actually needs — so the cap fires first with headroom to spare, which is the intent.
+        The ceiling should never be what stops a harness turn; it is what stops a turn that has no
+        cap, because `enforce_loop_cap` is attached only when the harness is on.
+        """
+        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 1

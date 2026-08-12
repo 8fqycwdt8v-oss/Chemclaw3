@@ -39,6 +39,7 @@ from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.budget import BudgetTracker
@@ -279,7 +280,11 @@ async def run_turn(
                 connectors=turn_tools,
                 checkpointer=await _turn_checkpointer(),
             )
-            graph_config = {"configurable": {"thread_id": session.session_id}}
+            # `turn_config`, not a bare `configurable`: it also carries the graph's step ceiling,
+            # which nothing here had ever chosen — `create_agent` bakes 9999, and reaching it raises
+            # rather than degrading. The mid-turn resume below reuses this same config, so the
+            # continuation runs under the same bound as the run it continues.
+            graph_config = turn_config(session.session_id)
             # The graph drives itself and emits the contract directly
             # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream is
             # that module's job rather than this loop's. What stays here is the whole rest of the

@@ -41,7 +41,7 @@ from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
@@ -131,7 +131,7 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
     """
     result = await agent.ainvoke(
         turn_input(prompt),
-        {"configurable": {"thread_id": session_id}},
+        turn_config(session_id),
     )
     return _answer_text(result)
 
