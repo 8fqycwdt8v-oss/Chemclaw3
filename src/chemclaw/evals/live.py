@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -986,13 +987,36 @@ class RoutingScore(BaseModel):
     # reader actually acts on: a systematic mis-route between two specialists is a prompt problem,
     # a scattered one is a partition problem.
     misroutes: dict[str, str] = Field(default_factory=dict)
+    # Turns that were **not** delegated, scored against the surface they should have been delegated
+    # to: every tool the supervisor called itself was one the expected specialist advertises.
+    #
+    # This exists because `accuracy` above is unmeasurable exactly when it matters most. The first
+    # team arm delegated 1 of 15, so accuracy read 100% on a denominator of one and said nothing —
+    # and a check whose denominator depends on the model volunteering a behaviour is the same
+    # defect the DARK-1 probe was fixed for. These two fields need no delegation at all: they ask
+    # whether the corpus's `expects_specialist` was the right answer, which is the half of "routing
+    # quality" that is a property of the partition rather than of the supervisor's judgement. A
+    # supervisor that never delegates still tells you, by which tools it reached for, where the
+    # question belonged.
+    self_answered: int = 0
+    within_expected_surface: int = 0
+    # Probe id → the tools it called that its expected specialist does not advertise. A question
+    # whose tools span two specialists is a partition finding, not a supervisor finding, and this
+    # is the list that distinguishes them.
+    outside_expected_surface: dict[str, list[str]] = Field(default_factory=dict)
     total_tokens: int = 0
     # Turns whose cost the ledger could not be asked about. Reported beside the totals and never
     # folded into them, so a mean over three measured turns is not read as a mean over twenty.
     unmeasured_turns: int = 0
 
 
-def score_routing(probes: list[Probe], outcomes: list[ProbeOutcome], *, arm: str) -> RoutingScore:
+def score_routing(
+    probes: list[Probe],
+    outcomes: list[ProbeOutcome],
+    *,
+    arm: str,
+    surfaces: Mapping[str, set[str]] | None = None,
+) -> RoutingScore:
     """Fold one arm's turns into its routing accuracy and per-specialist token cost.
 
     Per-specialist cost is attributed by *the turn's* routing, and it has to be: the ledger books a
@@ -1003,6 +1027,13 @@ def score_routing(probes: list[Probe], outcomes: list[ProbeOutcome], *, arm: str
 
     A turn routed to more than one specialist is attributed to the first, which is the delegation
     decision under test; the rest are what the supervisor did after it.
+
+    `surfaces` maps a specialist name to the tools it advertises, and is what lets a turn the
+    supervisor answered itself still say something about routing (see `RoutingScore`). It is passed
+    in rather than looked up because this module holds no import of the agent layer and should not
+    gain one to serve a score: the caller already has the profiles open. Omitting it leaves the two
+    surface fields at zero, which is the honest reading of "not measured" — the single-agent arm
+    passes it too, and there it measures the corpus rather than any routing decision.
     """
     score = RoutingScore(arm=arm, probes=len(probes))
     expected = {probe.id: probe.expects_specialist for probe in probes}
@@ -1013,6 +1044,7 @@ def score_routing(probes: list[Probe], outcomes: list[ProbeOutcome], *, arm: str
         else:
             score.total_tokens += tokens
         if not outcome.specialists:
+            _score_self_answered(score, outcome, expected.get(outcome.probe_id), surfaces)
             continue
         specialist = outcome.specialists[0]
         score.routed += 1
@@ -1028,3 +1060,29 @@ def score_routing(probes: list[Probe], outcomes: list[ProbeOutcome], *, arm: str
             score.misroutes[outcome.probe_id] = f"{wanted} → {specialist}"
     score.accuracy = score.correct / score.routed if score.routed else 0.0
     return score
+
+
+def _score_self_answered(
+    score: RoutingScore,
+    outcome: ProbeOutcome,
+    wanted: str | None,
+    surfaces: Mapping[str, set[str]] | None,
+) -> None:
+    """Score one turn the supervisor answered itself against the surface it should have used.
+
+    A turn that called no tool at all is not counted either way: it produces no evidence about
+    where the question belonged, and counting it as a match would make a supervisor that answers
+    everything from memory look perfectly routed — the exact reading this measurement exists to
+    prevent.
+    """
+    if wanted is None or surfaces is None or not outcome.tools_called:
+        return
+    surface = surfaces.get(wanted)
+    if surface is None:
+        return
+    score.self_answered += 1
+    outside = sorted({tool for tool in outcome.tools_called if tool and tool not in surface})
+    if outside:
+        score.outside_expected_surface[outcome.probe_id] = outside
+    else:
+        score.within_expected_surface += 1
