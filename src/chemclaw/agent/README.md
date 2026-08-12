@@ -5,12 +5,13 @@ over `create_agent` — one graph per turn, because LangGraph binds tools at con
 and a connector's MCP session belongs to exactly one turn (measured at ~60 ms, cheaper
 than the process-lived agent it replaced). Turn state is a declared schema (`state.py`)
 persisted by a Postgres checkpointer (`checkpointer.py`); the plan is `TodoListMiddleware`'s
-todo list; every tool call crosses the middleware chain in `langgraph_agent._middleware`,
+todo list; every tool call crosses the chain `langgraph_agent.tool_call_middleware` builds,
 whose order is load-bearing and documented there. The Microsoft Agent Framework this layer
 was first built on is gone
 (`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`) — replaced
-for defect load rather than capability, with `api/events.py` unchanged throughout, which is
-what let the two be scored against each other on one eval suite instead of argued about.
+for defect load rather than capability. `api/events.py` was the conformance boundary the two
+engines were scored against — additive changes only, and only after the comparison was made
+(M9/M10 add `HandoffEvent`, `EvidenceSourceEvent` and an `agent` field).
 
 **Responsibility:** conversation orchestration and short reasoning steps. Agents
 advertise tools, load Skills on demand, and

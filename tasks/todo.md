@@ -1516,3 +1516,29 @@ true after it, which is a better argument for renaming than brevity.
 **Still owed, unchanged from M12 and now a BACKLOG row of its own:** the concurrency probe, the live
 plan→approve→execute round trip, and team routing accuracy. Each needs a credential or a tenant this
 environment does not have. `agent_teams_enabled` stays off by default for the third of them.
+
+## Post-migration review (2026-08-12)
+
+The rebuild shipped green — `make lint type test`, every validator, CI, 4155 tests — and then a
+16-lane review with adversarial verification (181 agents; 81 findings raised, 72 survived) found
+three separate defects that each ended in a permanently unusable conversation. All three are fixed;
+`docs/decisions/D-2026-08-12-a-review-the-migration-did-not-get.md` records what a green suite could
+not see and why.
+
+**The one lesson worth carrying forward.** Sixteen of the confirmed findings are the same shape: a
+property was moved to a new mechanism and *only the declaration moved*. The specialist attenuation
+compared profiles while the tools were passed down already open; `awaiting_jobs` was declared as a
+replacement and never written; the skills backend's "every reach path" was seven of twenty-two; the
+test asserting that enumeration was a hand-written list. In each case the sentence was written by
+the same change that removed the old mechanism, so there was never a moment when it was true — which
+is why review found them and the suite did not.
+
+Three follow-on habits, each cheap:
+
+- **A checkpointed field is per-session until something resets it.** Per-turn is a claim that needs
+  a mechanism, and a single-turn test cannot see the difference. `state.turn_input` is that
+  mechanism; anything hand-building `{"messages": ...}` reintroduces the defect.
+- **A test that drives one request cannot see a batch.** The plan gate's whole suite drove the
+  middleware one call at a time, and the bypass needed two calls in one assistant message.
+- **When a docstring claims a set is derived, derive it in the test.** Two of the six unfalsifiable
+  tests said "enumerated from the protocol" / "proves the list is complete" over a literal.

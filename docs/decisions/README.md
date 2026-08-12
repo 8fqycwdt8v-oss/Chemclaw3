@@ -320,3 +320,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-10-basestore-is-not-where-this-systems-memory-lives](D-2026-08-10-basestore-is-not-where-this-systems-memory-lives.md) | BaseStore is not adopted; the memory package emits notes, not rows |
 | [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md) | Layer 1 is rebuilt on LangGraph, and turn state stops being hand-built |
 | [D-2026-08-11-what-the-removal-found](D-2026-08-11-what-the-removal-found.md) | Deleting the framework is what exposed the readers that only knew one shape |
+| [D-2026-08-12-a-review-the-migration-did-not-get](D-2026-08-12-a-review-the-migration-did-not-get.md) | What 181 reviewers found in a migration that shipped green |

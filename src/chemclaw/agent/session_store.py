@@ -130,9 +130,9 @@ _INSERT = (
     "INSERT INTO session_messages (session_id, message, message_shape, correlation_id) "
     "VALUES (%s, %s, %s, %s)"
 )
-# Row ids come back too, so a repaired message can be written to the row it came from. There is no
-# id-less variant: every reader needs the id, and the one that existed was dead code that D-143's
-# prose then cited as the statement the read path runs.
+# Row ids come back too. The repair that used to write a fixed message back to its own row is gone
+# (D-2026-08-10 §2), so what the id serves now is the caller that needs to name a row — the
+# conversion pass stamping it, and an operator reading a refusal's row number out of a log.
 _SELECT_WITH_ID = (
     "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
 )

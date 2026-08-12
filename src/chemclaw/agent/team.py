@@ -17,7 +17,7 @@ yet known to help is not a default.
 **The four invariants, and where each one lives.** They are what the ADR records, and three of them
 needed code that did not exist:
 
-1. **A subagent's surface is an attenuation of its caller's, never a widening.** `_reject_widening`
+1. **A subagent's surface is an attenuation of its caller's, never a widening.** `reject_widening`
    compares the *advertised* names of parent and child and fails the build on any addition. This is
    new: `_reject_unknown_tool_names` already checked a profile against the whole deployment, which
    catches a typo and says nothing about privilege — a specialist naming a tool the caller does not

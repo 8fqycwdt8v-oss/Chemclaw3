@@ -53,7 +53,7 @@ zustandsbehaftete Liste — und was nicht sichtbar ist, kann niemand vor der Aus
 ## 2. Woraus der Harness besteht
 
 Er ist kein Framework-Baustein, den man einschaltet, sondern **vier Teile**, die
-`langgraph_agent._harness_middleware` und `langgraph_agent._middleware` an den kompilierten Graphen
+`langgraph_agent._harness_middleware` und `langgraph_agent.tool_call_middleware` an den kompilierten Graphen
 hängen — beide nur, wenn `harness_enabled_for(profile)` wahr ist, damit der klassische Agent
 unverändert der ist, der er ohne Harness war.
 
@@ -61,8 +61,8 @@ unverändert der ist, der er ohne Harness war.
 |---|---|
 | **`TodoListMiddleware`** (LangChain) | Stellt dem Modell `write_todos` bereit und besitzt das Feld `todos` im Graph-State. Ein `Todo` ist `{content, status}` — **ohne** Beschreibungsfeld, was in §4 wichtig wird. |
 | **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um genau zwei Felder: `awaiting_jobs` (laufende durable Jobs) und `model_calls` (der Zähler der Runaway-Bremse). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. |
-| **`lg_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Zahl zurück. |
-| **`lg_enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
+| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end"}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Tatsache zurück — ein Flag, keine Zahl: der stoppende Zweig zählt nicht hoch, also endet ein gedeckelter Turn bei genau derselben Zahl wie einer, der seinen letzten erlaubten Aufruf verbraucht und dann geantwortet hat. |
+| **`enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
 
 **Warum der Deckel ein eigener Zähler ist und nicht `ModelCallLimitMiddleware`.** Die
 Framework-Middleware erzwingt genau diese Grenze, und sie war der erste Versuch. Sie führt zwei
@@ -81,9 +81,9 @@ Der Harness ist eine **reine Reasoning-Schicht-Erweiterung** und respektiert D-0
 │                                                                        │
 │   create_agent(state_schema=ChemclawState, middleware=[…])             │
 │        │            │                │                                 │
-│        │            │                └─ lg_enforce_plan_approval → Freigabe vor Wirkung
+│        │            │                └─ enforce_plan_approval → Freigabe vor Wirkung
 │        │            └─ TodoListMiddleware  → write_todos, State-Feld `todos`
-│        │            └─ lg_loop_cap         → `model_calls`, harte Obergrenze
+│        │            └─ enforce_loop_cap         → `model_calls`, harte Obergrenze
 │        │                                                                │
 │        └─ ruft pro Schritt vorhandene Tools auf:                        │
 │             • inline (xTB, Löslichkeit, pKa, Graph-Query) — synchron    │
@@ -100,7 +100,7 @@ Fire-and-Forget-Aufruf an Temporal — der Harness ändert daran nichts, er *seq
 der Aufruf passiert.
 
 **Blast-Radius im Code:** klein und an einer Stelle. `_harness_middleware` entscheidet, ob die
-Todo-Liste und der Deckel überhaupt hängen; `_middleware` schiebt das Freigabe-Gate ein, wenn
+Todo-Liste und der Deckel überhaupt hängen; `tool_call_middleware` schiebt das Freigabe-Gate ein, wenn
 `gate_applies(profile)`. Tools und Skills bleiben unverändert, weil der Harness dieselbe
 Registrierung nutzt.
 
@@ -167,7 +167,7 @@ das *nach* der Wissensproduktion greift (§6).
 - **PR-Gate bleibt terminal (D-005).** Egal wie autonom abgearbeitet wird: jede
   `created_by: agent`-Note geht über Branch → PR → menschliche Freigabe. Autonomie erzeugt
   *Vorschläge*, keine gemergte Wahrheit.
-- **Die Freigabe gilt dem Akt, nicht der Sitzung.** `lg_enforce_plan_approval` hängt am
+- **Die Freigabe gilt dem Akt, nicht der Sitzung.** `enforce_plan_approval` hängt am
   Tool-Aufruf-Rand, weil die Einheit, die eine Freigabe autorisiert, eine *Handlung* ist — dieselbe
   Begründung, die `agent/tool_authz.py` für die Per-Tool-RBAC führt. Eine Prüfung beim Turn-Start
   sieht plausibel aus und ist die Stelle, an der der naheliegende Fix falsch wird: der Plan wird
@@ -234,7 +234,7 @@ globalen `execute` bekam das Gate angehängt, ohne dass seine Freigabe je verbra
 Entscheidung autorisierte damit jeden weiteren Turn.
 
 **Kill-Switch & Beobachtbarkeit.** `harness_enabled=false` fällt sofort auf das heutige Verhalten
-zurück. Der Deckel ist **abgelesen, nicht erschlossen**: `lg_loop_cap` beendet den Lauf und
+zurück. Der Deckel ist **abgelesen, nicht erschlossen**: `enforce_loop_cap` beendet den Lauf und
 hinterlässt die Zahl in `model_calls`, `loop_capped(state)` liest sie, und damit ist auch der Fall
 `harness_max_loop_iterations == 1` beantwortbar — die frühere Schlussfolgerung war dort blind, weil
 die Schleife bei einem Deckel von 1 nie nach ihrer Fortsetzung gefragt wurde. **Offen** ist die

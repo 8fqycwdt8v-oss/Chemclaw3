@@ -3410,8 +3410,8 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/planning/i
 ### Phase F1 — Harness backbone (autonomous plan/execute)
 The framework of the day shipped a harness natively, so F1 was *wiring* it rather than
 reimplementing providers. That premise did not survive the rebuild: today's harness is assembled
-from parts rather than switched on — `TodoListMiddleware` for the plan, `lg_loop_cap` for the
-runaway bound, `lg_enforce_plan_approval` for the gate, hung on the graph by
+from parts rather than switched on — `TodoListMiddleware` for the plan, `enforce_loop_cap` for the
+runaway bound, `enforce_plan_approval` for the gate, hung on the graph by
 `agent/langgraph_agent.py` (D-2026-08-10, `docs/guides/harness-konzept.md`). The tickets below are
 the record of the original wiring.
 - [x] **F1-T1** Harness config (`harness_enabled`/`harness_autonomy`/`harness_max_loop_iterations`).

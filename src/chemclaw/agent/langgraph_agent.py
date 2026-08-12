@@ -33,12 +33,13 @@ because deepagents publishes skill paths into the system prompt and expects a fi
 fetch the bodies. `agent/skill_backend.py` says why that difference is a security property and not
 an API detail.
 
-**The middleware chain is the same chain** (M3). Six `@wrap_tool_call` wrappers in the same nesting
-order as the MAF agent's, over the *same* decision functions — `tool_authz.dry_run_refusal`,
-`.denial_result`, `.domain_error_result`, `.failure_detail`, `repeat_guard.count_call`, and
-`audit._recording`. Only the plumbing was ported; a second copy of any of those sentences would let
-an authorization decision, a dry-run refusal or a GxP audit row depend on which engine a deployment
-happens to run, which is the one drift this migration must be incapable of.
+**The middleware chain is the same chain** (M3). Seven `@wrap_tool_call` wrappers in the same
+nesting order as the previous engine's, over the *same* decision functions —
+`tool_authz.dry_run_refusal`, `.denial_result`, `.domain_error_result`, `.failure_detail`,
+`repeat_guard.count_call`, and `audit._recording`. Only the plumbing was ported; a second copy of
+any of those sentences would let an authorization decision, a dry-run refusal or a GxP audit row
+depend on which engine a deployment happens to run, which is the one drift this migration must be
+incapable of.
 
 What is deliberately *not* here yet, because nothing calls it: the extra state fields (they arrive
 with the phase that reads them), the human gate and the plan-approval middleware (M5), a *durable*

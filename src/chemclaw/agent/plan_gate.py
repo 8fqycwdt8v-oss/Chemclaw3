@@ -296,7 +296,7 @@ async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
 async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Refuse a state-changing tool whose session has no approval for its current plan.
 
-    The LangGraph twin of `enforce_plan_approval`, over the same identity (`plan_identity`), the
+    The decision behind `enforce_plan_approval`, over the same identity (`plan_identity`), the
     same durable store (`approval_stands`) and the same sentence (`plan_approval_refusal`). An
     approval is a *durable row* that outlives the turn that wrote it, so the two engines agreeing on
     what it identifies matters more here than anywhere else in the migration: a hash computed
