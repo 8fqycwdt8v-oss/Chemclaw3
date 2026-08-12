@@ -1,0 +1,53 @@
+# The eval lane's trace and experiment backend (AG-13). NOT a production topology, and not part of
+# the spine.
+#
+# **A second compose file rather than a service in `docker-compose.yml`.** That file is the
+# durable-execution + storage spine every developer needs to run anything at all; this is a reader
+# for a lane that is run deliberately, on archived data, by somebody asking a question about a
+# probe run. Folding it in would make every `make up` pay for a backend most sessions never open.
+#
+# **Not in the Helm chart either, and that is the AG-13 row's own scope.** The row is "the eval lane
+# only. Non-production, a dev credential, and probe questions that are already committed to this
+# repo — which is where the content-egress objection is weakest", with an explicit "do not re-open
+# it as [a production-tracing question]". The chart's `CHEMCLAW_OTEL_ENDPOINT` already names a
+# collector in an `observability` namespace it does not manage, and that stays the production
+# story: an operator points that collector wherever their org says traces go.
+#
+# **Licence.** The Phoenix *server image* is Elastic-2.0 — source-available, not OSI-approved —
+# which is why it is a container an operator chooses to run and not something this repo vendors.
+# The only Phoenix code in the tree is `arize-phoenix-client`, which is Apache-2.0. That split is
+# `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`'s, kept here.
+# Its own compose project. Without this both files default to the directory name (`infra`), so
+# `phoenix-down` would run against the same project as the spine — treating Postgres and Temporal as
+# orphans of a stack it does not own. A separate name is what keeps `phoenix-down` unable to touch
+# the database somebody's live lane is using.
+name: chemclaw-observability
+
+services:
+  phoenix:
+    # Pinned to the exact version the ADR measured against, not `version-20`: a floating tag would
+    # move this repo's only evidence about the publisher out from under it on someone else's
+    # release. The tag was checked against the registry rather than assumed.
+    image: arizephoenix/phoenix:version-20.1.0
+    ports:
+      # 6006 is the UI and the REST API the publisher writes through; 4317 is OTLP/gRPC, which is
+      # what `CHEMCLAW_OTEL_ENDPOINT` already speaks, so pointing the app here needs no new
+      # protocol and no collector in between.
+      - "6006:6006"
+      - "4317:4317"
+    environment:
+      # SQLite in a named volume. Phoenix supports Postgres and the spine already runs one, but
+      # pointing it at that database would put a third-party schema beside the GxP tables
+      # `infra/sql` owns and `tests/test_schema_inventory.py` pins. A separate store is the whole
+      # of what keeps this a reader.
+      PHOENIX_WORKING_DIR: /data
+    volumes:
+      - phoenix-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:6006/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  phoenix-data:

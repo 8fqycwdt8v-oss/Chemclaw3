@@ -383,41 +383,25 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       `core/tracing.py`'s `chemclaw.tool` rather than replacing it; ours is the audited one and the
       one that exists when the flag is off.
 
-- [ ] **AG-13 has no experiment surface, and the eval lane is where one could live** — [M].
-      Blocked since D-057 on "needs an external benchmark + a live LLM to score it", and it in turn
-      blocks the plan-vs-single-shot A/B row below. `evals/live.py` already drives the real front
-      door and writes each probe's whole event stream to disk, and `evals/live_judge.py` already
-      runs a stronger model as judge; what is missing is dataset versioning, run-over-run diffing
-      and annotation — the things `data/evals/baseline.json` plus a Markdown report approximate.
-      **Scope, and it is the whole point of the row**: the eval lane only. Non-production, a dev
-      credential, and probe questions that are already committed to this repo — which is where the
-      content-egress objection is weakest, and the reason this is not a production-tracing question.
-      Do not re-open it as one: the ADR lists the four written constraints that decided that.
-      **Evaluate the self-hostable tools first**, because LangSmith cannot be self-hosted without an
-      enterprise contract. Both candidates are legally fine to run internally and they gate
-      different things, which is what should decide it rather than the licence label:
-      **Arize Phoenix** — Elastic License 2.0, source-available but *not* OSI-approved; its three
-      limitations are no-hosted-service-to-third-parties, no circumventing the licence key, no
-      removing notices, so internal use and modification are squarely permitted and **nothing is
-      feature-gated**. One container plus Postgres, which this cluster already runs; OTLP-first and
-      the reference implementation of the OpenInference conventions; OAuth2/OIDC with an Entra ID
-      config URL.
-      **Langfuse** — MIT core, so the licence has no asterisk, but audit logs, data-retention
-      management, server-side masking, project-level RBAC and SCIM sit behind a commercial key.
-      That gated set *is* the compliance surface a GxP deployment wants, so "MIT" describes the
-      licence rather than the deliverable. SSO and org-level RBAC are in the core. Four stateful
-      services (Postgres + ClickHouse + Redis + S3) against this cluster's current Postgres +
-      Temporal.
-      **Check the OSPO policy first**: a blanket ban on non-OSI licences ends the comparison before
-      any of the above matters, and that is a policy question rather than a legal one — though it is
-      a narrower question than it looked. `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`
-      picked Phoenix and found its *client* half (`openinference-instrumentation-langchain` and its
-      closure) is **Apache-2.0**; only the server image is ELv2, so nothing ELv2 is vendored and the
-      policy question is about a container an operator runs. That ADR ships the instrumentation and
-      the spans; what is still open here is the **backend** — someone running Phoenix against the
-      probe transcripts so there are datasets, experiments and annotation.
-      **Exit criterion**: whether it closes AG-13's stated blocker — not whether the UI is nice.
-      **Trigger**: a live model credential plus somebody who wants the A/B answered.
+- [x] **AG-13 has no experiment surface, and the eval lane is where one could live** — [M].
+      **Closed 2026-08-12** by `D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open`,
+      and the trigger this row carried — "a live model credential plus somebody who wants the A/B
+      answered" — was wrong about what was missing. Every probe run this repo has taken was already
+      on disk: `evals/live.py` writes `{probe, outcome}` per probe, the judge's verdicts sit in
+      `grades.json` beside them, and `live_judge.judgement_from_transcript` already rehydrated one
+      so re-grading could happen offline. What was missing was a reader.
+      `make phoenix-up` runs Phoenix from `infra/docker-compose.observability.yml` (eval lane only,
+      never the chart — that was this row's own scope), and `make phoenix-publish DIR=… NAME=…`
+      publishes an archived run through `evals/phoenix.py`, calling no model.
+      **Measured against a real Phoenix 20.1.0**: the three archived arms in `tasks/live-test/`
+      published as three experiments over **one** dataset of 230 corpus examples at **one** version
+      — 190/190/92 runs, 760/760/411 evaluations — which is the run-over-run diff the row asked
+      for. The dataset is the *corpus* and not the run because the obvious alternative was measured
+      and is wrong: built from a run's own transcripts, the 92-probe sonnet arm cut the newest
+      version from 190 examples to 92, recording a run that covered less as a corpus that had lost
+      98 questions.
+      **What a credential still buys** is a new arm to compare, not the surface to compare it in.
+      The A/B row below is **not** closed by this: it needs a task set, and this needed none.
 
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
@@ -2178,9 +2162,13 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       capped turn is cut off, which is what `turn_timeout` and `budget_exhausted` already say.
       *Left open:* `Chemclaw3_ui` renders the new code through its generic error path and does not
       yet label it.
-- [ ] **The plan-vs-single-shot A/B has no real task set** — [M], blocked on AG-13.
-      `plan_execute_utility` scores the pairs a case hands it, and the shipped case is illustrative.
-      Genuine baseline-vs-augmented numbers mean running the same tasks twice against a live model.
+- [ ] **The plan-vs-single-shot A/B has no real task set** — [M]. **No longer blocked on AG-13**,
+      which closed on 2026-08-12: there is now a surface to compare two runs in
+      (`D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open`), and what this row
+      still lacks is the task set itself. `plan_execute_utility` scores the pairs a case hands it,
+      and the shipped case is illustrative. Genuine baseline-vs-augmented numbers mean running the
+      same tasks twice against a live model — publishing each arm with `make phoenix-publish` is
+      then the comparison, not a thing to build.
 - [ ] **The retrieval eval still scores only `GraphRetriever`** — [M], but it no longer *pretends*
       otherwise: under `hybrid`, or with `vector`/`lexical` active, the metric raises rather than
       report a graph-only recall under a name that promises the shipped path. Scoring the fused and
@@ -4361,7 +4349,10 @@ the record of the original wiring.
       `evals/ab.py` (2b.4) measures per-task tool utility including where tooling hurts, and
       `AgentProfile` (D-075) narrows the toolset per use case. Nothing left to build.
 - [ ] Design caution: evaluate the CoALA memory layer against DMR/LongMemEval, not by assumption —
-      deferred with AG-13 (needs an external benchmark + a live LLM to score it).
+      this was deferred alongside AG-13, and **only half of that blocker survived its closure**.
+      AG-13's half was the surface to compare runs in, which now exists; what this row still needs
+      is the thing AG-13 turned out not to need — an external benchmark, and a live model to score
+      it against.
 
 ## Open questions / awaiting input (see `docs/archive/research-review.md`)
 - [ ] **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
