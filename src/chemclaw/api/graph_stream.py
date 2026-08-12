@@ -116,7 +116,14 @@ async def graph_events(
             chunk, _metadata = payload
             usage.add(graph_usage_tokens(chunk))
             text = _text_of(chunk)
-            if text:
+            # **Only the root's tokens are the answer.** The runner concatenates `TokenEvent` into
+            # the turn's final answer, and a subgraph namespace is a *specialist* thinking out loud
+            # — so streaming its tokens spliced one agent's working notes into another agent's
+            # answer, interleaved with the supervisor's own text in whatever order the two
+            # happened to produce it. Its tool calls and results still surface, attributed, which is
+            # what a trace panel needs; what a chemist reads stays the answer the supervisor wrote.
+            # The usage is counted either way: a specialist's tokens cost the same money.
+            if text and not namespace:
                 yield TokenEvent(text=text)
         elif mode == "custom":
             event = _custom_event(payload, on_signal)
@@ -189,12 +196,25 @@ async def _from_update(
             # consequence would be a result never traced: no `result_ref` stored, and a transcript
             # showing a call with no answer.
             if isinstance(message, ToolMessage):
-                yield _attributed(
-                    await trace.returned(
-                        str(getattr(message, "tool_call_id", "")), message_text(message)
-                    ),
-                    agent,
-                )
+                # **A failed call is not a result, and must not become evidence.** `trace.returned`
+                # appends to `outputs`, which the answer gate reads to decide whether a claim was in
+                # front of the model — so emitting a failure here fed an error string to the
+                # grounding check as though it were retrieved data, and reported the call as
+                # `tool_result` while `announce_tool_failures` had already raised `tool_failed` for
+                # it. Two events for one outcome, one of them wrong, and the pair is documented as
+                # exhaustive.
+                if getattr(message, "status", "success") == "error":
+                    logger.debug(
+                        "tool call %s returned an error result; already reported as tool_failed",
+                        getattr(message, "tool_call_id", ""),
+                    )
+                else:
+                    yield _attributed(
+                        await trace.returned(
+                            str(getattr(message, "tool_call_id", "")), message_text(message)
+                        ),
+                        agent,
+                    )
         plan = _todo_titles(update)
         if plan is not None and plan != todos:
             # Only on change and never empty, matching `runner._PlanEmitter`: an unchanged plan

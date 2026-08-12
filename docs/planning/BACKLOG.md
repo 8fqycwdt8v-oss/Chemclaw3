@@ -18,6 +18,19 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       **Trigger**: the first chemist who asks why an approved plan looks stalled, or the frontend
       building a plan panel that wants per-step state.
 
+- [ ] **A specialist's events are attributed to `tools`, not to the specialist** — [S].
+      `graph_stream._agent_of` reads `namespace[-1].split(":")[0]`, and a subagent invoked through
+      deepagents' `task` tool arrives under a namespace whose entries name the *node* that ran it
+      (`tools:<id>`, then `model:<id>` inside the specialist's own graph) — so every event a
+      specialist raises carries `agent="tools"`, which is not an agent. The audit trail is
+      unaffected: it records the specialist through `_AttributedSpecialist`, not through the stream.
+      What is wrong is the trace a chemist reads, and the fix is not guessable from here — it needs
+      a live team turn to see what the namespace tuples actually contain, and `agent_teams_enabled`
+      is off by default so nothing produces them today. **Deliberately not fixed blind**: writing a
+      plausible-looking mapping and a docstring asserting it is the exact failure this review found
+      sixteen times.
+      **Trigger**: the M12 routing probe, which is the first thing that will run a real team.
+
 - [ ] **A conversation of pure prose is still unbounded** — [S]. `ContextEditingMiddleware` clears
       stale *tool results*, which is where the tokens are in this system, and a long chat with no
       tool calls therefore still grows until it meets the provider's window — at which point the
