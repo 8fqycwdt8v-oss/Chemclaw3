@@ -489,6 +489,12 @@ of the token-attribution fix — **22 passed in 4.50 s** when run.
 
 - The three M12 live probes remain unrun and need a credential. T-10's failure mode specifically
   needs a live Temporal broker, and T-14's fix wants a live re-measurement against a real connector.
-- Baseline: `make lint` and `make type` green (628 files, `mypy --strict`). The full suite was past
-  the halfway mark with **zero failures** when this was written; the final count goes in the test
-  report.
+- Baseline, measured on this branch before any behavioural change: `make lint` green, `make type`
+  green (`mypy --strict`, 628 files), `make prose-validate` green, and `make test`
+  **4079 passed, 157 skipped, 0 failed** in 19m15s. Every skip is conditional on a missing service or
+  binary — Postgres (27 files), the Temporal test server (13), `xtb`/`crest`/`tblite`, and `make`.
+  There is no unconditional `skip` and no `xfail` anywhere in the suite.
+
+  **That number is the point of this document.** 4079 green tests did not see the plan gate missing
+  from the template path, the unmetered spend, the audited-as-success connector failure, or the
+  unbounded MCP call. Each of those is reachable with shipped defaults.

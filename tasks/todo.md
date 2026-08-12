@@ -1937,7 +1937,10 @@ scouting:
 3. **Prose is evidence about its author's belief, never about the code.** Docstrings, ADRs and
    backlog rows are leads, not facts.
 
-Baseline before any change: `make lint` and `make type` green (628 files, `mypy --strict`).
+Baseline before any change, measured on this branch: `make lint` green, `make type` green
+(`mypy --strict`, 628 files), `make prose-validate` green, `make test` **4079 passed, 157
+skipped, 0 failed** in 19m15s. Every skip is conditional on a missing service or binary; the
+suite contains no unconditional `skip` and no `xfail`.
 
 ## What the prior reviews structurally could not see
 
