@@ -46,6 +46,29 @@ class TemporalSettings(BaseSettings):
     # gives up instead of pinning a worker with unlimited retries.
     activity_max_attempts: int = Field(default=5, ge=1)
 
+    # Bound on retries for a template's **agent** step alone (`durable/template_job.py`,
+    # `publish.agent_step_retry`). 1 = no outer retry.
+    #
+    # Its own setting because an agent step is the one activity whose retry is not free.
+    # Measured: a single provider 503 produced **two PR-gate branches and two audit rows for one
+    # logical note**, because a Temporal retry replays the whole turn from the prompt — there is no
+    # checkpointer behind an activity — so every tool the failed attempt already ran runs again,
+    # side effects and all. The turn is not idempotent, and `activity_max_attempts` was silently
+    # assuming it was.
+    #
+    # The retry that actually helps is already there and is much cheaper: the provider SDK retries
+    # a 503 in-process, `llm_max_retries=3` giving 4 HTTP attempts (the SDK's base client loops
+    # `range(max_retries + 1)` — measured, not assumed), with none of the replay. Wrapping that in
+    # `activity_max_attempts=5` meant up to 20 HTTP attempts and up to 5 duplicated turns for one
+    # blip.
+    #
+    # **The accepted cost, stated rather than discovered:** a *long* provider outage now fails the
+    # step after ~4 HTTP attempts instead of riding it out over 20. That is the deliberate trade —
+    # a template run that fails cleanly and is re-run by a person costs less than duplicate notes
+    # and duplicate audit rows that a person has to find and reconcile. A deployment that would
+    # rather ride out an outage raises this, knowing what each extra attempt may duplicate.
+    agent_step_max_attempts: int = Field(default=1, ge=1)
+
     # How many activities one worker process may run at once
     # (D-2026-08-05-a-worker-may-not-outrun-its-pool).
     #

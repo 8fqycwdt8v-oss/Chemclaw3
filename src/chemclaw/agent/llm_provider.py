@@ -4,7 +4,10 @@
 the internal OpenAI-compatible ("OpenLLM-like") endpoint versus the Anthropic dev path is a single
 config change, never a code edit at a call site (KISS/DRY, mirroring the ELN adapter registry).
 Provider classes are imported **only here** — `agent/langgraph_agent.py` calls this factory and
-stays provider-agnostic.
+stays provider-agnostic. `prompt_caching_middleware` is here for the same reason and not because
+it is a model: a cache breakpoint is spelled `cache_control` on Anthropic and has no counterpart on
+the internal endpoint, so *which* middleware a deployment gets is a provider question, and this is
+where provider questions are answered.
 
 The internal endpoint is reached with **one generic API credential** (`settings.llm_api_key`),
 deliberately not per-user Entra: the raw inference call is not a user-scoped resource access (see
@@ -51,6 +54,62 @@ def build_chat_model(task: str = "agent") -> Any:
     if settings.llm_provider == "openai_compatible":
         return _openai_compatible_model(model)
     return _anthropic_model(model)
+
+
+def prompt_caching_middleware() -> list[Any]:
+    """The provider's prompt-caching middleware, or nothing — the second thing this seam decides.
+
+    **It lives here rather than beside the middleware chain because caching is provider-specific,
+    which is the same reason the chat-model class lives here.** Anthropic marks a cacheable prefix
+    with `cache_control: {"type": "ephemeral"}` breakpoints; the internal OpenAI-compatible endpoint
+    has no such parameter and would be handed a kwarg it does not understand. `langgraph_agent`
+    splices whatever this returns and stays provider-agnostic, exactly as it does for the model.
+    Keeping the `langchain_anthropic` import inside this function is also what
+    `tests/test_third_party_layering.py` allows: `("chemclaw.agent", "llm")` is a *function-scope*
+    row, so a module-level import here would fail the layering gate.
+
+    **What gets marked, and why that is the whole win.** Upstream's middleware sets three
+    breakpoints: the last block of the system prompt, the last tool definition, and — via a
+    top-level `cache_control` on the request — the message tail. The Anthropic wire format renders
+    `tools` → `system` → `messages`, so a breakpoint on the system prompt caches the tool schemas
+    with it, and those two are the part that is byte-identical for the life of a profile. The
+    conversation tail is not static, but the incremental breakpoint on it means each call reads the
+    prefix the previous call wrote, which is what makes a long tool loop cheap rather than only the
+    first hop of it. Four breakpoints is the API's limit; three is what this uses.
+
+    **Below the minimum cacheable prefix it degrades silently, and that is a property of the API
+    rather than a check here.** Anthropic requires a prefix of roughly 1,024 tokens to create an
+    entry at all (2,048–4,096 on some models — it is per-model and not monotonic across
+    generations). Under that, the breakpoint is accepted, no entry is created, `cache_creation` and
+    `cache_read` both come back zero, and the request is answered normally at full price. There is
+    no error to handle and nothing here counts tokens to pre-empt one: a threshold copied into this
+    repo would be a second, staler statement of a number only the provider knows. What makes the
+    difference *visible* rather than assumed is the ledger — `api/runner_usage.graph_usage_tokens`
+    reads `cache_read`/`cache_creation` off every chunk and `turn_costs` stores both columns, so a
+    prefix that is not caching reads as zeros there instead of as a belief.
+
+    **Two gates, because they answer different questions.** `settings.llm_provider` decides whether
+    the *deployment* is on Anthropic at all, so the production `openai_compatible` target gets an
+    empty list and never imports `langchain_anthropic` — the guarantee is structural rather than
+    resting on somebody else's isinstance check. `unsupported_model_behavior="ignore"` covers the
+    other case: an Anthropic-configured deployment handed an injected model (every test that passes
+    `build_langgraph_agent(model=fake)`), where upstream's default would emit a `UserWarning` per
+    model call for a situation that is entirely expected.
+
+    Returns:
+        A one-element middleware list on the Anthropic path with caching enabled, else `[]`. The
+        list shape is what `build_langgraph_agent` splices, matching its three other middleware
+        groups.
+    """
+    if not settings.llm_prompt_caching or settings.llm_provider != "anthropic":
+        return []
+    from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+
+    # `ttl` is left at upstream's 5-minute default deliberately. The 1-hour cache doubles the write
+    # premium (2x rather than 1.25x) to buy survival across idle gaps, which is a trade a
+    # deployment with measured traffic can make and this seam cannot make for it — and a second
+    # setting with no reader is what `agent/compaction.py` records the cost of.
+    return [AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")]
 
 
 def _openai_compatible_model(model: str | None = None) -> Any:

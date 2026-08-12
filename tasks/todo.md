@@ -1903,3 +1903,135 @@ chunks. Both properties now hold and one test asserts both directions.
 **The lesson is about merges, not about tokens.** Two correct branches can compose into a defect
 that is in neither, and the place to look is where each side's *test* stops: a test pins one
 direction of a property, and merging two one-directional pins is not a two-directional pin.
+
+# Full review, refactor & hardening sweep (2026-08-12)
+
+An independent re-audit of the whole codebase, with special scrutiny on everything the
+Microsoft Agent Framework → LangGraph migration touched, plus a priority audit asking whether
+hand-rolled infrastructure duplicates something LangGraph already ships.
+
+**Deliberately independent.** The Phase 1–2 lanes were run *without* reading
+`D-2026-08-12-a-review-the-migration-did-not-get` or `D-2026-08-11-what-the-removal-found`, so their
+findings are not downstream of those reviews. The diff against them is a deliverable in its own
+right, and it is the most interesting result: see "What the prior reviews structurally could not
+see" below.
+
+## Documents
+
+- `tasks/review-2026-08-12-maf-removal.md` — Phase 1, the MAF removal completeness audit.
+- `tasks/review-2026-08-12-langgraph-native.md` — Phase 3, custom code vs. the native primitive.
+- `tasks/review-2026-08-12-migration-findings.md` — Phases 2 and 4, ranked by impact × safety.
+
+## Method
+
+Six waves of parallel subagents, each lane on one narrow surface, every behavioural claim **run**
+rather than read. Three rules the lanes carried, each learned from a false positive hit while
+scouting:
+
+1. **Resolve computed properties before claiming "no reader."** A naive `settings.<field>` grep
+   produced 22 candidates of which ~19 were false positives (`entra_jwks_url` is read via
+   `entra_jwks_endpoint`; `skills_dir` via `skills_dirs`). Same for filenames — the container recipe
+   is `deploy/Containerfile`, not `Dockerfile`.
+2. **A finding is a reproduction, not a reading.** The prior review's three worst defects each passed
+   the whole 4155-test suite; what distinguished the real ones was that somebody ran them.
+3. **Prose is evidence about its author's belief, never about the code.** Docstrings, ADRs and
+   backlog rows are leads, not facts.
+
+Baseline before any change, measured on this branch: `make lint` green, `make type` green
+(`mypy --strict`, 628 files), `make prose-validate` green, `make test` **4079 passed, 157
+skipped, 0 failed** in 19m15s. Every skip is conditional on a missing service or binary; the
+suite contains no unconditional `skip` and no `xfail`.
+
+## What the prior reviews structurally could not see
+
+`D-2026-08-11-what-the-removal-found` §4 claimed this exact ground — it swept "~180 MAF mentions",
+kept the load-bearing history, rewrote the present-tense assertions, and even names "a module
+docstring describing `build_agent` and a `SkillsProvider`" among the things it fixed. The rule it set
+is right. **But the sweep was keyed on the token `MAF`**, and measured:
+
+    grep -rn "\bbuild_agent\b" src/ tests/ | grep -v build_langgraph_agent | wc -l   →  42
+    ... | grep -ci maf                                                               →   0
+
+Not one of the 42 surviving references to a function with **zero definitions** mentions MAF. A
+token-keyed sweep was structurally incapable of seeing them, however carefully it was run.
+
+`D-2026-08-12` (16 lanes, 72 confirmed findings) missed them for a different reason: it was
+**diff-scoped**. Those references live in files the migration never opened; they became false when a
+symbol elsewhere was renamed. A diff review cannot see a file that did not change.
+
+**Both methods were sound and their union still has this hole.** The generalisation:
+
+> A rename makes prose false in files the rename never opened. Neither "grep the old framework's
+> name" nor "review the diff" finds that. The check that would is **"does every symbol this tree
+> names in the present tense still exist?"** — mechanisable, and currently unmechanised.
+
+`make prose-validate` already resolves metric and tool names against the live registries. The same
+idea applied to code identifiers in docstrings would have caught three of this sweep's findings at CI
+time.
+
+## Headline finding
+
+**`run_agent_step` — a Temporal activity that re-enters layer 1 — runs with no plan gate, no loop
+cap, no repeat guard, no cost ledger and no idempotency, over 16 state-changing tools, wrapped in a
+5-attempt retry policy.** `_classic()` sets `harness_enabled=False`, and `gate_applies` is
+`harness_enabled_for(profile) and autonomy_for(profile) == PLAN_ONLY` — so on the chart's own shipped
+posture a chat turn is plan-gated and a template agent step is not. Two further controls are inert
+because they are armed by context managers only `api/runner.py` enters.
+
+That is the migration's shape showing through: `api/runner.py` grew the controls, and the *other*
+caller of the same graph did not.
+
+## The Phase 3 score
+
+Of ten audited surfaces, **six are vindicated or correctly declined**, two need a better-stated
+reason, and two are genuine adoptions. Worth stating plainly: this layer was not built by someone
+reaching for hand-rolled code first. The two adoptions:
+
+- **`Annotated[int, UntrackedValue]`** — a native per-run channel exists and upstream's own
+  `ModelCallLimitMiddleware` uses it for exactly this counter. ~4 lines, and it dissolves the defect
+  class behind D-2026-08-12 §1 rather than guarding it.
+- **An explicit `recursion_limit`** — never set; `create_agent` bakes 9999, which at a measured ~1.83
+  supersteps per model call is a ceiling in the thousands, and it fails by *raising* rather than
+  degrading.
+
+Two corrections were made to this sweep's own findings mid-flight, both recorded in the native audit
+rather than quietly fixed: "no bound at all" (false — LangGraph has one) and then "the bound is
+10007" (also false for this repo — that is the bare-`StateGraph` default; `create_agent` overrides
+it with 9999).
+
+## Status
+
+Phases 0–4 complete. **Phase 5 (live tests) and Phase 6 (refactor execution) are gated on
+sign-off**, per the brief. The ranked execution order, the risk register, and the proposed live-test
+set are in `tasks/review-2026-08-12-migration-findings.md`.
+
+---
+
+# Prompt caching (D-2026-08-12-the-prefix-is-static-so-stop-paying-for-it)
+
+- [x] Verify the finding: no `cache_control` anywhere in a captured Anthropic payload; the ledger
+      already has the columns and the reader.
+- [x] Determine the API at these versions from installed source (`langchain_anthropic` 1.5.1).
+- [x] `llm_prompt_caching` setting + `.env.example` row.
+- [x] `agent/llm_provider.prompt_caching_middleware()`, spliced by `build_langgraph_agent`.
+- [x] Fix `runner_usage._cache_creation` — the per-TTL key upstream zeroes the flat one for.
+- [x] Tests: request shape, seam decision per provider, ledger, live two-call cache hit.
+- [x] Mutation-check every new test (5 mutations, each failing only its own tests).
+- [x] `make lint` · `make type` · full `make test` (4278 passed, 14 skipped, 10:31).
+
+## Review
+
+The seam placement was forced by `tests/test_third_party_layering.py`, and it turned out to be the
+right answer anyway — `("chemclaw.agent", "llm")` is a function-scope-only row, so the
+`langchain_anthropic` import had to be inside a function in `agent/`, and `llm_provider.py` is the
+module whose whole job is answering provider questions. A cache breakpoint is a provider question.
+
+The unplanned finding is the ledger one. The task asked to *confirm* the cache plumbing rather than
+assume it, and confirming is what turned it up: `cache_read` was carried end to end correctly and
+`cache_write` was never non-zero, because LangChain zeroes `cache_creation` whenever it emits the
+per-TTL breakdown — which Anthropic always sends. Every cache write was booked as full-price input.
+A payload-shape assertion would not have found this; only the live call did.
+
+Not done, deliberately: no per-TTL split of `cache_write_tokens` (a migration for a distinction no
+caller can make while the TTL is fixed at 5m), and no token-count pre-check against the provider's
+minimum cacheable prefix (a number only the provider knows, and it degrades silently anyway).

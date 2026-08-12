@@ -48,7 +48,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
 from chemclaw.agent.skill_manifest import declared_tools
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
@@ -687,10 +687,16 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
     )
     capped = _graph([calling] * 4)
     config = {"configurable": {"thread_id": "capped-1"}}
-    asyncio.run(capped.ainvoke(turn_input("go"), config=config))
+    # **The value `ainvoke` returns, not `get_state(config).values`.** `loop_capped` is an
+    # `UntrackedValue` channel, so it is never written to the checkpoint — reading it back through
+    # `get_state` gets `MISSING`, i.e. a silent `False`, and this assertion would have inverted into
+    # one that passes with the cap deleted. That is the same vacuous shape the comment above records
+    # for the earlier version of this test, reintroduced by the reader rather than by the script.
+    state = asyncio.run(capped.ainvoke(turn_input("go"), config=config))
 
-    assert loop_capped(capped.get_state(config).values), (
-        "a looping turn at a cap of 1 was not capped"
+    assert loop_capped(state), "a looping turn at a cap of 1 was not capped"
+    assert "loop_capped" not in capped.get_state(config).values, (
+        "the cap flag was checkpointed; it is per turn and the thread outlives the turn"
     )
 
     # And the other side, which is the half the count could never express: a turn that spends its
@@ -698,29 +704,30 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
     # Reporting that one as capped marks a complete answer partial.
     finished = _graph([AIMessage(content="done")])
     done_config = {"configurable": {"thread_id": "capped-2"}}
-    asyncio.run(finished.ainvoke(turn_input("go"), config=done_config))
+    done = asyncio.run(finished.ainvoke(turn_input("go"), config=done_config))
 
-    assert not loop_capped(finished.get_state(done_config).values), (
-        "a turn that answered within the cap was reported as capped"
-    )
+    assert not loop_capped(done), "a turn that answered within the cap was reported as capped"
 
 
 def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
-    """The cap is per turn; the checkpointer makes every field per *session* unless it is reset.
+    """The cap is per turn, and it is the *channel* that makes it so — not the call site.
 
-    This is the defect the reset exists for, and it bricked a conversation outright. `model_calls`
-    is a declared channel on a thread keyed by the session id, so with nothing zeroing it the count
-    accumulated: measured at `harness_max_loop_iterations=3`, turns 0-2 answered and turn 3 ended
-    before the model was called at all — the last message was the chemist's own question, and every
-    later turn on that session did the same. There is no recovery path from a durable counter that
-    has already passed the cap.
+    `model_calls` was a plain field, which resolves to a checkpointed `LastValue` on a thread keyed
+    by the session id, so the count accumulated across turns: measured at
+    `harness_max_loop_iterations=3`, turns 0-2 answered and turn 3 ended before the model was called
+    at all — the last message was the chemist's own question, and every later turn on that session
+    did the same. There is no recovery path from a durable counter that has already passed the cap.
+
+    **The input here is deliberately bare `{"messages": ...}`**, with nothing zeroing anything. That
+    is what distinguishes the fix from the one it replaced: hand-zeroing in `turn_input` made
+    per-turn-ness a property of every caller, and `graph.ainvoke` accepts a caller that forgets.
+    Under `Annotated[int, UntrackedValue]` there is nothing to forget — the checkpoint has no copy
+    of the count to restore. A test that went through `turn_input` could not tell the two apart.
 
     Four turns at a cap of 3, on one thread, is therefore the shape: the fourth is the one that
-    would have failed. Mutation-checked — dropping `"model_calls": 0` from `turn_input` fails here.
+    would have failed. Mutation-checked — dropping `UntrackedValue` from either field fails here.
     """
     from langgraph.checkpoint.memory import InMemorySaver
-
-    from chemclaw.agent.state import turn_input
 
     async def _scenario() -> list[str]:
         saver = InMemorySaver()
@@ -732,7 +739,7 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
                 audit_sink=NullAuditSink(),
                 checkpointer=saver,
             )
-            state = await graph.ainvoke(turn_input(f"question {turn}"), config=config)
+            state = await graph.ainvoke({"messages": [("user", f"question {turn}")]}, config=config)
             answers.append(str(state["messages"][-1].content))
         return answers
 
@@ -770,3 +777,33 @@ def test_a_specialist_is_handed_only_the_connectors_its_profile_declares() -> No
     # A profile that narrows nothing keeps the supervisor's set — attenuate-only, at the top.
     wide = AgentProfile(name="reporting")
     assert len(_narrowed_connectors(wide, [calc, hazard], supervisor_surface)) == 2
+
+
+def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> None:
+    """The graph's runaway backstop is this deployment's number, not one inherited from upstream.
+
+    `create_agent` bakes `recursion_limit=9999` (verified: a built agent's `.config` carries it) and
+    nothing here had ever chosen otherwise, so the only bound on a turn was thousands of model calls
+    — measured by binary search at 2 supersteps per call with the harness off and 4 with it on, i.e.
+    roughly 5,000 and 2,500. Reaching it raises `GraphRecursionError`, which discards the work the
+    turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial
+    answer still goes out. So the cap is the graceful stop and this is the backstop under it.
+
+    Asserted against the derivation rather than a literal, so the test says *why* 151 is the number
+    and follows the two settings it comes from. `9999` is named explicitly because that is the value
+    this exists to displace.
+    """
+    config = turn_config("session-1")
+
+    assert config["recursion_limit"] == settings.agent_recursion_limit
+    assert config["recursion_limit"] != 9999
+    assert config["recursion_limit"] == (
+        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 1
+    )
+    assert config["configurable"] == {"thread_id": "session-1"}
+
+    # A template step has no thread — one bounded turn, no conversation before or after it — and
+    # still gets the ceiling. That path runs with the harness off, so `enforce_loop_cap` is not
+    # attached and this is its only bound.
+    assert "configurable" not in turn_config()
+    assert turn_config()["recursion_limit"] == settings.agent_recursion_limit

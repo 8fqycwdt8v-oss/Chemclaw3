@@ -61,6 +61,24 @@ class LlmSettings(BaseSettings):
     # which omits the key entirely when this is None (F0.3).
     llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
+    # Anthropic prompt caching: mark the static prefix — the tool schemas and the system prompt —
+    # so a repeat call reads it at roughly a tenth of the input price instead of re-sending it at
+    # full price. Read only by `agent/llm_provider.prompt_caching_middleware`, which is also the
+    # only place that knows caching is provider-specific.
+    #
+    # **On by default, because the prefix here is large, static, and re-sent on every model call.**
+    # Measured on the default profile: 25,548 characters of system prompt across two blocks plus 29
+    # tool schemas — roughly 14,000 tokens that are byte-identical for the whole life of a profile,
+    # ahead of a conversation tail that is not. Measured live before this existed, across 22 billed
+    # turns: `cache_read_tokens = 0` and `cache_write_tokens = 0` on every one of them, an
+    # input:output ratio of 199:1, and single turns reaching 260,000 input tokens. A cache write
+    # costs 1.25x, a read 0.1x, so two calls over one prefix already pay for the write — and a
+    # single agent turn makes one model call per tool round trip, so break-even arrives inside the
+    # first turn rather than across turns.
+    #
+    # Off is for a deployment that has measured the opposite: turns rarer than the 5-minute TTL and
+    # exactly one model call each, where every write is paid and never read.
+    llm_prompt_caching: bool = True
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
     # the frontier model drives the main reasoning turn — without a second provider or a second

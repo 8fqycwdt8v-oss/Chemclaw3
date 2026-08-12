@@ -19,6 +19,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from langchain_core.tools import tool
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
@@ -522,3 +523,51 @@ def test_a_specialist_that_raises_still_hands_control_back(
         (signal.to, signal.reason)
         for signal in (payload[turn_signals._KEY] for payload in published)
     ] == [("evidence", "look it up"), ("", "")]
+
+
+def test_a_supervisor_with_connector_tools_can_build_its_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabling the team must not brick every turn — measured live, it did.
+
+    **The whole team suite could not express this, which is why it shipped.** Every other test here
+    builds the supervisor with no connectors, and `_narrowed_connectors` returns `[]` before it
+    reaches the widening assertion (`if not connectors: return []`), so the assertion was
+    unreachable in all 22 of them.
+
+    The defect: `build_langgraph_agent` composes the model's surface as
+    `[*tools, *connectors, skill_read_tool]` but handed `_team_middleware` only `tools` as the
+    supervisor's names. The assertion in `_narrowed_connectors` compares *connector* tool names
+    against that set, so every connector tool a specialist legitimately kept read as a widening.
+    Measured against the live stack with `CHEMCLAW_AGENT_TEAMS_ENABLED=true`: 15 of 15 probe turns
+    raised `TeamError: specialist 'evidence' would reach connector tool(s) [...] that its supervisor
+    cannot` at graph construction, before the model was called — each leaving a `turn_costs` row
+    with `completed=false` and zero tokens.
+
+    The guard itself is right and stays. What was wrong is the half of the surface it was given.
+
+    `agent_teams_enabled` is set here because it is off by default, so without it `_team_middleware`
+    returns `[]` and this test passes against the defect — which it did, on the first run, and is
+    why the mutation check is worth more than the assertion.
+    """
+    monkeypatch.setattr(settings, "agent_teams_enabled", True)
+    # Each specialist is compiled through `build_langgraph_agent` with no model of its own, so
+    # without this the build reaches for a real Anthropic client and fails on the credential rather
+    # than on the thing under test.
+    monkeypatch.setattr(
+        "chemclaw.agent.langgraph_agent.build_chat_model",
+        lambda *_a, **_k: ScriptedChatModel(["ok"]),
+    )
+
+    @tool
+    def similar_molecules(smiles: str) -> str:
+        """A connector-provided read tool, in the shape `open_connector_specs` hands down."""
+        return "[]"
+
+    graph = build_langgraph_agent(
+        ScriptedChatModel(["ok"]),
+        profile=_default(),
+        audit_sink=NullAuditSink(),
+        connectors=[similar_molecules],
+    )
+    assert graph is not None

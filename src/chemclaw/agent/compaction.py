@@ -18,8 +18,11 @@ This module is that policy again, over the same three settings, with the two hal
 verbatim, everything older replaced by a placeholder. Re-writing it here would have been a second
 copy of somebody else's tested code, and `langgraph_agent`'s own opening argument — use the
 framework's machinery rather than re-implement it — applies with more force to a strategy than it
-did to the agent loop. What upstream does *not* ship is the conversation window, so that half is
-first-party (`KeepLastConversationGroupsEdit`) and nothing else is.
+did to the agent loop. What upstream does *not* ship is a conversation window as a `ContextEdit`,
+so that half is first-party (`KeepLastConversationGroupsEdit`) — but only the *edit* is: the cut
+itself is `langchain_core`'s `trim_messages`, for the same reason. Re-deriving "which suffix of a
+message list fits a token budget without splitting a tool call from its result" is somebody else's
+tested code, and the first version of this edit is what re-deriving it costs (see its docstring).
 
 **Nothing here is destructive, and that is a change from D-025.** Both edits run inside
 `wrap_model_call`, so they narrow the list *this model call* is sent and leave graph state
@@ -67,7 +70,7 @@ from langchain.agents.middleware import (
 )
 from langchain.agents.middleware.context_editing import ContextEdit, TokenCounter
 from langchain_core.messages import AnyMessage, HumanMessage
-from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
@@ -95,19 +98,49 @@ TOOL_RESULT_PLACEHOLDER = (
 
 @dataclass(slots=True)
 class KeepLastConversationGroupsEdit(ContextEdit):
-    """Drop the oldest conversation groups once clearing tool results has not been enough.
+    """Cut the oldest conversation back to the token budget, on a group boundary.
 
     D-025's second strategy, and the only half of the policy upstream does not ship. It is what
     makes the thread *bounded* rather than merely cheaper: clearing tool results reclaims nothing
     from a conversation that called no tools, so a long enough exchange of prose would grow past any
     budget with the first edit doing its job perfectly.
 
-    **A group is a human message and everything that answers it**, which is also what makes this
-    safe. A tool call and its result are always emitted between two human messages, so a cut taken
-    at a group boundary can never separate them — the pairing rule `agent/message_pairing.py` states
-    is preserved structurally here rather than checked for afterwards. `tests/test_compaction.py`
-    asserts it with that module's own `calls_without_adjacent_results`, so the claim is measured
-    rather than reasoned about.
+    **The cut is by tokens, and it used to be by group count — which did not bound anything.** The
+    first version triggered on tokens and then dropped everything before the newest `keep` groups,
+    which reduces but does not bound: how much it reclaims depends entirely on how large those
+    `keep` groups happen to be, and it returned without cutting at all whenever the thread had no
+    more groups than `keep`. Measured at the shipped defaults over the 20 tool-free prose groups
+    `tests/test_compaction.py` builds: 300,300 tokens in, **180,180 out, against a 100,000
+    budget** — the edit ran, logged, dropped eight groups, and left the request 80% over. The budget
+    is now `trim_messages` (`strategy="last"`), so what survives is what fits.
+
+    **`keep` survives as a floor rather than the rule.** `agent_keep_last_conversation_groups` is an
+    ENV-visible knob and renaming or dropping it costs every deployment that sets it, for a word;
+    the same argument this module already makes for `agent_keep_last_tool_groups` at
+    `context_compaction_middleware`. So the window always drops everything older than the newest
+    `keep` groups, and the budget may drop more — `max(by_tokens, by_groups)`.
+
+    **A group is a human message and everything that answers it**, which is what keeps this safe.
+    A tool call and its result are always emitted between two human messages, so a cut taken at a
+    group boundary can never separate them — the pairing rule `agent/message_pairing.py` states is
+    preserved structurally here rather than checked for afterwards.
+
+    **`start_on="human"` is what buys the boundary from `trim_messages`, and it is load-bearing.**
+    `trim_messages` has no pairing logic of its own — `start_on` becomes an `end_on` on a reversed
+    first-fit pass, i.e. "drop from the front until the first kept message is of this type", and
+    nothing else. Measured without it over a 4-message-per-group thread, sweeping 565 budgets: 24
+    of them left a leading `ToolMessage` whose `tool_use` had just been dropped — a `tool_result`
+    with no call, which a provider rejects exactly as it rejects the reverse. Suffix trimming makes
+    the *call*-side orphan impossible, so this argument is only about the result side; the sweep in
+    `tests/test_compaction.py` pins both, with that module's own `calls_without_adjacent_results`
+    and with an assertion that the survivors start at a `HumanMessage`.
+
+    **The one thing it will not do is empty the list**, and that is a clamp rather than an
+    aspiration. Below the size of the newest group `trim_messages` returns `[]`, and
+    `ContextEditingMiddleware` checks for an empty message list only *before* running its edits — so
+    an emptied list goes to the provider, which rejects it. The cut never passes `starts[-1]`, which
+    means a single group larger than the whole budget is sent over budget rather than not sent. That
+    is the honest failure and it is the tool-result edit's case, not this one's.
 
     Ordered after the tool-result edit in `context_compaction_middleware`, so it sees a list already
     as small as the cheap move can make it and drops conversation only when that was not enough.
@@ -115,36 +148,55 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     """
 
     trigger: int = 100_000
-    """Estimated tokens above which the window is applied at all."""
+    """Estimated tokens above which the window is applied — and the budget it cuts back to."""
 
     keep: int = 12
-    """Number of most recent conversation groups to preserve."""
+    """Floor on the cut: groups older than the newest `keep` always go, whatever the budget says."""
 
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
-        """Trim `messages` in place to the newest `keep` groups, when over `trigger`.
+        """Cut `messages` in place back to `trigger` tokens, when over `trigger`.
 
         In place because that is the `ContextEdit` protocol: `ContextEditingMiddleware` deep-copies
         the request's list once and hands the same list to each edit in turn, so returning a new one
-        would silently discard this edit's work.
+        would silently discard this edit's work. Hence an index is computed and `del` applied,
+        rather than the list `trim_messages` returns being handed back.
         """
         if count_tokens(messages) <= self.trigger:
             return
         starts = [
             index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
         ]
-        if len(starts) <= self.keep:
+        if not starts:
+            # No group boundary to cut on, so no cut this edit can take without stranding a pairing.
             return
-        # `starts[-keep]`, not `starts[len(starts) - keep]`. They are the same index for every value
-        # the config can produce (`agent_keep_last_conversation_groups` is `ge=1`), and they differ
-        # at `keep == 0`, where the second raises `IndexError` inside a middleware — a failed turn —
-        # and this one degrades to cutting at the first group. A directly-constructed edit is the
-        # only way to reach that, and a crash is not what it should get.
-        cut = starts[-self.keep]
+        kept = trim_messages(
+            messages,
+            max_tokens=self.trigger,
+            token_counter=count_tokens,
+            strategy="last",
+            start_on="human",
+            include_system=False,
+            allow_partial=False,
+        )
+        # `kept` is a suffix of `messages` — `strategy="last"` with `allow_partial=False` and no
+        # system message to re-insert can only drop a prefix — so its length is the cut index.
+        by_tokens = len(messages) - len(kept)
+        # The floor, guarded at both ends because a directly-constructed edit can reach values the
+        # config cannot (`agent_keep_last_conversation_groups` is `ge=1`): `keep == 0` would index
+        # `starts[0]` while meaning the opposite, and `keep` above the group count would raise
+        # `IndexError` inside a middleware, which is a failed turn. Both degrade to "no floor".
+        by_groups = starts[-self.keep] if 0 < self.keep <= len(starts) else starts[0]
+        # The newest group is the floor on what can be kept, per the clamp in the class docstring.
+        cut = min(max(by_tokens, by_groups), starts[-1])
+        if cut <= 0:
+            return
         logger.info(
-            "context budget exceeded: dropping %d message(s), keeping the newest %d of %d "
-            "conversation groups",
+            "context budget exceeded: dropping %d of %d message(s) to fit %d tokens; "
+            "%d of %d conversation groups survive",
             cut,
-            self.keep,
+            len(messages),
+            self.trigger,
+            sum(1 for start in starts if start >= cut),
             len(starts),
         )
         del messages[:cut]

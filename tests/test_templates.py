@@ -16,6 +16,7 @@ here; everything above it is sandbox-safe and always runs.
 import asyncio
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -512,6 +513,71 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
     assert result.steps == {"hazards": {"flags": ["azide"]}, "brief": "briefing text"}
     assert result.result == "briefing text"
     assert result.template == "probe"
+
+
+# --- the agent step's retry is narrower than every other step's -------------------------------
+
+
+def test_only_the_agent_step_carries_the_narrowed_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dispatch, not the policy object — which branch actually got which bound.
+
+    `tests/test_publish.py` proves `agent_step_retry()` is narrower than `BAD_DATA_RETRY`. That is
+    worth nothing on its own: a policy nobody passes is a policy nobody has, and the defect this
+    guards is a whole turn being replayed on a provider blip, re-running every tool the failed
+    attempt already ran (measured: one 503 → two PR-gate branches and two audit rows for one
+    logical note). So this asserts what `_run_step` hands to Temporal, per branch.
+
+    Both directions matter and the tool branch is the one at risk. A future edit that narrowed
+    *every* step to one attempt would fix nothing and cost the transient-retry budget every other
+    activity is deliberately given — a tool step recomputes on a retry, which is the cheap and
+    correct thing to do.
+
+    Substituting the module's `workflow` handle rather than driving a server, the same way
+    `tests/test_publish.py` does: the real workflow API refuses to run outside a workflow event
+    loop, and the function under test is the real, unmodified `_run_step`.
+    """
+    import types
+
+    from chemclaw.durable import template_job
+    from chemclaw.durable.publish import BAD_DATA_RETRY
+    from chemclaw.durable.template_activities import StepIdentity
+
+    seen: list[Any] = []
+
+    async def execute_activity(*_args: Any, **kwargs: Any) -> str:
+        seen.append(kwargs["retry_policy"])
+        return "ok"
+
+    monkeypatch.setattr(
+        template_job, "workflow", types.SimpleNamespace(execute_activity=execute_activity)
+    )
+
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Screen then write.",
+            "steps": [
+                {"id": "hazards", "kind": "tool", "tool": "screen_hazards", "arguments": {}},
+                {"id": "brief", "kind": "agent", "prompt": "write it up"},
+            ],
+        }
+    )
+    identity = StepIdentity(actor="tester", roles=[], correlation_id="run-1")
+
+    async def _dispatch() -> None:
+        for step in template.steps:
+            await template_job.TemplateWorkflow()._run_step(
+                step, {}, identity, timedelta(seconds=60)
+            )
+
+    asyncio.run(_dispatch())
+
+    tool_policy, agent_policy = seen
+    assert tool_policy.maximum_attempts == BAD_DATA_RETRY.maximum_attempts
+    assert agent_policy.maximum_attempts == settings.agent_step_max_attempts
+    assert agent_policy.maximum_attempts < tool_policy.maximum_attempts
+    # Narrower in attempts only: which failures count as transient must not depend on the branch.
+    assert agent_policy.non_retryable_error_types == BAD_DATA_RETRY.non_retryable_error_types
 
 
 # --- DARK-2: a connector tool step is governed exactly as an in-process one (D-168) ------------

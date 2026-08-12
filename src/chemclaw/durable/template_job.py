@@ -46,7 +46,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, agent_step_retry
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -146,15 +146,26 @@ class TemplateWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
         if isinstance(step, AgentStep):
+            # The one branch not on `BAD_DATA_RETRY`, and the difference is replay, not
+            # classification. A retried tool step recomputes; a retried agent step re-runs the
+            # whole turn from the prompt — an activity has no checkpointer — so every tool the
+            # failed attempt already ran runs again with its side effects. Measured: one provider
+            # 503 produced two PR-gate branches and two audit rows for one logical note. The
+            # in-SDK retry (`llm_max_retries`) still absorbs a blip without any replay; see
+            # `publish.agent_step_retry` for the outage this trades away.
             return await workflow.execute_activity(
                 run_agent_step,
                 AgentStepInput(
                     prompt=resolve(step.prompt, scope),
                     profile=step.profile,
+                    # The step's declared writes travel with it, from the *pinned* template — so
+                    # editing the file cannot widen a run already in flight, exactly as pinning the
+                    # definition keeps an edit from changing its steps.
+                    write_tools=step.write_tools,
                     identity=identity,
                 ),
                 start_to_close_timeout=timeout,
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=agent_step_retry(),
             )
         if isinstance(step, JobStep):
             return await self._run_job_step(step, scope, identity, timeout)

@@ -73,7 +73,7 @@ from chemclaw.agent.chemclaw_agent import (
     instructions_for,
 )
 from chemclaw.agent.compaction import context_compaction_middleware
-from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
@@ -86,6 +86,7 @@ from chemclaw.agent.team import SPECIALISTS, build_team_middleware, team_enabled
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
+    refuse_undeclared_writes,
     refuse_writes_on_dry_run,
     surface_authorization_denials,
     surface_domain_errors,
@@ -173,8 +174,29 @@ def build_langgraph_agent(
         middleware=[
             *_harness_middleware(prof),
             _skills_middleware(backend),
-            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors, tools),
+            # `[*tools, *connectors]`, not `tools`: the widening assertion this feeds compares
+            # *connector* tool names against the supervisor's surface, and `tools` is the in-process
+            # half only — so every connector tool a specialist kept read as a widening and
+            # `_narrowed_connectors` raised `TeamError` before the model was ever called. Measured
+            # live with `agent_teams_enabled=true`: 15 of 15 turns failed at graph construction,
+            # each booking a `turn_costs` row with `completed=false` and zero tokens. The guard was
+            # right and the set it was given was the wrong half of the surface.
+            *_team_middleware(
+                prof,
+                actor,
+                correlation_id,
+                audit_sink,
+                connectors,
+                [*tools, *(connectors or [])],
+            ),
             *tool_call_middleware(audit, prof),
+            # Above the compaction group so that group keeps the innermost position its own
+            # docstring argues for. The two do not contend: caching marks the *system prompt and
+            # tool schemas*, which compaction never touches, and the message-tail breakpoint is
+            # placed by the provider at request time — on whatever list compaction hands it.
+            # Provider-specific, so which middleware this is (or that it is none) is decided in the
+            # F0 seam rather than here.
+            *prompt_caching_middleware(),
             # Unconditional, unlike the harness middleware above it: an unbounded thread is a
             # property of a session, not of the plan/execute mode, and the single-turn agent
             # accumulates one just as fast. Last in the list, so the reduction is the last thing
@@ -434,6 +456,22 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         # the chain above it; the announcement belongs where every refusal passes.
         announce_tool_failures,
         audit,
+        # Only for a profile that narrows, and inside `audit` so what an auditor reads is the
+        # refusal rather than the library's guess at what went wrong. Before `enforce_tool_authz`
+        # because it answers a coarser question — "was this agent even built with that tool" — and
+        # asking whether the *user* may call something the agent does not hold would word the
+        # refusal around the wrong subject.
+        #
+        # **It is the wording, never the enforcement**, and the enforcement is structural:
+        # `tool_names` removes the tool from `_capability_tools` and from every connector's
+        # allow-list before `create_agent` is called, and a compiled graph's `ToolNode` is built
+        # from the list it was given. This repo has twice rejected filtering an advertised list
+        # while leaving the capability reachable, and this is not a third time — with this
+        # middleware deleted the call still cannot execute (measured), it just comes back as
+        # LangGraph's `status="error"` "not a valid tool, try one of […]", which invites the retry
+        # a refusal is worded to prevent and writes the whole tool inventory into the audit trail's
+        # `detail`.
+        *([refuse_undeclared_writes(profile.tool_names)] if profile.tool_names is not None else []),
         enforce_tool_authz,
         refuse_writes_on_dry_run,
         refuse_repeated_calls,

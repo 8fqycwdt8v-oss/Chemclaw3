@@ -6,7 +6,7 @@ invoke it, and lets `AuthorizationError` propagate to block the call. It general
 expensive-trigger gate (F4-T5) so per-tool RBAC is applied uniformly by one interceptor, not
 hand-wired into each tool — the same DRY move the audit trail makes.
 
-The decisions live in `chemclaw.agent.authz` (the one home for authorization) and in the four
+The decisions live in `chemclaw.agent.authz` (the one home for authorization) and in the
 framework-free functions below; the `wrap_tool_call` wrappers at the end are only the wiring,
 exactly as `chemclaw.agent.audit` is the wiring over the audit decision. They are safe to attach
 unconditionally: `authorize_tool` is a no-op unless `entra_required`, so the dev path is unaffected
@@ -21,6 +21,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
+from chemclaw.agent.audit import returned_failure
 from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -45,9 +46,40 @@ class DryRunRefusal(AuthorizationError):
     """
 
 
+class UndeclaredWriteRefusal(AuthorizationError):
+    """A side-effecting tool was called by a narrowed agent that was never given it.
+
+    Raised where the *structure* already answers — the tool is not bound to the graph, so it cannot
+    run whatever this says. That is exactly why it exists: **this enforces nothing and it changes
+    what everyone reads.** Measured by removing it and running the same turn:
+
+        without:  ToolMessage(status="error") "Error: compute_xtb_energy is not a valid tool, try
+                  one of [list_attachments, read_attachment, ask_clarifying_question, …]"
+                  → audit `detail` is that same sentence
+        with:     "Refused: compute_xtb_energy changes stored data or starts work, and this agent
+                  was not given it, so it was not called…"
+
+    Three things are wrong with the first. `status="error"` reaches Anthropic as `is_error` on the
+    tool_result block — the retry-inviting signal `_refusal_message` exists to avoid. The text
+    invites the retry in words too ("try one of"), for a tool that was withheld on purpose rather
+    than mistyped. And it enumerates the agent's whole remaining inventory into the transcript and
+    into the GxP trail, where the `detail` column is what an auditor reads as *what happened*.
+
+    The audit row itself is not what this buys, and the earlier draft of this docstring said it was.
+    `ToolNode` *returns* the invalid-name message rather than raising it, and it returns it from
+    inside the wrapper chain — so `returned_failure` already books an `outcome="error"` row either
+    way. What changes is what that row says.
+
+    An `AuthorizationError` subclass for the reason `DryRunRefusal` and `PlanNotApprovedError` are:
+    the audit middleware records it and `surface_authorization_denials` relays it verbatim rather
+    than as a fault. Its own name so a reader can tell "this agent was never given that tool" apart
+    from "your account may not use it".
+    """
+
+
 # --- the decisions, framework-free ---------------------------------------------------------------
 #
-# Each of the five gates below is one sentence of policy wrapped in the framework's plumbing. The
+# Each of the decisions below is one sentence of policy wrapped in the framework's plumbing. The
 # sentence lives here, apart from that plumbing, because it was written while two engines had to
 # agree on it: a dry-run refusal worded one way under one engine, or a denial the model is told
 # about under one and not the other, was the drift the migration was arranged to be incapable of.
@@ -65,6 +97,22 @@ def dry_run_refusal(name: str) -> DryRunRefusal | None:
     return None
 
 
+def undeclared_write_refusal(name: str, held: frozenset[str]) -> UndeclaredWriteRefusal | None:
+    """The refusal a write earns from an agent narrowed away from it, or `None` to let it through.
+
+    `held` is the profile's resolved `tool_names` — what this agent was actually built with. A name
+    outside it that also changes something is the case worth wording; a name outside it that changes
+    nothing is an ordinary hallucinated or stale tool name, and inventing an authorization sentence
+    for that would tell a model it was *refused* something that simply does not exist here.
+    """
+    if name in held or name not in side_effecting_tools():
+        return None
+    return UndeclaredWriteRefusal(
+        f"{name} changes stored data or starts work, and this agent was not given it, so it was "
+        "not called. Nothing was started; say what you could not do and continue with what you can."
+    )
+
+
 def denial_result(exc: AuthorizationError) -> str:
     """What the model is told when a call was refused — the message verbatim, never swallowed."""
     return f"Refused: {exc}"
@@ -78,6 +126,22 @@ def domain_error_result(exc: BaseException) -> str:
 def failure_detail(exc: BaseException) -> str:
     """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood."""
     return f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS]
+
+
+def returned_failure_detail(message: ToolMessage) -> str:
+    """The same sentence for a tool that *returned* its failure instead of raising one.
+
+    Beside `failure_detail` rather than folded into it because the two have nothing to render in
+    common: a raised failure has an exception class worth naming, while a returned one has only the
+    server's own words — an MCP tool's error content is already a sentence someone wrote for a
+    reader, and prefixing it with a type name would be inventing a classification nobody made.
+
+    `message.text` rather than `message.content`: MCP content arrives as a list of content blocks,
+    so a chemist reading `content` would get `[{'type': 'text', 'text': …}]` — a repr of the
+    transport where the explanation should be. Bounded by the same `_FAILURE_CHARS` for the same
+    reason: a remote error is exactly the text that can be arbitrarily long.
+    """
+    return message.text[:_FAILURE_CHARS]
 
 
 def unexpected_error_result() -> str:
@@ -98,7 +162,7 @@ def unexpected_error_result() -> str:
 
 # --- the wiring ----------------------------------------------------------------------------------
 #
-# Five `wrap_tool_call` wrappers over the four decisions above. A gate stops a call by returning a
+# The `wrap_tool_call` wrappers over the decisions above. A gate stops a call by returning a
 # `ToolMessage` instead of calling `handler` — "the tool body never ran and this is what the model
 # is told instead" — which is why `_refusal_message` is shared rather than written out five times.
 
@@ -124,6 +188,36 @@ async def enforce_tool_authz(request: Any, handler: Callable[[Any], Any]) -> Any
     """Block a tool call the turn's user is not authorized for, else run it unchanged."""
     authorize_tool(request.tool_call["name"])
     return await handler(request)
+
+
+def refuse_undeclared_writes(held: frozenset[str]) -> Any:
+    """Middleware wording an undeclared write's refusal for a profile narrowed to `held`.
+
+    A factory rather than a module-level wrapper because the answer depends on *which* agent this
+    is, and the four wrappers beside it read only ambient state. Attached by
+    `langgraph_agent.tool_governance_middleware` only when a profile narrows at all, so an
+    un-narrowed agent's chain is byte-identical to the one before this existed.
+
+    **It intercepts a tool the graph does not hold, and that is not an accident of ordering.**
+    `ToolNode` looks the name up with `tools_by_name.get(...)` and passes `tool=None` into the
+    request — "validation is deferred to `_execute_tool_async` to allow interceptors to
+    short-circuit requests for unregistered tools", in its own words — so a `wrap_tool_call`
+    middleware still runs, and raising here means the name is never validated and the body never
+    reached. Nothing in this chain reads `request.tool`.
+    """
+
+    @wrap_tool_call(name="refuse_undeclared_writes")
+    async def _refuse(request: Any, handler: Callable[[Any], Any]) -> Any:
+        """Refuse a side-effecting tool this profile was narrowed away from."""
+        refusal = undeclared_write_refusal(request.tool_call["name"], held)
+        if refusal is not None:
+            raise refusal
+        return await handler(request)
+
+    # Named explicitly rather than after the closure, because `wrap_tool_call` takes the function's
+    # name as the middleware class's — and a chain that reads `_refuse` in a trace or a repr is one
+    # more indirection between a refusal and the rule that produced it.
+    return _refuse
 
 
 @wrap_tool_call
@@ -186,14 +280,27 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
 
 @wrap_tool_call
 async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Tell the chemist's stream a tool raised, then let it continue (`announce_tool_failures`).
+    """Tell the chemist's stream a tool failed, then let it continue (`announce_tool_failures`).
 
     Innermost, closest to the tool body, so it sees the raw exception before either converter turns
     it into a result — whether the *model* got a readable explanation is a separate question from
     whether the step worked, and the transcript answers the second.
+
+    **Two ways to fail, and only one of them raises.** A connector tool reaches this through
+    `langchain_mcp_adapters`, which handles the error itself and *returns* a
+    `ToolMessage(status="error")` — so catching exceptions announced nothing for exactly the tools
+    that run out of process. Worse than silence: `api/graph_stream` suppresses an error
+    `ToolMessage` on the documented ground that it "is already reported as tool_failed", so a failed
+    connector call left a `tool_call` event with no result and no failure beside it and vanished
+    from the transcript entirely. Checking the returned message closes that, and cannot
+    double-report — `returned_failure` is `None` for anything that signalled by raising.
     """
     try:
-        return await handler(request)
+        result = await handler(request)
     except Exception as exc:
         record_tool_failure(request.tool_call["name"], failure_detail(exc))
         raise
+    failed = returned_failure(result)
+    if failed is not None:
+        record_tool_failure(request.tool_call["name"], returned_failure_detail(failed))
+    return result

@@ -11,7 +11,8 @@ It also verifies the three things the HTTP transport adds and stdio did not have
 route the startup probe depends on, that the turn's identity headers actually arrive at the
 connector (the contract is only real if the bytes land), and that they arrive *there and nowhere
 else* — a connector that answers with a redirect must not be able to walk the caller's Entra
-identity to another origin (Sec-2).
+identity to another origin (Sec-2). And it verifies that a tool call has a *deadline* at all: an
+out-of-process capability that stops answering must cost its own call, never the turn.
 
 Tool *discovery* needs no database, so this runs in the sandbox; invoking a tool needs Postgres
 and is covered in CI (`test_molfp_postgres.py`, `test_rxnfp_postgres.py`) against the same code.
@@ -20,9 +21,11 @@ and is covered in CI (`test_molfp_postgres.py`, `test_rxnfp_postgres.py`) agains
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from dataclasses import replace
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -31,20 +34,23 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
 
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_ROLES,
     HEADER_SESSION,
 )
-from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
+from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     _mcp_connection,
     connector_http_client,
     discovered,
     open_connector_specs,
+    request_timeout_seconds,
 )
 from chemclaw.connectors.server import connector_app
+from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
@@ -496,3 +502,121 @@ def test_a_bundles_startup_report_cannot_delay_it_becoming_ready() -> None:
             await asyncio.wait_for(running.wait(), timeout=5)
 
     asyncio.run(asyncio.wait_for(_serve_and_stop(), timeout=10))
+
+
+def _session_read_bound(spec: ConnectorSpec) -> float:
+    """The deadline the MCP session will actually enforce, read off the built connection.
+
+    Read from the connection mapping rather than recomputed, because the property under test is
+    that the number a deployment *ships* is finite — a test that derived its own would pass with
+    `session_kwargs` deleted.
+    """
+    kwargs = spec.connection.get("session_kwargs") or {}
+    bound = kwargs["read_timeout_seconds"]
+    assert isinstance(bound, timedelta), bound
+    return bound.total_seconds()
+
+
+def test_a_slow_tool_call_is_abandoned_at_the_declared_request_timeout() -> None:
+    """A tool that will not answer must fail the call, not hold the turn until the deadline.
+
+    The defect this pins was unbounded in the literal sense. Nothing set `session_kwargs`, so the
+    MCP `ClientSession` got `read_timeout_seconds=None` and `mcp.shared.session.send_request`
+    reached `anyio.fail_after(None)` — a wait with no end. The httpx read timeout that *did* fire
+    was swallowed by `mcp.client.streamable_http` (caught as `Exception` at debug level, with a
+    reconnect that needs an SSE event id FastMCP never sends), so the answer was discarded and the
+    caller went on waiting: measured, a 4 s tool behind `request_timeout: 2` was still blocked at
+    25 s. Only the front door's 600 s turn deadline ended it, with an admission permit and the
+    session's connectors held the whole time.
+
+    Wrapped in `asyncio.wait_for` so the *unfixed* code fails this test in 15 s instead of hanging
+    the suite, and the elapsed time is asserted rather than merely "it raised" — raising at 25 s
+    would be the bug with a nicer ending.
+    """
+    release = threading.Event()
+    server = FastMCP("slow-probe")
+
+    @server.tool()
+    async def crawl() -> str:
+        """Answer only when the test lets go — far past any bound under test.
+
+        Blocks on a `threading.Event` in a worker thread rather than `asyncio.sleep`: the server
+        runs its own loop on its own thread, and this is the one way to release it from the test's
+        thread without a cross-loop race. The 30 s ceiling is the backstop if the release is missed.
+        """
+        await asyncio.to_thread(release.wait, 30)
+        return "too late to matter"
+
+    app = connector_app(server, name="slow-probe")
+    port = _free_port()
+
+    async def _call() -> float:
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="slow-probe")),
+            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp", request_timeout=2),
+        )
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
+            slow = next(tool for tool in tools if tool.name == "crawl")
+            started = time.monotonic()
+            # An `McpError`, not a tool-error *result*: a transport/session failure is not something
+            # the connector said, so `langchain-mcp-adapters` raises it rather than rendering it as
+            # content for the model.
+            with pytest.raises(McpError):
+                await slow.ainvoke({})
+            return time.monotonic() - started
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    with _Server(app, port):
+        try:
+            elapsed = asyncio.run(asyncio.wait_for(_call(), timeout=15))
+        finally:
+            release.set()  # let the server's in-flight request finish so uvicorn can exit
+    assert elapsed < 10, f"the call was abandoned only after {elapsed:.1f}s, not near its 2s bound"
+
+
+def test_the_http_read_bound_is_looser_than_the_session_bound() -> None:
+    """The bound that raises must fire before the bound that is swallowed — this pins that order.
+
+    Both come from `request_timeout_seconds`, so they cannot drift apart; what they must not do is
+    become *equal*, because then the invisible one can win. `mcp.client.streamable_http` discards an
+    httpx read timeout at debug level, so if it tripped first a merely slow tool would become a lost
+    answer with no error anywhere — which is exactly the failure measured before the fix. The grace
+    is what keeps the httpx timeout a backstop for a stream that stops producing bytes at all.
+    """
+    endpoint = HttpEndpoint(url="http://127.0.0.1:8899/mcp", request_timeout=2)
+    spec = _mcp_connection(
+        cast(ConnectorManifest, SimpleNamespace(name="ordering-probe")), endpoint
+    )
+    session_bound = _session_read_bound(spec)
+    assert session_bound == request_timeout_seconds(endpoint) == 2.0
+
+    async def _read_bound() -> float | None:
+        async with connector_http_client("ordering-probe", endpoint) as client:
+            assert isinstance(client.timeout.read, float)
+            return client.timeout.read
+
+    read_bound = asyncio.run(_read_bound())
+    assert read_bound is not None and read_bound > session_bound
+
+
+def test_an_endpoint_declaring_no_timeout_is_still_bounded() -> None:
+    """`request_timeout` is optional, and its absence must not mean "wait forever".
+
+    The case a third-party bundle ships: `HttpEndpoint.request_timeout` defaults to `None`, and
+    `StdioEndpoint` has no such field at all. Both used to reach `anyio.fail_after(None)`. Both
+    branches of `_mcp_connection` are checked, because the one that was forgotten is the one that
+    hangs a turn.
+    """
+    http = HttpEndpoint(url="http://127.0.0.1:8899/mcp")
+    assert http.request_timeout is None, "this test is only meaningful for an undeclared timeout"
+    stdio = StdioEndpoint(command="python", args=["-c", "pass"])
+
+    for endpoint in (http, stdio):
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="default-probe")), endpoint
+        )
+        bound = _session_read_bound(spec)
+        assert bound == request_timeout_seconds(endpoint)
+        assert 0 < bound < 600, f"{type(endpoint).__name__} bound {bound}s is not a usable deadline"

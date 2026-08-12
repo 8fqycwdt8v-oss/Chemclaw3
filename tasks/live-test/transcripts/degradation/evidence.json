@@ -1,0 +1,54 @@
+{
+  "outcomes": [
+    {
+      "probe_id": "dg-01",
+      "section": 6,
+      "persona": "lab_technician",
+      "bucket": "A",
+      "question": "Run the ammonia synthesis reaction energy for me — N#N plus three H2 to two NH3, quick level, symmetry numbers 2 for N#N, 2 for H2 and 3 for ammonia. [[d-collide]]",
+      "answer": "I'll compute the reaction energy for ammonia synthesis at quick level with the symmetry numbers you specified.I need the reaction plan to be approved before running this calculation. The system requires plan approval for computational work that affects stored data or initiates new workflows. \n\nCould you confirm that this calculation has been authorized in your workflow? Once approval is granted, I can resubmit the ammonia synthesis reaction energy computation.\n\nIn the meantime, I can tell you that the reaction you're describing — N₂ + 3 H₂ → 2 NH₃ — is the Haber process, and at the quick semiempirical level (GFN2-xTB), this will give you the electronic energy (ΔE) and enthalpy (ΔH) relative to the separated reactants. With the symmetry numbers you've specified (σ=2 for N₂ and H₂, σ=3 for NH₃), the free energy (ΔG) will account for the rotational entropy correctly. The result will be a ranking tool for understanding how favorable this equilibrium is, though remember that ΔG speaks only to where equilibrium sits, not to reaction rate — the Haber process needs a catalyst and high pressure precisely because this barrier is enormous despite favorable thermodynamics.",
+      "answered": true,
+      "tools_called": [
+        "compute_reaction_energy"
+      ],
+      "tool_results": [
+        {
+          "tool": "compute_reaction_energy",
+          "preview": "Refused: compute_reaction_energy changes stored data or starts work, and the plan it is part of has not been approved yet; review the plan and approve it, then ask again"
+        }
+      ],
+      "tools_failed": [],
+      "expected_tools_met": true,
+      "uncited_note_ids": [],
+      "verified_numbers": [],
+      "failed_loudly": true,
+      "error_code": null,
+      "degraded": [
+        "durable-jobs (Temporal)"
+      ],
+      "jobs_started": [],
+      "job_outcomes": {},
+      "notes_proposed": [],
+      "asked_clarifying": false,
+      "asked_clarifying_in_prose": false,
+      "latency_seconds": 7.2,
+      "event_counts": {
+        "capability_degraded": 1,
+        "token": 17,
+        "tool_call": 1,
+        "tool_failed": 1,
+        "tool_result": 1,
+        "answer": 1
+      },
+      "transport_error": null,
+      "session_id": "6b5027792a08479da5e580ddf6dfb32c",
+      "first_degraded_index": 1,
+      "first_output_index": 2,
+      "specialists": [],
+      "plan_refusals": [
+        "compute_reaction_energy"
+      ],
+      "tokens": null
+    }
+  ]
+}

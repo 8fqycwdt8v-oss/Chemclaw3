@@ -18,6 +18,10 @@ checks a per-file schema cannot make, because each is about the rest of the syst
    template can run".
 3. **A template that no deployment can start.** An enabled name with no file behind it advertises
    nothing at run time and looks exactly like a capability that quietly stopped working.
+4. **An `agent` step's declared writes.** The step's surface is computed by *subtracting* every
+   undeclared side-effecting tool, and a subtraction says nothing about names it never had to
+   remove — so a typo, a read tool, or a name outside the step's profile all read as a granted
+   write in the file and are silently nothing at run time (`_write_tool_problems`).
 
 **Where the argument check can and cannot reach.** A tool's parameters are knowable here only when
 its implementation is a function in this tree: the in-process `@tool` registry, and each connector
@@ -161,12 +165,67 @@ def _step_problems(template: Template) -> list[str]:
                 f"template {template.name!r} step {step.id!r} runs unknown job "
                 f"{step.job!r}; declared jobs: {sorted(jobs)}"
             )
-        elif isinstance(step, AgentStep) and step.profile is not None:
-            if step.profile not in profiles:
+        elif isinstance(step, AgentStep):
+            known_profile = step.profile is None or step.profile in profiles
+            if not known_profile:
                 problems.append(
                     f"template {template.name!r} step {step.id!r} names unknown profile "
                     f"{step.profile!r}; known: {sorted(profiles)}"
                 )
+            problems.extend(_write_tool_problems(template, step, tools, known_profile))
+    return problems
+
+
+def _write_tool_problems(
+    template: Template, step: AgentStep, tools: set[str], known_profile: bool
+) -> list[str]:
+    """Check an agent step's declared writes: each exists, actually writes, and is reachable.
+
+    An `agent` step is read-only unless it declares otherwise (`templates/manifest.AgentStep`), and
+    the declaration is applied by subtracting from a set — which is the failure mode this guards.
+    A subtraction is silent about names it never had to remove, so every way of writing the
+    declaration wrong produces a step that runs and quietly holds a different surface than the file
+    appears to grant. Three checks, each closing one of those:
+
+    1. **The name exists.** A typo would otherwise be a write the step believes it declared and does
+       not have, discovered when the model reaches for it mid-run — the same "fails at step four
+       after spending compute" this validator exists to prevent.
+    2. **The name actually writes** (`chemclaw.agent.authz.side_effecting_tools`). A read tool needs
+       no declaration to be reachable, so naming one grants nothing — and accepting it would let
+       this list drift into a general allow-list wearing a write-list's name, which is how the
+       narrowing would eventually be widened by people writing what looks like documentation. The
+       same classification the narrowing subtracts, asked here, so the two cannot disagree.
+    3. **The step's own profile advertises it.** `step_profile` intersects the declaration with what
+       the profile already offered, because a step must not gain capability its profile never had —
+       so a name outside that surface is accepted by the file and silently dropped at run time.
+       Skipped when the profile itself is unknown: that is already one problem, and asking what an
+       unresolvable profile advertises would raise here instead of reporting it.
+    """
+    if not step.write_tools:
+        return []
+    from chemclaw.agent.authz import side_effecting_tools
+    from chemclaw.agent.chemclaw_agent import advertised_tool_names
+
+    writes = side_effecting_tools()
+    advertised = advertised_tool_names(step.profile) if known_profile else frozenset(tools)
+    where = f"template {template.name!r} step {step.id!r}"
+    problems: list[str] = []
+    for name in step.write_tools:
+        if name not in tools:
+            problems.append(
+                f"{where} declares unknown write tool {name!r}; available: {sorted(tools)}"
+            )
+        elif name not in writes:
+            problems.append(
+                f"{where} declares {name!r} as a write tool, but it changes nothing — a read tool "
+                "needs no declaration, so remove it rather than widening the list"
+            )
+        elif name not in advertised:
+            problems.append(
+                f"{where} declares write tool {name!r}, which profile "
+                f"{step.profile or 'default'!r} does not advertise; a step cannot gain a tool "
+                "its profile never had"
+            )
     return problems
 
 

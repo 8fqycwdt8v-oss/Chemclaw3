@@ -76,6 +76,7 @@ from chemclaw.core.config.service import ServiceSettings
 from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
 from chemclaw.core.config.temporal import TemporalSettings
+from chemclaw.core.egress import pin_langsmith_egress
 
 # The package's public surface, exactly what the single-file module exported: the composed class,
 # its singleton, every section mixin (a few are imported directly, e.g. `EvalSettings`), and the
@@ -306,3 +307,13 @@ class Settings(
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""
+
+# The one line in this file that *does* something, and it is here for the reason the rest of the
+# file exists: this module is the single import every entrypoint makes (`api/app.py`,
+# `cli/chat.py`, `cli/connectors_dev.py`, `connectors/server_entry.py`,
+# `durable/background_worker.py`), so a decision applied here is applied by every process without
+# each launcher having to remember. `langsmith` turns its own tracing on from ambient environment
+# and would otherwise post prompts and completions to a third party that D-2026-08-11 declined;
+# `chemclaw.core.egress` documents why the pin needs both the in-process global and the environ
+# write, and why it overrides rather than defaults.
+pin_langsmith_egress(allowed=settings.langsmith_tracing_allowed)
