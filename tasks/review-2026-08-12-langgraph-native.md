@@ -221,11 +221,32 @@ Three different defaults are live in this dependency set, and only the third gov
 Verified empirically on a graph built the way the repo builds it:
 `agent.config == {'recursion_limit': 9999, …}`.
 
-**What 9999 means in the units that cost money.** Measured on a real `create_agent` graph with a
-scripted model, 6 model calls consumed 11 supersteps — **~1.83 supersteps per model call**, so the
-effective ceiling is **~5,400 model calls in a single turn**. (With Chemclaw's middleware nodes each
-agent iteration costs more supersteps than the bare case, so the real figure is lower — still in the
-thousands.)
+**What 9999 means in the units that cost money — corrected, and this is the third correction this
+finding has needed.** An earlier draft said *"~1.83 supersteps per model call"*, derived by counting
+`stream_mode="updates"` events. **That was wrong**: `updates` yields *node* updates, which are not
+Pregel supersteps.
+
+Measured properly, by binary search on the minimal `recursion_limit` at which a run of N model calls
+completes without `GraphRecursionError`:
+
+| graph | measured | supersteps per model call |
+|---|---|---|
+| bare `create_agent` | N=1→4, N=2→6, N=5→12, N=10→22 | **2** |
+| Chemclaw, harness **off** (the default path) | `2N + 1` | **2** |
+| Chemclaw, harness **on** | `4N + 1` | **4** |
+
+The harness adds nodes — `TodoListMiddleware`, `enforce_loop_cap`, skills, compaction — and each
+`before_model`/`after_model` hook is its own node.
+
+So the effective ceiling is roughly **5,000 model calls** on the default classic path and **2,500**
+with the harness on. Still thousands; the point stands, and the coincidence that 1.83 ≈ 2 made the
+wrong derivation look right on one path while being twice wrong on the other.
+
+**Why the exact number matters rather than being pedantry:** a `recursion_limit` derived from 1.83
+would sit *below* what a healthy harness turn needs (a 25-iteration turn needs 101 supersteps, and
+1.83 × 25 ≈ 46), so the "fix" would have started truncating good turns. Any derived limit must use
+the measured 4, with headroom, because the constant is the *middleware count* and changes whenever a
+middleware is added.
 
 Three consequences:
 

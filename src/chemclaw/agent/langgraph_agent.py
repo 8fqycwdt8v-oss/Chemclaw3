@@ -173,7 +173,21 @@ def build_langgraph_agent(
         middleware=[
             *_harness_middleware(prof),
             _skills_middleware(backend),
-            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors, tools),
+            # `[*tools, *connectors]`, not `tools`: the widening assertion this feeds compares
+            # *connector* tool names against the supervisor's surface, and `tools` is the in-process
+            # half only — so every connector tool a specialist kept read as a widening and
+            # `_narrowed_connectors` raised `TeamError` before the model was ever called. Measured
+            # live with `agent_teams_enabled=true`: 15 of 15 turns failed at graph construction,
+            # each booking a `turn_costs` row with `completed=false` and zero tokens. The guard was
+            # right and the set it was given was the wrong half of the surface.
+            *_team_middleware(
+                prof,
+                actor,
+                correlation_id,
+                audit_sink,
+                connectors,
+                [*tools, *(connectors or [])],
+            ),
             *tool_call_middleware(audit, prof),
             # Unconditional, unlike the harness middleware above it: an unbounded thread is a
             # property of a session, not of the plan/execute mode, and the single-turn agent

@@ -5,4 +5,4 @@ Routing accuracy is scored over the turns that were *delegated*, and token cost 
 | arm | probes | delegated | correct | accuracy | tokens | unmeasured turns |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | single | 15 | 0 | 0 | 0% | 1759062 | 0 |
-| team | 15 | 0 | 0 | 0% | 0 | 15 |
+| team | 15 | 0 | 0 | 0% | 0 | 0 |
