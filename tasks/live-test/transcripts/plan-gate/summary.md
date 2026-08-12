@@ -8,10 +8,10 @@ The GxP gate as a *conversation*: a write refused before approval, the same writ
 
 | probe | check | result | observed |
 | --- | --- | --- | --- |
-| pg-01 | a plan a human can decide on | PASS | 3 plan item(s), hash f6f1180bc0b2 |
+| pg-01 | a plan a human can decide on | PASS | 4 plan item(s), hash 6e74b1bd9c3b |
 | pg-01 | an unapproved state-changing call is refused | PASS | refused ['compute_reaction_energy']; ran - unrefused |
 | pg-01 | the decision was accepted | PASS | POST /sessions/…/plan/decision → [204] |
-| pg-01 | the approved plan executes | PASS | ran ['compute_reaction_energy', 'compute_reaction_energy', 'compute_reaction_energy', 'propose_knowledge_note']; refused - |
-| pg-01 | a changed plan is re-gated (DARK-1) | **FAIL** | plan hash f6f1180bc0b2 → f6f1180bc0b2 (UNCHANGED), approved=False, ran - under the earlier decision |
+| pg-01 | the approved plan executes | PASS | ran ['compute_reaction_energy', 'compute_reaction_energy', 'compute_reaction_energy', 'propose_knowledge_note', 'propose_knowledge_note']; refused - |
+| pg-01 | a changed plan is re-gated (DARK-1) | PASS | plan hash 6e74b1bd9c3b → 51bc29a442dd (new identity), approved=False, ran - under the earlier decision |
 
-**4/5 checks passed.**
+**5/5 checks passed.**

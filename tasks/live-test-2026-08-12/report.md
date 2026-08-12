@@ -1,7 +1,12 @@
 # Live test report — Phase 5 (2026-08-12)
 
-**Model: `claude-haiku-4-5-20251001` only. Total spend: $3.88 ≈ €3.57** against a €10 target and a
-€16 hard stop. No Sonnet or Opus call was made; no escalation was taken.
+**Total spend: $11.13 ≈ €10.24** against a €10 target and a €16 hard stop.
+
+Haiku (`claude-haiku-4-5-20251001`) throughout, with **one authorised escalation**: three turns on
+`claude-sonnet-5` to settle the DARK-1 check (§3). Those three turns cost **€5.38 — more than all
+22 haiku turns combined**, at ~616k input tokens each, which is the no-caching finding below showing
+up directly in the bill. The judge model stayed on haiku throughout, since the plan-gate checks are
+mechanical hash comparisons rather than judged.
 
 ## The stack this ran against
 
@@ -73,14 +78,29 @@ With `CHEMCLAW_HARNESS_ENABLED=true` and `plan_only`:
 | an unapproved state-changing call is refused | PASS | refused `compute_reaction_energy` |
 | the decision was accepted | PASS | `POST /plan/decision` → 204 |
 | the approved plan executes | PASS | ran `compute_reaction_energy` ×3, `propose_knowledge_note` |
-| a changed plan is re-gated (DARK-1) | **INCONCLUSIVE** | plan hash UNCHANGED, `approved=False`, ran — |
+| a changed plan is re-gated (DARK-1) | **PASS** (after a probe fix) | hash `6e74b1bd9c3b` → `51bc29a442dd` (new identity), `approved=False`, ran — |
 
-**The fifth is not a failure.** Read the observed column: the plan hash did not change, so haiku
-never rewrote the plan and the DARK-1 scenario was never staged. Nothing ran under the earlier
-decision, so the gate held. The probe could not set up its own test on this model.
+**5/5 after the probe was fixed. The fifth check was never a gate failure — it was a probe that
+could not stage its own scenario.**
 
-This is the one place the brief's escalation rule applies — interpreting it needs a run where the
-model actually rewrites the plan. **Flagged, not escalated.**
+First run on haiku: `plan hash UNCHANGED`. The brief's escalation rule applied, so it was flagged
+rather than escalated; with sign-off it was re-run on **`claude-sonnet-5`** — and produced the
+*identical* observed line, hash unchanged, 4/5. **Not a model-capability limit.**
+
+The cause is in the script. Turn 1 says *"Plan it out first and then do it"*; turn 3 did not, so the
+model simply answered the new question, never called `write_todos`, and the plan hash could not
+change. The check asserted a precondition its own script never established.
+
+What did **not** fail on either model: `ran —` under the earlier decision, and `approved=False`. The
+gate held throughout; only the probe's ability to provoke a re-plan did not.
+
+With `"Plan it out first"` added to turn 3, on **haiku**: the plan is rewritten, takes a new
+identity, the earlier approval does not carry, and nothing runs under it. That is DARK-1 verified
+end to end.
+
+**The escalation earned its cost by ruling something out rather than by passing.** A pass on Sonnet
+would have read as "haiku is too weak" and left a check that silently depends on the model
+volunteering a re-plan. Two models giving the same answer is what identified the script.
 
 ### 4. M12 probe (b) — degradation ordering — **3/3 PASS**
 
@@ -154,9 +174,10 @@ cost lever available and it is untouched. Backlog row added.
 
 ## What remains owed
 
-- **DARK-1 re-gate**, inconclusive on haiku — needs a run where the model rewrites its plan.
-- **Routing accuracy**, unmeasured — the probe can run now that the build defect is fixed, but it
-  was not re-run in this session.
+- **DARK-1 re-gate** — closed. 5/5 after the probe fix; see §3.
+- **Routing accuracy** — measured; see §5. The team arm delegated 1 of 15 at 31% more tokens, which
+  does not favour turning the flag on. Routing *quality* is still unmeasured and needs a probe set
+  that provokes delegation rather than hoping for it — the same lesson §3 just paid for.
 - **T-10's failure mode** (a start-to-close timeout on the non-heartbeating `run_agent_step`) still
   needs a deliberate broker-level test; it was not exercised here.
 - `make live-storm` (chaos/stress on the mock model, €0) was not run.

@@ -27,12 +27,15 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       favour turning it on. What is still open is quality: it needs a model that delegates often
       enough to score, and a probe set that provokes delegation rather than hoping for it.
 
-- [ ] **The DARK-1 re-gate check is inconclusive on haiku** — [S]. `make live-plan-gate` scores 4/5;
-      the fifth needs the model to *rewrite* its plan so the changed plan can be re-gated, and haiku
-      left the plan hash unchanged, so the scenario was never staged (nothing ran under the earlier
-      decision — the gate held). Either run it on a stronger model or make the probe force a plan
-      rewrite rather than ask for one; the second is better, because a check that depends on model
-      compliance is not a check.
+- [x] **The DARK-1 re-gate check is a probe defect, not a gate defect — closed** — [S]. Scored 4/5 on
+      haiku with `plan hash UNCHANGED`, and **identically on `claude-sonnet-5`**, which is what ruled
+      out a model-capability limit. Turn 1 of `data/evals/probes/m12/plan_gate.yaml` says "Plan it out
+      first"; turn 3 did not, so the model answered without calling `write_todos` and the hash could
+      not change — the check asserted a precondition its own script never established. Neither model
+      ever ran anything under the stale approval (`ran -`, `approved=False`), so the gate held
+      throughout. With the phrase added to turn 3, on haiku: `6e74b1bd9c3b -> 51bc29a442dd`, new
+      identity, approval does not carry, **5/5**. The lesson generalises to the routing row above: a
+      probe that depends on the model volunteering a behaviour is not a probe.
 
 - [ ] **There is no timeout on an MCP tool call, and `request_timeout` silently orphans one** — [S].
       The most severe operational finding of the sweep, reachable with shipped manifest values.
