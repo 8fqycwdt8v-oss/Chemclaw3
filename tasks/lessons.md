@@ -1831,3 +1831,30 @@ the answer is yes or unknown, it is the wrong command regardless of why I am run
 
 Cheaper still, and the real lesson: commit the test *before* mutating it. A committed file makes
 `git checkout` correct and makes the whole question disappear.
+
+## Run the gate's command, not a command that resembles it (2026-08-12, second time)
+
+I pushed red again, and the mechanism was the same one as the first time in a different disguise:
+**I verified a narrower scope than the gate checks.**
+
+The first time, `test_docstring_paths` was run only over the files I had changed, and it failed in
+CI on a path it validates repo-wide. This time I ran `mypy --strict src/chemclaw` and reported
+"mypy --strict green"; the Makefile's `type` target is `mypy src examples tests`, and the error was
+in a *test* file — `anthropic.NOT_GIVEN` where the SDK now wants `Omit`. Two minutes of CI to find
+what one local command would have caught.
+
+The tempting rule — "remember that mypy also checks tests" — is the same shape as the prohibition
+that failed twice above, and it will fail the same way, because the next gap will be a different
+target with a different scope. The rule that has no memory in it:
+
+    run `make <target>`, never the tool the target wraps
+
+`make lint`, `make type`, `make cov`, `make check`. The Makefile is the definition of green — CLAUDE.md
+says so outright ("CI runs exactly these, so a green `make` locally means a green CI") — and every
+time I have reached past it for `ruff`/`mypy`/`pytest` directly I have been verifying a scope I chose
+rather than the scope that decides. Running the tool directly is fine for a fast inner loop; it is
+never what "green" means, and it must never be what I report.
+
+Corollary, from the same push: **finish the work before running the gate.** The full suite here ran
+while a subagent was still editing documentation, so its result described a tree that no longer
+existed by the time I read it. A gate run is only evidence about the tree it ran against.

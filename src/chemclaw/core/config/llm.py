@@ -68,7 +68,7 @@ class LlmSettings(BaseSettings):
     #
     # **On by default, because the prefix here is large, static, and re-sent on every model call.**
     # Measured on the default profile: 25,548 characters of system prompt across two blocks plus 29
-    # tool schemas — roughly 14,000 tokens that are byte-identical for the whole life of a profile,
+    # tool schemas — 21,321 tokens that are byte-identical for the whole life of a profile,
     # ahead of a conversation tail that is not. Measured live before this existed, across 22 billed
     # turns: `cache_read_tokens = 0` and `cache_write_tokens = 0` on every one of them, an
     # input:output ratio of 199:1, and single turns reaching 260,000 input tokens. A cache write

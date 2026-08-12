@@ -26,9 +26,12 @@ from chemclaw.agent.chemclaw_agent import advertised_tool_names
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.team import (
+    _SUPERVISOR_PROMPT,
+    _TASK_TOOL_DESCRIPTION,
     REQUIRED_SPECIALIST,
     SPECIALISTS,
     TeamError,
+    _description,
     build_team_middleware,
     reject_widening,
     running_specialist,
@@ -571,3 +574,85 @@ def test_a_supervisor_with_connector_tools_can_build_its_team(
         connectors=[similar_molecules],
     )
     assert graph is not None
+
+
+def test_the_routing_menu_tells_the_supervisor_what_each_specialist_does() -> None:
+    """The supervisor's only per-specialist text must carry capability, not identity.
+
+    **This is what a 1-of-15 delegation rate turned out to be.** `_description` took
+    `instructions.split(". ")[0]`, and every shipped profile opens with the same identity sentence
+    shape — "You are Chemclaw's `<name>` specialist" — so the menu upstream renders as
+    `- {name}: {description}` printed the name twice and the capability never. The supervisor was
+    picking between five descriptions that carried no information it did not already have from the
+    name, which is not a routing decision it can get right.
+
+    The assertion is deliberately about *information*, not about wording: a description may not be
+    reconstructible from the specialist's name alone. Stripping the name and demanding the
+    remainder still differ pairwise is what makes this fail against the old implementation — under
+    it, all five collapsed to "you are chemclaw's specialist".
+    """
+    menu = {name: _description(get_profile(name)) for name in SPECIALISTS}
+
+    for name, description in menu.items():
+        assert not description.lower().startswith("you are chemclaw's"), (
+            f"{name}'s description is the identity sentence the menu line already prints: "
+            f"{description!r}"
+        )
+
+    stripped = {name: menu[name].lower().replace(name.lower(), "") for name in SPECIALISTS}
+    assert len(set(stripped.values())) == len(SPECIALISTS), (
+        "two specialists are indistinguishable once their own name is removed, so the supervisor "
+        f"cannot route between them: {stripped}"
+    )
+
+
+def test_a_profile_that_does_not_announce_itself_keeps_its_first_sentence() -> None:
+    """Dropping the identity sentence must not eat a profile whose first sentence is the work.
+
+    The narrowing is "drop a sentence that only says which specialist this is", and an out-of-tree
+    profile that never writes one must come through unchanged rather than losing its opening line
+    to a rule written for the five in this repo.
+    """
+    profile = AgentProfile(
+        name="kinetics",
+        instructions="Fit rate constants from time-course data. Report the residuals.",
+    )
+
+    assert _description(profile) == "Fit rate constants from time-course data."
+
+
+def test_an_opening_sentence_that_says_something_is_not_read_as_identity() -> None:
+    """Opening with "You are" is not the test — naming yourself and nothing else is.
+
+    A profile that opens "You are given a reaction and must return its hazards" begins with the
+    same two words as an identity sentence and is not one, so the name has to appear before the
+    sentence is dropped.
+    """
+    profile = AgentProfile(
+        name="hazards",
+        instructions="You are given a reaction and must return its hazards. Cite every alert.",
+    )
+
+    assert _description(profile) == "You are given a reaction and must return its hazards."
+
+
+def test_the_task_tool_describes_the_mechanism_this_deployment_built() -> None:
+    """The `task` tool must not tell the supervisor it is a context-isolation helper.
+
+    Upstream's description opens "Launch an ephemeral subagent to handle complex, multi-step
+    independent tasks with isolated context windows", which frames delegation as something to do
+    when a job is *large*. Chemclaw's specialists are a capability partition with a mandatory
+    safety gate, so on a one-tool question that framing and `_SUPERVISOR_PROMPT` disagree — and the
+    tool's own description is the half the supervisor acts on. Measured twice against the routing
+    corpus at 1 delegation in 15.
+
+    Asserted on the two properties that make it Chemclaw's rather than upstream's: the menu is
+    interpolated (a description without `{available_agents}` lists no specialists at all), and
+    small questions are not carved out.
+    """
+    assert "{available_agents}" in _TASK_TOOL_DESCRIPTION
+    assert "complex, multi-step" not in _TASK_TOOL_DESCRIPTION
+    for specialist in SPECIALISTS:
+        assert specialist in _SUPERVISOR_PROMPT, (
+            f"{specialist} is buildable but the supervisor is never told when to use it"
+        )

@@ -53,6 +53,7 @@ work — and its three tools are read-only precisely so the plan gate cannot ref
 """
 
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, cast
@@ -87,6 +88,39 @@ _SUPERVISOR_PROMPT = (
     "experiment to run next, `safety` for any hazard, genotoxicity or impurity-limit question, and "
     "`reporting` to turn finished work into a report or a proposed note. Ask `safety` whenever the "
     "work involves handling a substance, whether or not the chemist raised it."
+)
+
+# What the `task` tool says it is for. Overridden for the same reason `_SUPERVISOR_PROMPT` is: this
+# deployment's subagents are not upstream's.
+#
+# **Upstream's description describes a different mechanism.** It opens "Launch an ephemeral subagent
+# to handle complex, multi-step independent tasks with isolated context windows" — the tool as a
+# context-window optimisation, to be reached for when a job is big. Chemclaw's specialists are a
+# *capability partition*: each holds a different set of tools, one of them (`safety`) is a gate
+# rather than a convenience, and the question of which to use is not "is this big enough to be
+# worth isolating" but "whose surface answers this". So the supervisor was reading a system prompt
+# that told it to route every question by surface and a tool description that told it the tool was
+# for complex multi-step work — and on a one-tool question those disagree.
+#
+# Measured, and the measurement is why this is not a guess about prompts: against the 15-probe
+# routing corpus, whose specialist is unambiguous by construction, the supervisor delegated **1**.
+# Rewriting the five specialist descriptions from identity to capability (see `_description`) left
+# it at 1, which is what ruled the menu out as the binding constraint and pointed here.
+#
+# `{available_agents}` is upstream's placeholder and is filled with the `- name: description` menu.
+_TASK_TOOL_DESCRIPTION = (
+    "Hand a question to the specialist whose tools answer it, and wait for what it returns.\n\n"
+    "Available specialists and what each one is for:\n{available_agents}\n\n"
+    "These are not context-isolation helpers to reach for only when a job is large. They are this "
+    "system's capability partition: each specialist holds a different set of tools and a different "
+    "set of skills, and the supervisor's own surface is the union of theirs. A question with one "
+    "obvious tool still belongs to the specialist that holds it — being small is not a reason to "
+    "answer it yourself, because the specialist is the one carrying the domain rules for reading "
+    "that tool's output.\n\n"
+    "Give `description` the whole question plus any context the specialist needs, and say what to "
+    "return: it cannot see the conversation and you cannot send it a follow-up. Delegate "
+    "independent parts of a question in one message so they run at once. Assemble the final answer "
+    "yourself from what comes back, keeping the citations it gave you."
 )
 
 
@@ -317,6 +351,7 @@ def build_team_middleware(
     return SubAgentMiddleware(
         subagents=subagents,
         system_prompt=_SUPERVISOR_PROMPT,
+        task_description=_TASK_TOOL_DESCRIPTION,
         # `StateBackend`, which holds no filesystem. Upstream requires a backend because its *own*
         # subagent shape can be handed filesystem tools; Chemclaw's specialists are pre-compiled
         # agents that already carry their own narrowed skills backend, so anything with a real root
@@ -390,10 +425,65 @@ def _stated_reason(state: Any) -> str:
 def _description(profile: AgentProfile) -> str:
     """What the supervisor is told a specialist is for.
 
-    Taken from the profile's own instructions rather than written twice: the first sentence of a
-    specialist's prompt already says what it does, and a second description beside it is a thing
-    that can disagree with the agent it describes.
+    Still taken from the profile's own instructions rather than written twice — that part of the
+    original reasoning holds, and a description beside the agent it describes is a thing that can
+    disagree with it. What was wrong was *which* sentence.
+
+    **The first sentence of every shipped profile is an identity statement, not a capability
+    one.** All five open "You are Chemclaw's `<name>` specialist", so taking `split(". ")[0]` built
+    a routing menu of five strings that differed only in the name — and the menu format upstream
+    renders is `- {name}: {description}`, so the name was already the other half of every line. The
+    supervisor was choosing between five capability descriptions carrying no capabilities. Measured
+    against that menu, it delegated 1 of 15 probes whose specialist is unambiguous by construction
+    (`data/evals/probes/m12/routing.yaml`, three per specialist, partitioned by tool surface).
+
+    The capability sentence is the *second* one in all five: "You screen structures and whole
+    reactions for structural hazards…", "You compute molecular and reaction properties…". So the
+    identity sentence is dropped when it is one, and what follows is the description. Dropping it
+    is not a guess about prose — it removes only what the menu line already prints.
+
+    A profile whose instructions do not open with an identity sentence keeps its first sentence, so
+    this cannot make an out-of-tree profile's description worse than it was.
     """
-    instructions = (profile.instructions or "").strip()
-    first = instructions.split(". ")[0].strip()
-    return first + "." if first and not first.endswith(".") else (first or profile.name)
+    sentences = _sentences(profile.instructions or "")
+    if sentences and _is_identity(sentences[0], profile.name):
+        sentences = sentences[1:]
+    first = sentences[0] if sentences else ""
+    if not first:
+        return profile.name
+    return first if first.endswith(".") else first + "."
+
+
+def _sentences(instructions: str) -> list[str]:
+    """`instructions` split into sentences, each keeping its terminator."""
+    parts = [part.strip() for part in re.split(r"(?<=\.)\s+", instructions.strip())]
+    return [part for part in parts if part]
+
+
+# The words an identity sentence is allowed to be made of, besides the profile's own name: the
+# second-person opener, the product, and the noun for what a team member is. Anything else in the
+# sentence is content, and a sentence with content is kept.
+_IDENTITY_WORDS = frozenset(
+    # `s` is here because `chemclaw's` tokenizes to `chemclaw` + `s`, and a possessive that leaves
+    # a one-letter word behind would otherwise read as content and keep every shipped profile's
+    # identity sentence — which is exactly what it did before a test caught it.
+    "you are am the a an is this s chemclaw chemclaws specialist agent for of in on team".split()
+)
+
+
+def _is_identity(sentence: str, name: str) -> bool:
+    """Whether `sentence` says only *which* specialist this is, and nothing about the work.
+
+    Defined as "carries no information the menu line does not already print", which is the property
+    that justifies dropping it — not a match against the wording the five shipped profiles happen
+    to use. So the test is: remove the profile's own name and the handful of words an identity
+    sentence is built from, and see whether anything is left.
+
+    "You are Chemclaw's safety specialist." leaves nothing and is dropped. "You are given a reaction
+    and must return its hazards." leaves `given reaction and must return its` and is kept, even
+    though it opens with the same two words and contains the profile's name — which a
+    startswith-plus-substring rule got wrong, and a test caught.
+    """
+    words = re.findall(r"[a-z]+", sentence.lower())
+    name_words = set(re.findall(r"[a-z]+", name.lower()))
+    return not [word for word in words if word not in _IDENTITY_WORDS and word not in name_words]
