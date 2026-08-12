@@ -41,6 +41,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessageChunk
 
+from chemclaw.agent.state import turn_input
 from chemclaw.api.events import (
     ApprovalRequestEvent,
     Event,
@@ -103,7 +104,7 @@ async def graph_events(
     """
     todos: list[str] = []
     async for namespace, mode, payload in graph.astream(
-        {"messages": [("user", message)]}, config, stream_mode=_MODES, subgraphs=True
+        turn_input(message), config, stream_mode=_MODES, subgraphs=True
     ):
         if mode == "messages":
             chunk, _metadata = payload

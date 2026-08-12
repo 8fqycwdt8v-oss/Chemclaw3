@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
 from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.state import turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
@@ -380,7 +381,7 @@ async def run_agent_step(step: AgentStepInput) -> str:
                 correlation_id=step.identity.correlation_id,
                 connectors=connectors,
             )
-            result = await graph.ainvoke({"messages": [("user", step.prompt)]})
+            result = await graph.ainvoke(turn_input(step.prompt))
             return _answer_text(result)
     finally:
         reset_current_identity(tokens)

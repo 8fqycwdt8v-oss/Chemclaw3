@@ -50,7 +50,7 @@ async def get_plan(
     saying execute after the approval it was granted for had been spent. There is no mode here;
     what a surface renders is one fact seen twice.
     """
-    plan = await session_todos(session_id)
+    plan = await session_todos(session_id) or []
     approvable = plan_identity(plan)
     plan_hash = approvable or EMPTY_PLAN_HASH
     decision = (
@@ -98,7 +98,7 @@ async def decide_plan(
     it is the same function the gate asks, so the route and the enforcement cannot disagree about
     what counts as a plan.
     """
-    plan_hash = plan_identity(await session_todos(session_id))
+    plan_hash = plan_identity(await session_todos(session_id) or [])
     if plan_hash is None:
         raise HTTPException(
             status_code=409,

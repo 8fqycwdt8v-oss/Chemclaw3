@@ -168,7 +168,7 @@ def build_langgraph_agent(
         middleware=[
             *_harness_middleware(prof),
             _skills_middleware(backend),
-            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors),
+            *_team_middleware(prof, actor, correlation_id, audit_sink, connectors, tools),
             *tool_call_middleware(audit, prof),
         ],
         name="chemclaw",
@@ -251,6 +251,7 @@ def _team_middleware(
     correlation_id: str | None,
     audit_sink: AuditSink | None,
     connectors: list[Any] | None,
+    supervisor_tools: list[Any],
 ) -> list[Any]:
     """The specialist team, when this deployment routes turns through one (M9).
 
@@ -264,9 +265,11 @@ def _team_middleware(
     membership in `SPECIALISTS` rather than a depth counter, because "a specialist does not have a
     team" is the rule, and a depth counter would merely bound how badly it was broken.
 
-    The turn's identity, sink and connectors are passed down so a specialist audits under the same
-    correlation id and reaches the same per-turn connector sessions as the supervisor. Its *tools*
-    are narrowed by its own profile, and `team.reject_widening` refuses any that would widen.
+    The turn's identity and sink are passed down so a specialist audits under the same correlation
+    id. Its connectors are **narrowed to its own profile before they are passed**, which
+    `build_team_middleware` does — handing them down whole was a real widening: `reject_widening`
+    compares *declarations*, and the connector tools arrive already open, so a specialist declaring
+    two bundles received every bundle the supervisor had.
     """
     if not team_enabled() or profile.name in SPECIALISTS:
         return []
@@ -277,6 +280,10 @@ def _team_middleware(
             correlation_id=correlation_id,
             audit_sink=audit_sink,
             connectors=connectors,
+            supervisor_tool_names=frozenset(
+                str(getattr(t, "name", None) or getattr(t, "__name__", ""))
+                for t in supervisor_tools
+            ),
         )
     ]
 
