@@ -2035,3 +2035,60 @@ A payload-shape assertion would not have found this; only the live call did.
 Not done, deliberately: no per-TTL split of `cache_write_tokens` (a migration for a distinction no
 caller can make while the TTL is fixed at 5m), and no token-count pre-check against the provider's
 minimum cacheable prefix (a number only the provider knows, and it degrades silently anyway).
+
+---
+
+# The two rows the live test left open (2026-08-12, second pass)
+
+Both carried forward from `tasks/live-test-2026-08-12/report.md`: routing quality, which the first
+pass could not score on a denominator of one, and the minimum cacheable prefix, the one number in
+the caching commit that was written from a vendor's documentation instead of run.
+
+- [x] Fix `_description` so the specialist menu carries capability rather than identity (all five
+      profiles opened with the same "You are Chemclaw's `<name>` specialist" sentence).
+- [x] Override the `task` tool description, which sold delegation as a context-window optimisation
+      while the system prompt described a capability partition.
+- [x] Re-measure routing with a **fresh single control on the same build**, so the arms are not one
+      build apart the way the withdrawn 31% comparison was.
+- [x] Score routing on the surface a turn used (`self_answered` / `within_expected_surface` /
+      `outside_expected_surface`) rather than on whether it delegated.
+- [x] Bisect the cacheable-prefix floor to ±1 token on both models this system runs on; count every
+      shipped profile's prefix against it; confirm the below-floor ones live with a control.
+- [x] Two ADRs, the three register/report files, and a ratchet test pinning the set of below-floor
+      profiles.
+
+## Review
+
+**Measured.** Routing: single control 0/15 delegated at 1,779,642 tokens; team 2/15 (both correct)
+at 1,745,087 — **1.9% cheaper**, so the "team costs 31% more" figure is withdrawn, and it was
+withdrawn by rebuilding the comparison rather than by re-reading it (the old arms were both
+pre-caching). Surface score: single 12 self-answered, 10 within (83%); team 10 self-answered, 8
+within (80%). Cache floor: `claude-sonnet-5` **1,024**, `claude-haiku-4-5-20251001` **4,096** — the
+smaller model four times higher — and `property-lookup` (3,092) and `safety` (2,933) never cache on
+haiku, confirmed live with both counters zero against a `computation` control that wrote and read
+8,734. Three routing arms $0.96, the floor work ~$0.27, **$1.23 ≈ €1.13 total**.
+
+**Two null results, and they are reported as null results.** The menu fix: still **1 of 15**. The
+`task`-description fix: **2 of 15**. Each moved the delegation rate by at most one probe, and one
+probe is not a result — neither is the cause of the change and neither is offered as one. Both are
+kept because each was a real defect found by reading what the supervisor is actually sent, not
+because either worked. The `task` rewrite did buy something measurable, just not delegations: a
+15.3% token drop, because upstream's description is 6,573 characters and ships on every model call.
+
+**What the null result taught is the finding.** `reject_widening` makes the supervisor a superset of
+every specialist, so it never lacks the tool that answers a question and delegating is always a
+longer path to one in hand — every delegation across all three arms went to `safety`, the only
+specialist the prompt gives a reason to consult that is not about capability. Spontaneous delegation
+is therefore not a measurable quantity here, and the backlog row asking for "a probe set that
+provokes delegation" was asking for a probe that measures its own phrasing. That is the DARK-1
+lesson arriving from the other direction, three days later, at the cost of two prompt rewrites.
+
+**The surface score paid for itself on its first run** by finding what the accuracy number could
+not: `rt-13` and `rt-14` fall outside their declared surface in *both* arms, so the defect is the
+corpus's single-name `expects_specialist`, not the supervisor. That is the one new open row.
+
+Not done, deliberately: the two probes are not repartitioned (the field cannot express a pair yet,
+and inventing a second name per probe would hide the limit rather than fix it), no profile is padded
+to clear haiku's floor, and no threshold number enters the code path — a value that moved 4× between
+two models of one generation is exactly the kind of vendor constant this repo already refuses to
+copy.
