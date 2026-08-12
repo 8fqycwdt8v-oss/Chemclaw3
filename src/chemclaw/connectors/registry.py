@@ -29,6 +29,7 @@ import logging
 import os.path
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from functools import cache
 from pathlib import Path
 from types import ModuleType
@@ -67,6 +68,25 @@ MANIFEST_FILENAME = "connector.yaml"
 # deployment that needs a longer one has a network problem a setting would only hide. Short,
 # because a dark connector must degrade quickly — the whole point of `HeldConnectorSession`.
 _CONNECT_TIMEOUT_SECONDS = 5.0
+
+# How long a tool call may take when the manifest does not say. `HttpEndpoint.request_timeout`
+# defaults to `None`, and `None` used to mean *unbounded*: nothing set `session_kwargs`, so the MCP
+# client session's `read_timeout_seconds` stayed `None` and `mcp.shared.session` reached
+# `anyio.fail_after(None)` — it waits forever. Measured against a real server: a 4 s tool behind an
+# endpoint declaring `request_timeout: 2` was still blocked at 25 s, and its answer was discarded
+# when it finally arrived. Only the front door's 600 s turn deadline bounded it. Every shipped
+# bundle declares a timeout, so this is the number a *third-party* bundle gets — generous enough
+# that a legitimately slow tool is not cut off, finite so a mute connector cannot hold a turn.
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
+
+# How much looser the HTTP read timeout is than the MCP session's own bound. The two must not be
+# equal, and their order is the fix rather than a tuning detail: when the httpx read timeout fires
+# first, `mcp.client.streamable_http` swallows it (it catches `Exception` at debug level and
+# reconnects only on an SSE event id, which FastMCP never sends), so the answer is lost *silently*
+# and the caller keeps waiting. When the session bound fires first, `send_request` raises `McpError`
+# naming the timeout. So the visible bound must always be the one that trips, and the invisible one
+# is kept strictly behind it as a backstop for a connection that stops producing bytes entirely.
+_READ_TIMEOUT_GRACE_SECONDS = 5.0
 
 # What one configured connector endpoint becomes, whichever transport it declares. Both open into a
 # session advertising the same agent-facing surface, so callers never branch on the transport.
@@ -243,6 +263,35 @@ def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     return settings.connector_urls.get(connector, endpoint.url)
 
 
+def request_timeout_seconds(endpoint: Endpoint) -> float:
+    """How long one call to this endpoint may take — the single derivation of that number.
+
+    Two independent bounds are built from it (the MCP session's `read_timeout_seconds` and the
+    httpx read timeout), and they must stay in a fixed relationship to each other, so neither may
+    read the manifest on its own. Public because a test proving that relationship has to compare
+    the same number a deployment uses.
+
+    `StdioEndpoint` declares no timeout at all — a subprocess of our own process is not a network
+    dependency — but an unresponsive subprocess hangs a turn exactly as a mute HTTP host does, so
+    it gets the same default rather than an exemption.
+    """
+    if isinstance(endpoint, HttpEndpoint) and endpoint.request_timeout is not None:
+        return float(endpoint.request_timeout)
+    return _DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+def _session_kwargs(endpoint: Endpoint) -> dict[str, Any]:
+    """The `ClientSession` arguments that give a tool call a deadline at all.
+
+    This is the bound that actually fires: `mcp.shared.session.send_request` waits inside
+    `anyio.fail_after(read_timeout_seconds)` and raises `McpError` when it expires. Without it the
+    argument is `None` and the wait is unbounded — see `_DEFAULT_REQUEST_TIMEOUT_SECONDS`.
+    `langchain-mcp-adapters` forwards `session_kwargs` verbatim into `ClientSession`, and both
+    transports' connection mappings accept it, so one function serves both branches.
+    """
+    return {"read_timeout_seconds": timedelta(seconds=request_timeout_seconds(endpoint))}
+
+
 def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.AsyncClient:
     """The HTTP client one connector endpoint is reached with — the single definition of it.
 
@@ -285,9 +334,18 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
         # caller blocked for the full `request_timeout` (60 s for calc, 120 s for bo) before
         # surfacing an opaque failure — holding an admission permit and an agent lease the whole
         # time. A tool slower than 5 s is not exotic here: an uncached `predict_pka` runs xTB
-        # inline. `request_timeout` now bounds the read, which is the phase a slow tool occupies;
-        # connect stays short so a dead host still degrades fast.
-        timeout=httpx.Timeout(endpoint.request_timeout, connect=_CONNECT_TIMEOUT_SECONDS),
+        # inline. Connect stays short so a dead host still degrades fast.
+        #
+        # The read bound is deliberately *looser* than the MCP session's (`_session_kwargs`) rather
+        # than equal to it. The measurement above is what that ordering encodes: this timeout's
+        # firing is invisible — `mcp.client.streamable_http` catches it at debug level and does not
+        # reconnect — so whenever it trips first it converts a merely slow answer into a lost one
+        # with no error to show for it. The session bound is the one that must win, because it is
+        # the one that raises. See `_READ_TIMEOUT_GRACE_SECONDS`.
+        timeout=httpx.Timeout(
+            request_timeout_seconds(endpoint) + _READ_TIMEOUT_GRACE_SECONDS,
+            connect=_CONNECT_TIMEOUT_SECONDS,
+        ),
     )
 
 
@@ -348,6 +406,10 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
     honest way to ignore an argument is to never let a caller supply one. The adapter closes the
     client it builds through the factory — `_create_streamable_http_session` enters it with `async
     with client` — so the D-119-class connection leak cannot arise here.
+
+    `session_kwargs` is the one library argument that *is* passed, on both transports, because it
+    is the only place a tool call can be given a deadline at all (`_session_kwargs`) — the httpx
+    client bounds the bytes, not the JSON-RPC request waiting on them.
     """
     if isinstance(endpoint, HttpEndpoint):
         return ConnectorSpec(
@@ -356,6 +418,7 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 transport="streamable_http",
                 url=_endpoint_url(manifest.name, endpoint),
                 httpx_client_factory=_connector_client_factory(manifest.name, endpoint),
+                session_kwargs=_session_kwargs(endpoint),
             ),
             allowed_tools=tuple(endpoint.tools) if endpoint.tools else None,
         )
@@ -368,6 +431,7 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 transport="stdio",
                 command=endpoint.command,
                 args=list(endpoint.args),
+                session_kwargs=_session_kwargs(endpoint),
             ),
             allowed_tools=tuple(endpoint.tools) if endpoint.tools else None,
         )

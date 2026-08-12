@@ -107,8 +107,11 @@ class HttpEndpoint(BaseModel):
     `health_url` is optional and only used by the startup probe: a connector we wrote exposes
     `/healthz`, while a third-party MCP server may expose nothing, and reporting such a
     connector as "unprobed" is honest where guessing a path would produce a false alarm.
-    `request_timeout` (whole seconds) keeps an unreachable host from hanging a turn; `None` defers
-    to the MCP client's own default rather than inventing a number here.
+    `request_timeout` (whole seconds) is how long one tool call may take before it is abandoned —
+    the bound that keeps a mute or slow connector from hanging a turn. `None` does **not** defer to
+    the MCP client, which has no default of its own: it reaches `anyio.fail_after(None)` and waits
+    forever, so `None` means "take the registry's `_DEFAULT_REQUEST_TIMEOUT_SECONDS`" rather than
+    "unbounded". `chemclaw.connectors.registry.request_timeout_seconds` is where that is decided.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
