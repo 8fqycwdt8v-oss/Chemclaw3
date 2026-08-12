@@ -1,6 +1,6 @@
 # Live test report — Phase 5 (2026-08-12)
 
-**Model: `claude-haiku-4-5-20251001` only. Total spend: $1.53 ≈ €1.41** against a €10 target and a
+**Model: `claude-haiku-4-5-20251001` only. Total spend: $3.88 ≈ €3.57** against a €10 target and a
 €16 hard stop. No Sonnet or Opus call was made; no escalation was taken.
 
 ## The stack this ran against
@@ -19,11 +19,11 @@ Spend was read from `turn_costs` and priced at haiku rates ($1/MTok in, $5/MTok 
 
 | | |
 |---|---|
-| turns billed | 7 (of 22 rows — see below) |
-| input tokens | 1,484,119 |
-| output tokens | 8,844 |
+| turns billed | 22 (of 37 rows — see below) |
+| input tokens | 3,783,663 |
+| output tokens | 18,967 |
 | **cache reads** | **0** |
-| cost | $1.53 ≈ €1.41 |
+| cost | $3.88 ≈ €3.57 |
 | average | ≈ €0.20 per turn |
 
 The open backlog row *"`turn_costs` cannot say which model a turn spent its tokens on"* is real and
@@ -94,44 +94,52 @@ Run with `infra-temporal-1` deliberately stopped:
 
 REV-6's ordering claim holds live.
 
-### 5. M12 probe (c) — routing — **BLOCKED by a defect the probe found**
+### 5. M12 probe (c) — routing — **ran after the fix; the measurement does not favour teams**
 
-The team arm delegated nothing: 15 probes, 0 delegated. The flag *was* set on the front door
-(verified in the process environment), so the report's own suggested cause was wrong.
+Re-run against the fixed build. The probe executes now, and it answers the question
+`agent_teams_enabled` has been waiting on since M9:
 
-`.live/api.log` gives the real one — every turn failed at graph construction:
+| arm | probes | delegated | correct | accuracy | tokens |
+|---|---:|---:|---:|---:|---:|
+| single | 15 | 0 | 0 | — | 1,759,062 |
+| team | 15 | **1** | 1 | 100% (n=1) | **2,309,667** |
+
+Per specialist: `computation`, 1 turn, 260,500 tokens.
+
+**Read it carefully, because 100% is the least informative number in the table.** The denominator is
+one. What the run actually establishes is the other two columns: on haiku the supervisor delegated
+**1 of 15** probes, and the team arm cost **31% more tokens** than the single agent for that one
+delegation — the whole surface is paid for on every turn whether or not it routes.
+
+That is evidence for keeping the flag off, and it is the *kind* of evidence D-2026-08-10 said would
+decide it ("a supervisor that mis-routes is worse than the agent it replaces, and no unit test can
+establish which of those a deployment gets"). It is not yet evidence about routing *quality*, which
+needs a model that delegates often enough to score.
+
+**And it was blocked by a defect the probe itself surfaced.** The first run reported 0/15 delegated
+and suggested the flag was unset; the flag was set. `.live/api.log` showed every turn failing at
+graph construction:
 
 ```
 TeamError: specialist 'evidence' would reach connector tool(s)
 ['find_calculations', 'resolve_compound', 'similar_molecules',
  'similar_reactions', 'substructure_matches'] that its supervisor cannot
- — a delegation must attenuate
 ```
 
-**15 of 15 turns failed before the model was called** — which is why they cost €0 and left
-`turn_costs` rows with `input_tokens=0` and `completed=false`.
-
-**Root cause.** `build_langgraph_agent` composes the surface as
-`[*tools, *connectors, skill_read_tool]` but passed `_team_middleware` only `tools`.
-`_narrowed_connectors` compares *connector* tool names against that set, so every connector tool a
-specialist legitimately kept read as a widening. The guard (added by D-2026-08-12 to close a real
-widening hole) is correct; the half of the surface it was handed was not.
-
-**Fixed** in commit `2a59a02`, with a mutation-checked regression test. Routing accuracy itself
-remains unmeasured — the probe could not run — so `agent_teams_enabled` stays off by default and its
-backlog row stands.
+**15 of 15 turns failed before the model was called** — hence €0 and `completed=false` rows.
+`build_langgraph_agent` composes the surface as `[*tools, *connectors, skill_read_tool]` but passed
+the team middleware only `tools`, so every connector tool a specialist kept read as a widening. The
+guard (added by D-2026-08-12 to close a real hole) was right; the half of the surface it was handed
+was not. Fixed in `2a59a02`.
 
 **Why no test caught it:** all 22 tests in `tests/test_agent_team.py` build the supervisor with **no
-connectors**, and `_narrowed_connectors` returns `[]` before reaching the assertion. It was
-structurally unreachable in every one of them.
-
----
+connectors**, and `_narrowed_connectors` returns `[]` before reaching the assertion.
 
 ## The finding only a live run could produce
 
 **No prompt caching is happening at all: `cache_read_tokens = 0` and `cache_write_tokens = 0` on
-every turn**, with an input:output ratio of **122:1** (1,484,119 in vs 8,844 out) and single turns
-reaching 189k–210k input tokens.
+every turn**, across all 22 billed turns — with an input:output ratio of **199:1** (3,783,663 in
+vs 18,967 out) and single turns reaching 189k–260k input tokens.
 
 The ledger *reads* cache columns (`api/runner_usage.py:85`, and `turn_costs` has both), so the
 observability exists — but nothing ever requests caching: `cache_control` / `ephemeral` have zero

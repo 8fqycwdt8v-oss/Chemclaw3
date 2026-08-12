@@ -18,11 +18,14 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       so this is the largest cost lever in the system and it is untouched. Full numbers in
       `tasks/live-test-2026-08-12/report.md`.
 
-- [ ] **Routing accuracy is still unmeasured, and the probe now runs** — [M]. `make live-routing`
-      delegated 0 of 15 probes because every turn failed at graph construction (`TeamError`, fixed in
-      `2a59a02`). The build defect is closed and a mutation-checked test guards it, but the
-      measurement `agent_teams_enabled` is waiting on was never taken. Re-run
-      `make live-routing ARM=team` and `ARM=single` and compare. Until then the flag stays off.
+- [ ] **The team costs 31% more and delegates once in fifteen — measured, and the flag stays off**
+      — [M]. `make live-routing` ran after `2a59a02` fixed the build defect that made it report 0/15.
+      Measured on haiku: the team arm delegated **1 of 15** probes at **2,309,667** tokens against the
+      single agent's **1,759,062** — the whole surface is paid for on every turn whether or not it
+      routes. Accuracy reads 100%, on a denominator of one, so it says nothing yet about routing
+      *quality*. This is the measurement D-2026-08-10 said would decide the default, and it does not
+      favour turning it on. What is still open is quality: it needs a model that delegates often
+      enough to score, and a probe set that provokes delegation rather than hoping for it.
 
 - [ ] **The DARK-1 re-gate check is inconclusive on haiku** — [S]. `make live-plan-gate` scores 4/5;
       the fifth needs the model to *rewrite* its plan so the changed plan can be re-gated, and haiku
