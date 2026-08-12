@@ -596,20 +596,41 @@ def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
     would stop being pruned too — a missing checkpointer silently disabling retention for
     everything else.
 
-    **This test drops shared tables, so it fails beside a running stack rather than because of a
-    defect.** It `DROP`s `checkpoints`, `checkpoint_blobs` and `checkpoint_writes` from the same
-    database `make up` serves, and a front door started by `make live-up` recreates them on first
-    use — its checkpointer migrates lazily. Observed on 2026-08-11: one failure in an otherwise
-    green 4206-test run, passing in isolation and passing again with the lane stopped. If this is
-    the only red test, check for a live lane before reading it as a regression.
+    **The drop is schema-qualified, and an unqualified one destroyed the application's tables.**
+    `tests/pg.py` isolates every test table behind `search_path={isolation},public`, so a bare
+    `DROP TABLE IF EXISTS checkpoints` resolves to the *first* match — and this test does not create
+    the tables it drops. Run after `test_an_expired_thread_leaves_none_of_its_three_tables_behind`
+    there is an isolation-schema copy to hit; run alone there is not, and the statement reaches
+    **`public.checkpoints`**: the running deployment's turn state, dropped by a unit test.
+
+    That is not hypothetical. It wedged this repository's own dev stack twice on 2026-08-11–12 —
+    the second time irrecoverably, because `AsyncPostgresSaver.setup()` is idempotent against
+    `checkpoint_migrations` and that table survived, so every later turn died with
+    `UndefinedTable: relation "checkpoints" does not exist` and nothing could repair it. A live
+    concurrency sweep read 0 accepted turns at every admission cap before the cause was found.
+
+    So the drop names `current_schema()` explicitly and can no longer reach `public`. The cost is
+    that on a database where the application *has* run, `public` still shadows the now-absent
+    isolation copies and the sweep correctly reports a checkpointer it can see — which is not this
+    test's subject, so it skips saying so rather than failing.
     """
 
-    async def _run() -> RetentionOutcome:
+    async def _run() -> RetentionOutcome | None:
         await migrated_db_or_skip()
         async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_schema()")
+                row = await cur.fetchone()
+            schema = str(row[0]) if row else "public"
             for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
-                await conn.execute(f"DROP TABLE IF EXISTS {table}")
+                await conn.execute(f'DROP TABLE IF EXISTS "{schema}".{table}')
             await conn.commit()
+            # Still visible means `public` holds a real checkpointer this test must not touch.
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT to_regclass('checkpoints')")
+                shadowed = await cur.fetchone()
+            if shadowed is not None and shadowed[0] is not None:
+                return None
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
         monkeypatch.setattr(settings, "retention_session_events_days", 7)
@@ -619,6 +640,11 @@ def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
             monkeypatch.undo()
 
     outcome = asyncio.run(_run())
+    if outcome is None:
+        pytest.skip(
+            "a checkpointer exists in `public` (this database has run the application), so the "
+            "absent-schema case cannot be produced without dropping tables this test does not own"
+        )
 
     assert any("no checkpointer" in reason for reason in outcome.skipped), (
         f"the missing tables were not reported: {outcome.skipped}"

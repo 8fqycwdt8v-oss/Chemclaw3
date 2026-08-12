@@ -12,7 +12,9 @@ import math
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.science.calc import reaction as reaction_module
 from chemclaw.science.calc.reaction import (
+    ReactionEnergyResult,
     check_balance,
     compare_solvent_effects,
     compute_reaction_energy,
@@ -188,6 +190,133 @@ def test_solvent_comparison_ranks_and_admits_when_it_cannot_distinguish() -> Non
         assert result.best_solvent == result.effects[0].solvent
         if result.spread_kcal <= result.uncertainty_kcal:
             assert any("does not distinguish" in warning for warning in result.warnings)
+
+    asyncio.run(_run())
+
+
+def _reaction_result(solvent: object) -> ReactionEnergyResult:
+    """A minimal, valid per-medium result — the fan-out's unit, with no chemistry in it.
+
+    The screen's own arithmetic (ranking, spread, the cannot-distinguish warning) is covered by
+    the real-calculation test above. These three are about *scheduling*, so a real xTB run would
+    add minutes and a second reason to fail.
+    """
+    return ReactionEnergyResult(
+        reactants=["CCO"],
+        products=["CC=O"],
+        method="gfn2",
+        solvent=solvent,  # type: ignore[arg-type]
+        temperature_k=298.15,
+        level="quick",
+        delta_e_kcal=-1.0,
+        delta_h_kcal=None,
+        delta_g_kcal=None,
+        species=[],
+        cache_hits=0,
+        uncertainty_kcal=1.0,
+        is_strongly_exothermic=False,
+        exotherm_threshold_kcal=-20.0,
+        conformer_treatment="single",
+    )
+
+
+def _screen_overlap(max_parallel: int, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Run a four-medium screen and report the greatest number of media in flight at once.
+
+    Measured by counting, not by timing: a sleep-and-compare test of concurrency is a test of the
+    machine's load. Each branch is intercepted at `compute_reaction_energy`, which is the only
+    awaited call in the fan-out, so the counter sees exactly the overlap the semaphore allows.
+    """
+    monkeypatch.setattr(settings, "calc_screen_max_parallel", max_parallel)
+    live = 0
+    peak = 0
+
+    # `solvent` is the fourth POSITIONAL argument at the call site, not a keyword. Reading it from
+    # `**kwargs` silently handed every branch `None`, which the overlap count survived and the
+    # ordering assertion below did not — the kind of wrong-field read this session has now found
+    # four times in production code, here in a test of it.
+    async def fake(
+        _store: object, _r: object, _p: object, solvent: object, *_rest: object, **_kw: object
+    ) -> object:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            # Yield twice, so a serial run cannot overlap by accident and a parallel one must.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return _reaction_result(solvent)
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(reaction_module, "compute_reaction_energy", fake)
+
+    async def _run() -> None:
+        await compare_solvent_effects(
+            InMemoryStore(), ["CCO"], ["CC=O"], ["water", "toluene", "thf"], level="quick"
+        )
+
+    asyncio.run(_run())
+    return peak
+
+
+def test_a_solvent_screen_serializes_on_the_shipped_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`calc_screen_max_parallel = 1` must be the loop it replaced, exactly.
+
+    The fan-out is opt-in because a branch spawns xtb and `xtb_cli_threads = 0` sizes that binary
+    to the whole machine — four media at once would be four processes each expecting every core.
+    So the default has to be indistinguishable from serial, and "indistinguishable" is a number
+    here rather than a claim: never more than one medium in flight.
+    """
+    assert settings.calc_screen_max_parallel == 1, "the shipped default must stay serial"
+    assert _screen_overlap(1, monkeypatch) == 1
+
+
+def test_raising_the_bound_actually_overlaps_the_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    """And the knob must do something, or it is a setting that reads as a capability.
+
+    Four media (gas phase plus three solvents) under a bound of 3 should reach 3 in flight. A
+    screen that stayed at 1 here would mean the semaphore was acquired around the whole fan-out
+    rather than around each branch — which looks identical in every other test.
+    """
+    assert _screen_overlap(3, monkeypatch) == 3
+
+
+def test_the_gas_phase_reference_stays_first_however_the_branches_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gather` preserves argument order, and the ranking depends on it.
+
+    Under concurrency the branches finish in whatever order the event loop hands back. If results
+    were collected as they completed, the gas-phase reference would land wherever it happened to
+    finish and the ordering below it would be a race. Asserted with the *last* branch resolving
+    first, which is the arrangement that would expose it.
+    """
+    monkeypatch.setattr(settings, "calc_screen_max_parallel", 4)
+    order: list[str | None] = []
+
+    async def fake(
+        _store: object, _r: object, _p: object, solvent: object, *_rest: object, **_kw: object
+    ) -> object:
+        # Later media finish sooner: gas phase waits longest.
+        delays: dict[object, int] = {None: 3, "water": 2, "toluene": 1}
+        delay = delays.get(solvent, 0)
+        for _ in range(delay):
+            await asyncio.sleep(0)
+        order.append(solvent)  # type: ignore[arg-type]
+        return _reaction_result(solvent)
+
+    monkeypatch.setattr(reaction_module, "compute_reaction_energy", fake)
+
+    async def _run() -> None:
+        result = await compare_solvent_effects(
+            InMemoryStore(), ["CCO"], ["CC=O"], ["water", "toluene"], level="quick"
+        )
+        # Completion order really was reversed, so the assertion below is not vacuous.
+        assert order == ["toluene", "water", None], order
+        assert result.effects, "a screen must rank something"
 
     asyncio.run(_run())
 

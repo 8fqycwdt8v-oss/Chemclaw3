@@ -473,16 +473,35 @@ async def compare_solvent_effects(
     """
     if not solvents:
         raise ValueError("give at least one solvent to compare")
-    results = []
-    for solvent in [None, *solvents]:
+
+    # **Bounded, and the bound defaults to 1 — which is the serial loop this replaces.** The media
+    # are independent (each is its own cache key, so no branch recomputes another's work) and they
+    # genuinely serialize, unlike the evidence sweep whose `Send` rewrite found `asyncio.gather`
+    # already there. But a branch here spawns xtb, and `xtb_cli_threads = 0` means the binary sizes
+    # itself to the whole machine: six solvents at once would be six processes each expecting every
+    # core. So the fan-out is available and off, and `calc_screen_max_parallel` says what raising it
+    # is paired with.
+    #
+    # **Not `Send`, and not by preference.** `tests/test_third_party_layering.py` allows this
+    # package rdkit, xtb, ml and postgres — LangGraph is not on that list, because `science/` is the
+    # physics and the graph belongs to layer 1. Running the fan-out one layer up would split one
+    # tool into two, which is the pairing `ARCHITECTURE.md` exists to keep intact.
+    limit = asyncio.Semaphore(settings.calc_screen_max_parallel)
+
+    async def one(solvent: str | None) -> ReactionEnergyResult:
+        """One medium, under the fan-out bound, reporting progress prefixed with its own name."""
         label = solvent or "gas phase"
 
-        def relay(line: str, label: str = label) -> None:
-            """Prefix the inner reaction's progress with which medium it is running in."""
+        def relay(line: str) -> None:
+            """Prefix the inner reaction's progress with which medium it is running in.
+
+            The prefix was already here for a serial loop and is what makes a parallel one
+            readable: interleaved lines stay attributable to the branch that wrote them.
+            """
             progress(f"{label}: {line}")
 
-        results.append(
-            await compute_reaction_energy(
+        async with limit:
+            return await compute_reaction_energy(
                 store,
                 reactants,
                 products,
@@ -492,7 +511,10 @@ async def compare_solvent_effects(
                 symmetry_numbers,
                 progress=relay,
             )
-        )
+
+    # `gather` preserves argument order, so the gas-phase reference stays first and the ranking
+    # below sorts from a list whose order does not depend on which branch finished first.
+    results = list(await asyncio.gather(*(one(solvent) for solvent in [None, *solvents])))
     effects = [
         SolventEffect(
             solvent=result.solvent,

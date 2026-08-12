@@ -20,14 +20,31 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 
 ## Open — Left by the LangGraph rebuild (2026-08-11, D-2026-08-11-what-the-removal-found)
 
-- [ ] **M12 probe (a), concurrency, is still unrun** — [M]. 8 simultaneous turns against a compiled
-      graph. D-123's *defect* has no surface left (its parser went with the dependency, which is why
-      `agent_pool.py` could be deleted), but LangGraph's own behaviour under that load is
-      unmeasured, so this is a new question rather than the old one re-asked.
-      **Trigger**: a live stack; it needs no expensive model, and `cli/mock_llm` can now drive it
-      (its chat-completions route was added 2026-08-11 — before that every mock-driven lane 404'd).
+- [x] **M12 probe (a), concurrency** — **Ran 2026-08-12** against Postgres + Temporal + the front
+      door on `cli/mock_llm`, 24 offered concurrent, 48 turns per cap.
 
-      **(b) and (c) ran on 2026-08-11** against Postgres + Temporal + the front door on
+      | cap | accepted | shed | p50 s | answered/s |
+      | ---: | ---: | ---: | ---: | ---: |
+      | 2 | 10 | 38 | 6.0 | 0.71 |
+      | 4 | 17 | 31 | 7.0 | 1.02 |
+      | 8 | 24 | 24 | 8.1 | 1.14 |
+      | 16 | 37 | 11 | 13.4 | 1.27 |
+      | 32 | 48 | 0 | 18.7 | 1.30 |
+
+      **The D-123 shape is gone**: at cap 8 the door accepted 24 turns with zero unaccounted for,
+      and goodput rises monotonically with the cap, so the per-turn graph build holds under
+      concurrency and the cap is load-bearing. The old defect was 8/8 concurrent turns failing on a
+      shared client; there is no trace of it.
+
+      **The knee is still unread**, and that is a limit of the sweep rather than of the system:
+      within-cap spread measured 28%, above `_MAX_READABLE_NOISE`, so `_knee` refuses to name one
+      and two of the four checks fail on that basis — which is
+      `D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with` working as designed. The box was
+      also running Postgres, Temporal, four workers and the mock. **Trigger for a re-run**: a
+      quieter host, or more samples per cap.
+
+- [x] **M12 probes (b) plan-gate and (c) routing** — **Ran 2026-08-11** against Postgres + Temporal
+      + the front door on
       claude-haiku-4-5, and what they found is in `tasks/todo.md`: four defects, every one of them
       in the *observation* rather than the mechanism, and each with a passing unit test in front of
       it. (b) plan → approve → execute now passes including the refusal check, after
