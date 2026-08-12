@@ -366,12 +366,17 @@ def test_which_shipped_profiles_clear_the_cache_floor() -> None:
     for name in registered_profile_names():
         with pytest.MonkeyPatch.context() as patch:
             payload = _captured_payload(patch, get_profile(name))
-        prefix = client.messages.count_tokens(
-            model=model,
-            tools=payload.get("tools") or anthropic.NOT_GIVEN,
-            system=[{"type": "text", "text": block["text"]} for block in payload["system"]],
-            messages=[{"role": "user", "content": "hi"}],
-        ).input_tokens
+        # `tools` is omitted rather than passed a sentinel when a profile advertises none: the
+        # SDK's absent-value type is not the same as an empty list, and every shipped profile has
+        # tools anyway — this is the branch that keeps an out-of-tree toolless profile counting.
+        counted: dict[str, Any] = {
+            "model": model,
+            "system": [{"type": "text", "text": block["text"]} for block in payload["system"]],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        if payload.get("tools"):
+            counted["tools"] = payload["tools"]
+        prefix = client.messages.count_tokens(**counted).input_tokens
         if prefix < floor:
             below.add(name)
 
