@@ -10,13 +10,32 @@ dependencies = [
     # unconditionally (bofire.data_models.features.feature -> mordred); without it a
     # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
     "bofire[optimization,cheminfo]>=0.4.1",
-    "deepagents>=0.6.12",
+    # Capped below 0.7 deliberately. `deepagents` is a 0.x package and its own
+    # `backends/protocol.py` already carries `removal="0.7.0"` markers, so an unpinned upgrade walks
+    # into a release that announces it removes API — and what this repo reaches for there is the
+    # skills backend, which is where role-gated skill *visibility* is enforced. Lift the cap after
+    # reading 0.7's protocol, not before. (It also drags `langchain-google-genai` in as a hard
+    # requirement: ~22 MB of Google client and `langsmith` that nothing here imports. That closure
+    # is a known cost of this dependency, recorded rather than discovered in an image scan; the
+    # chart pins `LANGSMITH_TRACING` off so the tracer cannot be switched on by ambient env.)
+    "deepagents>=0.6.12,<0.7",
+    # Imported directly — `evals/live_judge.py` and `cli/mock_llm.py` name the provider SDKs' own
+    # response types — so they are declared rather than relied on through the `langchain-*` wrappers
+    # that happen to pull them today.
+    "anthropic>=0.40",
+    "openai>=1.60",
     "drfp>=0.3.7",
     "fastapi>=0.139.2",
     # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp).
     "httpx>=0.28",
+    # Declared, not left transitive, for the reason stated above `httpx`: eight first-party modules
+    # import it directly — including `agent/session_store.py`, which uses `message_to_dict` /
+    # `messages_from_dict` for the *durable* `session_messages` column. Its floor would otherwise be
+    # whichever transitive constraint happened to be tightest, so dropping an unrelated `langchain-*`
+    # package could silently relax the pin on the library that owns a GxP-retained serialization.
+    "langchain-core>=1.5.3",
     "langchain>=1.0",
     "langchain-anthropic>=1.5.1",
     "langchain-mcp-adapters>=0.3.2",

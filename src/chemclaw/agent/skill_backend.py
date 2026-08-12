@@ -120,6 +120,21 @@ class NarrowedSkillsBackend(FilesystemBackend):
         """The hits naming a path this turn may reach."""
         return [hit for hit in hits if self._allows(_path_of(hit))]
 
+    def download_files(self, paths: list[str]) -> Any:
+        """Return the bodies of the permitted paths only — the reach path the gate had missed.
+
+        `read` was gated and this was not, and it returns a file's **full bytes**: measured on the
+        installed backend, a gated `SKILL.md` came back whole through here while `read` refused it
+        and `ls` did not list it. Nothing binds it today — only `skill_read_tool` and the
+        middleware's own listing reach the backend — so this was a latent hole rather than a live
+        one, and it becomes live the moment upstream fetches a body this way. That is a patch
+        release in a 0.x package, against the one narrowing that is a *security* property.
+
+        Filtered rather than refused outright: this returns per-path results, so a caller asking for
+        five paths of which one is gated should get the four, exactly as `glob` and `grep` do.
+        """
+        return super().download_files([path for path in paths if self._allows(path)])
+
     def write(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse: a skill is reviewed judgment, never something a turn may rewrite."""
         raise PermissionError("the skills tree is read-only")

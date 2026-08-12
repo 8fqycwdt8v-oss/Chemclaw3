@@ -428,6 +428,7 @@ name = "chemclaw"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "bofire", extra = ["cheminfo", "optimization"] },
     { name = "deepagents" },
     { name = "drfp" },
@@ -435,6 +436,7 @@ dependencies = [
     { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
+    { name = "langchain-core" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
     { name = "langgraph" },
@@ -442,6 +444,7 @@ dependencies = [
     { name = "mcp" },
     { name = "networkx" },
     { name = "numpy" },
+    { name = "openai" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-sdk" },
     { name = "pandas" },
@@ -481,13 +484,15 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.40" },
     { name = "bofire", extras = ["optimization", "cheminfo"], specifier = ">=0.4.1" },
-    { name = "deepagents", specifier = ">=0.6.12" },
+    { name = "deepagents", specifier = ">=0.6.12,<0.7" },
     { name = "drfp", specifier = ">=0.3.7" },
     { name = "fastapi", specifier = ">=0.139.2" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "langchain", specifier = ">=1.0" },
     { name = "langchain-anthropic", specifier = ">=1.5.1" },
+    { name = "langchain-core", specifier = ">=1.5.3" },
     { name = "langchain-mcp-adapters", specifier = ">=0.3.2" },
     { name = "langchain-openai", specifier = ">=1.4.2" },
     { name = "langgraph", specifier = ">=1.2.10" },
@@ -495,6 +500,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "networkx", specifier = ">=3.6.1" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "openai", specifier = ">=1.60" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.44.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.44.0" },
     { name = "pandas", specifier = ">=2.2" },
