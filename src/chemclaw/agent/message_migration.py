@@ -32,6 +32,7 @@ being silently coerced into text — a message that arrives at the model subtly 
 migration that stops and says which row it could not read.
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -78,6 +79,7 @@ def to_langchain(payload: dict[str, Any]) -> BaseMessage:
     """
     role = str(payload.get("role", ""))
     contents = list(payload.get("contents") or [])
+    _reject_unknown_content(contents)
     text = "".join(c.get("text", "") for c in contents if c.get("type") == "text")
 
     if role == "user":
@@ -91,12 +93,35 @@ def to_langchain(payload: dict[str, Any]) -> BaseMessage:
     raise UnconvertibleMessage(f"stored message has unknown role {role!r}")
 
 
+# Every content type this converter knows how to carry across. A stored row holding anything else is
+# refused rather than converted, which is what `043_session_message_shape.sql` and this module's own
+# docstring have always claimed and what the code did not do: unknown parts were simply not matched
+# by any branch, so they vanished into an empty string and the row was stamped as converted. A
+# migration that silently drops what it does not recognise is the one thing an irreversible pass
+# must not be, and the drop was invisible precisely because the result still looked like a message.
+_KNOWN_CONTENT = frozenset({"text", "function_call", "function_result"})
+
+
+def _reject_unknown_content(contents: list[dict[str, Any]]) -> None:
+    """Stop on a content type this converter has no example of, naming it.
+
+    The alternative is guessing at data that outlives the guess. A refused row keeps its `maf` stamp
+    and stays readable through `session_store.message_from_row`, so refusing costs the conversation
+    nothing and buys an operator a row number and a type name.
+    """
+    unknown = sorted({str(c.get("type")) for c in contents if isinstance(c, dict)} - _KNOWN_CONTENT)
+    if unknown:
+        raise UnconvertibleMessage(
+            f"stored message holds content type(s) {unknown} this converter has never written"
+        )
+
+
 def _tool_calls(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The assistant's tool calls, in LangChain's `{name, args, id}` shape.
 
-    MAF stores `arguments` as a decoded object, which is the same thing LangChain calls `args`, so
-    this is a rename rather than a parse. A call whose arguments were stored as a JSON *string* —
-    which the streaming path can produce — is passed through as `{}` rather than parsed here,
+    The stored `arguments` is the same thing LangChain calls `args`, so this is mostly a rename;
+    `_arguments` handles the string form the streaming path produces. A call whose arguments will
+    not parse degrades to `{}` rather than raising,
     because a half-streamed argument blob is not something to reconstruct months later; the call is
     still visible in the transcript with its name and id.
     """
@@ -104,15 +129,38 @@ def _tool_calls(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for content in contents:
         if content.get("type") != "function_call":
             continue
-        arguments = content.get("arguments")
         calls.append(
             {
                 "name": str(content.get("name", "")),
-                "args": arguments if isinstance(arguments, dict) else {},
+                "args": _arguments(content.get("arguments")),
                 "id": str(content.get("call_id", "")),
             }
         )
     return calls
+
+
+def _arguments(arguments: Any) -> dict[str, Any]:
+    """A stored call's arguments as a mapping, parsing the string form rather than discarding it.
+
+    Both forms are in the table: the decoded object for a call that arrived whole, and the raw JSON
+    *string* for one assembled from streamed fragments. Only the first was read, so every streamed
+    call in the archive converted to `args: {}` — the arguments a GxP reviewer asks "what was this
+    run with" about, replaced by nothing, in the irreversible pass.
+
+    A string that will not parse still degrades to `{}` rather than raising: it is a half-streamed
+    fragment, the call is still visible with its name and id, and refusing the whole row over an
+    argument blob nobody can reconstruct would cost the conversation to save a detail that is
+    already gone.
+    """
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str) and arguments.strip():
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _tool_message(contents: list[dict[str, Any]]) -> ToolMessage:
@@ -121,15 +169,32 @@ def _tool_message(contents: list[dict[str, Any]]) -> ToolMessage:
     `tool_call_id` is required rather than best-effort: a `ToolMessage` with no id is a result
     answering nothing, which every provider rejects as a malformed exchange — the same rule the
     LangGraph gates obey when they refuse a call.
+
+    **A row answering several calls is refused, not truncated.** Parallel tool calls are answered by
+    one stored `tool` row holding one `function_result` per call, and this returns a single
+    `ToolMessage` — so taking the first and returning silently destroyed the rest, irreversibly, in
+    the one pass whose own docstring calls itself the irreversible step. Worse than the loss is what
+    it leaves behind: the surviving assistant message still carries all three calls, so the thread
+    acquires unanswered `tool_use` blocks that a provider rejects outright, which is the poison pill
+    `agent/message_pairing.py` exists to keep out of a conversation.
+
+    Refusing costs nothing a chemist can see. A refused row keeps its `maf` stamp and stays fully
+    readable through `session_store.message_from_row`, which reads both shapes — so the conversation
+    renders exactly as before while the pass names the row for an operator.
     """
-    for content in contents:
-        if content.get("type") != "function_result":
-            continue
-        call_id = str(content.get("call_id", ""))
-        if not call_id:
-            raise UnconvertibleMessage("stored tool result has no call_id to answer")
-        return ToolMessage(content=_result_text(content), tool_call_id=call_id)
-    raise UnconvertibleMessage("stored tool message holds no function_result")
+    results = [content for content in contents if content.get("type") == "function_result"]
+    if not results:
+        raise UnconvertibleMessage("stored tool message holds no function_result")
+    if len(results) > 1:
+        answered = ", ".join(str(content.get("call_id", "?")) for content in results)
+        raise UnconvertibleMessage(
+            f"stored tool message answers {len(results)} calls ({answered}) and one LangChain "
+            "ToolMessage answers one — converting it would destroy the rest"
+        )
+    call_id = str(results[0].get("call_id", ""))
+    if not call_id:
+        raise UnconvertibleMessage("stored tool result has no call_id to answer")
+    return ToolMessage(content=_result_text(results[0]), tool_call_id=call_id)
 
 
 def _result_text(content: dict[str, Any]) -> str:

@@ -86,8 +86,39 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     try:
         return to_langchain(payload)
     except UnconvertibleMessage:
-        log.warning("could not render a stored message; showing it as plain text", exc_info=True)
-        return AIMessage(content=str(payload.get("text", "")))
+        log.warning("could not render a stored message; showing its prose", exc_info=True)
+        # The prose out of `contents`, not `payload["text"]` — the stored shape has no top-level
+        # `text` key and never did, so the fallback rendered **every** refused row as an empty
+        # bubble. That is the failure this branch exists to avoid, reached by the branch itself: a
+        # reader who cannot convert a row should still see what was said in it, and a blank message
+        # says the turn was silent. Refusals became commonplace when the converter started stopping
+        # on parallel results and unknown content types instead of quietly dropping them.
+        return AIMessage(content=_stored_prose(payload))
+
+
+def _stored_prose(payload: dict[str, Any]) -> str:
+    """Whatever text a stored row carries, for a reader that could not convert it properly.
+
+    Deliberately forgiving where `to_langchain` is strict: this runs *after* a refusal, and its job
+    is that a chemist reloading a conversation still reads the words. Both stored shapes are tried
+    because a row that fails conversion is exactly the row whose shape is in doubt.
+    """
+    contents = payload.get("contents")
+    if isinstance(contents, list):
+        parts = [part for part in contents if isinstance(part, dict)]
+        prose = "".join(str(p.get("text", "")) for p in parts if p.get("type") == "text")
+        if prose:
+            return prose
+        # A refused *tool* row carries no text part at all — its words are the results. Joining
+        # them is what makes the commonest refusal (a row answering parallel calls) render as the
+        # answers it holds rather than as an empty bubble.
+        results = [str(p.get("result", "")) for p in parts if p.get("type") == "function_result"]
+        if any(results):
+            return "\n".join(r for r in results if r)
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return str(data.get("content", ""))
+    return str(payload.get("text", ""))
 
 
 # The correlation id makes a stored message joinable to the audit rows of the turn that wrote it

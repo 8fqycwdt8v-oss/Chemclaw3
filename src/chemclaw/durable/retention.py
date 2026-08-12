@@ -118,7 +118,11 @@ _EXPIRED_SESSIONS = (
 )
 # The whole session, in id order: the pairing closure needs the partners, which are frequently the
 # rows that are *not* expiring.
-_SESSION_ROWS = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
+# `message_shape` is selected because the pairing rule reads it: the sweep and the transcript
+# reader must decide "which serialization is this" the same way, and this is the destructive one.
+_SESSION_ROWS = (
+    "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
+)
 _EXPIRED_IDS = (
     "SELECT id FROM session_messages "
     "WHERE session_id = %s AND created_at < now() - make_interval(days => %s)"
@@ -241,7 +245,7 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
             # payload. So the sweep crashed on any session that had taken a turn since the
             # conversion, Temporal retried it to exhaustion, and retention silently stopped for
             # exactly the sessions still in use.
-            rows = [(int(row[0]), stored_call_ids(row[1])) for row in await cur.fetchall()]
+            rows = [(int(row[0]), stored_call_ids(row[1], row[2])) for row in await cur.fetchall()]
             if unreadable := unreadable_rows(rows):
                 # Refuse the whole session rather than the row: an unreadable row links to nothing,
                 # so pruning around it could strand a pairing it would have protected.
