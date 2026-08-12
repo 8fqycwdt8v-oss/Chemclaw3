@@ -8,6 +8,29 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 Detail and measurements in `tasks/review-2026-08-12-{maf-removal,langgraph-native,migration-findings}.md`.
 Ordered by impact × safety: the first six are additive and cannot regress a working deployment.
 
+- [ ] **No prompt caching, and input outweighs output 122:1** — [M]. Measured live on haiku:
+      `cache_read_tokens = 0` and `cache_write_tokens = 0` on every one of 7 billed turns, with
+      1,484,119 input tokens against 8,844 output and single turns reaching 189k-210k input. The
+      ledger *reads* both columns (`api/runner_usage.py:85`, and `turn_costs` stores them) so the
+      observability is already there, but nothing requests caching: `cache_control`/`ephemeral` have
+      zero hits across the agent layer. Every model call re-sends the full system prompt and all 28
+      tool schemas at full price. The prefix is large and static and reads bill at a tenth of input,
+      so this is the largest cost lever in the system and it is untouched. Full numbers in
+      `tasks/live-test-2026-08-12/report.md`.
+
+- [ ] **Routing accuracy is still unmeasured, and the probe now runs** — [M]. `make live-routing`
+      delegated 0 of 15 probes because every turn failed at graph construction (`TeamError`, fixed in
+      `2a59a02`). The build defect is closed and a mutation-checked test guards it, but the
+      measurement `agent_teams_enabled` is waiting on was never taken. Re-run
+      `make live-routing ARM=team` and `ARM=single` and compare. Until then the flag stays off.
+
+- [ ] **The DARK-1 re-gate check is inconclusive on haiku** — [S]. `make live-plan-gate` scores 4/5;
+      the fifth needs the model to *rewrite* its plan so the changed plan can be re-gated, and haiku
+      left the plan hash unchanged, so the scenario was never staged (nothing ran under the earlier
+      decision — the gate held). Either run it on a stronger model or make the probe force a plan
+      rewrite rather than ask for one; the second is better, because a check that depends on model
+      compliance is not a check.
+
 - [ ] **There is no timeout on an MCP tool call, and `request_timeout` silently orphans one** — [S].
       The most severe operational finding of the sweep, reachable with shipped manifest values.
       `registry.py` sets no `session_kwargs`, `langchain_mcp_adapters/tools.py:489-493` calls
