@@ -3,6 +3,238 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the full review/refactor/hardening sweep (2026-08-12)
+
+Detail and measurements in `tasks/review-2026-08-12-{maf-removal,langgraph-native,migration-findings}.md`.
+Ordered by impact × safety: the first six are additive and cannot regress a working deployment.
+
+- [ ] **There is no timeout on an MCP tool call, and `request_timeout` silently orphans one** — [S].
+      The most severe operational finding of the sweep, reachable with shipped manifest values.
+      `registry.py` sets no `session_kwargs`, `langchain_mcp_adapters/tools.py:489-493` calls
+      `session.call_tool` with no `read_timeout_seconds`, so `mcp/shared/session.py:283-291` reaches
+      `anyio.fail_after(None)` — waits forever. The httpx read timeout that *does* fire is swallowed
+      by `mcp/client/streamable_http.py:429-434` (catches `Exception` at debug level, reconnects only
+      on an event carrying an id, which FastMCP never sends), so the POST task returns silently
+      having written nothing and the transport stays up. Measured with `request_timeout=2.0` against
+      a real FastMCP server: a 4 s tool was still blocked at 25 s and its answer permanently
+      discarded; the control at `request_timeout=30` returned in 4.0 s. So `request_timeout` is a
+      silent-hang trigger, not a timeout, and any connector tool slower than its manifest value
+      wedges the turn for the full 600 s deadline while holding an admission permit and the session's
+      turn slot. Shipped: `calc: 60`, `bo: 120`, others `30`, with `registry.py:279-289` itself
+      noting an uncached `predict_pka` runs xTB inline. Fix: pass `read_timeout_seconds` (or
+      `session_kwargs` at `registry.py:355`) so the bound is enforced where the caller is parked.
+      *Vindication:* the connect phase is correctly bounded — a black-hole server gave
+      `unreachable=['blackhole']` in 3.1 s.
+
+- [ ] **A failed connector tool is recorded in the GxP audit trail as a success** — [S]. MCP tools
+      never raise: `langchain_mcp_adapters/tools.py:527-535` converts an `isError=True` result inside
+      `StructuredTool.ainvoke` and returns `ToolMessage(status="error")`. `agent/audit.py:315`
+      derives `outcome` from control flow, so it writes `ok`. The chemist also never sees a
+      `ToolFailedEvent`, because `announce_tool_failures` only catches raised exceptions. Both the
+      job-tool and hand-written paths record `error` correctly, so D-2026-08-12's
+      `surface_domain_errors` fix covers two of the three tool kinds.
+
+- [ ] **Connector domain refusals set the retry flag the repo argues against** — [S].
+      `tool_authz.py:112-117` states it: `status="error"` reaches Anthropic as `is_error`, "which
+      invites exactly the retry a deliberately-worded refusal is trying to prevent". The MCP path
+      carries most domain refusals ("that SMILES has an unclosed ring") and sets exactly that flag.
+      The policy holds on the two in-process kinds and is inverted on the third.
+
+- [ ] **`LANGSMITH_TRACING` is pinned false in the Helm chart and nowhere else** — [S]. `langsmith`
+      is in the runtime closure (a hard requirement of `langchain-core`, pulled again by
+      `deepagents`) and enables itself from ambient environment: measured,
+      `LANGSMITH_TRACING=true` makes `langsmith.utils.tracing_is_enabled()` return `True` with no
+      repo code involved, sending conversation content to `api.smith.langchain.com`. The pin exists
+      only at `deploy/helm/chemclaw/templates/_helpers.tpl:40-42`; `grep LANGSMITH src/` is empty and
+      neither `deploy/entrypoint.sh`, CI nor the Makefile sets it. So `make chat`, `make connectors`,
+      hand-started workers, local dev, CI and `docker run` of the image (which `image.yml` itself
+      does) are unguarded. The chart's own comment makes the case: a GxP deployment's egress posture
+      should not rest on a library default. Fix at `entrypoint.sh` and/or the composition root so it
+      holds regardless of launcher.
+
+- [ ] **`recursion_limit` is inherited rather than chosen** — [S]. Never set anywhere; the only
+      invocation config is `{"configurable": {"thread_id": …}}` (`api/runner.py:282`).
+      `create_agent` bakes 9999 (`langchain/agents/factory.py:1779`; verified
+      `agent.config['recursion_limit'] == 9999`), and at a measured ~1.83 supersteps per model call
+      that is a ceiling in the thousands. It fails by raising `GraphRecursionError`, discarding the
+      partial answer — the opposite of the position `loop_cap.py:101-103` states explicitly. Set it
+      explicitly, derived from `harness_max_loop_iterations`, at every entry point.
+
+- [ ] **A template agent step's token spend is unmetered** — [M]. `record_turn_cost`,
+      `chemclaw_tokens_total`, `budget.record`, `begin_call_watch` and `begin_loop_watch` have
+      exactly one caller each (`api/runner.py:527,554,509,197,201`);
+      `durable/template_activities.py` calls none, and `graph.ainvoke` at `:384` never reads
+      `usage_metadata`. So spend reaches neither `turn_costs`, nor the Prometheus counters, nor the
+      `BudgetTracker` the chart ships enabled — multiplied by up to 5 retry attempts. Same class as
+      D-144's "a deployment that looks free and is not", via a path the migration did not re-check.
+
+- [ ] **The conversation window reduces but does not bound** — [S]. `KeepLastConversationGroupsEdit`
+      (`agent/compaction.py:97-150`) triggers on tokens and then cuts by *group count*, returning
+      early when `len(starts) <= keep`. Measured at shipped defaults over 20 tool-free prose groups:
+      240,230 → **144,142** tokens against a 100,000 trigger. Its docstring claims it "is what makes
+      the thread *bounded*"; the hard provider-context error it exists to prevent still happens.
+      `langchain_core.messages.utils.trim_messages(strategy="last", start_on="human")` is the native
+      window — pairing measured safe at every budget from 2000 down to 250 tokens. ~6 lines, plus a
+      decision on what `agent_keep_last_conversation_groups` then means (a floor, not a rename).
+
+- [ ] **The per-turn state fields should be `UntrackedValue`, not a hand-written reset** — [S].
+      `ChemclawState.model_calls`/`loop_capped` are plain fields, so they resolve to `LastValue` and
+      are checkpointed; with `thread_id = session_id` they persist for the conversation, which is
+      the defect D-2026-08-12 §1 fixed by zeroing them in `turn_input()`.
+      `langgraph.channels.UntrackedValue` is never checkpointed and upstream's own
+      `ModelCallLimitMiddleware` declares `run_model_call_count` with it. Verified to survive
+      `create_agent`'s schema merging and to stay readable in the `invoke` output. ~4 lines, and it
+      moves the invariant from a convention-enforced-by-test into the schema — which also makes the
+      mid-turn-resume double-budget below unexpressible. *Latent caveat:* a resume is a new run, so
+      the counter would reset across `interrupt()`; nothing calls `interrupt()` today.
+
+- [ ] **A mid-turn resume grants a second full loop-cap budget** — [S]. `graph_events` starts from
+      `turn_input()`, and `api/runner.py:341-349` calls it a second time on the same graph and
+      thread. Measured with a cap of 2: pass 1 spends 2, pass 2 spends 2, **4 model calls for one
+      chemist turn**. Default 25 → 50. Also, `loop_capped` being a boolean means a turn capped in
+      pass 1 that then answers cleanly still marks a complete answer partial. Bounded today by
+      `mid_turn_resume_enabled=False`. Closed by the `UntrackedValue` row above.
+
+- [ ] **A template workflow's failure is invisible to the chemist** — [S]. `TemplateWorkflow.run`
+      has no `try/except` and reaches `notify_session_best_effort(…, "job_completed", …)`
+      (`durable/template_job.py:119-129`) only on success, unlike
+      `ConnectorJobWorkflow._notify_failure` (`durable/connector_job.py:282,333-342`). A step that
+      fails after 5 attempts pushes nothing back, and the surface shows the run as "running" forever.
+
+- [ ] **The plan gate does not apply to template agent steps** — [L]. **Needs a decision, not a
+      patch.** `_classic()` sets `harness_enabled=False`
+      (`durable/template_activities.py:410-419`) and `gate_applies` is
+      `harness_enabled_for(profile) and autonomy_for(profile) == PLAN_ONLY`, so on the chart's own
+      posture (`harness_enabled=true`, `plan_only`) a chat turn is gated and a template agent step is
+      not — while holding 16 state-changing tools including `propose_knowledge_note`,
+      `compute_dft_energy` and `start_optimization_campaign`. `refuse_repeated_calls` and
+      `loop_hit_cap` are separately inert there because their context managers are entered only by
+      `api/runner.py`. The GxP "AI proposes, human signs off" line is the repo's central control and
+      there is a path around it. **Trigger:** before any deployment enables templates that call write
+      tools under a plan-gated posture.
+
+- [ ] **Two retry systems multiply, and the fix is subtractive** — [M]. `llm_max_retries=3` means
+      **4** HTTP attempts (`anthropic/_base_client.py:1132`), under `activity_max_attempts=5`, and
+      each Temporal retry replays the *whole turn* from `turn_input(...)` with no checkpointer — so
+      every tool side effect repeats. Measured: one template step, one provider 503, **2 PR-gate
+      branches and 2 audit rows for one logical note**. Adding `ModelRetryMiddleware` or a node
+      `RetryPolicy` would be a fourth layer; narrow the outer policy instead so the SDK owns
+      transient provider failure. Accept explicitly that a long provider outage then fails in ~4
+      attempts rather than riding out 20. *Not to be touched:* `ingest/documents/sync.py:378,417` is
+      fan-out-on-failure, not a retry layer, and its comment records the outage it fixed.
+
+- [ ] **`run_agent_step` could have task-level idempotency for free, and does not** — [L]. Measured:
+      on resume from the same `thread_id` after a mid-turn crash, a completed task's result replays
+      from `checkpoint_writes` and its tool is **not** re-run. That needs a checkpointer, a stable
+      thread id and `durability != "exit"`; `run_agent_step` has none, by an explicit decision
+      (`template_activities.py:377`, "a second durability mechanism inside the first (D-002)"). That
+      argument is about where durability *lives*, not about idempotency — a Temporal-derived thread
+      id is deterministic under replay and the rows are prunable by the existing sweep. ADR-sized:
+      it re-draws D-002's line, which must be done deliberately rather than crossed quietly.
+
+- [ ] **No heartbeat and no aggregate timeout on template steps** — [M]. `template_job.py:139-158`
+      sets `start_to_close_timeout` only; `template_activities.py` never calls `activity.heartbeat`,
+      though `durable/heartbeat.py` exists and the calc/qm/bo activities use it. No
+      `schedule_to_close_timeout` and no `execution_timeout` on `start_workflow`, so one agent step's
+      worst case is 5 × 900 s = 75 min and a multi-step template's is unbounded. **Unverified —
+      needs a live broker:** whether a start-to-close timeout on a non-heartbeating activity leaves
+      attempt N's graph running (with live connector sessions and write tools) while attempt N+1
+      starts.
+
+- [ ] **Nothing checks that a symbol named in prose still exists** — [M]. The gate that would have
+      caught three of this sweep's findings at CI time. Measured: 42 present-tense references to
+      `build_agent`, which has **0** definitions, and 16 to `*SkillsSource` classes that have **0** —
+      and *none* of the 42 mentions "MAF", which is why the token-keyed sweep of D-2026-08-11 could
+      not see them and why the diff-scoped review of D-2026-08-12 could not either (the files never
+      changed). `make prose-validate` already resolves metric and tool names against the live
+      registries; extend it to code identifiers in docstrings.
+
+- [ ] **Two rename passes were never run** — [S]. `build_agent` → `build_langgraph_agent` (42 sites)
+      and `*SkillsSource` → `*Skills` (16 sites). **Do `*SkillsSource` first:** `make skill-validate`
+      prints `chemclaw.agent.skill_access.ToolScopedSkillsSource`
+      (`cli/validate_skills.py:17,136,27,163,178`), an unimportable dotted path an operator is
+      invited to follow. `FileSkillsSource` has no successor at all. Four stale premises go with
+      them: `core/session_context.py:18-20` (explains a module split by a dependency that is gone),
+      `core/logging.py:143` (the same defect D-2026-08-11 §3 fixed one file away),
+      `tests/test_service.py:45-50` (documents a double against `open_reachable`, deleted in
+      `e453c20`), `tests/fakes.py:14-21` (models `user_input_request`, 0 readers in `src/`). Plus
+      `tests/test_cli.py:122`, where a rename pass edited text *inside* a quoted error string,
+      leaving `"requires an TurnSession"` — ungrammatical and false as a historical record.
+
+- [ ] **`mcp` has no upper bound** — [XS]. `connectors/server.py` patches
+      `FastMCP._tool_manager.call_tool` twice, stacked (`:279` caller re-binding, a *security*
+      property; `:328` error sanitization). The **ratchets already exist** and are good —
+      `tests/test_connector_transport.py:350` fails if the sanitizer stops applying (a `RuntimeError`
+      carrying a DSN would leak it) and `tests/test_connector_identity.py:436` is the only test that
+      can see `_bind_caller_per_tool_call` (handshake as alice, `tools/call` as bob, asserts the body
+      reads bob); a renamed attribute `AttributeError`s at bundle build. What is missing is only the
+      ceiling: `pyproject.toml:45` is `mcp>=1.2.0`, unbounded, resolving **1.28.1**, while
+      `deepagents` was capped `<0.7` on the identical argument. The swallowed-SSE behaviour in the
+      MCP-timeout row above is version-specific too, which is a second reason to cap.
+
+- [ ] **Two shipped settings govern nothing** — [S]. `calibration_conformal_coverage` and
+      `calibration_conformal_min_samples` (`core/config/calculators.py:193-194`) have zero readers in
+      `src/`, `tests/` or the chart, yet ship in `.env.example:234-235`.
+      `science/calc/uncertainty.py:195` takes exactly these two parameters and is never wired to
+      them. Wire or delete — a capability decision, not a cleanup. Weaker third:
+      `service_uvicorn_workers` has no reader, and `entrypoint.sh` maps four other settings to
+      uvicorn flags but not this one.
+
+- [ ] **The checkpoint tables are reached only by a hand-maintained tuple** — [S].
+      `CHECKPOINT_TABLES` (`agent/checkpointer.py:52`) is the sole route for both erasure
+      (`agent/leaver.py`) and retention (`durable/retention.py`). The tables are created by
+      `AsyncPostgresSaver.setup()` rather than by a migration, so `tests/test_schema_inventory.py`
+      structurally cannot see them and a library upgrade adding a fourth table is invisible to every
+      gate in the repo. Add a check that reconciles the tuple against what the saver actually
+      creates.
+
+- [ ] **A claim whose mechanism does not exist: the deterministic call id** — [S].
+      `agent/tool_invocation.py:53-60` says the id is derived so "a retried activity produces the
+      same id", against an audit trail in which one logical call would otherwise read as three. But
+      `audit_events` has **no call-id column** — migrations `006/010/011/026/044` add none, and
+      `AuditEvent`'s fields are `actor, agent, arguments, correlation_id, detail, latency_ms,
+      outcome, purpose, revision, session_id, tool`. The id reaches only
+      `ToolMessage(tool_call_id=…)`. Duplicate rows on retry are not *corrupting* (the chain is
+      intact and each row is truthful) but they are indistinguishable from the model genuinely
+      calling twice; `activity.info().attempt` is available and read nowhere. Either add the column
+      or correct the docstring.
+
+- [ ] **`session_id` is empty on every template-path audit row** — [S]. `run_agent_step` stamps
+      identity but never calls `set_current_session_id`, so the D-2026-07-31 join from a tool call
+      back to the question it answered is empty for the whole template path.
+
+- [ ] **Two duplicate migration numbers** — [XS]. `037_bo_suggestion_provenance.sql` /
+      `037_document_index.sql` and `043_session_listing.sql` / `043_session_message_shape.sql`. Apply
+      order within a pair is filename collation, not intent — the ambiguity the ADR ledger was
+      renamed to date-plus-slug to escape (D-2026-07-31).
+
+- [ ] **`interrupt()` is declined for a reason that is measurably false** — [S]. The decision is
+      right; the recorded reason is not.
+      `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has:25-26` says an SSE stream cannot be
+      held open across a days-long review — but `interrupt()` does not hold a stream open:
+      `invoke()` **returns normally** with `__interrupt__` in its output, and a measurement across
+      two processes showed a fresh interpreter resuming a checkpointed thread with
+      `Command(resume=…)` and running to completion. Three better reasons hold: (1) `thread_id =
+      session_id`, and measured, an ordinary new input on that thread **silently discards** the
+      pending interrupt so a later resume is a no-op; (2) `durable/retention.py:138` prunes the
+      checkpoint tables, so the sign-off would live on a prunable table; (3) two of the three gates
+      cannot call it at all — `propose_note` has 12 call sites across 9 modules including Temporal
+      activities and the CLI. Supersede the reason, not the decision: as written it invites a future
+      reader to re-open the question the moment they discover `invoke()` returns.
+
+- [ ] **No mechanism for a short, in-turn clarification** — [M]. The one thing `interrupt()` is
+      genuinely good at and the repo has no equivalent for: "you said 'the usual solvent' — which?",
+      seconds, same turn, no compliance record. The three existing gates are all durable, owner-scoped
+      and days-long. Additive, not a replacement. **Trigger:** the first chemist complaint that the
+      agent guessed instead of asking.
+
+- [ ] **A stale docstring reason in `ReloadingSkillsMiddleware`** — [XS].
+      `agent/langgraph_agent.py:222-227` cites a `TypeError` from a three-argument override; that
+      does not reproduce at langchain 1.3.14 / langgraph 1.2.10 (a three-required-arg
+      `abefore_agent` ran clean end to end). The real arity constraint is on the base
+      `AgentMiddleware.before_agent(self, state, runtime)`. The subclass itself is correct and there
+      is no upstream knob to replace it.
+
 ## Open — Left by the post-migration review (2026-08-12)
 
 - [ ] **A plan no longer shows which step is waiting on a durable job** — [M]. The previous engine
