@@ -46,6 +46,37 @@ class DryRunRefusal(AuthorizationError):
     """
 
 
+class UndeclaredWriteRefusal(AuthorizationError):
+    """A side-effecting tool was called by a narrowed agent that was never given it.
+
+    Raised where the *structure* already answers — the tool is not bound to the graph, so it cannot
+    run whatever this says. That is exactly why it exists: **this enforces nothing and it changes
+    what everyone reads.** Measured by removing it and running the same turn:
+
+        without:  ToolMessage(status="error") "Error: compute_xtb_energy is not a valid tool, try
+                  one of [list_attachments, read_attachment, ask_clarifying_question, …]"
+                  → audit `detail` is that same sentence
+        with:     "Refused: compute_xtb_energy changes stored data or starts work, and this agent
+                  was not given it, so it was not called…"
+
+    Three things are wrong with the first. `status="error"` reaches Anthropic as `is_error` on the
+    tool_result block — the retry-inviting signal `_refusal_message` exists to avoid. The text
+    invites the retry in words too ("try one of"), for a tool that was withheld on purpose rather
+    than mistyped. And it enumerates the agent's whole remaining inventory into the transcript and
+    into the GxP trail, where the `detail` column is what an auditor reads as *what happened*.
+
+    The audit row itself is not what this buys, and the earlier draft of this docstring said it was.
+    `ToolNode` *returns* the invalid-name message rather than raising it, and it returns it from
+    inside the wrapper chain — so `returned_failure` already books an `outcome="error"` row either
+    way. What changes is what that row says.
+
+    An `AuthorizationError` subclass for the reason `DryRunRefusal` and `PlanNotApprovedError` are:
+    the audit middleware records it and `surface_authorization_denials` relays it verbatim rather
+    than as a fault. Its own name so a reader can tell "this agent was never given that tool" apart
+    from "your account may not use it".
+    """
+
+
 # --- the decisions, framework-free ---------------------------------------------------------------
 #
 # Each of the decisions below is one sentence of policy wrapped in the framework's plumbing. The
@@ -64,6 +95,22 @@ def dry_run_refusal(name: str) -> DryRunRefusal | None:
             "Nothing was started; re-ask without dry-run to do it."
         )
     return None
+
+
+def undeclared_write_refusal(name: str, held: frozenset[str]) -> UndeclaredWriteRefusal | None:
+    """The refusal a write earns from an agent narrowed away from it, or `None` to let it through.
+
+    `held` is the profile's resolved `tool_names` — what this agent was actually built with. A name
+    outside it that also changes something is the case worth wording; a name outside it that changes
+    nothing is an ordinary hallucinated or stale tool name, and inventing an authorization sentence
+    for that would tell a model it was *refused* something that simply does not exist here.
+    """
+    if name in held or name not in side_effecting_tools():
+        return None
+    return UndeclaredWriteRefusal(
+        f"{name} changes stored data or starts work, and this agent was not given it, so it was "
+        "not called. Nothing was started; say what you could not do and continue with what you can."
+    )
 
 
 def denial_result(exc: AuthorizationError) -> str:
@@ -141,6 +188,36 @@ async def enforce_tool_authz(request: Any, handler: Callable[[Any], Any]) -> Any
     """Block a tool call the turn's user is not authorized for, else run it unchanged."""
     authorize_tool(request.tool_call["name"])
     return await handler(request)
+
+
+def refuse_undeclared_writes(held: frozenset[str]) -> Any:
+    """Middleware wording an undeclared write's refusal for a profile narrowed to `held`.
+
+    A factory rather than a module-level wrapper because the answer depends on *which* agent this
+    is, and the four wrappers beside it read only ambient state. Attached by
+    `langgraph_agent.tool_governance_middleware` only when a profile narrows at all, so an
+    un-narrowed agent's chain is byte-identical to the one before this existed.
+
+    **It intercepts a tool the graph does not hold, and that is not an accident of ordering.**
+    `ToolNode` looks the name up with `tools_by_name.get(...)` and passes `tool=None` into the
+    request — "validation is deferred to `_execute_tool_async` to allow interceptors to
+    short-circuit requests for unregistered tools", in its own words — so a `wrap_tool_call`
+    middleware still runs, and raising here means the name is never validated and the body never
+    reached. Nothing in this chain reads `request.tool`.
+    """
+
+    @wrap_tool_call(name="refuse_undeclared_writes")
+    async def _refuse(request: Any, handler: Callable[[Any], Any]) -> Any:
+        """Refuse a side-effecting tool this profile was narrowed away from."""
+        refusal = undeclared_write_refusal(request.tool_call["name"], held)
+        if refusal is not None:
+            raise refusal
+        return await handler(request)
+
+    # Named explicitly rather than after the closure, because `wrap_tool_call` takes the function's
+    # name as the middleware class's — and a chain that reads `_refuse` in a trace or a repr is one
+    # more indirection between a refusal and the rule that produced it.
+    return _refuse
 
 
 @wrap_tool_call

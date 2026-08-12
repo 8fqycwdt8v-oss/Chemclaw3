@@ -74,7 +74,14 @@ def test_profile_can_narrow_connectors() -> None:
 
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
-    """The invariant: narrowing a profile never removes the audit + per-tool authz middleware."""
+    """The invariant: narrowing a profile never removes the audit + per-tool authz middleware.
+
+    A narrowing profile carries **one more** than the default agent's seven, not fewer: the
+    undeclared-write refusal is attached exactly when `tool_names is not None`, because that is the
+    only case in which a tool can be missing from the graph on purpose rather than by mistake
+    (D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only). Asserted by name rather than by
+    count alone, so a future change that swapped one entry for another cannot keep this green.
+    """
     from chemclaw.agent.langgraph_agent import tool_call_middleware
     from chemclaw.agent.repeat_guard import refuse_repeated_calls
     from chemclaw.agent.tool_authz import (
@@ -85,12 +92,22 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
 
     profile = AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"}))
     middleware = tool_call_middleware(object(), profile)
-    # denial + domain-error surfacing + audit + authz + dry-run + repeat guard + announcing
-    assert len(middleware) == 7
+    assert [type(entry).__name__ for entry in middleware] == [
+        "surface_authorization_denials",
+        "surface_domain_errors",
+        "announce_tool_failures",
+        "object",  # the audit middleware, a stand-in here
+        "refuse_undeclared_writes",
+        "enforce_tool_authz",
+        "refuse_writes_on_dry_run",
+        "refuse_repeated_calls",
+    ]
     assert enforce_tool_authz in middleware
     assert refuse_writes_on_dry_run in middleware
     assert refuse_repeated_calls in middleware
     assert announce_tool_failures in middleware
+    # The default agent keeps the chain it had: the extra entry is the narrowing's, not everyone's.
+    assert len(tool_call_middleware(object(), AgentProfile(name="wide"))) == 7
 
 
 def test_unknown_tool_name_in_profile_fails_loud() -> None:

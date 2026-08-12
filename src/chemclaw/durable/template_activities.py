@@ -12,7 +12,7 @@ a way to run a tool the requester could not run directly, and this is where that
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -20,7 +20,7 @@ from langchain_core.tools import tool as tool_decorator
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
-from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.connectors.jobs import prepare_job_launch
@@ -73,12 +73,19 @@ class ToolStepInput(BaseModel):
 
 
 class AgentStepInput(BaseModel):
-    """One resolved `agent` step: the rendered prompt and the profile to run it under."""
+    """One resolved `agent` step: the rendered prompt, the profile, and the writes it may reach.
+
+    `write_tools` is carried across the activity boundary rather than re-read from the template
+    file, for the reason the whole resolved template travels in the workflow's input: a worker that
+    re-read `data/templates/<name>.yaml` would decide a *security* narrowing from the disk it
+    happens to have, and an edit could then widen a run already in flight.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     prompt: str = Field(min_length=1)
     profile: str | None = None
+    write_tools: list[str] = Field(default_factory=list)
     identity: StepIdentity
 
 
@@ -358,16 +365,30 @@ async def run_agent_step(step: AgentStepInput) -> str:
     planning loop inside one step of a fixed procedure would give the step back the discretion the
     template was written to remove — and, with the plan gate now enforced, would refuse every write
     inside it for want of a plan nobody can approve.
+
+    **So the step is ungated and the step is read-only by default**, which is the same sentence from
+    both ends. The plan gate exists to put a human between an autonomously-chosen write and its
+    execution; a template already has that human — the author of a reviewed, git-committed file that
+    nothing at run time can produce — so gating it again would only ask for an approval of a plan
+    nobody wrote. What the gate *also* did was bound the blast radius of a model improvising inside
+    the step, and that half is kept structurally: `step_profile` hands this turn a surface with
+    every side-effecting tool the step did not declare removed from it, so the graph is built
+    without them.
+
+    **The profile is resolved once and threaded through both calls.** It used to be resolved twice —
+    the raw name to `connector_specs` and a modified copy to the builder — which is exactly the
+    shape in which a narrowing silently covers half a surface: `compute_xtb_energy` is a *connector
+    endpoint* tool, so narrowing only the builder's copy would leave it (and every other connector
+    write) bound to the graph while the in-process half looked correctly closed.
     """
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
     _capability_tools, connector_specs = _agent_surface()
+    profile = step_profile(step.profile, step.write_tools)
     tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
     try:
         async with AsyncExitStack() as stack:
-            connectors, _unreachable = await open_connector_specs(
-                stack, connector_specs(step.profile)
-            )
+            connectors, _unreachable = await open_connector_specs(stack, connector_specs(profile))
             # Compiled here, with this step's connectors, for the reason `build_langgraph_agent`
             # gives: a graph binds its tools at construction and a connector session belongs to
             # exactly one caller. A step is that caller.
@@ -376,7 +397,7 @@ async def run_agent_step(step: AgentStepInput) -> str:
             # after it — Temporal is what makes the *run* durable, and giving the step its own
             # checkpointed thread would be a second durability mechanism inside the first (D-002).
             graph = build_langgraph_agent(
-                profile=_classic(step.profile),
+                profile=profile,
                 actor=step.identity.actor,
                 correlation_id=step.identity.correlation_id,
                 connectors=connectors,
@@ -410,13 +431,58 @@ def _answer_text(result: Any) -> str:
     return str(content)
 
 
-def _classic(profile: str | None) -> Any:
-    """The step's profile with the harness switched off — see `run_agent_step`.
+def step_profile(profile: str | None, write_tools: Sequence[str]) -> AgentProfile:
+    """The step's profile: harness off, and no write it did not declare.
 
-    Resolved through the profile registry rather than by passing a bare flag, so a step that names
-    a profile keeps every other narrowing that profile applies (its instructions, its tool subset,
-    its connectors) and loses only the autonomy loop.
+    **One profile, used for both halves of the surface.** The caller builds its connectors from
+    this object *and* builds the graph from it, because the surface has two halves and a narrowing
+    that reaches one of them is not a narrowing. It was resolved twice before this, and the
+    connector half got the un-narrowed name.
+
+    Two overrides, each answering a different question:
+
+    - `harness_enabled=False` — the reason `run_agent_step` gives: the harness's todo list, plan
+      mode and completion loop are the discretion a template exists to remove, and its approval
+      middleware refuses a session-less run outright.
+    - `tool_names = advertised − (side-effecting − declared)` — the step's read-only default. The
+      profile's own `tool_names` dial is the seam this uses rather than a new one, because it is the
+      documented attenuation point and it already spans *both* halves (`_capability_tools` narrows
+      the in-process tools, `connector_specs` narrows each bundle's allow-list) and re-narrows the
+      skills backend along with them. `advertised_tool_names` is the starting set rather than the
+      whole registry so a step that names a profile keeps that profile's own narrowing: this can
+      only subtract from what the profile already offered.
+
+    The classification is `chemclaw.agent.authz.side_effecting_tools()`, shared with the dry-run
+    guard and the plan gate rather than restated. A second list of "which tools write" is the second
+    source of truth this tree forbids, and it would be wrong in the same direction each time: a
+    connector's own manifest is the only thing that knows `compute_xtb_energy` spends real compute
+    while `resolve_compound` is a lookup, and core cannot tell them apart from the name.
+
+    `declared` is intersected in rather than added: a step cannot name a tool its profile never
+    advertised and gain it, which keeps this attenuation-only in the sense `agent/profiles.py`
+    means it. A name that resolves to nothing is a `make template-validate` failure, not a silent
+    widening here.
+
+    Args:
+        profile: The profile the step named, or `None` for the default agent.
+        write_tools: The side-effecting tools this step declared it may reach.
+
+    Returns:
+        An `AgentProfile` copy, narrowed. Never the registered object — profiles are shared,
+        process-lived and frozen.
     """
-    from chemclaw.agent.profiles import get_profile
+    # Lazily, both of them: `chemclaw.agent.chemclaw_agent` reaches the template registry, which
+    # reaches the workflow, which reaches this module — the cycle `_agent_surface` defers for the
+    # same reason. `side_effecting_tools` reaches the same two registries.
+    from chemclaw.agent.authz import side_effecting_tools
+    from chemclaw.agent.chemclaw_agent import advertised_tool_names
 
-    return get_profile(profile).model_copy(update={"harness_enabled": False})
+    prof = get_profile(profile)
+    advertised = advertised_tool_names(prof)
+    declared = advertised & frozenset(write_tools)
+    return prof.model_copy(
+        update={
+            "harness_enabled": False,
+            "tool_names": advertised - (side_effecting_tools() - declared),
+        }
+    )

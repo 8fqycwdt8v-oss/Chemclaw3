@@ -86,6 +86,7 @@ from chemclaw.agent.team import SPECIALISTS, build_team_middleware, team_enabled
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
+    refuse_undeclared_writes,
     refuse_writes_on_dry_run,
     surface_authorization_denials,
     surface_domain_errors,
@@ -448,6 +449,22 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         # the chain above it; the announcement belongs where every refusal passes.
         announce_tool_failures,
         audit,
+        # Only for a profile that narrows, and inside `audit` so what an auditor reads is the
+        # refusal rather than the library's guess at what went wrong. Before `enforce_tool_authz`
+        # because it answers a coarser question — "was this agent even built with that tool" — and
+        # asking whether the *user* may call something the agent does not hold would word the
+        # refusal around the wrong subject.
+        #
+        # **It is the wording, never the enforcement**, and the enforcement is structural:
+        # `tool_names` removes the tool from `_capability_tools` and from every connector's
+        # allow-list before `create_agent` is called, and a compiled graph's `ToolNode` is built
+        # from the list it was given. This repo has twice rejected filtering an advertised list
+        # while leaving the capability reachable, and this is not a third time — with this
+        # middleware deleted the call still cannot execute (measured), it just comes back as
+        # LangGraph's `status="error"` "not a valid tool, try one of […]", which invites the retry
+        # a refusal is worded to prevent and writes the whole tool inventory into the audit trail's
+        # `detail`.
+        *([refuse_undeclared_writes(profile.tool_names)] if profile.tool_names is not None else []),
         enforce_tool_authz,
         refuse_writes_on_dry_run,
         refuse_repeated_calls,

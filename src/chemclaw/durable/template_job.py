@@ -158,6 +158,10 @@ class TemplateWorkflow:
                 AgentStepInput(
                     prompt=resolve(step.prompt, scope),
                     profile=step.profile,
+                    # The step's declared writes travel with it, from the *pinned* template — so
+                    # editing the file cannot widen a run already in flight, exactly as pinning the
+                    # definition keeps an edit from changing its steps.
+                    write_tools=step.write_tools,
                     identity=identity,
                 ),
                 start_to_close_timeout=timeout,

@@ -124,17 +124,15 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       `ConnectorJobWorkflow._notify_failure` (`durable/connector_job.py:282,333-342`). A step that
       fails after 5 attempts pushes nothing back, and the surface shows the run as "running" forever.
 
-- [ ] **The plan gate does not apply to template agent steps** — [L]. **Needs a decision, not a
-      patch.** `_classic()` sets `harness_enabled=False`
-      (`durable/template_activities.py:410-419`) and `gate_applies` is
-      `harness_enabled_for(profile) and autonomy_for(profile) == PLAN_ONLY`, so on the chart's own
-      posture (`harness_enabled=true`, `plan_only`) a chat turn is gated and a template agent step is
-      not — while holding 16 state-changing tools including `propose_knowledge_note`,
-      `compute_dft_energy` and `start_optimization_campaign`. `refuse_repeated_calls` and
-      `loop_hit_cap` are separately inert there because their context managers are entered only by
-      `api/runner.py`. The GxP "AI proposes, human signs off" line is the repo's central control and
-      there is a path around it. **Trigger:** before any deployment enables templates that call write
-      tools under a plan-gated posture.
+- [ ] **The repeat guard and the loop cap are inert inside a template agent step** — [M].
+      `refuse_repeated_calls` and `loop_hit_cap` are attached but do nothing there, because their
+      context managers are entered only by `api/runner.py` — so the only bound on an `agent` step's
+      loop is `turn_config()`'s recursion limit. The *plan-gate* half of this row is closed by
+      [`D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only`](../decisions/D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only.md):
+      the step stays ungated (a template *is* the pre-approved plan) and gets a read-only surface
+      unless the file declares otherwise, so the 16 state-changing tools it used to hold are now
+      absent from the graph rather than merely ungated. **Trigger:** a template whose agent step
+      declares a write and whose prompt can loop.
 
 - [ ] **Two retry systems multiply, and the fix is subtractive** — [M]. `llm_max_retries=3` means
       **4** HTTP attempts (`anthropic/_base_client.py:1132`), under `activity_max_attempts=5`, and

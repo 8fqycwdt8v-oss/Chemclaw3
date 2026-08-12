@@ -109,6 +109,13 @@ _BAD_DATA_TYPES = [
     "AuthorizationError",
     "DryRunRefusal",
     "PlanNotApprovedError",
+    # An `agent` step's model reached for a write the template did not declare
+    # (`chemclaw.agent.tool_authz`). It is caught and converted inside the turn, so it does not
+    # normally cross a boundary — but a template step *is* an activity, and what the step declares
+    # is pinned in the run's input, so the identical attempt is refused identically on every
+    # attempt. Listed for the same reason every entry here is listed: by class name, and a name
+    # that is never matched costs nothing.
+    "UndeclaredWriteRefusal",
     # NOT here, deliberately: `SubsystemUnavailableError` (`chemclaw.core.errors`). It reads like
     # a sibling of the two entries above — a non-`ChemclawError` that crosses an activity boundary
     # (a connector-job tool invoked inside `durable.template_activities`) — but it means the

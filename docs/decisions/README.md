@@ -329,3 +329,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-11-what-the-review-found-in-the-compaction-change](D-2026-08-11-what-the-review-found-in-the-compaction-change.md) | A middleware that narrowed its engine, a privacy flag that re-armed itself, and a placeholder arguing with a guard |
 | [D-2026-08-12-a-held-permit-is-the-price-of-a-mid-turn-resume](D-2026-08-12-a-held-permit-is-the-price-of-a-mid-turn-resume.md) | Mid-turn resume stays off, because the push-back mailbox already answers its question for free |
 | [D-2026-08-12-a-review-the-migration-did-not-get](D-2026-08-12-a-review-the-migration-did-not-get.md) | What 181 reviewers found in a migration that shipped green |
+| [D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only](D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only.md) | A template is the pre-approved plan, so its agent step is ungated and read-only by default |

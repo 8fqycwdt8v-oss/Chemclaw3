@@ -36,6 +36,7 @@ steps:
   - id: verdict
     kind: agent
     profile: property-lookup         # optional; omit for the default agent
+    write_tools: []                  # optional; see "An agent step is read-only" below
     prompt: >-
       Summarize these hazard flags for a chemist: ${steps.hazards.result}
 ```
@@ -49,6 +50,34 @@ Three step kinds:
 - **`agent`** — run one agent turn with a rendered prompt, optionally under a named profile. The
   result is the answer text. This is what keeps a template *agentic*: the sequence is fixed, the
   reasoning inside a step is not.
+
+## An agent step is read-only
+
+**A template is not plan-gated.** The plan gate puts a human between an autonomously-chosen write
+and its execution; a template already has that human — the file is authored by a person, committed
+to git and reviewed, and nothing at run time can produce one. Asking an `agent` step to get its plan
+approved would be asking for approval of a plan nobody wrote, and there is no session to approve it
+in.
+
+**So the step is narrowed instead.** Its agent is built with every state-changing tool removed from
+both halves of its surface — the in-process tools *and* every connector's allow-list — unless the
+step names them:
+
+```yaml
+  - id: record
+    kind: agent
+    write_tools: [propose_knowledge_note]
+    prompt: Write up what step two found and propose it as a note.
+```
+
+The removal is structural, not a filter: the tool is absent from the graph the step runs on, so it
+is not reachable by any name. Declaring one only *restores* it — every other gate still applies, so
+the run's requester must still be authorized for it.
+
+Only side-effecting tools belong here. A read tool is reachable without any declaration, and naming
+one fails `make template-validate` — otherwise the list becomes a general allow-list wearing a
+write-list's name. The same check rejects a typo, and a tool the step's `profile` does not
+advertise: a step can only ever narrow what its profile already offered.
 
 ## Substitution
 
@@ -70,7 +99,8 @@ as it starts any durable job — and it is gated, audited and attributed exactly
 returns a job id; poll it with `get_durable_job_status`.
 
 `make template-validate` checks every template before it ships: unique step ids, references that
-resolve, tools that exist, profiles that exist, and no forward references.
+resolve, tools that exist, profiles that exist, declared write tools that exist and actually write,
+and no forward references.
 
 ## Versioning
 

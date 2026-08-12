@@ -89,11 +89,23 @@ class AgentStep(_Step):
     This is what keeps a template *agentic* rather than a shell script: the sequence is fixed, the
     reasoning inside a step is not. `profile` picks which configured agent runs it, so a step can be
     deliberately narrow — a summarizing step has no business holding the durable-job launchers.
+
+    **The step is read-only unless it says otherwise, and `write_tools` is how it says so.** A
+    template is not gated by the plan gate — a template *is* the pre-approved plan, human-authored,
+    git-committed, reviewed, and uncreatable at run time — so the discretion the plan gate would
+    have removed has to be removed by the file instead. The narrowing is applied by
+    `chemclaw.durable.template_activities.step_profile`, which subtracts every side-effecting tool
+    the step did not name from the profile's advertised surface *before the graph is built*, so an
+    undeclared write is not a call that gets refused, it is a tool the step's agent never held.
+
+    A read tool needs no entry — declaring one is rejected by `make template-validate`, because a
+    list that accepts reads is an allow-list for the whole surface wearing a write-list's name.
     """
 
     kind: Literal["agent"] = "agent"
     prompt: str = Field(min_length=1)
     profile: str | None = None
+    write_tools: list[str] = Field(default_factory=list)
 
 
 Step = Annotated[ToolStep | JobStep | AgentStep, Field(discriminator="kind")]

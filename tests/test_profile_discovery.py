@@ -175,11 +175,20 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
 
     load_profiles()
 
-    # Asserted as *the same chain the default agent gets*, not as a count: the chain has grown
+    # Asserted against *the chain the default agent gets*, not as a count: the chain has grown
     # (error surfacing was added around audit + authz) and a hardcoded number would have failed
     # on that addition while saying nothing about the property that matters.
     # Compared by *name*, because the audit entry is a closure built per agent: identity would
     # differ for two agents that are nonetheless governed identically, which is the property here.
+    #
+    # **A superset, in order, rather than equality** — and the difference is a decision, not a
+    # loosened assertion. A narrowing profile now carries one extra middleware,
+    # `refuse_undeclared_writes`, which words the refusal a tool the profile was narrowed away from
+    # earns (D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only). That is strictly *more*
+    # governance for the narrowed agent, which is the direction this invariant is about: what must
+    # never happen is a narrowed profile losing an entry, and equality would have made the safe
+    # direction fail as loudly as the unsafe one. The order is checked too, because the nesting is
+    # load-bearing (`tool_governance_middleware` argues each position).
     from chemclaw.agent.langgraph_agent import tool_call_middleware
     from chemclaw.agent.profiles import get_profile
 
@@ -187,7 +196,9 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
         chain = tool_call_middleware(object(), get_profile(profile_name))
         return [type(middleware).__name__ for middleware in chain]
 
-    assert names("property-lookup") == names(None)
+    narrowed, default = names("property-lookup"), names(None)
+    assert [name for name in narrowed if name in default] == default, (narrowed, default)
+    assert set(narrowed) - set(default) == {"refuse_undeclared_writes"}, narrowed
     assert enforce_tool_authz in tool_call_middleware(object(), get_profile("property-lookup"))
 
 
