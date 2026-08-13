@@ -27,7 +27,9 @@ a number. Withholding that count would make a partial erasure look like a comple
 outcome worse than refusing.
 
 Erasure is **irreversible and identity-scoped**, so the caller states the actor exactly; there is no
-pattern match and no "all users matching". The default is a dry run.
+pattern match and no "all users matching" — but "exactly" means *the person*, not one spelling of
+them, and this database holds two spellings of the same id (see `_actor_forms`). The default is a
+dry run.
 """
 
 import logging
@@ -54,6 +56,52 @@ class ErasureError(ChemclawError):
     """
 
 
+# The namespace a writer stamps onto an actor it was in no position to authenticate — a single,
+# known, literal prefix, duplicated here from `connectors/bo/server/tools.py` because that module is
+# a connector bundle and this one is core: importing it would make the erasure sweep depend on a
+# bundle a deployment may not even enable. Two literals is the honest cost of that boundary; a third
+# writer is the point at which the constant should move to a shared home (Rule of Three).
+_UNVERIFIED_ACTOR_PREFIX = "unverified:"
+
+
+def _actor_forms(actor: str) -> list[str]:
+    """Every spelling this database legitimately holds of *one* person's id.
+
+    **Why one id has two spellings.** A writer that cannot authenticate its caller records the
+    claimed name marked as a claim: `connectors/bo/server/tools.py` stamps `unverified:` onto the
+    actor from `X-Chemclaw-Actor` on the synchronous MCP path, because that bundle declares
+    `auth: mode: none` and the header is attacker-writable. The durable sibling reads a validated
+    principal off the run's memo and writes the bare id. So `bo_campaigns.opened_by` and
+    `bo_suggestions.actor` — both in `_RETAINED` — hold `alice-oid` for one path and
+    `unverified:alice-oid` for the other, and they are the same chemist. Matching only the bare form
+    made a right-to-erasure report *under-count rows that still contain that person's identifier*,
+    which is the one number this module exists to get right.
+
+    **Exact equality against a closed set, never a pattern.** The forms are enumerated and compared
+    with `=` (via `= ANY(...)`), so the guarantee the module is built on is unchanged: a row matches
+    only if its column *is* one of these two strings. `LIKE '%' || actor || '%'` would have been one
+    line and is the dangerous answer — it matches `oid-erik-2` when erasing `oid-erik`, i.e. deletes
+    a different person's conversation and counts their retained records as the leaver's. Measured,
+    not asserted: with that one-line version in place,
+    `test_erasing_one_person_spares_another_whose_id_contains_theirs` reports 3 retained campaigns
+    where 1 is the truth, and takes the bystander's sessions with it. A
+    `LIKE actor || '%'` prefix match fails the same way; a `column LIKE 'unverified:%'` guard plus
+    string surgery in SQL reimplements this function where it cannot be tested. The marker's prefix
+    is literal and known, so the set is enumerable, and an enumerable set needs no pattern.
+
+    **The caller may name either form.** An operator reads `unverified:alice-oid` out of the column
+    or out of a previous report and pastes it; stripping the marker first makes both inputs mean the
+    same person and keeps the set at two rather than growing an `unverified:unverified:` third.
+
+    Applied to *both* tiers, not just to the two columns that hold a marked id today. The rule is
+    "these strings name one person", which is a property of the id rather than of the table — the
+    next `auth: mode: none` connector to write a person-column would otherwise silently escape the
+    sweep, which is the failure this is fixing, one table over.
+    """
+    base = actor.removeprefix(_UNVERIFIED_ACTOR_PREFIX)
+    return [base, f"{_UNVERIFIED_ACTOR_PREFIX}{base}"]
+
+
 # The conversational tier, deleted in dependency order: rows keyed by `session_id` go before the
 # `session_owners` rows that are the only way to find which sessions were theirs. Reversing this
 # would orphan every message rather than remove it.
@@ -62,7 +110,11 @@ class ErasureError(ChemclawError):
 # a table an operator can go and look at. `session_messages`, `session_events` and `session_turns`
 # carry no actor of their own — they are reached through the ownership table, which is why that one
 # is deleted last.
-_SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = %(actor)s"
+#
+# `= ANY(%(actors)s)` throughout rather than `= %(actor)s`: the parameter is the closed set of
+# spellings of one id that `_actor_forms` returns, and `ANY` over an array is still exact equality
+# against each element — the same comparison, applied to each form the same person's id can take.
+_SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = ANY(%(actors)s)"
 # The LangGraph checkpointer holds the same conversation as graph state, keyed by `thread_id` —
 # which is the session id. Erasing `session_messages` and leaving these behind would remove a
 # departing person's transcript while their turn state, tool calls and results stayed readable, and
@@ -93,11 +145,12 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # on a session whose ownership row had already gone in the same run.
     (
         "session_turns",
-        f"DELETE FROM session_turns WHERE holder = %(actor)s OR session_id IN ({_SESSION_SCOPED})",
+        "DELETE FROM session_turns "
+        f"WHERE holder = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
     ),
-    ("subscriptions", "DELETE FROM subscriptions WHERE owner = %(actor)s"),
-    ("user_preferences", "DELETE FROM user_preferences WHERE owner = %(actor)s"),
-    ("session_owners", "DELETE FROM session_owners WHERE owner = %(actor)s"),
+    ("subscriptions", "DELETE FROM subscriptions WHERE owner = ANY(%(actors)s)"),
+    ("user_preferences", "DELETE FROM user_preferences WHERE owner = ANY(%(actors)s)"),
+    ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 
 # The GxP tier: counted, named, never deleted. Each entry is (table, actor columns, why it stays).
@@ -159,20 +212,29 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
     and the only way to be sure of that is to have deleted it and rolled back.
 
     Args:
-        actor: The Entra `oid` (or the configured dev actor id) whose data to erase. Matched
-            exactly — there is no prefix, pattern or wildcard form, because the blast radius of
-            getting one wrong is unrecoverable.
+        actor: The Entra `oid` (or the configured dev actor id) whose data to erase. Matched by
+            **exact equality against the two spellings this database holds of one id** — the bare
+            id and the same id marked `unverified:` by a writer that could not authenticate its
+            caller (`_actor_forms` has the whole argument). No pattern, no wildcard, no substring:
+            the blast radius of getting one wrong is unrecoverable, so a person whose id merely
+            *contains* this one cannot match. Either spelling may be given; they name one person.
         apply: Commit the deletion. The default counts and rolls back.
 
     Returns:
         The per-table counts for both tiers.
 
     Raises:
-        ErasureError: `actor` is blank — which would otherwise match every row whose owner column
-            is empty, and those are the un-attributed rows of a dev deployment, not one person's —
-            or the database refused a statement (see below).
+        ErasureError: `actor` is blank, or is the bare `unverified:` marker with no id behind it —
+            either would otherwise match every row whose owner column is empty, and those are the
+            un-attributed rows of a dev deployment, not one person's — or the database refused a
+            statement (see below).
     """
-    if not actor.strip():
+    # `actors[0]` is the bare id: blank there means the caller named nobody — `""`, whitespace, or a
+    # bare `unverified:` with no id behind it. Checked on that form rather than on all of them,
+    # because the marked spelling of a blank id is the non-blank string `"unverified:"` and would
+    # sail through, matching every marked row in the database.
+    actors = _actor_forms(actor)
+    if not actors[0].strip():
         raise ErasureError("actor must be a non-empty id; refusing to erase on a blank actor")
 
     report = ErasureReport(actor=actor, applied=apply)
@@ -186,11 +248,13 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
         async with db.connection(_session_dsn()) as conn:
             async with conn.cursor() as cur:
                 for table, columns, _ in _RETAINED:
-                    # One row counts once however many of its columns name this actor: a proposal
-                    # they both wrote and reviewed is one retained record, not two.
-                    predicate = " OR ".join(f"{column} = %(actor)s" for column in columns)
+                    # One row counts once however many of its columns name this actor, in whichever
+                    # spelling: a proposal they both wrote and reviewed is one retained record, not
+                    # two, and a campaign whose `opened_by` is their id marked `unverified:` is
+                    # still a record that names them.
+                    predicate = " OR ".join(f"{column} = ANY(%(actors)s)" for column in columns)
                     await cur.execute(
-                        f"SELECT count(*) FROM {table} WHERE {predicate}", {"actor": actor}
+                        f"SELECT count(*) FROM {table} WHERE {predicate}", {"actors": actors}
                     )
                     row = await cur.fetchone()
                     report.retained[table] = int(row[0]) if row else 0
@@ -204,7 +268,7 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                         # operator cannot compare against another run.
                         report.erased[table] = 0
                         continue
-                    await cur.execute(statement, {"actor": actor})
+                    await cur.execute(statement, {"actors": actors})
                     report.erased[table] = cur.rowcount if cur.rowcount > 0 else 0
             if apply:
                 await conn.commit()

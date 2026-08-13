@@ -6,6 +6,11 @@ that the rows attributing scientific work to them stay and are counted rather th
 that a dry run writes nothing while still reporting real numbers, and that one person's erasure
 cannot take another's data with it.
 
+The last of those has two halves now that a writer which cannot authenticate its caller records the
+claimed id as `unverified:<id>`: both spellings are the same person and must be *seen*, and a
+different person whose id merely contains theirs must not be — the two tests that pin the closed set
+of exact forms in `_actor_forms` against the one-line substring match that would fail the second.
+
 Postgres-backed and skipped where no database is reachable, like every other store test here.
 """
 
@@ -27,6 +32,15 @@ _ACTOR_COLUMN_NAMES = frozenset(
 
 _ANNA = "oid-anna"
 _BEN = "oid-ben"
+# One person per marker test, kept off `_ANNA`/`_BEN` and off each other so the counts below are
+# exact rather than "at least": no other test writes a `bo_*` row, and each of these writes only its
+# own — a shared id would make one test's rows show up in the other's report.
+_CARLA = "oid-carla"
+_ERIK = "oid-erik"
+# The trap. This id *contains* `_ERIK`, so any substring or prefix match dressed up as "see the
+# unverified form too" erases this person's conversation and counts their records while offboarding
+# someone else.
+_ERIK_LOOKALIKE = f"{_ERIK}-2"
 
 
 async def _seed(actor: str, session_id: str) -> None:
@@ -58,6 +72,28 @@ async def _seed(actor: str, session_id: str) -> None:
                 "INSERT INTO subscriptions (owner, query) VALUES (%s, %s) "
                 "ON CONFLICT (owner, query, coalesce(note_type, '')) DO NOTHING",
                 (actor, "new suzuki reactions"),
+            )
+        await conn.commit()
+
+
+async def _seed_campaign(campaign_id: str, actor: str) -> None:
+    """Give `actor` one BO campaign and one suggestion against it, written exactly as stored.
+
+    `actor` goes in verbatim — the caller passes either the bare id (what the durable path writes,
+    from a validated Temporal memo) or `unverified:<id>` (what the synchronous MCP path writes,
+    because `connectors/bo` declares `auth: mode: none` and its actor is an unauthenticated header).
+    Both are the same chemist, which is the whole point of these tests.
+    """
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO bo_campaigns (campaign_id, objective, direction, opened_by) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (campaign_id) DO NOTHING",
+                (campaign_id, "yield", "maximize", actor),
+            )
+            await cur.execute(
+                "INSERT INTO bo_suggestions (campaign_id, actor) VALUES (%s, %s)",
+                (campaign_id, actor),
             )
         await conn.commit()
 
@@ -156,15 +192,21 @@ def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
 
 
 def test_a_blank_actor_is_refused() -> None:
-    """A blank id matches every un-attributed row of a dev deployment, not one person's data."""
+    """A blank id matches every un-attributed row of a dev deployment, not one person's data.
+
+    `unverified:` on its own is the same refusal wearing a disguise: it is a non-empty string, but
+    the id behind the marker is blank, and matching it would sweep every row any writer ever marked
+    — everyone's, from a single stray paste.
+    """
 
     async def _run() -> None:
-        try:
-            await erase_actor("   ")
-        except ValueError as exc:
-            assert "non-empty" in str(exc)
-        else:  # pragma: no cover - the refusal is the behavior under test
-            raise AssertionError("a blank actor must be refused before any statement runs")
+        for blank in ("   ", "unverified:", "unverified:  "):
+            try:
+                await erase_actor(blank)
+            except ValueError as exc:
+                assert "non-empty" in str(exc)
+            else:  # pragma: no cover - the refusal is the behavior under test
+                raise AssertionError(f"{blank!r} must be refused before any statement runs")
 
     asyncio.run(_run())
 
@@ -258,6 +300,68 @@ def test_a_reviewers_signoff_is_retained_even_when_they_proposed_nothing() -> No
         assert report.retained["note_proposals"] >= 1, (
             "a reviewer's sign-off must be reported as retained, not silently missed"
         )
+
+    asyncio.run(_run())
+
+
+def test_a_claim_marked_unverified_is_the_same_person_and_is_counted() -> None:
+    """The regression: one chemist, two spellings, and a report that saw only one of them.
+
+    `connectors/bo` declares `auth: mode: none`, so its synchronous MCP path cannot authenticate the
+    caller and records the claimed actor as `unverified:<id>` — while the durable path, reading a
+    validated principal off the run's memo, writes the bare id into the *same* two columns. Erasure
+    matched actor columns byte-exactly, so an offboarding report for `oid-carla` counted the durable
+    rows and silently missed the inline ones: an under-count of rows that still hold that person's
+    identifier, which is precisely the number this command exists to state correctly.
+
+    Either spelling may be named, because an operator pastes what they read out of the column.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed_campaign("camp-carla-durable", _CARLA)
+        await _seed_campaign("camp-carla-inline", f"unverified:{_CARLA}")
+
+        report = await erase_actor(_CARLA)
+        assert report.retained["bo_campaigns"] == 2, (
+            "a campaign opened under an unverified claim of this person's id still names them"
+        )
+        assert report.retained["bo_suggestions"] == 2
+
+        marked = await erase_actor(f"unverified:{_CARLA}")
+        assert marked.retained == report.retained, "the two spellings name one person"
+
+    asyncio.run(_run())
+
+
+def test_erasing_one_person_spares_another_whose_id_contains_theirs() -> None:
+    """The dangerous way to have fixed the above, caught before it can be shipped.
+
+    `LIKE '%' || actor || '%'` sees the `unverified:` form in one line — and also sees `oid-erik-2`
+    when erasing `oid-erik`, deleting a working chemist's conversation and attributing their
+    campaigns to the leaver. So the match stays exact equality against the closed set of spellings
+    `_actor_forms` enumerates, and this test is what says so: the bystander keeps every row, in both
+    of *their* spellings, and appears in nobody else's report.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed(_ERIK, "sess-erik")
+        await _seed_campaign("camp-erik-inline", f"unverified:{_ERIK}")
+        await _seed(_ERIK_LOOKALIKE, "sess-erik-lookalike")
+        await _seed_campaign("camp-lookalike-durable", _ERIK_LOOKALIKE)
+        await _seed_campaign("camp-lookalike-inline", f"unverified:{_ERIK_LOOKALIKE}")
+
+        report = await erase_actor(_ERIK, apply=True)
+        assert report.retained["bo_campaigns"] == 1, "only the leaver's own campaign is theirs"
+        assert report.retained["bo_suggestions"] == 1
+
+        assert await _count("session_owners", "owner", _ERIK_LOOKALIKE) == 1
+        assert await _count("user_preferences", "owner", _ERIK_LOOKALIKE) == 1
+        assert await _count("subscriptions", "owner", _ERIK_LOOKALIKE) == 1
+        assert await _count("session_messages", "session_id", "sess-erik-lookalike") == 1
+        assert await _count("bo_campaigns", "opened_by", _ERIK_LOOKALIKE) == 1
+        assert await _count("bo_campaigns", "opened_by", f"unverified:{_ERIK_LOOKALIKE}") == 1
 
     asyncio.run(_run())
 

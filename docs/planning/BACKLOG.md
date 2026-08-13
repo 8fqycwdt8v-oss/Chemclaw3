@@ -3,6 +3,52 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the external synthesis review (2026-08-13)
+
+Source: `docs/planning/REVIEW-2026-08-13-external-synthesis-and-gap-analysis.md`, 15
+recommendations. **Verification came first and it changed the list**: several recommendations were
+already implemented by the time the report merged, and one — retrosynthesis — was wrong on its
+central claim (see `DEFERRED.md`). What that pass landed is marked closed in place, on the rows it
+belongs to, rather than restated here: the `mcp` ceiling, the two lexical legs (half), the
+`hnsw.ef_search` knobs, `find_past_jobs` framing, the forgeable actor header (half), and four rows
+that were **stale rather than open** (the conversation window, the per-turn channels, the mid-turn
+double budget, the two retry systems). Four ADRs came out of it, all dated 2026-08-13.
+
+What remains from the review, beyond the rows it touched:
+
+- [x] **The CLI layer's one coverage hole, and the two real bugs behind it — closed** — [S]. The
+      review's only concrete coverage finding was that `cli/sync_share.py` and `cli/leak_probe.py`
+      had no unit tests. Writing them found two defects in the probe, both now fixed:
+      `report()` raised `ZeroDivisionError` out of the middle of the type table whenever two samples
+      shared a turn count (the series table above it printed `+0.00` — one guard, two readers, now
+      `_per_turn`), and `--turns`/`--batch`/`--warmup` had no positivity guard, so `--batch 0` made
+      `done` never advance and every pass appended another full type histogram: **a leak probe that
+      leaks**. `_positive` refuses all three at parse time. `tests/test_leak_probe.py`,
+      `tests/test_sync_share_cli.py`. A test that finds a bug in the thing it was written to cover
+      is the argument for writing it.
+- [ ] **MCP's OAuth 2.1 / ID-JAG token exchange as the target design for connector authentication**
+      — [L]. A design direction for the open *every shipped connector is unauthenticated* row below,
+      not a second item. Recorded so the eventual design starts from the protocol's own answer
+      rather than inventing a bearer scheme.
+- [ ] **Sub-note, section-aware chunking with note-id + section metadata** — [M]. The review's
+      specific remediation for the existing *a note is one vector over its whole body* row.
+- [ ] **AIMNet2 as a mid-tier ML interatomic potential** — [M]. A candidate D-092 never evaluated
+      (it assessed ANI-2x/TorchANI and MACE-OFF/MACE-MP only), MIT-licensed, and it clears the
+      build-time vendoring bar D-135 already set — checksummed fetch, `HF_HUB_OFFLINE=1`, never a
+      quiet runtime fetch. *Trigger:* the same one as every vendored artifact — a decision to pay
+      the image-size cost, taken deliberately.
+- [ ] **Langfuse vs Phoenix for the AG-13 eval surface** — [S]. The review recommends self-hosted
+      Langfuse; [`D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open`](../decisions/D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open.md)
+      already chose Phoenix, on evidence the review did not have. Re-open only with a property
+      Phoenix lacks — the choice is not re-litigated by a later recommendation naming a different
+      tool.
+- [ ] **Forward-pointers on D-042, D-064 and D-016** — [XS]. Three numbered ADRs the review
+      identifies as superseded in substance without saying so (unverified here — check each against
+      what supersedes it before editing). The numbered series predates the supersedes header,
+      so this is three individual edits, not a format migration. **Constraint:** a merged ADR is
+      never edited (CLAUDE.md) — so the pointer belongs in `docs/decisions/README.md`'s row for
+      each, which is the one place that may change.
+
 ## Open — Left by the full review/refactor/hardening sweep (2026-08-12)
 
 Detail and measurements in `tasks/review-2026-08-12-{maf-removal,langgraph-native,migration-findings}.md`.
@@ -122,32 +168,45 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       `BudgetTracker` the chart ships enabled — multiplied by up to 5 retry attempts. Same class as
       D-144's "a deployment that looks free and is not", via a path the migration did not re-check.
 
-- [ ] **The conversation window reduces but does not bound** — [S]. `KeepLastConversationGroupsEdit`
-      (`agent/compaction.py:97-150`) triggers on tokens and then cuts by *group count*, returning
-      early when `len(starts) <= keep`. Measured at shipped defaults over 20 tool-free prose groups:
-      240,230 → **144,142** tokens against a 100,000 trigger. Its docstring claims it "is what makes
-      the thread *bounded*"; the hard provider-context error it exists to prevent still happens.
-      `langchain_core.messages.utils.trim_messages(strategy="last", start_on="human")` is the native
-      window — pairing measured safe at every budget from 2000 down to 250 tokens. ~6 lines, plus a
-      decision on what `agent_keep_last_conversation_groups` then means (a floor, not a rename).
+- [x] **The conversation window reduces but does not bound — closed in `6dd1f90`** — [S]. The
+      defect as found: `KeepLastConversationGroupsEdit` triggered on tokens and then cut by *group
+      count*, returning early when `len(starts) <= keep`. Measured at shipped defaults over 20
+      tool-free prose groups, 240,230 → **144,142** tokens against a 100,000 budget — the edit ran,
+      logged, dropped eight groups and left the request 80% over — and a thread of 12 large groups
+      was never reduced at all, so the hard provider-context error it exists to prevent still
+      happened. It cuts by tokens now, via `trim_messages(strategy="last", start_on="human")`, with
+      `start_on` carrying the group-boundary guarantee the old shape got structurally.
+      `agent_keep_last_conversation_groups` keeps its ENV-visible name and becomes a **floor** on
+      the cut (`max(by_tokens, by_groups)`), not a rename. The clamp shipped with it: below the
+      newest group `trim_messages` returns `[]` and `ContextEditingMiddleware` only checks for one
+      *before* editing, so an emptied thread would otherwise reach the provider.
+      **This row was stale, not open** — the fix landed the day after the sweep wrote it, and the
+      row went uncorrected; that is the audit-artifact accuracy problem the 2026-08-13 review found
+      three more instances of, below.
 
-- [ ] **The per-turn state fields should be `UntrackedValue`, not a hand-written reset** — [S].
-      `ChemclawState.model_calls`/`loop_capped` are plain fields, so they resolve to `LastValue` and
-      are checkpointed; with `thread_id = session_id` they persist for the conversation, which is
-      the defect D-2026-08-12 §1 fixed by zeroing them in `turn_input()`.
-      `langgraph.channels.UntrackedValue` is never checkpointed and upstream's own
-      `ModelCallLimitMiddleware` declares `run_model_call_count` with it. Verified to survive
-      `create_agent`'s schema merging and to stay readable in the `invoke` output. ~4 lines, and it
-      moves the invariant from a convention-enforced-by-test into the schema — which also makes the
-      mid-turn-resume double-budget below unexpressible. *Latent caveat:* a resume is a new run, so
-      the counter would reset across `interrupt()`; nothing calls `interrupt()` today.
+- [x] **The per-turn state fields are `UntrackedValue`, not a hand-written reset — closed in
+      `6dd1f90`** — [S]. `ChemclawState.model_calls`/`loop_capped` were plain fields, so they
+      resolved to `LastValue` and were checkpointed; with `thread_id = session_id` they persisted
+      for the conversation, and the "per-turn" runaway cap counted the whole session. Both are
+      `NotRequired[Annotated[…, UntrackedValue]]` now (`agent/state.py:85,96`), which LangGraph
+      never checkpoints, so the reset is the channel's rather than every caller's — the same way
+      upstream's `ModelCallLimitMiddleware` declares `run_model_call_count`. Declared **without**
+      `PrivateStateAttr` deliberately: that would hide the field from the `ainvoke` return, which is
+      the only place `loop_capped` can be read once it is out of the checkpoint. The subtle half was
+      the readers — two assertions read `loop_capped` off `get_state(config).values`, precisely
+      where an `UntrackedValue` is missing, so they would have inverted to `False` and passed
+      vacuously rather than failing. **Row was stale, not open.**
 
-- [ ] **A mid-turn resume grants a second full loop-cap budget** — [S]. `graph_events` starts from
-      `turn_input()`, and `api/runner.py:341-349` calls it a second time on the same graph and
-      thread. Measured with a cap of 2: pass 1 spends 2, pass 2 spends 2, **4 model calls for one
-      chemist turn**. Default 25 → 50. Also, `loop_capped` being a boolean means a turn capped in
-      pass 1 that then answers cleanly still marks a complete answer partial. Bounded today by
-      `mid_turn_resume_enabled=False`. Closed by the `UntrackedValue` row above.
+- [x] **A mid-turn resume grants a second full loop-cap budget — closed with the row above** — [S].
+      The measurement that identified it: with a cap of 2, pass 1 spends 2 and pass 2 spends 2 —
+      **4 model calls for one chemist turn**, default 25 → 50 — because `graph_events` starts from
+      `turn_input()` and `api/runner.py` called it a second time on the same graph and thread. An
+      untracked channel makes the double budget unexpressible rather than merely unused, which is
+      why this row closes with that one and not with `mid_turn_resume_enabled=False` (still the
+      shipped default, for the separate reason in
+      [`D-2026-08-12-a-held-permit-is-the-price-of-a-mid-turn-resume`](../decisions/D-2026-08-12-a-held-permit-is-the-price-of-a-mid-turn-resume.md)).
+      *Residual, unchanged and still true:* `loop_capped` is a boolean, so a turn capped in pass 1
+      that then answers cleanly still marks a complete answer partial.
 
 - [ ] **A template workflow's failure is invisible to the chemist** — [S]. `TemplateWorkflow.run`
       has no `try/except` and reaches `notify_session_best_effort(…, "job_completed", …)`
@@ -165,15 +224,21 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       absent from the graph rather than merely ungated. **Trigger:** a template whose agent step
       declares a write and whose prompt can loop.
 
-- [ ] **Two retry systems multiply, and the fix is subtractive** — [M]. `llm_max_retries=3` means
-      **4** HTTP attempts (`anthropic/_base_client.py:1132`), under `activity_max_attempts=5`, and
-      each Temporal retry replays the *whole turn* from `turn_input(...)` with no checkpointer — so
-      every tool side effect repeats. Measured: one template step, one provider 503, **2 PR-gate
-      branches and 2 audit rows for one logical note**. Adding `ModelRetryMiddleware` or a node
-      `RetryPolicy` would be a fourth layer; narrow the outer policy instead so the SDK owns
-      transient provider failure. Accept explicitly that a long provider outage then fails in ~4
-      attempts rather than riding out 20. *Not to be touched:* `ingest/documents/sync.py:378,417` is
-      fan-out-on-failure, not a retry layer, and its comment records the outage it fixed.
+- [x] **Two retry systems multiply, and the fix is subtractive — closed; the agent step has its own
+      bound** — [M]. As found: `llm_max_retries=3` means **4** HTTP attempts
+      (`anthropic/_base_client.py`, `range(max_retries + 1)` — measured, not assumed), and it sat
+      under `activity_max_attempts=5`, while each Temporal retry replays the *whole turn* from
+      `turn_input(...)` with no checkpointer, so every tool side effect repeats. Measured: one
+      template step, one provider 503, **2 PR-gate branches and 2 audit rows for one logical note**.
+      The fix was the subtractive one this row asked for, not a fourth layer:
+      `agent_step_max_attempts` (`core/config/temporal.py:70`) is its **own** setting defaulting to
+      **1** — no outer retry — and `publish.agent_step_retry` wraps only the agent step, leaving
+      `activity_max_attempts=5` where it belongs for ordinary activities. The accepted cost is
+      recorded beside the setting rather than discovered later: a *long* provider outage now fails
+      the step after ~4 HTTP attempts instead of riding it out over 20, on the trade that a clean
+      failure a person re-runs costs less than duplicate notes and audit rows a person must
+      reconcile. **Row was stale, not open.** *Still not to be touched:* `ingest/documents/sync.py`
+      fan-out-on-failure is not a retry layer, and its comment records the outage it fixed.
 
 - [ ] **`run_agent_step` could have task-level idempotency for free, and does not** — [L]. Measured:
       on resume from the same `thread_id` after a mid-turn crash, a completed task's result replays
@@ -201,11 +266,21 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       changed). `make prose-validate` already resolves metric and tool names against the live
       registries; extend it to code identifiers in docstrings.
 
-- [ ] **Two rename passes were never run** — [S]. `build_agent` → `build_langgraph_agent` (42 sites)
-      and `*SkillsSource` → `*Skills` (16 sites). **Do `*SkillsSource` first:** `make skill-validate`
-      prints `chemclaw.agent.skill_access.ToolScopedSkillsSource`
-      (`cli/validate_skills.py:17,136,27,163,178`), an unimportable dotted path an operator is
-      invited to follow. `FileSkillsSource` has no successor at all. Four stale premises go with
+- [ ] **Two rename passes were never run** — [S]. `build_agent` → `build_langgraph_agent` and
+      `*SkillsSource` → `*Skills`. Re-counted 2026-08-13, and the scope matters more than the
+      number: `build_agent` appears **32** times in `src/`, 10 in `tests/` and **75** in `docs/`
+      (117 total), `*SkillsSource` 16 times in `src/`. The "42 sites" this row shipped with was
+      neither of those totals, so it is corrected rather than deleted — and the docs count says
+      where the work actually is.
+      **Do `*SkillsSource` first:** `chemclaw.agent.skill_access.ToolScopedSkillsSource` is an
+      unimportable dotted path and it appears four times in `src/`. **What this row claimed and
+      what is true:** it said `make skill-validate` *prints* that path, inviting an operator to
+      follow it. It does not — the mentions in `cli/validate_skills.py` are in the module docstring
+      and in `_undeclared_problems`'s docstring, and the only things the CLI prints are the problem
+      strings and its pass/fail line; the module never prints `__doc__`. So the defect is stale
+      prose a *reader of the source* meets, not output an operator meets, which lowers this row's
+      urgency without removing it. `FileSkillsSource` has no successor at all. Four stale premises
+      go with
       them: `core/session_context.py:18-20` (explains a module split by a dependency that is gone),
       `core/logging.py:143` (the same defect D-2026-08-11 §3 fixed one file away),
       `tests/test_service.py:45-50` (documents a double against `open_reachable`, deleted in
@@ -213,18 +288,27 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       `tests/test_cli.py:122`, where a rename pass edited text *inside* a quoted error string,
       leaving `"requires an TurnSession"` — ungrammatical and false as a historical record.
 
-- [ ] **`mcp` has no upper bound** — [XS]. `connectors/server.py` patches
+- [x] **`mcp` has no upper bound — closed: `mcp>=1.2.0,<2`** — [XS]. The cap is the `deepagents`
+      argument transposed, and the boundary is **the next major, not the next minor, which is the
+      same rule rather than a weaker one**: `<0.8` is deepagents' major boundary (a 0.x minor is
+      where that project promises breakage) and `<2` is `mcp`'s, because `mcp` is post-1.0 and
+      versions accordingly. Additive drift *inside* 1.x is held by the two mechanisms that already
+      exist rather than by a number somebody must bump monthly — `uv.lock` pins the exact resolved
+      version (**1.28.1** today), and the two ratchets below fail if either patched behaviour stops
+      applying. The reasoning lives in `pyproject.toml` beside the pin, which is where a version
+      bump is read. Original finding, kept for the argument: `connectors/server.py` patches
       `FastMCP._tool_manager.call_tool` twice, stacked (`:279` caller re-binding, a *security*
       property; `:328` error sanitization). The **ratchets already exist** and are good —
       `tests/test_connector_transport.py:350` fails if the sanitizer stops applying (a `RuntimeError`
       carrying a DSN would leak it) and `tests/test_connector_identity.py:436` is the only test that
       can see `_bind_caller_per_tool_call` (handshake as alice, `tools/call` as bob, asserts the body
-      reads bob); a renamed attribute `AttributeError`s at bundle build. What is missing is only the
-      ceiling: `pyproject.toml:45` is `mcp>=1.2.0`, unbounded, resolving **1.28.1**, while
-      `deepagents` is capped `<0.8` on the identical argument — and that cap has since paid for
-      itself once (`D-2026-08-12-the-cap-was-right-and-what-it-was-holding-back`: 0.7 added a
-      `delete` verb the skills gate did not refuse). The swallowed-SSE behaviour in the
-      MCP-timeout row above is version-specific too, which is a second reason to cap.
+      reads bob); a renamed attribute `AttributeError`s at bundle build. What was missing was only
+      the ceiling, while `deepagents` was capped `<0.8` on the identical argument — and that cap has
+      since paid for itself once (`D-2026-08-12-the-cap-was-right-and-what-it-was-holding-back`: 0.7
+      added a `delete` verb the skills gate did not refuse). The swallowed-SSE behaviour in the
+      MCP-timeout row above is version-specific too, which was the second reason to cap and is
+      **still an open row in its own right** — the cap bounds which `mcp` resolves, it does not pass
+      a `read_timeout_seconds`.
 
 - [ ] **Two shipped settings govern nothing** — [S]. `calibration_conformal_coverage` and
       `calibration_conformal_min_samples` (`core/config/calculators.py:193-194`) have zero readers in
@@ -1049,15 +1133,38 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       deliberately, with the manifests in front of you. *Trigger:* a real share, where `share-estimate`
       shows a folder an exclusion was meant to cover.
 
-- [ ] **The two lexical legs disagree on AND vs OR** — [M]. Postgres uses `websearch_to_tsquery`,
-      which ANDs the terms; the in-memory reference scores any chunk sharing *one* token. So a
-      multi-word question retrieves on the dense leg alone in production while the test passes on
-      the in-memory OR, and the rank fusion the whole `_search` design rests on runs one-legged.
-      `retrieval/vector_index.py` has the same shape, so this may be deliberate there — but nothing
-      says so, and the "reference the tests use" claim in `index.py` is not true for this operator.
-      *Trigger:* decide which semantics is wanted, then make both backends state it.
+- [ ] **The two lexical legs disagree on AND vs OR — half closed; the document index is what is
+      left** — [M]. The rule is now decided and stated:
+      [`D-2026-08-13-both-lexical-backends-state-one-boolean-rule`](../decisions/D-2026-08-13-both-lexical-backends-state-one-boolean-rule.md)
+      — *match any term, rank the notes matching every term first* — which is also the rule
+      `GraphRetriever` has applied to the same corpus since D-138. **Done in
+      `retrieval/vector_index.py`** (the note index): both backends state it, and the defect is on
+      the record rather than inferred — measured on a 15,000-note corpus, the four stems of "amide
+      coupling solvent screen" matched **0 rows** under the AND-only statement while partial matches
+      existed, so the lexical leg contributed nothing and the RRF ran one-legged while the unit
+      tests passed on the in-memory OR. Cost of widening, same corpus, GIN `Bitmap Index Scan` in
+      both plans: 3.1 ms matching 5,000 rows against 12.4 ms matching 10,000.
+      **Still open in `ingest/documents/index.py`** — its Postgres leg is `websearch_to_tsquery`
+      alone against an in-memory reference that scores a shared-token *fraction*, the identical
+      defect one file over. Not transplanted, because that statement carries the `_ELIGIBLE`
+      predicate and a citation projection, so the widening has to be re-measured against *its* plan.
+      *Trigger:* apply the stated rule there and measure the plan, not the note index's.
 
-- [ ] **`hnsw.ef_search` is not a setting, and the dense note search is now approximate** — [S].
+- [x] **`hnsw.ef_search` is a setting now, and `ANALYZE` is documented as the thing to reach for
+      first — closed** — [S]. `hnsw_ef_search` (default `0`) and `hnsw_iterative_scan` (default
+      `off`) ship in `core/config/retrieval.py` and are applied **transaction-locally** on the dense
+      note path (`retrieval/vector_index.py::_apply_recall_settings`, via
+      `set_config(name, value, is_local => true)` — a session-level `SET` would leak one query's
+      candidate list onto every later borrower of a pooled connection). Both defaults emit **no
+      statement at all**, so today's behaviour is unchanged byte-for-byte until an operator opts in,
+      which is also what keeps a `pgvector >= 0.7` deployment working: `hnsw.iterative_scan` needs
+      0.8, and pgvector reserves the `hnsw.` prefix, so an unknown parameter under it is an error
+      rather than an ignored placeholder. `ef_search` is capped at **400**, deliberately not
+      pgvector's 1000 — above roughly 200–400 the planner abandons the index for a sequential scan,
+      so a larger value buys the opposite of the recall it was set for.
+      [`D-2026-08-13-analyze-first-and-the-recall-knobs-second`](../decisions/D-2026-08-13-analyze-first-and-the-recall-knobs-second.md);
+      `tests/test_retrieval_hnsw_tuning.py`. The measurements this row assembled are kept below,
+      because they are the reason both knobs default to off. Original finding:
       `D-2026-08-08-a-derived-index-must-record-what-derived-it` moved the `note_id` tie-break to an
       outer sort, which restored the HNSW index the inner one had disabled (243 ms → 3.6 ms at
       N=20,000) — and with it, approximate recall, which the accidental Seq Scan had been hiding.
@@ -1079,11 +1186,14 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       uniform-random embeddings. **The large numbers came from stale statistics, not from ANN
       recall**: before `ANALYZE`, the same statements went short on 13 of 20 and 20 of 20 queries
       (6 rows of a possible 160 at the narrowest), because the planner was working from default
-      estimates. `hnsw.iterative_scan` is `off` on this server and is the knob that addresses the
-      residual directly; `hnsw.ef_search` is the blunter one. Neither is a setting, and neither is
-      the first thing to reach for — autovacuum's `ANALYZE` on a bulk-loaded corpus is.
-      *Trigger:* a corpus where a note or a document a chemist knows exists does not come back, or
-      the first recall regression an eval catches.
+      estimates. `hnsw.iterative_scan` is the knob that addresses the residual directly;
+      `hnsw.ef_search` is the blunter one. Neither is the first thing to reach for — autovacuum's
+      `ANALYZE` on a bulk-loaded corpus is, and both settings say so where an operator meets them.
+      *Named residual:* the knobs are wired on the **note** dense path only, and the document index
+      is where the (small) shortfall was actually measured. Wiring them there is one call to the
+      same helper plus its own measurement against that index's `EXISTS` plan. *Trigger:* a
+      document a chemist knows exists does not come back, or the first recall regression an eval
+      catches — and run `ANALYZE` before touching either knob.
 
 - [ ] **An unfiltered external-store search ranks across every share and can return nothing** —
       [S]. `ExternalVectorDocumentIndex._eligible_documents` returns `None` when a query carries no
@@ -1190,9 +1300,26 @@ prose *string*, while each of these returns a structured model, so covering them
 about which fields to wrap without corrupting the shape the model reads — a design question, not a
 mechanical fix. Ranked by how attacker-reachable the content is.
 
-- [ ] **[M] `find_past_jobs` returns other users' free-text job rationales unframed**
-      (`agent/durable_tools.py:246`). Stored cross-user injection: the `reason` a *different*
-      chemist recorded on a durable job reaches this turn's model verbatim.
+- [x] **[M] `find_past_jobs` returns other users' free-text job rationales unframed — closed**
+      (`agent/durable_tools.py`). Stored cross-user injection: the rationale a *different* chemist
+      recorded on a durable job reached this turn's model verbatim, forever, with no PR-gate in the
+      way. Both free-text fields now go through the existing `frame_untrusted`, with the run's
+      `job_id` as the envelope's source id — the run *is* the source, and it is the id a citation of
+      a past run should point at. **`summary` is framed too, and that is the half worth recording:**
+      it looks first-party (connector code composes the sentence) but it interpolates
+      model-authored strings — `spec.objective_name`, `request.title`, `' + '.join(spec.reactants)`
+      — so a first-party *template* is not a first-party *string*, and framing the reason while
+      leaving the summary bare would have left the same turn open through the neighbouring field.
+      The four structured fields are deliberately unframed and the reason is stated in the code:
+      `job_id`/`note_id` are handed straight back to `get_durable_job_status`/`expand_note` (an
+      envelope would break the follow-up call the docstring points at) and are generated or
+      slug-validated; `connector`/`job` are manifest names matched against `^[a-z][a-z0-9_-]*$`;
+      `completed_at` is a `datetime`. Framing is applied in the agent layer rather than in
+      `search_job_records`, because the front door's `GET /jobs` reads that same function for a
+      human UI where an envelope is noise. No ADR: this applies an existing, already-decided
+      mechanism (`D-2026-08-06-an-envelope-that-only-survives-its-own-process`) to one more tool —
+      what was open was which fields, and that answer belongs beside the fields.
+      `tests/test_framing.py` (forged close defanged, evidence intact, summary covered).
 - [ ] **[M] No connector/MCP tool result is ever framed** (`connectors/*/server/tools.py`).
       `fetch_artifact` returns arbitrary externally-produced text straight to the model. The widest
       surface of the four, and the one whose fix most needs a shape decision — framing every tool
@@ -1304,13 +1431,25 @@ Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed
 trigger gate and added the guard that would have caught it. These are what the same lane found and
 did not fix.
 
-- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution**
-      (`connectors/server.py:84`). `CallerLogMiddleware` documents the identity headers as
-      advisory, but a bundle's activity stamps them into `bo_campaigns`/`bo_suggestions`, so
-      anything that can reach the pod can forge who ran an experiment. The root fix is connector
-      authentication (already tracked above); the narrower one is to attribute from the workflow
-      payload's `requested_by`, which is set from the validated principal, rather than from a
-      header.
+- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution — half
+      closed; the record now says which half it is** (`connectors/server.py`). `CallerLogMiddleware`
+      documents the identity headers as advisory, but a bundle stamped them into
+      `bo_campaigns`/`bo_suggestions`, so anything that could reach the pod could forge who ran an
+      experiment — measured: `X-Chemclaw-Actor: victim-oid` landed **verbatim** in
+      `bo_campaigns.opened_by` and `bo_suggestions.actor`, byte-identical to a validated row.
+      **Done:** the *durable* path already read the validated principal off the run's memo
+      (`connectors/bo/workflows.py`), and the *synchronous* MCP path now records
+      `unverified:<claim>` — marking rather than blanking, because the claimed name is still the
+      only join a forensic reader has, and *the system flags, it never certifies*. Erasure was
+      taught both spellings of one id in the same change, by exact equality against a closed
+      two-element set (a substring match was written, run, and rejected: it deletes a bystander
+      whose id merely contains the target's).
+      [`D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim`](../decisions/D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md);
+      `tests/test_bo_provenance.py`, `tests/test_leaver.py`.
+      **Still open:** the root fix, connector authentication (tracked above) — a marker says the
+      name is unverified, it does not make it verifiable. Rows written before this change are not
+      migrated and cannot be: a bare id from that era is indistinguishable from a validated one
+      after the fact.
 - [ ] **[L] The built-in write gate never consults the connector-declared `state_changing` set**
       (`agent/authz.py`). `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained list while every manifest
       already partitions its tools into `state_changing`/`read_only`; deriving the gate from the
@@ -2063,11 +2202,18 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `authz.side_effecting_tools()` (the set D-167 had already assembled), and the three ad-hoc
       checks deleted. The set moved out of `plan_gate` on the way, because dry-run applies whether
       or not the harness is on.
-- [ ] **Every shipped connector is unauthenticated** — [M]. All seven manifests ship
-      `auth: mode: none`; `connectors/server.py` correctly never trusts the `X-Chemclaw-*` headers,
-      which leaves the ingress NetworkPolicy as the only control. The `bearer` mode exists and is
-      unused, and a connector serves its *whole* FastMCP surface — `allowed_tools` is a client-side
-      filter.
+- [ ] **Every shipped connector that serves an endpoint is unauthenticated** — [M]. Re-counted
+      2026-08-13: **six** of the seven bundles ship `auth: mode: none` (`bo`, `calc`, `chem`,
+      `molfp`, `rxnfp`, `safety`); `qm` declares no `endpoint:` block at all, so it has no endpoint
+      auth to declare — it is a durable-jobs-only bundle. The row's "all seven" was wrong in the
+      direction that flatters the finding, and the corrected count does not weaken it: every served
+      surface is still open. `connectors/server.py` correctly never trusts the `X-Chemclaw-*`
+      headers, which leaves the ingress NetworkPolicy as the only control. The `bearer` mode exists
+      and is unused, and a connector serves its *whole* FastMCP surface — `allowed_tools` is a
+      client-side filter. Related and now recorded rather than latent: because the headers cannot be
+      trusted, the `bo` synchronous path records `unverified:<claim>` in its GxP columns
+      ([`D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim`](../decisions/D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md)),
+      which is what this row's closure would let a writer stop doing.
 - [ ] **Egress is still port-scoped by default** — [S]. D-158 made destinations declarable
       (`networkPolicy.egressDestinations`) but left the default empty, which renders `to: []` — any
       destination on those ports. Closing it needs the operator's real CIDRs; until a deployment
@@ -3486,11 +3632,15 @@ for each recorded here rather than left implicit.
 Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
 design (D-004/D-005) and queued rather than adopted wholesale — see D-074 for the comparison.
 
-- [ ] ~~**Per-bundle `log.md` changelog** appended by the PR-gate~~ — **DROPPED as designed**
+- [x] ~~**Per-bundle `log.md` changelog** appended by the PR-gate~~ — **DROPPED as designed**
       (assessment 2026-07-25): every note lands on its own branch, so N concurrent proposals all
       append to the same `log.md` and every one after the first conflicts — manufacturing merge
       failures to duplicate what git already records. Redesigned as a *generated* view (`git log` →
-      rendered changelog), deferred until a reviewer/auditor actually asks for one.
+      rendered changelog), deferred until a reviewer/auditor actually asks for one. **Ticked
+      2026-08-13:** it was struck through and marked DROPPED and still carried an open checkbox, so
+      it read as live work here *and* as a live row in `DEFERRED.md` — one item counted twice. The
+      deferral row is the correct home (it has the trigger); this box is closed, not deleted,
+      because BACKLOG is a log and DEFERRED is a register.
 - [ ] **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
       no class hierarchy, so an agent can't query by subsumption (e.g. "all electrophilic aromatic
       substitutions" matching a `reaction_class: acetylation` note). Add optional frontmatter
@@ -3863,10 +4013,12 @@ the record of the original wiring.
       `launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested), dispatched by `hpc_launch_interface`
       (mock kept for CI). `hpc_pipeline_version` in the cache key when set (F5-T3). Worker unchanged
       (F5-T4). ADR D-048. `test_nextflow_adapter.py`.
-- [ ] **F5 deferred**: ~~`QMJobWorkflow→CalculationWorkflow` rename~~ — **DROPPED** (assessment
+- [x] **F5 dropped**: ~~`QMJobWorkflow→CalculationWorkflow` rename~~ — **DROPPED** (assessment
       2026-07-25): the workflow type name is durable-history state, so the rename is exactly the
-      un-versioned change the workflow-versioning policy below exists to forbid; real `cclib`
-      parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
+      un-versioned change the workflow-versioning policy below exists to forbid.
+- [ ] **F5 still deferred** (split out of the row above 2026-08-13, which mixed one dropped item
+      with two live ones under a single unticked box): real `cclib` parsing once a live QM output
+      format is fixed; live-cluster durability spike (needs a cluster).
 - [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
       `entrypoint.sh`), Helm chart (`deploy/helm/chemclaw/`: ConfigMap/Secret, SA with federation,
       service/route/HPA, both workers, MCP, NetworkPolicy, pre-deploy migrate hook), `deploy.yml` CI
@@ -4342,9 +4494,16 @@ the record of the original wiring.
       tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
       SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
       three scope questions await the user — `docs/archive/plans/backlog-plan.md` §3/§5.
-- [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
-      closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
-      models — all currently in `docs/planning/DEFERRED.md` with triggers; confirm or pull forward.
+- [ ] Retrosynthesis + reaction prediction · lab automation/SiLA2 closed-loop · process flowsheet
+      synthesis · multimodal analytical data (now two rows: generic OCR, and hand-drawn
+      structures/spectra) · domain foundation models — all in `docs/planning/DEFERRED.md` with
+      triggers; confirm or pull forward. **Corrected 2026-08-13: DoE/Bayesian optimization was in
+      this list and is not deferred at all** — it shipped as Phase 1d (BoFire behind
+      `suggest_next_experiment`/`resume_campaign`, D-024) and has never had a `DEFERRED.md` row. The
+      rows that *do* exist are narrower, named capabilities *inside* BO (optimal design and space
+      filling, nonlinear constraints, `NChooseK`, a second molecular representation, feature
+      importance), each with its own trigger — which is the opposite of the whole capability being
+      deferred, and is exactly the confusion a list of six nouns produces.
 - [x] Design caution "apply Skills/tools **selectively + measured per task**" — **satisfied**:
       `evals/ab.py` (2b.4) measures per-task tool utility including where tooling hurts, and
       `AgentProfile` (D-075) narrows the toolset per use case. Nothing left to build.
@@ -4367,9 +4526,13 @@ the record of the original wiring.
 - [ ] Concrete lab-automation/SiLA2 + DoE + retrosynthesis integration wiring.
 - [ ] Domain safety/compliance layer design beyond RBAC.
 
-## Later
-- [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
+## Later — all of it shipped; kept as the record of what "later" meant
+- [x] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
       ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
+      **Ticked 2026-08-13:** every one of these is marked Done elsewhere in this same file (Phases
+      0–5b are CHECKMATE-reviewed per `CLAUDE.md`, and Phase 6 was folded into F4 — see the
+      "Later — Phase 6 items now folded into F4" section above). A six-item unticked box under a
+      heading called *Later* is the most readable thing in the file and it was wrong about all six.
 
 ## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
 

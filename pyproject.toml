@@ -55,7 +55,23 @@ dependencies = [
     "langchain-openai>=1.4.2",
     "langgraph>=1.2.10",
     "langgraph-checkpoint-postgres>=3.1.2",
-    "mcp>=1.2.0",
+    # Capped on the `deepagents` argument above, transposed: this repository reaches into `mcp` for
+    # a *protocol* — `connectors/server.py` patches `FastMCP._tool_manager.call_tool` twice, and one
+    # of those two stacked patches is the per-call caller re-binding, a security property — so a
+    # release that widens or renames that surface lands on a gate written against the old one. The
+    # deepagents cap has already paid for itself once that way
+    # (`docs/decisions/D-2026-08-12-the-cap-was-right-and-what-it-was-holding-back.md`: 0.7 added a
+    # `delete` verb the skills gate did not refuse), and `mcp` was the same shape with no ceiling
+    # at all.
+    #
+    # **The boundary is the next major, not the next minor, and that is the same rule not a weaker
+    # one.** `<0.8` is deepagents' *major* boundary — a 0.x minor is where that project promises
+    # breakage — and `<2` is this one's, because `mcp` is post-1.0 and versions accordingly. Held
+    # against additive drift inside 1.x by the two things that already exist rather than by a
+    # number that would need bumping every month: `uv.lock` pins the exact resolved version (1.28.1
+    # today), and the ratchets in `tests/test_connector_transport.py` and
+    # `tests/test_connector_identity.py` fail if either patched behaviour stops applying.
+    "mcp>=1.2.0,<2",
     "networkx>=3.6.1",
     "numpy>=2.0",
     # The OpenTelemetry SDK + OTLP exporter that `chemclaw.core.logging.configure_telemetry` needs.
