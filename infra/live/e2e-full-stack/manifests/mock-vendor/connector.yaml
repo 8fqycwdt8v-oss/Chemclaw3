@@ -19,7 +19,12 @@ description: >-
 endpoint:
   transport: http
   url: http://127.0.0.1:8091/mcp
-  health_url: http://127.0.0.1:8091/healthz
+  # No health_url: `vendor_server.py` is a bare `FastMCP(...).run(transport="streamable-http")`,
+  # not `mcp_server_kit.connector_app` (which is what gives props/rxnpredict their /healthz) — it
+  # exposes no REST route at all, so a health_url here would 404 and, under
+  # CHEMCLAW_CONNECTORS_REQUIRED=true, hard-fail the front door's startup on a connector that was
+  # actually fine. HttpEndpoint's own docstring names this exact case: omitting health_url is the
+  # honest "unprobed" rather than a guessed path producing a false alarm.
   request_timeout: 15
   # `vendor_server.py` runs no bearer check at all (see its module docstring), and the URL above is
   # loopback, so `HttpEndpoint`'s "a networked endpoint carries a credential" rule does not fire.

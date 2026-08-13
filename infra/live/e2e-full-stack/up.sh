@@ -24,7 +24,10 @@ readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3-mcp}
 readonly MOCK_REPO="${CHEMCLAW_MOCK_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3_mock}"
 readonly UI_REPO="${CHEMCLAW_UI_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3_ui}"
 
-log() { printf '\033[35m[e2e]\033[0m %s\n' "$*"; }
+# stderr, not stdout: `mock_venv_bin()` returns a path via stdout command substitution, and a
+# log() that shared stdout corrupted it with ANSI-coded log text — the exact bug that made
+# mock-hpc-eln's exec target unparseable. die() already had this right; log() did not.
+log() { printf '\033[35m[e2e]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
 
 require_repo() {
