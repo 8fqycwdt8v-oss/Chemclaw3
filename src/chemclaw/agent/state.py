@@ -31,13 +31,13 @@ design somebody can rely on.
 **Every field here is either per-turn or per-thread, and the *channel* is what makes that true.**
 The checkpointer persists the whole state under `thread_id`, and `thread_id` is the *session* id —
 so a plain field resolves to a `LastValue` channel, which is checkpointed, which makes it per-thread
-whatever its docstring says. Nothing reset the two fields below and the consequence was not
-theoretical: `model_calls` accumulated across turns, so the runaway cap fired on the *session's*
+whatever its docstring says. Nothing reset `model_calls` and the consequence was not
+theoretical: it accumulated across turns, so the runaway cap fired on the *session's*
 fourth model call rather than the turn's, and every later turn on that session ended before the
 model was called at all. Measured at `harness_max_loop_iterations=3`: turns 0-2 answered, turn 3
 returned the user's own question. A session bricked with no way back.
 
-That defect was first closed by zeroing both fields by hand in `turn_input`, which worked and was
+That defect was first closed by zeroing it by hand in `turn_input`, which worked and was
 the wrong shape: it made "per-turn" a property of every *call site* rather than of the field, so a
 caller that hand-built `{"messages": ...}` — and `graph.ainvoke` accepts one — silently got the
 bricked session back. The fields are now `UntrackedValue` channels, which LangGraph never
@@ -64,7 +64,7 @@ class ChemclawState(PlanningState):
     Fields arrive with the phase that reads one — a declared field nothing consults is the same
     stub as a function nothing calls, and reads as coverage while proving nothing.
 
-    **Neither field carries `PrivateStateAttr`**, and that is deliberate rather than an omission
+    **No field here carries `PrivateStateAttr`**, and that is deliberate rather than an omission
     from the upstream declaration they otherwise copy. `PrivateStateAttr` is
     `OmitFromSchema(input=True, output=True)`, so it would strip the field from what `ainvoke`
     *returns* — and once the value is out of the checkpoint, the return is the only place left to
@@ -94,6 +94,13 @@ class ChemclawState(PlanningState):
     # cost is that `get_state(config).values` no longer carries it: the value lives only in what the
     # run returns, which is where every reader already looks.
     loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
+
+    # How many revision rounds the challenge panel has already forced this turn. Bounds the
+    # `jump_to: "model"` loop in `agent/challenge_gate.py` against `challenge_max_attempts`, and it
+    # is a counted field for exactly the reason `model_calls` is: the alternative is inferring
+    # "have we been round this before" from the message list, which is the inference
+    # `agent/loop_cap.py` was written to delete.
+    challenge_attempts: NotRequired[Annotated[int, UntrackedValue]]
 
 
 def turn_input(message: str) -> dict[str, Any]:

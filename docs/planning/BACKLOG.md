@@ -3,6 +3,34 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the challenge panel and the delegation reframing (2026-08-13)
+
+Both ADRs ship the mechanism and defer the *number*, deliberately: the two open rows below are
+measurements, and D-2026-08-12 is the precedent for keeping the measurement and the default-on
+decision in one ADR rather than asserting either here.
+
+- [ ] **Measure whether the reframed spawn prompt actually raises delegation** — [M].
+      `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` argues that
+      D-2026-08-12's 2-of-15 finding does not transfer, because it measured delegating *to reach a
+      capability* and the reframed texts offer isolation, parallelism and independent judgment
+      instead. That argument is untested. Re-run the M12 routing corpus
+      (`data/evals/probes/m12/routing.yaml`) under the new `_SUPERVISOR_PROMPT` /
+      `_TASK_TOOL_DESCRIPTION` and report the rate beside the old one. **If it does not move, the
+      reframing bought nothing** and the honest next step is the invariant inversion that ADR
+      declined, not another prompt.
+- [ ] **Measure whether the challenge panel finds real defects or over-flags** — [M].
+      `challenge_enabled` is off for the reason `agent_teams_enabled` is, and the same instrument
+      settles it: probes where the answer is known-wrong (does the panel reach quorum?) and probes
+      where it is known-good but low-confidence (does it stay quiet?). Watch
+      `chemclaw_challenge_degraded_total` in the same run — every degraded path returns a
+      *non-corroborating* verdict, so a dead panel and a clean answer are indistinguishable without
+      it, and a "0 objections" result means nothing until that series is known to be flat.
+- [ ] **A sixth copy of the Temporal launch idiom now exists in layer 1** — [S].
+      `challenge.start_answer_review` joins `durable_tools`, `interaction_tools`, `job_results` and
+      `templates/registry` in `tests/test_third_party_layering._KNOWN_LEAKS`. It is function-scope
+      so the agent layer stays importable without Temporal, which bounds the leak rather than
+      removing it. Same fix as the other four: one `start_job()` in `durable/`.
+
 ## Open — Left by the full review/refactor/hardening sweep (2026-08-12)
 
 Detail and measurements in `tasks/review-2026-08-12-{maf-removal,langgraph-native,migration-findings}.md`.
