@@ -1858,3 +1858,59 @@ never what "green" means, and it must never be what I report.
 Corollary, from the same push: **finish the work before running the gate.** The full suite here ran
 while a subagent was still editing documentation, so its result described a tree that no longer
 existed by the time I read it. A gate run is only evidence about the tree it ran against.
+
+## The working tree is not the baseline when other agents are in it (2026-08-13)
+
+Seven implementation agents worked one tree at once, and a verification pass reading that tree
+reported a feature as **"already implemented"** — because it was reading another agent's
+*uncommitted* edits. `git show HEAD:<path>` proved the feature was not there. The implementing agent
+caught it only because it checked HEAD before complying with the "already done, skip it" finding; had
+it complied, the work would have been dropped on the strength of evidence that the working copy
+itself had manufactured.
+
+This is the same failure as the `git checkout` lessons above wearing the opposite face. Those are
+about *writing* a file whose uncommitted state I misjudged; this is about *reading* one. Both come
+from treating the working tree as a stable object when it is a shared, live one.
+
+The rule, and it costs one command:
+
+    git show HEAD:<path>        # what is actually committed
+    git status --short          # what is in flight, and whose
+    git diff -- <path>          # the delta I would otherwise mistake for history
+
+**Whenever the question is "does this already exist?", the answer must come from HEAD, never from
+the working copy** — and the answer must name which one it came from. "Verified against HEAD" and
+"verified against the tree" are different claims, and in a parallel session only the first one is
+evidence. The tell that I have got this wrong is a verification finding that is *surprisingly*
+convenient: a review item that turns out to be already done, in a tree where somebody was asked to
+do it an hour ago, is the exact shape of this mistake.
+
+Corollary for the other direction: if I am the one with uncommitted work, another agent's
+verification of "the current state" may be describing my edits back to me. Commit early — a
+committed change is the only kind another reader can attribute correctly.
+
+## A review's recommendation list goes stale before the review merges (2026-08-13)
+
+An external synthesis review landed with 15 recommendations. By the time it merged, several were
+already implemented — not superseded, not disputed, *done* — and one (retrosynthesis: "the licence
+blocker is cleared, this is a one-sprint vendoring task") was wrong on its central claim in two
+separate ways: the licence evidence covered the legacy Keras assets rather than the ONNX ones the
+current code actually downloads (Zenodo 7797465 / 7341155, CC-BY-4.0, not the MIT figshare package
+that was checked), and the real obstacle was never the licence but a four-way dependency exclusion
+against pins this repo cannot move.
+
+Neither error is careless. A review is a photograph, and the tree moves while it is being developed;
+a recommendation is a *hypothesis about the tree*, at the strength of any other unverified prose.
+The failure mode is that a recommendation arrives pre-argued and pre-formatted, so acting on it feels
+like execution rather than like accepting a claim.
+
+**Rule: verify-before-implement is the first step of acting on any review, never an optional one, and
+it is two questions, not one.**
+
+1. *Is it still true of the tree?* — check HEAD (see the lesson above), not the working copy.
+2. *Was it true when it was written?* — re-derive the load-bearing fact from the primary source. Here
+   that was two `curl`s: the package's own `requires_dist`, and the Zenodo API's `license` field. Two
+   minutes, against a recommendation that would otherwise have become a sprint and then a revert.
+
+The reviewer being external, thorough and specific is what makes this necessary rather than what
+makes it unnecessary — a vague recommendation invites a check, a precise one invites compliance.

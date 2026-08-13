@@ -81,6 +81,26 @@ def _type_histogram() -> dict[str, int]:
     return counts
 
 
+def _positive(value: str) -> int:
+    """A turn count argparse will not accept as zero or negative — the driving loop cannot end.
+
+    `--batch 0` makes `batch = min(args.batch, ...)` zero, so `done` never advances, `while done <
+    args.turns` never ends, and every iteration appends another full type histogram: a leak probe
+    that leaks. A negative batch is the same loop walking backwards. `--turns` and `--warmup` count
+    the same quantity and get the same guard — a negative warm-up offsets every turn count in the
+    report, and a run of no turns measures nothing either way.
+
+    Deliberately four lines here rather than a shared helper imported from `cli/sync_share.py`,
+    which states the same rule about its own pass size: what the two have in common is `int(value)
+    < 1` and an argparse exception type, which is smaller than the import that would carry it, and
+    the messages they raise are about different things.
+    """
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def _rss_kb() -> float:
     """This process's resident set, read the way the soak reads the front door's."""
     with open("/proc/self/statm", encoding="utf-8") as handle:
@@ -122,6 +142,18 @@ def _sample(turns: int, *, trace: bool, baseline: Any) -> Sample:
     return sample
 
 
+def _per_turn(delta: float, span: float) -> float:
+    """A rate over `span` turns, or 0.0 when no turns separate the first and last sample.
+
+    One reader for the guard, because two columns of the report need it and the version that had it
+    in only one of them raised `ZeroDivisionError` out of the middle of the type table while the
+    series table above it printed `+0.00`. `report` is public and is the single durable artefact a
+    leak hunt produces, so a degenerate series — two samples taken at the same turn count — has to
+    render what it does know rather than take the whole deliverable down with it.
+    """
+    return delta / span if span else 0.0
+
+
 def report(samples: Sequence[Sample]) -> str:
     """What each series did per turn, as a fit — the whole deliverable."""
     if len(samples) < 2:
@@ -141,7 +173,7 @@ def report(samples: Sequence[Sample]) -> str:
     ):
         if not any(values):
             continue
-        per_turn = (values[-1] - values[0]) / span if span else 0.0
+        per_turn = _per_turn(values[-1] - values[0], span)
         # `describe` fits against the *batch index*, so its slope is per batch; the per-turn column
         # beside it is the number a reader wants and the verdict is the number they can trust.
         lines.append(
@@ -161,7 +193,7 @@ def report(samples: Sequence[Sample]) -> str:
         for delta, name in grown:
             if delta <= 0:
                 continue
-            lines.append(f"| `{name}` | {delta / span:+.2f} | {delta:+d} |")
+            lines.append(f"| `{name}` | {_per_turn(delta, span):+.2f} | {delta:+d} |")
     allocations = [line for sample in samples for line in sample.top_allocations]
     if allocations:
         lines += ["", "## Largest growth since the first batch", ""]
@@ -181,9 +213,11 @@ def leaks(samples: Sequence[Sample]) -> bool:
 def main(argv: list[str] | None = None) -> int:
     """Drive the turns, print the fits, and exit non-zero when RSS growth is resolvable."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--turns", type=int, default=300, help="total turns to drive")
-    parser.add_argument("--batch", type=int, default=25, help="turns between samples")
-    parser.add_argument("--warmup", type=int, default=25, help="turns before the first sample")
+    parser.add_argument("--turns", type=_positive, default=300, help="total turns to drive")
+    parser.add_argument("--batch", type=_positive, default=25, help="turns between samples")
+    parser.add_argument(
+        "--warmup", type=_positive, default=25, help="turns before the first sample"
+    )
     parser.add_argument(
         "--trace", action="store_true", help="also take tracemalloc snapshots (slower)"
     )

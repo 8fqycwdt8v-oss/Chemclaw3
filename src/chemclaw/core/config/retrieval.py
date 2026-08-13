@@ -102,6 +102,48 @@ class RetrievalSettings(BaseSettings):
     # visible any sooner than the sync that delivers it; it only bought scans.
     graph_cache_ttl_seconds: float = Field(default=60.0, ge=0.0)
 
+    # ── pgvector HNSW recall knobs ────────────────────────────────────────────────────────────
+    # Applied as *transaction-local* Postgres settings on the connection running a dense query, and
+    # only there: the lexical leg's `ts_rank` over a GIN index is exact and has no such parameter,
+    # and an upsert is not a search. `chemclaw.retrieval.vector_index` is where they are read.
+    #
+    # **Why a knob exists at all.** With the HNSW index in use, an eligibility predicate (`within=`)
+    # is a *post* filter over the ef_search candidate list rather than a bound on what the index
+    # scan considers, so a selective scope can leave fewer than `retrieval_top_k` candidates alive
+    # and the search returns short.
+    #
+    # **Neither of these is the first thing to reach for, and saying so is the point.** The measured
+    # cause of the large shortfalls was stale planner statistics, not ANN recall: before `ANALYZE`
+    # the same statements went short on 13 of 20 and 20 of 20 queries; after it, 0 of 20 on the note
+    # index and 1–2 of 20 on the document index. `ANALYZE` (autovacuum's, or by hand after a bulk
+    # load) is the fix for the bulk of it. These two address only that small residual, which is why
+    # both default to "leave the server alone" and neither changes a single query until an operator
+    # sets it.
+    #
+    # `0` means "do not set it" — pgvector's own default (40) stands and no extra round trip is
+    # made. The `le` ceiling is *not* pgvector's maximum (1000): above roughly 200–400 the planner's
+    # cost estimate for the index scan can exceed a sequential scan and it abandons the index
+    # entirely, so a larger value silently buys the opposite of the recall it was set for. That
+    # 200–400 band is sourced from the August-2026 external retrieval review, not measured here;
+    # 400 is its upper edge, taken as the ceiling so the documented safe range is expressible and
+    # the pathological range is not.
+    hnsw_ef_search: int = Field(default=0, ge=0, le=400)
+    # `off` (the default, and pgvector's) keeps today's behavior exactly. The other two make the
+    # index scan keep walking until the filter is satisfied instead of stopping at the first
+    # candidate window, which is the knob that addresses the `within=` residual above directly
+    # rather than bluntly. **Requires pgvector >= 0.8** — the parameter did not exist before it, and
+    # pgvector reserves the `hnsw.` prefix, so setting it on an older server is an error rather than
+    # an ignored placeholder. That is why `off` emits no statement at all: a deployment on the
+    # `pgvector >= 0.7` floor the fingerprint migrations state (`infra/sql/002`) keeps working
+    # untouched, and only a deployment that opts in needs the newer server. The dev image
+    # (`pgvector/pgvector:pg16`) and the live lane's pinned `v0.8.6` both satisfy it.
+    # `strict_order` returns rows in exact distance order; `relaxed_order` may return them slightly
+    # out of order in exchange for filling `top_k` sooner. `strict_order` is the one to reach for
+    # first here: this index's hits are re-sorted by score downstream, but a relaxed scan changes
+    # *which* rows come back, and a recall knob that also perturbs the ranking makes the next
+    # measurement ambiguous.
+    hnsw_iterative_scan: Literal["off", "strict_order", "relaxed_order"] = "off"
+
     @property
     def retrieval_source_weights_map(self) -> dict[str, float] | None:
         """The fusion weights, or `None` when unset — so the fusion keeps its uniform fast path."""

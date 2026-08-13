@@ -48,6 +48,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
+from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_roles
@@ -298,6 +299,25 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
     )
 
 
+def _framed_free_text(text: str, job_id: str) -> str:
+    """One free-text field of a past run, wrapped as data and attributed to the run that wrote it.
+
+    `find_past_jobs` is the one tool whose whole purpose is to return **other people's** text, and
+    a job record is never PR-gated: chemist A types a rationale into a launcher and it reaches
+    chemist B's model turn verbatim, months later, as tool output. That is the stored, cross-user
+    form of the indirect prompt-injection vector `expand_note` and `gather_evidence` already frame a
+    note body against, so it gets the same envelope rather than a second mechanism.
+
+    Empty stays empty: an envelope around nothing is context spent to say nothing. `rationale` is
+    `min_length=1` where records are written, but a summary is optional and both are read back out
+    of a database column, so the guard is applied to whatever is passed rather than to one field.
+
+    The envelope's source id is the `job_id` — the run *is* the source here, and it is the id a
+    citation of a past run should point at (and the one `get_durable_job_status` takes).
+    """
+    return frame_untrusted(text, note_id=job_id) if text else ""
+
+
 @tool
 async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
     """Find durable jobs this system has already run, and why each of them was run.
@@ -321,7 +341,40 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
         The matching runs, newest first: what ran, why, what came out in one line, and the note it
         proposed (if any).
     """
-    return await search_job_records(text, connector)
+    # Two fields are framed and four are not, and both halves of that are deliberate.
+    #
+    # `rationale` is prose a person (or their model) wrote to justify a run — untrusted by
+    # construction. `summary` is the subtler one: the sentence is composed by first-party connector
+    # code, which reads as trusted until you look at what it interpolates — `spec.objective_name`,
+    # `request.title`, `' + '.join(spec.reactants)` — all model-authored strings echoed verbatim. A
+    # first-party template is not a first-party string, so framing the reason and not the summary
+    # would leave the vector open through the neighbouring field. (This is the inconsistency
+    # BACKLOG notes at `gather_evidence`, which frames a chunk's `content` and not its `source`;
+    # the point of naming it here is to not repeat it.)
+    #
+    # The other four carry no free text and framing them would cost more than it buys. `job_id` and
+    # `note_id` exist to be handed straight back to `get_durable_job_status` and `expand_note`, so
+    # wrapping them would break the follow-up call this tool's whole docstring points at — and they
+    # are generated (`<connector>-<job>-<hash>`) or slug-validated (`Note.id` is
+    # `^[A-Za-z0-9][A-Za-z0-9_.-]*$`), a charset with no `<` in it. `connector` and `job` are
+    # manifest names matched against `^[a-z][a-z0-9_-]*$`, and `completed_at` is a `datetime`.
+    # Framing the structured half of a hit would spend the model's ability to read it on nothing.
+    #
+    # Nothing is said about the envelope in the docstring above, which is the model-facing text:
+    # the system prompt is the single place that vouches for the delimiter, and a per-tool
+    # restatement is exactly the drift `test_instructions_name_the_exact_delimiter_framing_uses`
+    # exists to catch. Framing is also applied *here* rather than in `search_job_records`, because
+    # the front door's `GET /jobs` reads that same function for a human UI, where an envelope is
+    # noise; the envelope belongs to the model's context, so it belongs to the agent layer.
+    return [
+        record.model_copy(
+            update={
+                "rationale": _framed_free_text(record.rationale, record.job_id),
+                "summary": _framed_free_text(record.summary, record.job_id),
+            }
+        )
+        for record in await search_job_records(text, connector)
+    ]
 
 
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
