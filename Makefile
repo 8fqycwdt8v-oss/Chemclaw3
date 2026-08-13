@@ -298,6 +298,15 @@ live-down:  ## Stop the live processes.
 live-status:  ## Show which live processes are running.
 	bash infra/live/processes.sh status
 
+live-e2e-full-stack:  ## Full four-repo pass: this backend + Chemclaw3-mcp + Chemclaw3_mock + Chemclaw3_ui.
+	bash infra/live/e2e-full-stack/up.sh up
+
+live-e2e-full-stack-down:  ## Stop the four-repo pass.
+	bash infra/live/e2e-full-stack/up.sh down
+
+live-e2e-full-stack-status:  ## Show which four-repo-pass processes are running.
+	bash infra/live/e2e-full-stack/up.sh status
+
 live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
 	uv run python -m chemclaw.cli.live_jobs
 
