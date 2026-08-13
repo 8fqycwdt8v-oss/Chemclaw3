@@ -13,15 +13,16 @@ reference the tests use, no database), `PostgresNoteIndex` persists to `note_ind
 in SQL. Dense ranking is identical across backends (both cosine); the in-memory lexical
 rank is a simple token-overlap proxy of Postgres `ts_rank` (same ordering intent, not identical
 scores), noted where it is defined. What the two lexical backends *do* share exactly is their
-boolean rule — match any term, rank the notes matching every term first — because a reference
-implementation that answers a multi-word question differently from the backend it stands in for
-cannot be tested against.
+boolean rule — match any term, rank the notes matching every term first, honour a `-term` exclusion
+— because a reference implementation that answers a multi-word question differently from the
+backend it stands in for cannot be tested against. That rule is built once, in
+`chemclaw.core.fulltext`, and the document index (`chemclaw.ingest.documents.index`) runs the same
+one.
 """
 
 import asyncio
 import logging
 import math
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,14 +35,11 @@ from pydantic import BaseModel, Field
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts, embedding_config_key
+from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
 from chemclaw.kg.graph import invalidate_cache, load_notes, note_file_fingerprints
 from chemclaw.kg.search import search_text
 
 log = logging.getLogger(__name__)
-
-# Lexical tokenizer for the in-memory backend (lowercase alphanumeric runs) — the offline proxy of
-# Postgres `to_tsvector`; the durable backend uses real FTS, this only needs the same ordering.
-_TOKEN = re.compile(r"[a-z0-9]+")
 
 
 class NoteRecord(BaseModel):
@@ -116,11 +114,12 @@ class NoteIndex(Protocol):
     ) -> list[IndexHit]:
         """Return up to `top_k` notes best matching the terms in `query`, best first.
 
-        **A note matching *every* term outranks one matching only some, and a note matching some is
-        still a hit.** Both backends state that one rule — the durable one used to AND the terms
-        while the in-memory reference OR'd them, so a multi-word question returned evidence in the
-        tests and nothing in production. It is also the rule `GraphRetriever` already applies to the
-        same corpus (D-138), so the graph and the index answer such a question the same way.
+        **A note matching *every* term outranks one matching only some, a note matching some is
+        still a hit, and a note carrying a `-excluded` term is not a hit at all.** Both backends
+        state that one rule (`chemclaw.core.fulltext`) — the durable one used to AND the terms while
+        the in-memory reference OR'd them, so a multi-word question returned evidence in the tests
+        and nothing in production. It is also the rule `GraphRetriever` already applies to the same
+        corpus (D-138), so the graph and the index answer such a question the same way.
 
         `within` scopes the search exactly as in `search_dense`, and here it really is a bound
         before the `LIMIT` rather than a post-filter: the lexical path is exact.
@@ -183,16 +182,20 @@ class InMemoryNoteIndex:
     async def search_lexical(
         self, query: str, top_k: int, within: set[str] | None = None
     ) -> list[IndexHit]:
-        """Rank notes sharing any query token, those sharing every token first; tie-break by id.
+        """Rank notes sharing any wanted token, those sharing every one first; tie-break by id.
 
         The same boolean semantics `PostgresNoteIndex` states, which is the whole point of this
         being called a reference: it used to score any note sharing a single token while the durable
         backend ANDed the terms, so a multi-word query that returned hits here returned none there
-        and no test could see it. Tokens stand in for Postgres lexemes (no stemming, no stop-word
-        list), so the *scores* still differ from `ts_rank` — the ordering intent and the boolean
-        rule are what must match.
+        and no test could see it. A `-term` exclusion is part of that rule and is honoured here for
+        the same reason — a reference that reads `-solvent` as a *request* for solvent is the same
+        defect in the mirror. Tokens stand in for Postgres lexemes (no stemming, no stop-word list),
+        so the *scores* still differ from `ts_rank` — the ordering intent and the boolean rule are
+        what must match.
         """
-        query_tokens = set(_TOKEN.findall(query.lower()))
+        wanted, excluded = reference_terms(query)
+        if not wanted and not excluded:
+            return []
         # (complete, overlap, hit) — `complete` leads the sort for the same reason the durable
         # statement's `lexeme @@ all_terms` does: a note matching every term outranks one matching
         # some, and widening only decides what is returned when nothing matches them all.
@@ -200,10 +203,14 @@ class InMemoryNoteIndex:
         for record in self._records.values():
             if within is not None and record.note_id not in within:
                 continue
-            overlap = len(query_tokens & set(_TOKEN.findall(record.text.lower())))
-            if overlap:
-                hit = IndexHit(note_id=record.note_id, score=float(overlap))
-                scored.append((overlap == len(query_tokens), overlap, hit))
+            tokens = reference_tokens(record.text)
+            if excluded & tokens:
+                continue
+            overlap = len(wanted & tokens)
+            if wanted and not overlap:
+                continue
+            hit = IndexHit(note_id=record.note_id, score=float(overlap))
+            scored.append((overlap == len(wanted), overlap, hit))
         scored.sort(key=lambda entry: (not entry[0], -entry[1], entry[2].note_id))
         return [entry[2] for entry in scored[:top_k]]
 
@@ -216,25 +223,6 @@ def _vector_literal(embedding: list[float]) -> str:
 def _scope_array(within: set[str] | None) -> list[str] | None:
     """A `within` scope as the SQL array parameter: sorted for a stable query, NULL = unscoped."""
     return sorted(within) if within is not None else None
-
-
-def _hnsw_session_settings() -> dict[str, str]:
-    """The pgvector recall parameters the configuration asks a dense query to run under.
-
-    Empty is the default and means "issue no statement": pgvector's own `ef_search` (40) and
-    `iterative_scan` (`off`) stand, the dense path costs exactly the round trips it did before this
-    existed, and a server without `hnsw.iterative_scan` (pgvector < 0.8, where the reserved `hnsw.`
-    prefix makes an unknown parameter an error rather than an ignored placeholder) is never handed
-    one. See `core/config/retrieval.py` for why neither knob is the first thing to reach for — the
-    measured cause of the large `within=` shortfalls was stale planner statistics, and these address
-    only the residual.
-    """
-    wanted: dict[str, str] = {}
-    if settings.hnsw_ef_search:
-        wanted["hnsw.ef_search"] = str(settings.hnsw_ef_search)
-    if settings.hnsw_iterative_scan != "off":
-        wanted["hnsw.iterative_scan"] = settings.hnsw_iterative_scan
-    return wanted
 
 
 class PostgresNoteIndex:
@@ -302,7 +290,8 @@ class PostgresNoteIndex:
         # `GraphRetriever` always passes a `within`, so the scoped plan is the only one production
         # takes. Two knobs now trade latency back for recall on exactly this statement —
         # `settings.hnsw_ef_search` and `settings.hnsw_iterative_scan`, applied per query by
-        # `_apply_recall_settings` below. Both default to leaving the server alone, because the
+        # `db.apply_vector_recall_settings` (shared with the document index, whose dense path is
+        # where the residual actually is). Both default to leaving the server alone, because the
         # measured cause of the large shortfalls was stale planner statistics rather than ANN
         # recall (13/20 and 20/20 queries short before `ANALYZE`, 0/20 after) and these address
         # only what is left after it.
@@ -329,16 +318,16 @@ class PostgresNoteIndex:
             f"ORDER BY embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, note_id"
         )
-        # **Match any term; rank the notes matching every term above the rest.** One boolean
-        # semantics, stated here and in `InMemoryNoteIndex.search_lexical`, because the two used to
-        # disagree: this statement was `websearch_to_tsquery` alone, which ANDs, while the in-memory
-        # reference scored any note sharing a single token. Measured on a 15,000-note corpus, four
-        # stems ("amide coupling solvent screen"): the AND form matched **0 rows** while the widened
-        # form returned the complete matches first — so an ordinary multi-word question retrieved
-        # on the dense leg alone in production, the lexical leg contributed nothing, and the rank
-        # fusion the hybrid mode rests on ran one-legged, while the unit tests passed on the memory
-        # OR. A test that cannot see the semantics of the backend it stands in for is not a
-        # reference.
+        # **Match any term; rank the notes matching every term above the rest; honour a `-term`
+        # exclusion.** One boolean semantics, built once in `chemclaw.core.fulltext` and stated in
+        # `InMemoryNoteIndex.search_lexical`, because the two used to disagree: this statement was
+        # `websearch_to_tsquery` alone, which ANDs, while the in-memory reference scored any note
+        # sharing a single token. Measured on a 15,000-note corpus, four stems ("amide coupling
+        # solvent screen"): the AND form matched **0 rows** while the widened form returned the
+        # complete matches first — so an ordinary multi-word question retrieved on the dense leg
+        # alone in production, the lexical leg contributed nothing, and the rank fusion the hybrid
+        # mode rests on ran one-legged, while the unit tests passed on the memory OR. A test that
+        # cannot see the semantics of the backend it stands in for is not a reference.
         #
         # This is the rule `GraphRetriever` already states for the same corpus (D-138: every term,
         # widening to any term rather than answering "nothing known", coverage ordering the result),
@@ -347,11 +336,12 @@ class PostgresNoteIndex:
         # widened query already ranks a full-coverage note above a partial one, and the explicit
         # `lexeme @@ all_terms` sort key makes that ordering a guarantee instead of a tendency.
         #
-        # The widened query is built from Postgres's own lexemes (`tsvector_to_array` over the same
-        # `to_tsvector`), not from Python tokens: it must OR exactly the stems the AND form would
-        # have required, including this configuration's stemming and stop-word list.
-        # `quote_literal` is what makes an arbitrary chemist's query safe to splice into a
-        # `tsquery` — a lexeme may contain any character the parser emitted.
+        # **The widening is over the parsed query's clauses, not over the query's lexemes.** This
+        # comment used to claim the widened form "must OR exactly the stems the AND form would have
+        # required" — and that claim was false for negation, which is the one place the two differ:
+        # `to_tsvector` does not know `-`, so widening its lexemes turned an exclusion into a
+        # positive OR term and `amide coupling -solvent` returned the solvent notes.
+        # `chemclaw.core.fulltext.TSQUERY_TERMS` carries the measurement and the injection argument.
         #
         # Measured cost of widening, same corpus, GIN index used in both (`Bitmap Index Scan`):
         # 3.1 ms matching 5,000 rows (AND) against 12.4 ms matching 10,000 (widened). The scan is
@@ -359,10 +349,7 @@ class PostgresNoteIndex:
         # nothing.
         self._lexical = (
             "SELECT note_id, ts_rank(lexeme, any_terms) AS score "
-            "FROM note_index, websearch_to_tsquery('english', %(q)s) AS all_terms, "
-            "(SELECT array_to_string(ARRAY(SELECT quote_literal(term) FROM "
-            "unnest(tsvector_to_array(to_tsvector('english', %(q)s))) AS term), ' | ')::tsquery"
-            ") AS widened(any_terms) "
+            f"FROM note_index, {TSQUERY_TERMS} "
             f"WHERE lexeme @@ any_terms {scope}"
             "ORDER BY (lexeme @@ all_terms) DESC, score DESC, note_id LIMIT %(k)s"
         )
@@ -379,31 +366,6 @@ class PostgresNoteIndex:
         """
         async with db.connection(self._dsn) as conn:
             yield conn
-
-    @staticmethod
-    async def _apply_recall_settings(cur: psycopg.AsyncCursor[TupleRow]) -> None:
-        """Put the configured pgvector recall parameters on this transaction, if any are set.
-
-        `set_config(name, value, is_local => true)` rather than `SET LOCAL` because the values come
-        from configuration: `SET` accepts no placeholders, so the alternative is interpolating an
-        operator-supplied value into statement text. One `unnest` over two arrays applies however
-        many are set in a single round trip, and nothing is sent at all when none are — which is the
-        default, so the dense path costs exactly what it did before this existed.
-
-        **Transaction-local is the load-bearing half, not an implementation detail.**
-        `db.connection` commits on exit and pooled connections are reused, so a session-level `SET`
-        here would leak one query's widened candidate list onto every later borrower of that
-        connection — including the unscoped searches that never wanted it. `is_local => true` makes
-        the setting die with the transaction that asked for it.
-        """
-        wanted = _hnsw_session_settings()
-        if not wanted:
-            return
-        await cur.execute(
-            "SELECT set_config(name, value, true) "
-            "FROM unnest(%(names)s::text[], %(values)s::text[]) AS parameter(name, value)",
-            {"names": list(wanted), "values": list(wanted.values())},
-        )
 
     async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
         """Insert or replace each record (embedding + tsvector + fingerprint + key) by note id."""
@@ -454,7 +416,7 @@ class PostgresNoteIndex:
             async with conn.cursor() as cur:
                 # Same transaction as the search below, which is the only place they mean anything:
                 # they parametrize the HNSW index scan this statement takes.
-                await self._apply_recall_settings(cur)
+                await db.apply_vector_recall_settings(cur)
                 await cur.execute(self._dense, params)
                 rows = await cur.fetchall()
         return [IndexHit(note_id=r[0], score=float(r[1])) for r in rows]

@@ -105,12 +105,17 @@ class RetrievalSettings(BaseSettings):
     # ── pgvector HNSW recall knobs ────────────────────────────────────────────────────────────
     # Applied as *transaction-local* Postgres settings on the connection running a dense query, and
     # only there: the lexical leg's `ts_rank` over a GIN index is exact and has no such parameter,
-    # and an upsert is not a search. `chemclaw.retrieval.vector_index` is where they are read.
+    # and an upsert is not a search. `chemclaw.core.db.apply_vector_recall_settings` is where they
+    # are read, and **both** pgvector dense searches call it — the note index
+    # (`chemclaw.retrieval.vector_index`) and the document index
+    # (`chemclaw.ingest.documents.index`). Both, because the residual described below was measured
+    # on the *document* index, and a knob wired only into the note index would have left the case
+    # that motivated it untouched.
     #
-    # **Why a knob exists at all.** With the HNSW index in use, an eligibility predicate (`within=`)
-    # is a *post* filter over the ef_search candidate list rather than a bound on what the index
-    # scan considers, so a selective scope can leave fewer than `retrieval_top_k` candidates alive
-    # and the search returns short.
+    # **Why a knob exists at all.** With the HNSW index in use, an eligibility predicate (`within=`,
+    # or the document index's `EXISTS` over `document_files`) is a *post* filter over the ef_search
+    # candidate list rather than a bound on what the index scan considers, so a selective scope can
+    # leave fewer than `retrieval_top_k` candidates alive and the search returns short.
     #
     # **Neither of these is the first thing to reach for, and saying so is the point.** The measured
     # cause of the large shortfalls was stale planner statistics, not ANN recall: before `ANALYZE`
@@ -119,6 +124,14 @@ class RetrievalSettings(BaseSettings):
     # load) is the fix for the bulk of it. These two address only that small residual, which is why
     # both default to "leave the server alone" and neither changes a single query until an operator
     # sets it.
+    #
+    # **The document-index residual above did not reproduce when the knob was wired into that path**
+    # (live PostgreSQL 16 / pgvector 0.8.0, 20,000 chunks, `ANALYZE`d): 20 queries × 6 filter
+    # selectivities × 4 combinations of these two settings returned **0 of 480 short**. The plan is
+    # the one the residual needs — an eligibility semi join *above* an HNSW scan, down to a tag
+    # matching 10% of the corpus, below which the planner takes an exact plan instead — so the
+    # hazard is real in shape and unobserved at this size. Reach for these after `ANALYZE` and after
+    # measuring a shortfall you actually have, not on the strength of the number above.
     #
     # `0` means "do not set it" — pgvector's own default (40) stands and no extra round trip is
     # made. The `le` ceiling is *not* pgvector's maximum (1000): above roughly 200–400 the planner's

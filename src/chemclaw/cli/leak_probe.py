@@ -86,9 +86,11 @@ def _positive(value: str) -> int:
 
     `--batch 0` makes `batch = min(args.batch, ...)` zero, so `done` never advances, `while done <
     args.turns` never ends, and every iteration appends another full type histogram: a leak probe
-    that leaks. A negative batch is the same loop walking backwards. `--turns` and `--warmup` count
-    the same quantity and get the same guard — a negative warm-up offsets every turn count in the
-    report, and a run of no turns measures nothing either way.
+    that leaks. A negative batch is the same loop walking backwards, and `--turns 0` drives nothing
+    at all, so there is no series to fit.
+
+    **`--warmup` is not one of these** — it is the one count zero is meaningful for, and it takes
+    `_non_negative` instead.
 
     Deliberately four lines here rather than a shared helper imported from `cli/sync_share.py`,
     which states the same rule about its own pass size: what the two have in common is `int(value)
@@ -98,6 +100,24 @@ def _positive(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _non_negative(value: str) -> int:
+    """The warm-up count, where zero is a run and not a mistake — measuring from a cold process.
+
+    `--warmup 0` asks what the *first* turns cost: the agent pool, every connector's first session,
+    the JWKS and profile caches and the allocator finding its arenas all land inside the fitted
+    series instead of ahead of it. That is a deliberately different measurement, not a degenerate
+    one — `_drive(client, 0)` returns immediately, the first sample is taken at turn 0, and the
+    loop below is bounded by `--turns` exactly as it always is.
+
+    Only a *negative* warm-up is nonsense: it offsets every turn count in the report below zero and
+    makes `span` larger than the turns actually driven, so every per-turn rate comes out too small.
+    """
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("cannot be negative")
     return parsed
 
 
@@ -216,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--turns", type=_positive, default=300, help="total turns to drive")
     parser.add_argument("--batch", type=_positive, default=25, help="turns between samples")
     parser.add_argument(
-        "--warmup", type=_positive, default=25, help="turns before the first sample"
+        "--warmup", type=_non_negative, default=25, help="turns before the first sample (0 = cold)"
     )
     parser.add_argument(
         "--trace", action="store_true", help="also take tracemalloc snapshots (slower)"
@@ -271,7 +291,8 @@ def main(argv: list[str] | None = None) -> int:
     with TestClient(app) as client:
         # The warm-up is not cosmetic. The first turns build the agent pool, open every connector's
         # first session, fill the JWKS and profile caches and let the allocator find its arenas —
-        # all one-time costs that would otherwise be fitted as a slope.
+        # all one-time costs that would otherwise be fitted as a slope. `--warmup 0` opts into
+        # exactly that, which is what a run measuring a cold process wants.
         answered = _drive(client, args.warmup)
         logger.info("warm-up: %d/%d turns answered", answered, args.warmup)
         gc.collect()
