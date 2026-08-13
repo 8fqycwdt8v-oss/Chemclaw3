@@ -1,0 +1,41 @@
+# The `mock-vendor` bundle, as Chemclaw3 reads it.
+#
+# This is a connector Chemclaw3 does **not** run (D-2026-08-09-a-connector-we-do-not-run): the
+# server half lives in `Chemclaw3_mock` (`app/mcp_tools/vendor_server.py`), a companion repo whose
+# own README documents wiring an HPC mock and two ELN data sources into a Chemclaw3 checkout but
+# ships no `connector.yaml` for this MCP tool — "the manifest belongs on the serving side," which
+# for the four-repo e2e harness is here. Drop this directory onto `CHEMCLAW_CONNECTORS_DIR` and the
+# capability appears with no core edit, same as `props`/`rxnpredict` in `Chemclaw3-mcp/manifests/`.
+#
+# The URL below is the loopback dev default `Chemclaw3_mock/start-mcp.sh` binds
+# (`MOCK_MCP_VENDOR_HOST`/`MOCK_MCP_VENDOR_PORT`, default 0.0.0.0:8091 reached here over loopback).
+name: mock-vendor
+description: >-
+  A mock vendor catalog for building-block sourcing: search a ~20-entry fixture catalog by name or
+  SMILES substring, and look up full pricing/availability for one catalog id. Deterministic and
+  in-memory — no real vendor, no network call beyond this loopback server. Stands in for a real
+  building-block vendor API during the four-repo end-to-end pass (D-2026-08-09-a-connector-we-do-not-run).
+
+endpoint:
+  transport: http
+  url: http://127.0.0.1:8091/mcp
+  # No health_url: `vendor_server.py` is a bare `FastMCP(...).run(transport="streamable-http")`,
+  # not `mcp_server_kit.connector_app` (which is what gives props/rxnpredict their /healthz) — it
+  # exposes no REST route at all, so a health_url here would 404 and, under
+  # CHEMCLAW_CONNECTORS_REQUIRED=true, hard-fail the front door's startup on a connector that was
+  # actually fine. HttpEndpoint's own docstring names this exact case: omitting health_url is the
+  # honest "unprobed" rather than a guessed path producing a false alarm.
+  request_timeout: 15
+  # `vendor_server.py` runs no bearer check at all (see its module docstring), and the URL above is
+  # loopback, so `HttpEndpoint`'s "a networked endpoint carries a credential" rule does not fire.
+  # `mode: bearer` here would just mean Chemclaw3 sends a header nothing on the other side reads.
+  auth:
+    mode: none
+  tools:
+    - search_building_blocks
+    - get_price
+  # Both tools are lookups against an in-memory fixture: no store, no write, no effect the plan
+  # gate needs to hold — same classification `props` gives its six lookup tools.
+  read_only:
+    - search_building_blocks
+    - get_price

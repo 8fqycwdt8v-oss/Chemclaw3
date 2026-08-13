@@ -285,6 +285,15 @@ ledger listing exactly the files beside it, in record order.
   have their own context and tools). One focused task per subagent. For hard problems, throw
   more compute at them by fanning out across several subagents.
 
+## Local live/e2e credentials
+
+Some Claude Code Remote environments for this repo carry a working Anthropic credential for the
+live lane (`infra/live/`, `infra/live/e2e-full-stack/`) as an environment variable literally named
+`API-KEY` — hyphenated, so it is not `$`-referenceable in bash and has to be read with
+`printenv 'API-KEY'`. Where present, map it to `ANTHROPIC_API_KEY` before starting the front door;
+`infra/live/e2e-full-stack/up.sh` does this automatically. Never print or commit the value itself —
+this note records where to look, not what it is, and it may not exist in every environment.
+
 ## Governance
 
 Treat this file like code: version it, review changes in a PR, and re-test it in a fresh
