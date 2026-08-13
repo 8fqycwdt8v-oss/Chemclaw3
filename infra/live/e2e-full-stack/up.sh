@@ -166,6 +166,14 @@ up() {
   log "bringing up infra (Postgres/pgvector + Temporal + note repo)"
   bash "$REPO_ROOT/infra/live/bootstrap.sh" up
 
+  # bootstrap.sh's own last line says "Next: make db-migrate && make live-up" — a step that has
+  # been missed by hand before (this script's own first live run hit "relation session_owners
+  # does not exist" from skipping it). Both commands are idempotent, so running them
+  # unconditionally on every `up` is correct rather than merely convenient.
+  log "applying database migrations"
+  ( cd "$REPO_ROOT" && uv run python -m chemclaw.core.migrate \
+      && uv run python -m chemclaw.agent.message_migration )
+
   # The env this backend's front door and workers need — composed once, here, and exported before
   # infra/live/processes.sh runs so it inherits every one of these (it only sets defaults for the
   # keys it already knows about; none of the keys below are among them).
