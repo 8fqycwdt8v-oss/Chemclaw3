@@ -1,10 +1,15 @@
-"""The pgvector HNSW recall knobs on the dense note search — off by default, transaction-local.
+"""The pgvector HNSW recall knobs on the dense searches — off by default, transaction-local.
 
-Two halves, for the two things that can be wrong with a knob. Offline: what the configuration
+Three halves, for the three things that can be wrong with a knob. Offline: what the configuration
 resolves to, including that the default resolves to *nothing* (no statement, no extra round trip,
 and — because pgvector reserves the `hnsw.` prefix — nothing a pre-0.8 server would reject).
 Server-backed: that the parameters actually land on the transaction running the search and are gone
 again when it commits, which is the property that makes them safe under a shared connection pool.
+And **that every dense search reads them at all** — which is where the knob was inert: it was
+applied inside `PostgresNoteIndex.search_dense` only, while the residual
+`settings.hnsw_ef_search` cites as its reason lives on the *document* index, whose dense path never
+issued the statement. `test_the_document_dense_path_runs_under_the_configured_parameters` is that
+gap, counted rather than asserted.
 
 The server half needs a real pgvector, so it skips in the offline sandbox exactly as every other
 Postgres-backed test here does.
@@ -12,17 +17,21 @@ Postgres-backed test here does.
 
 import asyncio
 
+import psycopg
 import pytest
 from pydantic import ValidationError
 
 from chemclaw.core import db
 from chemclaw.core.config import Settings, settings
+from chemclaw.core.db import vector_recall_settings
 from chemclaw.core.embeddings import embed_texts, embedding_config_key
-from chemclaw.retrieval.vector_index import (
-    NoteRecord,
-    PostgresNoteIndex,
-    _hnsw_session_settings,
+from chemclaw.ingest.documents.index import (
+    ChunkRecord,
+    DocumentFilter,
+    FileRecord,
+    PostgresDocumentIndex,
 )
+from chemclaw.retrieval.vector_index import NoteRecord, PostgresNoteIndex
 from tests.pg import migrated_db_or_skip
 
 # pgvector's own default `ef_search`. Asserted rather than read back from the server so the test
@@ -41,20 +50,20 @@ def test_the_recall_knobs_are_off_by_default() -> None:
     """
     assert settings.hnsw_ef_search == 0
     assert settings.hnsw_iterative_scan == "off"
-    assert _hnsw_session_settings() == {}
+    assert vector_recall_settings() == {}
 
 
 def test_each_knob_is_emitted_only_when_it_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each configured knob contributes its parameter; the unset one contributes nothing."""
     monkeypatch.setattr(settings, "hnsw_ef_search", 200)
-    assert _hnsw_session_settings() == {"hnsw.ef_search": "200"}
+    assert vector_recall_settings() == {"hnsw.ef_search": "200"}
 
     monkeypatch.setattr(settings, "hnsw_ef_search", 0)
     monkeypatch.setattr(settings, "hnsw_iterative_scan", "relaxed_order")
-    assert _hnsw_session_settings() == {"hnsw.iterative_scan": "relaxed_order"}
+    assert vector_recall_settings() == {"hnsw.iterative_scan": "relaxed_order"}
 
     monkeypatch.setattr(settings, "hnsw_ef_search", 100)
-    assert _hnsw_session_settings() == {
+    assert vector_recall_settings() == {
         "hnsw.ef_search": "100",
         "hnsw.iterative_scan": "relaxed_order",
     }
@@ -118,7 +127,7 @@ def test_recall_parameters_are_transaction_local_on_a_shared_connection(
                 await conn.execute("SELECT '[1,0]'::vector <=> '[0,1]'::vector")
             async with db.connection(settings.postgres_dsn) as conn:
                 async with conn.cursor() as cur:
-                    await PostgresNoteIndex._apply_recall_settings(cur)
+                    await db.apply_vector_recall_settings(cur)
                     await cur.execute(
                         "SELECT current_setting('hnsw.ef_search'), "
                         "current_setting('hnsw.iterative_scan'), pg_backend_pid()"
@@ -174,5 +183,78 @@ def test_dense_search_runs_under_the_configured_parameters(
         # candidate list, so this is the query that can come back short.
         scoped = await index.search_dense(query, top_k=1, within={"rxn-2"})
         assert [h.note_id for h in scoped] == ["rxn-2"]
+
+    asyncio.run(_run())
+
+
+def test_the_document_dense_path_runs_under_the_configured_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The document index's dense leg issues the recall statement; its lexical leg does not.
+
+    **Counted, because the defect this pins was an omission and an omission has no wrong answer.**
+    Both knobs were applied inside `PostgresNoteIndex.search_dense` alone, so the document index —
+    the path `settings.hnsw_ef_search`'s own documentation names as the reason the knobs exist —
+    ran every dense search under pgvector's defaults, and every possible assertion about its *hits*
+    passed. What separates "wired up" from "inert" is whether the statement is sent at all, so that
+    is what is counted: one on the dense leg, none on the lexical leg (whose `ts_rank` over a GIN
+    index is exact and has no such parameter), and none anywhere when the knobs are off.
+    """
+    issued: list[str] = []
+    real_execute = psycopg.AsyncCursor.execute
+
+    async def _spy(self, query, params=None, **kwargs):  # type: ignore[no-untyped-def]
+        issued.append(str(query))
+        return await real_execute(self, query, params, **kwargs)
+
+    monkeypatch.setattr(psycopg.AsyncCursor, "execute", _spy)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_chunks, document_files")
+            await conn.commit()
+
+        index = PostgresDocumentIndex()
+        (vector,) = await asyncio.to_thread(embed_texts, ["amide coupling with HATU"])
+        await index.upsert(
+            [
+                FileRecord(
+                    path="a.txt",
+                    source="share",
+                    doc_id="doc-a",
+                    fingerprint="1:1",
+                    chunking_key="chars-400",
+                )
+            ],
+            [
+                ChunkRecord(
+                    doc_id="doc-a",
+                    chunking_key="chars-400",
+                    ordinal=0,
+                    content="amide coupling with HATU",
+                    embedding=vector,
+                )
+            ],
+            embedding_config_key(),
+        )
+
+        def recall_statements() -> int:
+            return sum(1 for statement in issued if "set_config" in statement)
+
+        # Off (the shipped default): not one extra round trip, on either leg.
+        issued.clear()
+        assert await index.search_dense("share", vector, 5, DocumentFilter())
+        assert await index.search_lexical("share", "amide coupling", 5, DocumentFilter())
+        assert recall_statements() == 0
+
+        monkeypatch.setattr(settings, "hnsw_ef_search", 200)
+        monkeypatch.setattr(settings, "hnsw_iterative_scan", "strict_order")
+        issued.clear()
+        assert await index.search_dense("share", vector, 5, DocumentFilter())
+        assert recall_statements() == 1, "the document dense path never read the knobs"
+        issued.clear()
+        assert await index.search_lexical("share", "amide coupling", 5, DocumentFilter())
+        assert recall_statements() == 0, "an exact GIN scan has no recall parameter to set"
 
     asyncio.run(_run())

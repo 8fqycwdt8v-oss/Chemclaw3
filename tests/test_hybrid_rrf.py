@@ -7,6 +7,15 @@ mismatch: an ordinary multi-word question matched nothing in production, so the 
 contributed no chunks and Reciprocal Rank Fusion ran one-legged, while every test passed on the
 in-memory OR.
 
+**Widening a query is not the same as widening its lexemes, and the first fix confused the two.**
+The widened form was built by ORing `tsvector_to_array(to_tsvector(q))` — every stem in the query
+text — and `to_tsvector` does not know `websearch_to_tsquery`'s `-term` exclusion syntax. So a
+`-solvent` exclusion came back as a positive OR term and a chemist who typed it got the solvent
+notes: measured on the corpus below, `amide coupling -solvent` returned all four notes including
+`solvent-guide`, whose whole body is "solvent selection guide". `test_a_negated_term_is_excluded_*`
+is what would have caught it, and it is asserted on both backends because a reference that reads an
+exclusion as a request is the same defect in the mirror.
+
 **RRF is not the fix for that, and this file is where the distinction is made checkable.** Fusing by
 rank is what lets a cosine and a `ts_rank` be combined without agreeing on a score scale, and it is
 already how `hybrid` mode merges the sources — but a leg that returns *no rows* contributes nothing
@@ -44,6 +53,11 @@ _CORPUS = {
     "unrelated": "distillation reflux ratio study",
 }
 _QUERY = "amide coupling solvent screen"
+# The same question with the solvent notes taken out of it. The corpus needs nothing added to make
+# this discriminating: two of its notes carry `solvent` and must drop out, `partial-amide` carries
+# both wanted stems and neither excluded one, and `unrelated` carries nothing wanted — so the
+# answer is exactly one note, while the shipped widened form returned three.
+_EXCLUDING_QUERY = "amide coupling -solvent"
 
 
 async def _load(index: NoteIndex, corpus: dict[str, str] | None = None) -> None:
@@ -114,6 +128,79 @@ def test_postgres_lexical_states_the_same_boolean_rule_as_the_reference() -> Non
         assert durable_hits[0] == "complete"
         assert set(durable_hits) == set(reference_hits)
         assert "unrelated" not in durable_hits
+
+    asyncio.run(_run())
+
+
+def test_a_negated_term_is_excluded_by_the_reference() -> None:
+    """`-solvent` removes the solvent notes instead of asking for them.
+
+    The in-memory half of the regression: the reference tokenized the query flat, so the `-` was
+    punctuation and `solvent` was a term the chemist had *asked* for. A reference that reads an
+    exclusion backwards cannot witness the durable backend reading it backwards either.
+    """
+
+    async def _run() -> None:
+        index = InMemoryNoteIndex()
+        await _load(index)
+        hits = [h.note_id for h in await index.search_lexical(_EXCLUDING_QUERY, top_k=5)]
+        assert hits == ["partial-amide"]
+
+    asyncio.run(_run())
+
+
+def test_a_negated_term_is_excluded_by_the_durable_backend() -> None:
+    """The live regression, on the backend that shipped it: `-solvent` returned the solvent notes.
+
+    Measured on this corpus against PostgreSQL 16 / pgvector 0.8.0 before the fix — the widened form
+    was `'amid' | 'coupl' | 'solvent'`, so `complete` and `partial-solvent` came back as hits and a
+    chemist excluding solvent got solvent notes. It is now `( 'amid' | 'coupl' ) & !'solvent'`.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE note_index")
+            await conn.commit()
+
+        durable = PostgresNoteIndex()
+        reference = InMemoryNoteIndex()
+        await _load(durable)
+        await _load(reference)
+        hits = [h.note_id for h in await durable.search_lexical(_EXCLUDING_QUERY, top_k=5)]
+        assert hits == ["partial-amide"]
+        assert hits == [h.note_id for h in await reference.search_lexical(_EXCLUDING_QUERY, 5)]
+        # Widening is what the exclusion must not undo: the same question without the `-` still
+        # returns every note sharing any term, which is the property PR #173 was written for.
+        widened = await durable.search_lexical("amide coupling solvent", top_k=5)
+        assert {h.note_id for h in widened} == {"complete", "partial-solvent", "partial-amide"}
+
+    asyncio.run(_run())
+
+
+def test_a_quoted_phrase_survives_the_widening() -> None:
+    """A phrase is one clause, so splitting the parsed query on ` & ` leaves it whole.
+
+    The widening turns the parsed query's top-level conjunction into a disjunction, and the one way
+    that could go wrong quietly is by taking a `'a' <-> 'b'` phrase apart into two independent
+    terms — which would silently answer a different question rather than fail.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE note_index")
+            await conn.commit()
+
+        durable = PostgresNoteIndex()
+        await _load(durable)
+        # "coupling amide" is present as two words in no note in that order, so a phrase match is
+        # empty while the same two words unquoted match two notes.
+        assert await durable.search_lexical('"coupling amide"', top_k=5) == []
+        assert {h.note_id for h in await durable.search_lexical("coupling amide", top_k=5)} == {
+            "complete",
+            "partial-amide",
+        }
 
     asyncio.run(_run())
 

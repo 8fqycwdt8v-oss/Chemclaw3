@@ -1153,7 +1153,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
 - [x] **`hnsw.ef_search` is a setting now, and `ANALYZE` is documented as the thing to reach for
       first — closed** — [S]. `hnsw_ef_search` (default `0`) and `hnsw_iterative_scan` (default
       `off`) ship in `core/config/retrieval.py` and are applied **transaction-locally** on the dense
-      note path (`retrieval/vector_index.py::_apply_recall_settings`, via
+      note path and the dense document path (`core/db.py::apply_vector_recall_settings`, via
       `set_config(name, value, is_local => true)` — a session-level `SET` would leak one query's
       candidate list onto every later borrower of a pooled connection). Both defaults emit **no
       statement at all**, so today's behaviour is unchanged byte-for-byte until an operator opts in,

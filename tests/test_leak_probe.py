@@ -337,39 +337,79 @@ def test_a_resolvable_ramp_is_reported_as_a_leak() -> None:
 # --- the run's own arguments ---------------------------------------------------------------------
 
 
+class _Started(Exception):
+    """Raised in place of `main`'s first post-parse statement, so parsing can be observed alone."""
+
+
+@pytest.fixture
+def parse_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace `logging.basicConfig` — `main`'s first statement after `parse_args` — with a marker.
+
+    That one line is the boundary every test below is about: reaching it means argparse accepted
+    the arguments, and not reaching it means argparse refused them. Standing the real run up
+    instead would need the whole live lane, and a `--batch 0` run would never return at all.
+    """
+    monkeypatch.setattr(logging, "basicConfig", _raise_started)
+
+
+def _raise_started(**_: object) -> None:
+    """Stand in for the first thing `main` does once its arguments are accepted."""
+    raise _Started
+
+
 @pytest.mark.parametrize("value", ["0", "-5"])
-@pytest.mark.parametrize("flag", ["--batch", "--turns", "--warmup"])
+@pytest.mark.parametrize("flag", ["--batch", "--turns"])
+@pytest.mark.usefixtures("parse_only")
 def test_a_run_that_could_never_end_is_refused_before_anything_starts(
     flag: str,
     value: str,
     capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`--batch 0` was an unbounded loop inside the tool built to account for unbounded growth.
 
     `batch = min(args.batch, args.turns - done)` is zero, so `done` never advances, `while done <
     args.turns` never ends, and each iteration appends another full type histogram — every live
     object in the process, by name, forever. A negative batch walks `done` backwards into the same
-    loop. `--turns` and `--warmup` count the same quantity, and a negative warm-up shifts every
-    turn count in the report below zero.
+    loop. `--turns` is the bound on that loop, so a zero or negative one drives nothing and leaves
+    a single sample, which `report` can only refuse to fit.
 
-    The stand-in `basicConfig` — the one `main` calls, first statement after `parse_args` — pins
-    *where* the refusal happens: this fails in milliseconds if the guard is ever removed, instead
-    of standing the whole front door up inside the test suite, or not returning at all.
+    These two flags only. `--warmup` counts turns as well and is *not* one of them — see below.
     """
-
-    def _started(**_: object) -> None:
-        """Whatever `main` does after parsing, this argument should never have got there."""
-        pytest.fail(f"{flag} {value} started a run instead of being refused at parse time")
-
-    monkeypatch.setattr(logging, "basicConfig", _started)
-
     with pytest.raises(SystemExit) as exit_code:
         cli.main([flag, value])
 
     assert exit_code.value.code == 2
     assert "must be at least 1" in capsys.readouterr().err
     assert cli._positive("25") == 25
+
+
+@pytest.mark.usefixtures("parse_only")
+def test_a_cold_start_is_a_run_the_probe_accepts() -> None:
+    """`--warmup 0` measures from a cold process, which is a question worth asking.
+
+    It is what puts the one-time costs the warm-up exists to exclude — the agent pool, each
+    connector's first session, the caches, the allocator's arenas — *inside* the fitted series
+    instead of ahead of it. Nothing about it is unbounded: `_drive(client, 0)` returns immediately,
+    the first sample is taken at turn 0, and `--turns` bounds the loop exactly as always.
+    """
+    assert cli._non_negative("0") == 0
+
+    with pytest.raises(_Started):
+        cli.main(["--warmup", "0"])
+
+
+@pytest.mark.usefixtures("parse_only")
+def test_a_warm_up_below_zero_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    """The only warm-up that is nonsense: it puts every turn count in the report below zero.
+
+    It also inflates `span`, so every per-turn rate — the column a leak hunt is read off — comes
+    out smaller than it is.
+    """
+    with pytest.raises(SystemExit) as exit_code:
+        cli.main(["--warmup", "-5"])
+
+    assert exit_code.value.code == 2
+    assert "cannot be negative" in capsys.readouterr().err
 
 
 def _vm_rss_kb() -> float:

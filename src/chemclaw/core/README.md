@@ -16,6 +16,14 @@ identity (`identity_context`), its session id
 `chemclaw.agent` until R2 and were the single import that made three sibling edges — including one
 whole `kg <-> agent` cycle — exist at all.
 
+`fulltext` is here for a narrower version of the same reason: it holds the *one* lexical boolean
+rule — the widened tsquery both durable indexes join against, and the tokenizer both their offline
+references match with. The two indexes live in different packages (`retrieval.vector_index`,
+`ingest.documents.index`), `core` is the only package both already depend on, and every time that
+rule has been written twice the two copies have disagreed silently. `db` holds the dense half of
+the same story: `apply_vector_recall_settings` is the pgvector recall parameters *both* dense
+searches run under.
+
 `metrics` is the process-wide Prometheus registry, here for the same reason: a scrape targets a
 *process*, and every process in the system has something to count. **It is not the eval layer's
 metrics.** `evals/metric.py` is the `@metric` decorator and registry for scored eval criteria and

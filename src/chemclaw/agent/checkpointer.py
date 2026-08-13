@@ -27,19 +27,48 @@ which is what a checkpoint already is.
 `asyncio.get_running_loop()` and keeps it, so the saver cannot outlive or precede the loop it was
 built in — hence the async factory rather than a module-level instance.
 
-**Every checkpoint carries the state schema it was written under, and a foreign one is refused by
-name.** LangGraph restores a checkpoint's `channel_values` into channels built from the *current*
-graph's state schema, and it has no migration system: a channel the checkpoint never held simply
-stays empty, so the first node that reads it raises a bare `KeyError` naming a field. Measured on
-this tree — a thread checkpointed under a state declaring `plan`, resumed under one declaring
-`todos`, fails with exactly `KeyError: 'todos'`, from inside the node, with nothing in it naming the
-thread, the schema change or a remedy. That is the whole failure mode: a redeploy that moves a state
-field strands every session that already has turn state, and the only evidence is a key name.
+**Every checkpoint records the state channels this repository declared when it was written, and a
+thread that never held one this build declares is refused by name.** LangGraph restores a
+checkpoint's `channel_values` into channels built from the *current* graph's state schema, and it
+has no migration system: a channel the checkpoint never held simply stays empty, so a node that
+indexes it raises a bare `KeyError` naming the field — from inside the node, with nothing in it
+naming the thread, the schema change or a remedy.
 
-`SchemaStampedSaver` closes it in the two places the shape is available at all: it writes
-`STATE_SCHEMA_VERSION` into every checkpoint's metadata, and on resume it refuses a checkpoint
-stamped with a *different* one, raising `CheckpointSchemaMismatch` with the thread, both versions
-and the remedy in the message.
+**The direction that fails is not the intuitive one, so it was measured**
+(`tests/test_checkpointer_schema.py` runs each of these):
+
+- What raises is a channel **this build declares that the checkpoint does not hold** — an *added*
+  name. A rename is an addition plus a removal, and it is the addition half that raises.
+- A *removed* channel is harmless: nothing declares it any more, so nothing indexes it. Measured
+  `OK` on resume, both at a turn boundary and mid-turn.
+- It only bites where the resumed run does not re-run the node that writes the channel — a turn
+  resumed *inside* the graph, which is what `interrupt()` produces. At a turn boundary the run
+  starts at `START`, so a node indexing an unwritten channel fails identically on a brand-new
+  thread: `KeyError: 'todos'` measured on the resumed thread *and* on a fresh one, which means the
+  checkpoint contributed nothing to that one.
+- `NotRequired` is not a filter this can use: measured `KeyError: 'extra'` for a `NotRequired`
+  channel a resumed node indexes, and `OK` for the same channel read with `.get()`. The declaration
+  says how the *input* may be spelled, not how a node reads the channel.
+
+`SchemaStampedSaver` writes `FIRST_PARTY_CHANNELS` into every checkpoint's metadata, and on resume
+refuses a checkpoint whose stamp is missing one of them, raising `CheckpointSchemaMismatch` naming
+the thread, the missing channels and the remedy.
+
+**Only the channels this repository declares, and that is the whole point of the exclusion.**
+`ChemclawState` extends langchain's `PlanningState`, from which `messages`, `jump_to`,
+`structured_response` and `todos` arrive. A stamp over all six would move on any langchain minor
+bump that adds or renames one of *its* channels, refusing every in-flight thread in the fleet on a
+dependency change nobody associated with turn state — the guard causing the exact harm it exists to
+prevent. Middleware channels are outside it for a second reason: `create_agent` merges those in and
+this module cannot see them without importing the agent builder that imports it.
+
+**What is not caught, and where the refusal is deliberately wider than the failure.** Not caught: a
+same-name *type* change (a type repr is not stable enough to hang a session's resumability on); an
+upstream or middleware channel that moves; a first-party channel that is only *removed* (measured
+harmless above). Wider than the failure: an added channel is refused even when every reader of it
+uses `.get()` and the resume would have worked, because the stamp holds names and cannot see how a
+node reads one. That over-refusal lands on a change this repository is itself deploying — which it
+can drain sessions for, and which the paragraph below says it should — never on a dependency's.
 
 **Refusing rather than silently starting the thread over**, which is the same call
 `agent/plan_state.py` makes for an unreadable plan and for the same reason: the two are
@@ -50,18 +79,21 @@ answer. Nothing is destroyed by the refusal: the checkpoint rows stay until `dur
 prunes them, and the transcript (`session_messages`) and the audit chain are separate stores that
 the checkpointer never held (D-2026-08-10 §3). What the chemist gets is `api/runner.py`'s ordinary
 turn-failure event — classified `internal` and non-retryable, which is exactly right, because
-retrying cannot move a checkpoint to a different schema — while the log carries this module's own
-ERROR naming the session and both versions.
+retrying cannot give a checkpoint a channel it never held — while the log carries this module's own
+ERROR naming the session, the missing channels and the ones the thread does hold.
 
-**An *unstamped* checkpoint is accepted.** Every checkpoint written before this guard existed has no
-stamp, and refusing those would brick every live session at the deploy that introduces the guard —
-the exact outcome the guard exists to prevent, caused by the guard. They resume as they always did,
-and the first write of each thread stamps it from then on.
+**An *unstamped* checkpoint is accepted, and so is a stamp this build cannot read.** Every
+checkpoint written before this guard existed has no stamp, and refusing those would brick every
+live session at the deploy that introduces the guard — the exact outcome the guard exists to
+prevent, caused by the guard. They resume as they always did, and the first write of each thread
+stamps it from then on. The same rule covers a *rolling* deploy in both directions: the stamp lives
+under its own metadata key, so a build running the earlier schema-hash version of this guard reads
+these checkpoints as unstamped rather than as a mismatch, and this build reads that version's
+checkpoints the same way.
 """
 
-import hashlib
 import logging
-from typing import Any, cast, get_type_hints
+from typing import Any, cast, get_origin, get_type_hints
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -91,70 +123,83 @@ _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 # deliberately absent from the *erasure* half — it holds schema versions, not anyone's conversation.
 CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
 
-# The metadata key each checkpoint's state-schema stamp is written under. Metadata is a plain jsonb
+# The metadata key each checkpoint's channel stamp is written under. Metadata is a plain jsonb
 # column the saver round-trips untouched, so this needs no migration and no table of its own — and
 # it travels *with* the checkpoint, which is the only thing that makes the check possible on a
 # thread whose writer was a different build.
-STATE_SCHEMA_KEY = "chemclaw_state_schema"
+#
+# Its own key rather than the `chemclaw_state_schema` one the first version of this guard used,
+# because the *value* changed shape (a schema hash then, a channel list now) and a rolling deploy
+# runs both builds at once. Under one key each build would read the other's value as a mismatch and
+# refuse the thread; under two, each reads the other's checkpoints as unstamped and resumes them.
+STATE_CHANNELS_KEY = "chemclaw_state_channels"
 
 
-def _state_schema_version(state: Any) -> str:
-    """Fingerprint a graph state's declared channels — the thing an old checkpoint is read into.
+def _first_party_channels(state: Any) -> tuple[str, ...]:
+    """The channel names `state` declares itself, with those of the base it extends left out.
 
     **Derived, not declared, because a version somebody has to remember to bump is a version that
-    silently stops being one.** The whole failure this guards is invisible at the moment it is
-    introduced: the change looks like an ordinary field rename and the tests pass, because nothing
-    in a unit test has a checkpoint from the previous build. A constant in this file would be
-    correct exactly as often as it was remembered, and the deploy where it was forgotten is the
-    deploy that needs it.
+    silently stops being one.** The failure this guards is invisible at the moment it is
+    introduced: the change looks like an ordinary field rename and every test passes, because
+    nothing in a unit test has a checkpoint from the previous build.
 
-    **The channel *names*, sorted, and nothing else.** A name is what a node indexes state by, so a
-    name that appears, disappears or moves is precisely what turns into a `KeyError` on resume; a
-    same-name type change is not caught, and that is stated rather than fixed because a type repr
-    is not stable enough to hang a session's resumability on. Inherited fields count — this reads
-    `ChemclawState` *and* the `PlanningState`/`AgentState` it extends — so a dependency bump that
-    reshapes the upstream agent state moves the fingerprint too, which is the case no hand-written
-    constant would ever have covered.
+    **Names only.** A name is what a node indexes state by, so a name that appears is precisely what
+    becomes a `KeyError` on a mid-turn resume. A same-name type change is not covered, and that is
+    stated rather than fixed because a type repr is not stable enough to hang a session's
+    resumability on.
 
-    Middleware that contributes its own state channels is outside this: `create_agent` merges those
-    in and this module cannot see them without importing the agent builder that imports it. So the
-    fingerprint is a strong signal, not a proof of compatibility — it catches the schema this
-    repository declares, and it never fires falsely on one it does not.
+    **The base's channels are subtracted, and that is the reason this function exists rather than a
+    one-line `get_type_hints`.** A `TypedDict` merges its bases' annotations into its own
+    `__annotations__` (measured on 3.11: `ChemclawState.__annotations__` reports all six channels,
+    four of them langchain's), so "what this repository declares" is not directly readable and has
+    to be computed by difference. `__orig_bases__` is where the pre-merge base list survives. It is
+    only populated when a base is generic — true of `PlanningState`, which extends
+    `AgentState[ResponseT]` — so the subtraction can silently become a no-op if that ever changes;
+    `tests/test_checkpointer_schema.py` asserts the result stays disjoint from the upstream base's
+    channels, which turns that into a red build rather than a fleet-wide refusal.
 
     Args:
-        state: The graph state class to fingerprint — `ChemclawState` in this process, and a
-            stand-in in the test that proves the fingerprint tracks a schema in both directions.
+        state: The graph state class to read — `ChemclawState` in this process, and stand-in
+            classes in the tests that prove what the derivation includes and excludes.
 
     Returns:
-        Twelve hex characters identifying that state schema. Short because it is written on every
-        checkpoint row and it identifies a schema rather than authenticating one.
+        The names this class adds to its base, sorted, so declaration order cannot move the stamp.
     """
-    channels = ",".join(sorted(get_type_hints(state, include_extras=True)))
-    return hashlib.sha256(channels.encode()).hexdigest()[:12]
+    inherited: set[str] = set()
+    for base in getattr(state, "__orig_bases__", ()):
+        # `__orig_bases__` holds the written base, so a generic one arrives subscripted
+        # (`AgentState[ResponseT]`); `get_type_hints` needs the class under it.
+        origin = get_origin(base) or base
+        # `__required_keys__` is what makes a class a `TypedDict` rather than `Generic` or `dict`,
+        # both of which also appear in these lists and neither of which declares channels.
+        if isinstance(origin, type) and hasattr(origin, "__required_keys__"):
+            inherited |= set(get_type_hints(origin, include_extras=True))
+    return tuple(sorted(set(get_type_hints(state, include_extras=True)) - inherited))
 
 
-STATE_SCHEMA_VERSION = _state_schema_version(ChemclawState)
+FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)
 
 
 class CheckpointSchemaMismatch(RuntimeError):
-    """A thread's turn state was written under a different graph state schema than this build's.
+    """A thread's turn state never held a state channel this build declares.
 
-    Raised instead of letting the restore proceed to the `KeyError` it would otherwise produce
-    somewhere inside a node. Its own type is the point: a caller can tell "this session predates a
-    schema change" from "the database is down", which is not something a `KeyError` on a field name
+    Raised instead of letting the restore proceed to the `KeyError` a node indexing that channel
+    would otherwise produce. Its own type is the point: a caller can tell "this session predates a
+    state change" from "the database is down", which is not something a `KeyError` on a field name
     supports.
     """
 
 
 class SchemaStampedSaver(AsyncPostgresSaver):
-    """`AsyncPostgresSaver` that records the state schema it writes and refuses a foreign one.
+    """`AsyncPostgresSaver` that records the channels it writes and refuses a thread missing one.
 
     Two overrides, on the write and the resume, because those are the only two points where the
-    schema is knowable and where it matters. `alist` is deliberately not guarded: history reads
-    render checkpoints, they do not restore them into a running graph, and a schema change is not a
-    reason to stop showing what a session did.
+    state schema is knowable and where it matters. `alist` is deliberately not guarded: history
+    reads render checkpoints, they do not restore them into a running graph, and a state change is
+    not a reason to stop showing what a session did.
 
-    The module docstring holds the argument for refusing rather than resuming empty.
+    The module docstring holds what is and is not caught, and the argument for refusing rather than
+    resuming empty.
     """
 
     async def aput(
@@ -164,12 +209,19 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Write the checkpoint with this build's state-schema stamp in its metadata."""
-        stamped = cast(CheckpointMetadata, {**metadata, STATE_SCHEMA_KEY: STATE_SCHEMA_VERSION})
+        """Write the checkpoint with this build's first-party channel names in its metadata."""
+        stamped = cast(
+            CheckpointMetadata, {**metadata, STATE_CHANNELS_KEY: list(FIRST_PARTY_CHANNELS)}
+        )
         return await super().aput(config, checkpoint, stamped, new_versions)
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
-        """Load the checkpoint, refusing one stamped with a different state schema.
+        """Load the checkpoint, refusing one that predates a channel this build declares.
+
+        A stamp that is absent, or that this build cannot read — the schema-hash string the first
+        version of this guard wrote, or anything else that is not a list of names — is treated the
+        same as an unstamped checkpoint and resumed, for the module docstring's reason: refusing it
+        would brick live sessions on the deploy that changed the stamp.
 
         Args:
             config: The `configurable` naming the thread (and optionally the checkpoint) to load.
@@ -178,29 +230,32 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             The stored checkpoint, or `None` when the thread has none.
 
         Raises:
-            CheckpointSchemaMismatch: The stored checkpoint was written under a different state
-                schema, so restoring it would fail inside a node instead of here.
+            CheckpointSchemaMismatch: The stored checkpoint never held a channel this build
+                declares, so restoring it can fail inside a node instead of here.
         """
         stored = await super().aget_tuple(config)
         if stored is None:
             return None
-        stamp = (stored.metadata or {}).get(STATE_SCHEMA_KEY)
-        if stamp is None or stamp == STATE_SCHEMA_VERSION:
+        stamp = (stored.metadata or {}).get(STATE_CHANNELS_KEY)
+        if not isinstance(stamp, list):
             return stored
+        missing = [name for name in FIRST_PARTY_CHANNELS if name not in stamp]
+        if not missing:
+            return stored
+        held = ", ".join(str(name) for name in stamp) or "none"
         thread_id = stored.config.get("configurable", {}).get("thread_id", "")
         logger.error(
-            "refusing turn state for session %s: written under state schema %s, this build "
-            "declares %s",
+            "refusing turn state for session %s: it never held state channel(s) %s; it holds %s",
             thread_id,
-            stamp,
-            STATE_SCHEMA_VERSION,
+            ", ".join(missing),
+            held,
         )
         raise CheckpointSchemaMismatch(
-            f"session {thread_id!r} has turn state written under a different graph state schema "
-            f"(checkpoint {stamp}, this build {STATE_SCHEMA_VERSION}). LangGraph has no migration "
-            "for that, and restoring it raises a bare KeyError from whichever node reads the field "
-            "that moved. Start a new session: this one's transcript and audit trail are unaffected "
-            "and its checkpoints stay until retention prunes them."
+            f"session {thread_id!r} has turn state from before this build declared the state "
+            f"channel(s) {', '.join(missing)} (it holds {held}). LangGraph has no migration for "
+            "that, and a turn resuming mid-graph raises a bare KeyError from whichever node "
+            "indexes one of them. Start a new session: this one's transcript and audit trail are "
+            "unaffected and its checkpoints stay until retention prunes them."
         )
 
 
