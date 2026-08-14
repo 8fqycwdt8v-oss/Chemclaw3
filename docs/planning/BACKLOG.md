@@ -9,15 +9,20 @@ Both ADRs ship the mechanism and defer the *number*, deliberately: the two open 
 measurements, and D-2026-08-12 is the precedent for keeping the measurement and the default-on
 decision in one ADR rather than asserting either here.
 
-- [ ] **Measure whether the reframed spawn prompt actually raises delegation** — [M].
-      `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` argues that
-      D-2026-08-12's 2-of-15 finding does not transfer, because it measured delegating *to reach a
-      capability* and the reframed texts offer isolation, parallelism and independent judgment
-      instead. That argument is untested. Re-run the M12 routing corpus
-      (`data/evals/probes/m12/routing.yaml`) under the new `_SUPERVISOR_PROMPT` /
-      `_TASK_TOOL_DESCRIPTION` and report the rate beside the old one. **If it does not move, the
-      reframing bought nothing** and the honest next step is the invariant inversion that ADR
-      declined, not another prompt.
+- [ ] **Re-measure delegation through the front door — the first attempt did not settle it** — [M].
+      Run live 2026-08-13 on `claude-sonnet-5`, both arms differing only in the two prompt strings:
+      **old 14/15, new 14/15**, same probe (`rt-08`) self-answering in both. Two problems with that
+      number. It shows the reframing bought nothing measurable — recorded against the ADR in
+      `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` — but the old arm
+      was already at ceiling, so the run had no power to detect an improvement either. And 14/15
+      against D-2026-08-12's **2/15** on the same corpus and the same prompts means the harness is
+      not measuring what that ADR measured: this one drove `build_langgraph_agent()` directly, with
+      no front door, no connectors, no history and no session profile, and possibly a different
+      model. Redo it the way M12 did — two configured front doors, connectors open, the model that
+      ADR used — and with repeats per probe, because a throwaway single run of `rt-01` self-answered
+      while both scored arms delegated it. Until then **neither 2/15 nor 14/15 is the deployment's
+      rate**, and no default-on decision can rest on either.
+
 - [ ] **Measure whether the challenge panel finds real defects or over-flags** — [M].
       `challenge_enabled` is off for the reason `agent_teams_enabled` is, and the same instrument
       settles it: probes where the answer is known-wrong (does the panel reach quorum?) and probes

@@ -352,6 +352,32 @@ def test_the_challenger_never_widens_any_shipped_profile(caller: str | None) -> 
     reject_widening(profile, challenger_for(profile))
 
 
+@pytest.mark.parametrize(
+    "caller",
+    [
+        AgentProfile(name="mcp-none", mcp_server_names=frozenset()),
+        AgentProfile(name="mcp-one", mcp_server_names=frozenset({"calc"})),
+        AgentProfile(name="tools-none", tool_names=frozenset()),
+        AgentProfile(
+            name="both", tool_names=frozenset({"find_notes"}), mcp_server_names=frozenset()
+        ),
+    ],
+    ids=["mcp-none", "mcp-one", "tools-none", "both"],
+)
+def test_the_challenger_narrows_both_halves_of_a_surface(caller: AgentProfile) -> None:
+    """Attenuation covers the connector half too, not just the in-process tool list.
+
+    **No shipped profile narrows `mcp_server_names`, which is why this is written by construction.**
+    An earlier fix intersected `tool_names` and left the bundle set at `None` — "inherit every
+    bundle" — while `advertised_tool_names` resolves connector tools *from* that set. Measured: a
+    caller with no bundles was widened by five connector tools, i.e. the fatal `TeamError` was still
+    reachable for the first deployment that narrowed them. The suite could not have caught it from
+    the shipped profiles alone, so the callers here are hand-built to exercise the axis nothing
+    ships yet.
+    """
+    reject_widening(caller, challenger_for(caller))
+
+
 def test_a_caller_holding_none_of_the_challengers_tools_is_not_challenged() -> None:
     """An empty intersection skips the panel instead of running a weaker, costlier verifier.
 

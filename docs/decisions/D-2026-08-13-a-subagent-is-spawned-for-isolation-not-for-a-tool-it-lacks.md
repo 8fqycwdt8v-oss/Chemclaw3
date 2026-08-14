@@ -100,6 +100,42 @@ measurement, not an argument — the M12 routing corpus is the instrument, and a
 belongs to whatever ADR reports that number, exactly as D-2026-08-12 kept the default and the
 measurement in one place.
 
+## Measured — and it does not support the argument above
+
+The corpus was then run, live on `claude-sonnet-5`, both arms differing only in the two prompt
+strings (`/tmp` harness: `build_langgraph_agent()` per probe, `agent_teams_enabled=true`,
+delegation counted by `team.delegations()`).
+
+| arm | delegated |
+|---|---:|
+| old (capability-partition framing) | **14 / 15** |
+| new (spawn-for-isolation framing) | **14 / 15** |
+
+**Two things follow, and the first one is against this ADR.**
+
+*The reframing changed nothing measurable.* Identical rates, and the same single probe (`rt-08`)
+self-answered in both. The argument this ADR is built on — that restoring upstream's reason to spawn
+gives the supervisor a reason the capability framing denied it — is **not evidenced**. It may still
+be true and simply unmeasurable here, because the old arm was already at 14/15 and there was no
+headroom to detect an improvement; a ceiling is not a refutation, but it is not support either.
+
+*The harness does not reproduce D-2026-08-12's baseline, so neither number transfers.* That ADR
+measured **2 of 15** through the front door, with connectors, history and a session profile; this
+ran the compiled agent directly with none of them. A seven-fold gap on the *same corpus and the same
+prompts* means the two setups are not measuring the same thing, and the likeliest candidates are the
+model (this run's `claude-sonnet-5` is not necessarily what that run used) and the missing connector
+surface. Sampling noise is real too: `rt-01` self-answered on a throwaway single run and delegated
+in both scored arms, so one sample per probe is thin.
+
+**What this leaves standing.** The *structural* changes here — surfaces instead of a routing
+partition, the two texts agreeing, the ban on bare `SubAgent` dicts, the delegation tally — are
+sound independent of the rate, and the ban in particular is a security property that no measurement
+bears on. What is not established is the claim that the reframing buys delegation. Nothing in this
+change should be read as having demonstrated that, and `agent_teams_enabled` staying off is now
+better supported than when it was written: a capability whose headline benefit is unevidenced is
+certainly not a default. Re-measuring through the front door, against the same model D-2026-08-12
+used, with repeats per probe, is the open row in `docs/planning/BACKLOG.md`.
+
 ## Result
 
 `make lint type test` green. Tests: `test_agent_team.py` (the two prompts agree; the tally counts a

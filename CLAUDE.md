@@ -69,7 +69,14 @@ for that answer* rather than declared, unconditionally when two or more helpers 
 only when the existing checks flagged it. A quorum sends the critique back for a bounded revision
 round; past the bound the answer ships marked with a durable hold (`durable/answer_review.py`).
 Both ship off (`challenge_enabled`, `agent_teams_enabled`) — whether either helps is a measurement,
-and `docs/planning/BACKLOG.md` carries both.
+and `docs/planning/BACKLOG.md` carries both. **The first such measurement came back against the
+first ADR**: run live on the M12 corpus, the old and new framings delegated **14/15 each**, so the
+reframing bought nothing detectable — though the old arm was already at ceiling, and 14/15 against
+M12's own 2/15 on the same corpus means that harness (no front door, no connectors, no history) was
+not measuring what M12 measured. Neither number is the deployment's rate. What survives the result
+is the structural half — surfaces rather than a routing partition, the two prompts agreeing, the
+delegation tally, and the ban on bare `SubAgent` dicts, which is a security property no measurement
+bears on.
 
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context

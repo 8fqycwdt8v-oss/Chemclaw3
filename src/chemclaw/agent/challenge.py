@@ -85,20 +85,34 @@ def challenger_for(caller: AgentProfile) -> AgentProfile:
         because a guarantee worth having is worth asserting.
     """
     declared = get_profile(CHALLENGER_PROFILE)
-    # `None` means "everything the deployment offers" on both sides, so the intersection of an
-    # unnarrowed challenger with an unnarrowed caller is still unnarrowed.
-    if declared.tool_names is None:
-        return (
-            declared
-            if caller.tool_names is None
-            else declared.model_copy(update={"tool_names": caller.tool_names})
-        )
-    held = (
-        declared.tool_names
-        if caller.tool_names is None
-        else declared.tool_names & caller.tool_names
+    return declared.model_copy(
+        update={
+            "tool_names": _narrowed(declared.tool_names, caller.tool_names),
+            # **Both halves of the surface, not just the in-process one.** Narrowing `tool_names`
+            # alone left this at `None` — "inherit every bundle" — while `advertised_tool_names`
+            # resolves connector tools *from* the bundle set, so a caller that narrowed its MCP
+            # servers was widened by a challenger that had not. No shipped profile narrows them
+            # today, which is exactly why this had to be found by construction rather than by the
+            # suite: the field exists so a deployment can, and the first one that did would have
+            # got the fatal `TeamError` this function was written to remove.
+            "mcp_server_names": _narrowed(declared.mcp_server_names, caller.mcp_server_names),
+        }
     )
-    return declared.model_copy(update={"tool_names": held})
+
+
+def _narrowed(
+    declared: frozenset[str] | None, caller: frozenset[str] | None
+) -> frozenset[str] | None:
+    """One side of a surface, attenuated to the caller's.
+
+    `None` means "everything this deployment offers", which is why it cannot simply be intersected
+    as if it were an empty set: unnarrowed ∩ unnarrowed is still unnarrowed, and unnarrowed ∩ a set
+    is that set. Written once because both halves of an `AgentProfile` need it and the asymmetry
+    between them is what produced the defect above.
+    """
+    if declared is None:
+        return caller
+    return declared if caller is None else declared & caller
 
 
 class ChallengeBrief(BaseModel):
