@@ -176,6 +176,16 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    echo "FAIL: overriding one connector removed another's pods"; exit 1;; esac; \
 	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
 
+upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
+	@# The whole point of `tests/test_upstream_surface.py` is that a dependency bump becomes one
+	@# conversation instead of six surprises, and that only works if somebody runs it *at* the bump.
+	@# It is in the suite too, so this is a shortcut rather than a second gate — but a named target
+	@# is what a bump checklist can point at. Two of its assertions check an *absence* (the MCP call
+	@# timeout, the unreadable run counter), so a failure here can mean "upstream fixed it, go and
+	@# delete our workaround" as easily as "upstream broke us".
+	uv run pytest tests/test_upstream_surface.py -q
+	@uv run python -c "import importlib.metadata as m; print('resolved: ' + ', '.join(f\"{p}=={m.version(p)}\" for p in ('langchain','langchain-core','langgraph','langgraph-checkpoint','deepagents','langchain-mcp-adapters')))"
+
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m chemclaw.cli.verify_audit_chain
 

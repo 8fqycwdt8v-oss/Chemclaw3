@@ -54,6 +54,17 @@ does not start by re-checking.
       grader `tools`; delete the hand-rolled `with_structured_output` judge and its timeout/fallback
       plumbing. `on_evaluation` feeds `evals/phoenix.py` for free. *Ship behind a setting*, because
       it changes what a turn returns.
+      **Two interactions to settle first, both found by reading the middleware rather than the
+      docs.** (1) `after_agent` is declared `@hook_config(can_jump_to=["model"])` and loops by
+      jumping *back into the same run*, so every revision iteration passes `before_model` and is
+      counted by `CappedModelCallLimit`'s `run_limit`. With `max_iterations=3` the revisions spend
+      the turn's runaway budget, and if the cap fires first the turn ends capped rather than
+      revised — the two bounds must be chosen together, and `agent_recursion_limit` re-measured
+      again underneath both. (2) The grader reads the *transcript*, whereas `verifier.py` scores
+      against this turn's `ToolCallTrace` — which lives in the runner, not in graph state. Making
+      the deterministic citation gate a grader `tool` therefore needs it bound to the turn's trace
+      the way `skill_read_tool` is bound to a backend; a grader that only reads the transcript is a
+      weaker check than the one already shipped, so this is a design step, not wiring.
 - [ ] **The audit trail as OpenTelemetry spans, and the transcript from the checkpointer** — [L].
       Unblocked by GxP no longer being a constraint (ADR §5). The tool-call span half is already
       emitted natively by the OpenInference `LangChainInstrumentor` that `CHEMCLAW_OTEL_LLM_SPANS`
