@@ -79,6 +79,15 @@ application `INSERT` and neither `UPDATE` nor `DELETE`. The chain was the weaker
 tool call, and `audit_events` becomes prunable in principle (still refused, now for the right
 reason).
 
+**One thing I got wrong, and the suite caught it.** The exploration concluded the `audit_anchors`
+grant could stay ("harmless but pointless"), and I followed that. It was wrong:
+`test_the_grant_matches_the_writes_the_code_actually_performs` derives the grant matrix from the SQL
+the code issues and fails in **both** directions, so deleting the anchor writer left an `INSERT`
+grant nobody exercises. The full suite went `1 failed, 4243 passed` on exactly that. `audit_anchors`
+now carries no grant, and its *absence* is asserted so one reappearing fails a test. The lesson is
+the one already in `tasks/lessons.md` in a different disguise: a recommendation arrives pre-argued,
+and this one was mine.
+
 ## Verification
 
 - `make lint` · `make type` · `make test` — green.

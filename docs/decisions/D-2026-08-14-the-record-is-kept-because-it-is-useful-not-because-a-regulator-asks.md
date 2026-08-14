@@ -91,6 +91,15 @@ namespace: it is the only thing authorising the applier to *delete* a Schedule. 
 would strand a live `audit-verify` Schedule on an existing Temporal namespace, firing a workflow no
 worker registers, forever. It can be dropped once every deployment has run one apply.
 
+**A grant outlived its writer, and the suite caught it.** The first version of this change left
+`GRANT INSERT ON audit_events, audit_anchors` alone on the argument that a privilege on an empty
+table costs nothing. `tests/test_database_privileges.py::test_the_grant_matches_the_writes_the_code_actually_performs`
+derives the grant matrix from the SQL the code actually issues and fails in **both** directions, so
+deleting `agent/audit_anchor.py` made `audit_anchors: ['INSERT']` a grant nobody exercises — which
+is the test's own phrasing for the hazard: *a privilege nobody uses is a privilege that only matters
+when someone else uses it*. `audit_anchors` now carries no grant at all, and the "no grant" is
+asserted rather than merely dropped, so one silently reappearing fails a test.
+
 **`audit_events` becomes prunable in principle**, and is still refused in practice —
 `durable/retention.py` now argues the refusal from what the record is for rather than from the chain,
 and `tests/test_retention.py` keeps the guard so the removal is not later read as permission.

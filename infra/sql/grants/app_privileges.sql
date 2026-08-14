@@ -49,9 +49,14 @@ BEGIN
     -- the whole of the trail's integrity claim: the credential that writes a row cannot rewrite or
     -- remove it. A per-row hash chain and signed anchors used to sit on top of this and made
     -- tampering *detectable*; they were built for a regulated deployment, have been removed, and
-    -- this grant is what always did the preventing. `audit_anchors` is retired and empty — it keeps
-    -- the grant because the table still exists and INSERT-with-no-DELETE costs nothing.
-    EXECUTE format('GRANT INSERT ON audit_events, audit_anchors TO %I', app_role);
+    -- this grant is what always did the preventing.
+    --
+    -- `audit_anchors` is deliberately absent. The table still exists — the schema is forward-only —
+    -- but the code that wrote it went with the chain, and a grant nobody exercises is a privilege
+    -- that only matters when someone else exercises it. `tests/test_database_privileges.py` derives
+    -- this matrix from the SQL the code actually issues and fails in *both* directions, which is
+    -- what caught the grant outliving its writer.
+    EXECUTE format('GRANT INSERT ON audit_events TO %I', app_role);
 
     -- Insert and upsert, no delete. These include the three tables `durable/retention.py`
     -- explicitly refuses to prune, each for a stated reason (the cache is bounded by cost policy
