@@ -152,11 +152,52 @@ Security and identity code — `tool_authz`, `authz`, `reject_widening`, `Narrow
   (`D-2026-08-13-the-guard-must-not-refuse-a-dependency-bump`) now covers `loop_capped` alone.
 - A bump becomes one conversation instead of six surprises, which is the whole point of §3.
 
+### 6. The front door stays on `astream`, because v3 cannot book an abandoned turn's tokens
+
+`api/graph_stream.py` drives `graph.astream(stream_mode=_MODES, subgraphs=True)` and unpacks a
+3-tuple whose arity had been verified by reading `langgraph.pregel.main._output` — a comment there
+warns that writing the mode list as a *tuple* silently changes it. That is the largest single
+instance of the coupling this ADR is about, and `stream_events(version="v3")` retires it
+structurally: v3 owns `stream_mode` and `subgraphs` and refuses them.
+
+The migration was written and the suite run against it. It is reverted, and the measurement is the
+decision.
+
+**v3 reports token usage only at `message-finish`.** Every v3 event was searched for an incremental
+signal; there is none. Usage arrives once, aggregated, when a message completes — and again in
+`updates`/`values`, later still. `tests/test_turn_cancellation.py` requires that a turn abandoned
+*mid-message* books what it has already spent, because otherwise "a user could bypass the token
+budget indefinitely by dropping each connection just before the answer, which is the cheapest
+possible attack on the runaway-cost guard". Measured under v3: **0 tokens booked**, against ~30 on
+the current driver. A coupling that costs maintenance is a smaller harm than a cost guard that can
+be walked around, so the coupling stays and `tests/test_upstream_surface.py` is what keeps it from
+rotting silently.
+
+Three things learned in the attempt, recorded because they change what a restart looks like:
+
+- **The event contract did not have to change.** The prediction that ordering would move was wrong;
+  all sixteen conformance assertions passed unmodified. The migration is repo-local — no
+  `Chemclaw3_ui` or `Chemclaw3_mock` change — which removes the reason it looked expensive.
+- **The projections cannot be used.** `run.messages` / `run.tool_calls` / `run.subagents` are
+  single-consumer cursors, so consuming several concurrently interleaves by whichever cursor is
+  pumped, and this module's contract is a global order asserted as a whole sequence. The raw
+  protocol stream is ordered and carries a monotonic `seq`.
+- **v3's native `tools` method cannot see a specialist's tools.** It carries
+  `tool-started`/`tool-finished` whole, which would retire the fragment reassembly D-138 came from,
+  but it only sees the tools the *parent* graph's `ToolNode` runs — and `SubAgentMiddleware` invokes
+  a compiled specialist as an ordinary runnable inside the `task` tool. Measured: a team turn
+  reported the `task` call and nothing the specialist did.
+
+Restart when v3 emits usage per content block, or exposes the raw `(chunk, metadata)` message stream
+beside the content-block one. The rest of the work is known to be sound.
+
 ## Still open
 
-The larger items this pass scoped but did not land — the front door on
-`stream_events(version="v3")` with per-middleware transformers, approvals on
-`HumanInTheLoopMiddleware`, `RubricMiddleware` in the turn loop, and the audit/transcript collapse —
-are in `docs/planning/BACKLOG.md` with what was verified about each. All four are breaking changes to
-the SSE contract or to a merged decision, and two need a coordinated pull request in
-`Chemclaw3_ui`; none of them should ship half-migrated behind the ones above.
+Three items this pass scoped but did not land — approvals on `HumanInTheLoopMiddleware`,
+`RubricMiddleware` in the turn loop, and the audit/transcript collapse — plus the v3 migration above,
+are in
+`docs/planning/BACKLOG.md` with what was verified about each. Two carry a blocker found by trying
+them: `RubricMiddleware`'s revision loop jumps back into the *same* run, so its iterations are
+counted by the runaway cap's `run_limit` and the two bounds must be chosen together; and the
+transcript cannot leave `session_messages` without a decision about `cli/explain`, which groups a
+turn's words with its audit rows on a `correlation_id` the checkpoint does not carry.

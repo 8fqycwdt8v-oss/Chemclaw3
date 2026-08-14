@@ -90,10 +90,16 @@ workaround red instead of letting it outlive its reason. The same pass moved the
 re-measured with it) and reduced `ReloadingSkillsMiddleware` to a single `UntrackedValue` channel,
 deleting a dependency on the *arity* LangChain invokes a hook with. It also declined three adoptions
 that looked obvious and are not: `ToolErrorMiddleware` and `ToolRetryMiddleware` both trigger on
-raised exceptions, and MCP tools never raise. **GxP is no longer a constraint on layer 1**; the audit
-chain, the durable approval store and the `session_messages` read-model are open in
-`docs/planning/BACKLOG.md` on that basis, alongside the v3 streaming migration,
-`HumanInTheLoopMiddleware` and `RubricMiddleware`.
+raised exceptions, and MCP tools never raise. The same pass **built and reverted** the front door's
+move to `stream_events(version="v3")`: it retires the largest coupling of all — `astream`'s tuple
+arity — and the event contract survived unmodified, but v3 reports token usage only at
+`message-finish`, so a turn abandoned mid-message books **0** tokens where the current driver books
+~30, which makes "drop the connection just before the answer" a free bypass of the token budget.
+A maintenance coupling is the smaller harm; the finding and the restart condition are in the ADR.
+**GxP is no longer a constraint on
+layer 1**; the audit chain, the durable approval store and the `session_messages` read-model are open
+in `docs/planning/BACKLOG.md` on that basis, alongside `HumanInTheLoopMiddleware` and
+`RubricMiddleware`.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See

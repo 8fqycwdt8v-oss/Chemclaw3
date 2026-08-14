@@ -13,47 +13,44 @@ need a coordinated pull request in `Chemclaw3_ui`, so none of them should ship h
 is recorded here is what was *verified* about each against the installed distributions, so the work
 does not start by re-checking.
 
-- [ ] **The front door on `stream_events(version="v3")` with per-middleware transformers** — [L].
-      `api/graph_stream.py:114` drives `graph.astream(stream_mode=_MODES, subgraphs=True)` and
-      depends on a 3-tuple arity verified by reading `langgraph.pregel.main._output`, then
-      reverse-engineers plan and tool events out of `updates` payloads in `_from_update()`. The
-      supported replacement is already in the pinned `langgraph 1.2.10`: `stream_events(version="v3")`
-      builds its stream modes from the union of registered transformers' `required_stream_modes`
-      and *owns* `stream_mode`/`subgraphs` itself (`_V3_INVARIANT_KWARGS` raises if a caller passes
-      either), and `create_agent(transformers=…)` merges `AgentMiddleware.transformers` at compile
-      time (`factory.py:1841-1858`). `langgraph.stream.transformers` ships `MessagesTransformer`,
-      `UpdatesTransformer`, `CustomTransformer` and `SubgraphTransformer`; the last already carries
-      the namespace, which is the reason `team._AttributedSpecialist` exists. Neither
-      `TodoListMiddleware` nor `SubAgentMiddleware` ships a transformer, so the plan, handoff and
-      compaction projections stay first-party — but as *registered* projections rather than as a
-      parser of somebody else's tuple. Decision taken with the ADR: reshape `api/events.py` around
-      v3's native projections rather than translating into today's 17 classes, which is what makes
-      this breaking. *Blocked on:* a `Chemclaw3_ui` change landing in step, or a settings flag
-      selecting the v3 path until it does.
-      **The mechanics are validated against a real graph — start from these, not from the docs.**
-      (1) *Iterate the raw protocol stream, not the projections.* `run.messages` / `run.tool_calls` /
-      `run.subagents` are separate single-consumer cursors, so consuming several concurrently loses
-      the **global order** that `api/events.py` is a contract about
-      (`test_a_scripted_turn_emits_the_declared_event_sequence` asserts a whole sequence). `async for
-      ev in run` is globally ordered and carries a monotonic `seq`; switch on `ev["method"]`, which
-      is structurally today's `mode` switch. (2) *The modes you need must be asked for.* v3 derives
-      its stream modes from the union of the registered transformers' `required_stream_modes`, so by
-      default only `values` and `messages` arrive — measured. Passing
-      `transformers=[UpdatesTransformer, CustomTransformer]` restores `updates` and `custom` on the
-      ordered stream and additionally yields a native `tools` method; measured counts on one scripted
-      turn: `messages` 10, `values` 5, `updates` 4, `tools` 2, `custom` 1. That is the replacement
-      for the `_MODES` list *and* for the arity dependency, because v3 owns `stream_mode`/`subgraphs`
-      and raises `TypeError` if you pass them. (3) *Namespace comes from* `ev["params"]["namespace"]`,
-      which is what lets `team._AttributedSpecialist` go — but only once the handoff pair is re-sourced
-      from `SubgraphTransformer`, so schedule that with this row rather than after it. (4) **Event
-      order does change**: on the measured turn the `custom` signal landed after the native `tools`
-      event, where today's contract puts the `question` between the call and its result. That is the
-      contract change that was accepted, and it is what the `Chemclaw3_ui` PR has to absorb.
-      (5) **v3 is `.. beta:: experimental and may change`** in the pinned langgraph and emits a
-      `LangChainBetaWarning` per run from `Pregel.astream_events` and `AsyncGraphRunStream`;
-      accepted deliberately, but the warning needs suppressing at the one call site rather than
-      globally, and `tests/test_upstream_surface.py` should assert the beta marker is still there so
-      its removal is noticed.
+- [ ] **The front door on `stream_events(version="v3")` — built, measured, and reverted; do not
+      restart it until upstream reports usage incrementally** — [L]. The migration was written and
+      the whole suite run against it. Most of it worked, and one thing did not.
+      **What worked, and is worth having when this becomes possible:** v3 owns `stream_mode` and
+      `subgraphs` and raises `TypeError` if a caller passes either, which retires the dependency on
+      `astream`'s tuple arity — the single largest unpromised-shape coupling in the tree, the one
+      that had to be verified by reading `langgraph.pregel.main._output` and that changed silently
+      if the mode list was written as a tuple. Prose becomes a `text-delta` content block and a tool
+      call's fragments a different block type, so "the token stream carries prose and never a
+      tool-call fragment" is structural instead of a filter. `_MODES` becomes
+      `transformers=[UpdatesTransformer, CustomTransformer]`, because v3 derives its modes from the
+      union of the registered transformers' `required_stream_modes` and a bare run yields only
+      `values` and `messages` (measured). And the **event contract did not have to change at all** —
+      all sixteen conformance assertions passed unmodified, so no `Chemclaw3_ui` or `Chemclaw3_mock`
+      change was needed. The projections (`run.messages`, `run.tool_calls`, `run.subagents`) must
+      *not* be used: they are single-consumer cursors and consuming several concurrently loses the
+      global order the contract is about. Iterate the raw protocol stream, which is ordered.
+      **The blocker, which is why it is reverted: v3 reports token usage only at `message-finish`.**
+      Searched every v3 event for an incremental signal and there is none — usage arrives once,
+      aggregated, when a message completes, and again in `updates`/`values` after the node does.
+      `tests/test_turn_cancellation.py` requires that a turn abandoned *mid-message* still books the
+      tokens it has already spent, and its docstring says why: "a user could bypass the token budget
+      indefinitely by dropping each connection just before the answer, which is the cheapest
+      possible attack on the runaway-cost guard". Measured under v3: **0 tokens booked** where the
+      current driver books ~30. That is a security-relevant regression on a deliberate guard, so the
+      arity coupling — real but merely a maintenance risk — is the lesser cost. *Restart when v3
+      emits usage per content block, or when it exposes the raw `(chunk, metadata)` message stream
+      alongside the content-block one.*
+      **A second finding, independent of the blocker:** v3's native `tools` method carries
+      `tool-started`/`tool-finished` whole — the shape that would retire the fragment reassembly
+      D-138 came from — but it only sees the tools the *parent* graph's `ToolNode` runs.
+      `SubAgentMiddleware` invokes a compiled specialist as an ordinary runnable inside the `task`
+      tool, so a specialist's own calls never reach it: measured, a team turn reported the `task`
+      call and nothing the specialist did. Calls and results must keep coming from `updates`.
+      **Also note:** v3 is `.. beta::` and warns once per run from two places, and
+      `LangChainBetaWarning` lives in `langchain_core._api`, which `tests/test_third_party_layering.py`
+      forbids importing — suppress by message, not by category.
+
 - [ ] **Approvals on `HumanInTheLoopMiddleware`** — [L]. `InterruptOnConfig` in the pinned
       `langchain 1.3.14` carries `when` (a `ToolCallRequest` predicate), `allowed_decisions`, a
       description factory, and the four decision types (`approve`/`edit`/`reject`/`respond`), with
