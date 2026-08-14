@@ -1,6 +1,9 @@
 # D-2026-08-14-the-coupling-is-the-cost-not-the-line-count — What upstream already does, what it still does not, and the six shapes this repository reads that it was never promised
 
-**Status:** accepted · **Date:** 2026-08-14 · Supersedes the "why not `ModelCallLimitMiddleware`"
+**Status:** accepted · **Date:** 2026-08-14 · Lands beside
+`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks`, which removed
+the GxP framing and the audit hash chain on `main` while this branch was open; §5 below reaches the
+same conclusion from the layer-1 side and that ADR is the one that carried it out. · Supersedes the "why not `ModelCallLimitMiddleware`"
 paragraph of `agent/loop_cap.py` (D-2026-08-10 phase M1) and the `channel_values` claim in
 `agent/plan_state.py`. Amends `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` where it
 records deepagents' surface, and records that GxP is no longer a constraint on layer 1.

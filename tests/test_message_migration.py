@@ -469,7 +469,7 @@ def test_streamed_call_arguments_are_parsed_rather_than_discarded() -> None:
     """Both forms are in the table, and only the decoded one was read.
 
     A call assembled from streamed fragments stores its `arguments` as a JSON *string*, so every
-    streamed call in the archive converted to `args: {}` — losing exactly what a GxP reviewer asks
+    streamed call in the archive converted to `args: {}` — losing exactly what a reviewer asks
     a tool call about, permanently.
     """
     streamed = legacy_message(

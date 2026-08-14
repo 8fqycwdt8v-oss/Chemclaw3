@@ -11,14 +11,14 @@
 -- that incident recorded an agent's self-authorization under the chemist's identity, and an
 -- attributable-*looking* record with no human act behind it is worse than an unrecorded one.
 -- Writing it into `purpose` would spend the one column that is deliberately empty because nothing
--- can fill it honestly yet. Attribution to "the agent" makes a GxP trail worthless; attribution of
+-- can fill it honestly yet. Attribution to "the agent" makes the trail worthless; attribution of
 -- an agent's act to a person makes it wrong. Two questions, two columns.
 --
 -- '' is the main agent, and it is a complete answer rather than a missing one — which is why the
 -- column is `NOT NULL DEFAULT ''` and why no backfill is needed: every row written before this
 -- migration was in fact made by the single agent that existed then.
 --
--- **Why the chain version moves again.** `agent/audit_store.chain_hash` hashes
+-- **Why the chain version moved again** (historical — the hash chain has since been removed). `agent/audit_store.chain_hash` hashes
 -- `{"prev": prev_hash, "event": event.model_dump()}`, so adding a field to `AuditEvent` changes the
 -- bytes hashed for every row — including the v1 and v2 rows already in the table. Migration 026 gave
 -- each row a `chain_version` for exactly this; this migration is the second use of it, and the first

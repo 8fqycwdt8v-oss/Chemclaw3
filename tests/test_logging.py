@@ -261,8 +261,8 @@ def test_enabling_telemetry_without_the_extras_names_the_missing_dependency(
 #
 # What is deliberately *not* redacted is the audit trail's arguments. `SECURITY.md` states that the
 # trail records tool-call arguments, that they are user free text and may hold PII, and that this is
-# **intentional**: GxP requires an attributable "who did what to which inputs" record. Redacting it
-# would break the requirement the trail exists to meet.
+# **intentional**: the trail exists to be an attributable "who did what to which inputs" record.
+# Redacting it would break the very thing it is for.
 
 _DSN = "postgresql://chemclaw:sup3rs3cret-password@db.internal:5432/chemclaw"
 _KEY = "sk-live-0123456789abcdef"

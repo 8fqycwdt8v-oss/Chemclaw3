@@ -242,12 +242,11 @@ and are re-applied on every deploy on purpose: a table added by a new migration 
 until they run, so a split-principal deployment breaks on first use of it with
 `InsufficientPrivilege`. They no-op where no `chemclaw_app` role exists.
 
-### Splitting the database principal (optional, GxP)
+### Splitting the database principal (optional)
 
 By default one credential does everything, and `infra/sql/006` describes `audit_events` as
-"append-only by contract" — which the hash chain and the signed anchors *detect* violations of, and
-which nothing prevented. To make it append-only in fact
-(D-2026-08-05-append-only-by-grant-not-by-contract):
+"append-only by contract" — a contract nothing enforced and nothing prevented breaking. To make it
+append-only in fact (D-2026-08-05-append-only-by-grant-not-by-contract):
 
 1. Create a login role the application runs as, owning nothing:
    `CREATE ROLE chemclaw_app LOGIN PASSWORD '…';`
@@ -259,7 +258,7 @@ which nothing prevented. To make it append-only in fact
 Verify it took: as `chemclaw_app`, `INSERT INTO audit_events …` succeeds and
 `DELETE FROM audit_events` fails with `InsufficientPrivilege`. The owner credential can still
 rewrite the trail — this narrows who holds that power and for how long, it does not remove it — so
-the chain and the anchors remain the evidence. The role also needs no `CREATE EXTENSION` right;
+the grant is the whole of the guarantee. The role also needs no `CREATE EXTENSION` right;
 that stays with the migrator, which is where `vector` already required superuser on most managed
 Postgres.
 
@@ -428,7 +427,7 @@ set so adding to it is a reviewed edit:
 - **Conversation plumbing** — anything reading or writing the turn's own state
   (`ask_clarifying_question`, attachments, preferences, watches). Another process does not have the
   turn.
-- **The two PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`) — the GxP
+- **The two PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`) — the review
   boundary. A connector reaches the gate only by returning a note in a job envelope, for core to
   publish.
 - **The knowledge-graph reads** (`find_notes`, `expand_note`, `find_knowledge_gaps`, and the
@@ -900,10 +899,13 @@ refused.
 
 ## (xiii) Restore a store — and what a restore does to the audit trail
 
-**Read this before running a restore, not after.** A point-in-time restore of Postgres is a
-*trailing deletion* of `audit_events`, and the hash chain cannot see one: the surviving rows link
-cleanly, so a shortened GxP trail verifies as intact
-(D-2026-08-01-a-restore-is-a-truncation-nobody-can-see).
+**Read this before running a restore, not after.** A point-in-time restore of Postgres silently
+shortens `audit_events`: the trail comes back missing whatever was written after the restore point,
+and nothing in the system will tell you so. The system used to carry a hash chain and signed
+high-water anchors that made *some* alterations detectable — never this one, which is what
+D-2026-08-01-a-restore-is-a-truncation-nobody-can-see was about — and they have since been removed.
+So the record of what was lost is the restore itself: write down the restore point and the window it
+discarded, wherever your operational record lives, at the time you do it.
 
 ### What this system needs from the stores it does not own
 
@@ -911,58 +913,28 @@ The chart deploys none of these. It states what it requires of whoever does.
 
 | Store | Holds | If it is lost |
 | --- | --- | --- |
-| **Postgres** | the audit chain, sessions, the calculation cache, the note index, job records | the audit chain is the only part with a compliance obligation; the cache is regenerable by definition (D-011) and the note index is rebuilt by `make reindex` |
+| **Postgres** | the audit trail, sessions, the calculation cache, the note index, job records | the audit trail is the only part that cannot be regenerated from anything; the cache is regenerable by definition (D-011) and the note index is rebuilt by `make reindex` |
 | **Temporal** | in-flight workflow history | running jobs die; finished results survive in `job_records` (D-157) and the calculation store |
 | **Knowledge git repo** | every merged note | the corpus. It is a git repo, so any clone is a backup — including each pod's sidecar checkout |
 | **HPC artifact store** | job outputs | regenerable at the cost of re-running the cluster job |
 
 Only one of the four needs a *point-in-time* story rather than a recent-snapshot one, and it is the
-audit trail — because it is the only store where "we lost the last hour" is a compliance statement
-rather than an inconvenience.
+audit trail — because it is the only store where "we lost the last hour" means the answer to "who
+ran that?" is gone for good, rather than merely inconvenient.
 
 ### Restoring Postgres
 
-1. **Before restoring, capture the current anchor.** From the log store, take the most recent line
-   containing `audit_chain_anchor=` and keep the whole line. This is the *only* copy that survives
-   the restore — the `audit_anchors` table is rolled back with everything else, and will come back
-   agreeing with the truncated trail.
-2. Restore, by whatever mechanism the Postgres owner provides.
-3. Run the migrator (`make db-migrate` / the Helm hook) — it applies nothing if the restore was
-   already current, and the advisory lock makes running it twice safe (§(xi)).
-4. **Verify against the anchor you kept:**
+1. Restore to the chosen point by whatever mechanism your Postgres provider offers.
+2. Re-run `make db-migrate`. Every migration is `IF NOT EXISTS` and re-runnable, so this is a no-op
+   on a restore that was already current and closes the gap on one that was not.
+3. Record the restore point and the window of audit rows it discarded in your operational log.
+   Nothing in the database can tell you afterwards that they were ever there.
+4. Re-run `make db-grants` if the deployment splits the database principal (see *Splitting the
+   database principal*, above) — a restore can bring back a role grant state that predates it.
 
-   ```
-   uv run python -m chemclaw.cli.verify_audit_chain --anchor '<the whole log line>'
-   ```
-
-   A clean chain plus `audit trail is short: N rows against an anchor of M` is the expected and
-   correct outcome of a restore that lost records. It is telling you precisely what a GxP process
-   needs to know and what nothing could tell you before: how many audited actions are gone.
-5. **Record the gap, then re-seal.** The trail may be shortened by a legitimate recovery; it may
-   never pretend it was not.
-
-   ```
-   uv run python -m chemclaw.cli.verify_audit_chain \
-     --anchor '<the log line>' --reseal "PITR to 2026-08-01T09:00Z after storage failure INC-123" \
-     --reseal-by "qa@example.com"
-   ```
-
-   `--reseal` refuses on a broken chain, deliberately: re-sealing over a break would sign the damage
-   and the trail would verify clean forever afterwards.
-
-### When the verifier reports a gap and there was no restore
-
-Treat it as tampering until shown otherwise, and do **not** re-seal. The anchor is signed, so a gap
-means either records were removed or the anchor was forged — and forging one needs
-`CHEMCLAW_AUDIT_ANCHOR_SECRET`, which is not in the database. Preserve the trail, preserve the log
-store, and escalate.
-
-### If `CHEMCLAW_AUDIT_ANCHOR_SECRET` is unset
-
-None of the above applies, because there are no anchors. The chain still catches modification,
-reordering, interior deletion and prefix truncation — and a restore stays what it was before this
-existed: an undetectable shortening of the compliance trail. Set the secret before writing a
-recovery procedure, not after.
+The other three stores need no procedure here: Temporal's in-flight history is lost by definition,
+the knowledge repo is a git repo (any clone is a backup), and the HPC artifact store is regenerable
+at the cost of re-running the job.
 
 ## (xiv) Cut a release: pin the image to bytes
 
@@ -1097,24 +1069,19 @@ It removes their sessions, messages, events, turn lease, preferences and watch s
 **keeps and counts** the rows that attribute scientific work to them — `audit_events`,
 `plan_approvals`, `note_proposals`, `bo_suggestions`, `job_records`, `turn_costs` — and prints the
 reason beside each. That is not a limitation to work around: an attributable record that can be
-deleted on request is not an attributable record, and `audit_events` carries a tamper-evident hash
-chain whose proof spans the rows either side of any deletion (see (xvi)). If a data-protection
-obligation reaches the retained tier, that is a decision to take with the record's owner.
+deleted on request is not an attributable record, and for a tool call that changed nothing durable
+the trail is the only place it is recorded at all. The application credential cannot delete from
+`audit_events` either — the grant withholds DELETE (see *Splitting the database principal*). If a
+data-protection obligation reaches the retained tier, that is a decision to take with the record's
+owner.
 
 The dry run executes the deletes and rolls back, so the number you sign off on is the number that
 will be deleted rather than a second query's guess at it.
 
-## (xvi) Verify the audit trail, and the other commands with no section of their own
+## (xvi) The other commands with no section of their own
 
-Four operations exist as `make` targets and had no entry here. Three of them are yours to run;
-the fourth is automated and listed so nobody runs it by hand wondering why.
-
-**`make audit-verify` — the GxP tamper-evidence check.** `audit_events` is a hash chain: each row
-carries a hash over itself and its predecessor, so any edit or deletion breaks the chain from that
-point on. Verifying it is what makes the trail *evidence* rather than a log. Nothing schedules it,
-so decide a cadence and hold to it — monthly, plus after any restore (see (xiii), which describes
-what a restore does to the chain without naming the command that checks it) and before any audit.
-A reported gap with no restore behind it is an incident, not a maintenance task.
+Three operations exist as `make` targets and had no entry here. Two of them are yours to run;
+the third is automated and listed so nobody runs it by hand wondering why.
 
 **`make share-sync SHARE=<source>` — crawl a mounted document share now.** The scheduled job is the
 production path (every six hours by default); this is for the first crawl after attaching a share,

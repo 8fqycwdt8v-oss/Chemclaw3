@@ -110,9 +110,9 @@ skills/
 │   ├── SKILL.md              # Note-Template, Frontmatter-Schema, Git-Workflow
 │   └── assets/
 │       └── note-template.md
-└── gxp-scope-guard/
+└── scope-guard/
     └── SKILL.md              # Governance-Skill: erzwingt die Trennung
-                               # "AI schlägt vor" vs. "GxP-Ausführung"
+                               # "Agent schlägt vor" vs. "Mensch entscheidet"
 ```
 
 Jeder Skill kann intern sowohl direkten Python-Code als auch MCP-Tool-Aufrufe kapseln – die Skill-Ebene ist also die "Bedienungsanleitung", MCP/Temporal/direkte Funktionsaufrufe sind die eigentliche Ausführung dahinter. Dass der Standard framework-übergreifend getragen wird, war schon bei der Recherche der Punkt und ist inzwischen belegt: die Skills dieses Repos sind beim Wechsel der Reasoning-Schicht **unverändert** mitgegangen. Das erlaubt Fachexperten (Chemiker), SKILL.md-Dateien direkt zu pflegen, ohne Python-Code anzufassen – hier übertragen auf Reaktions- und Analytik-Wissen.
@@ -151,7 +151,7 @@ Regioselektivität stimmt mit DFT-Vorhersage aus [[qm-job-8f2a]] überein.
 **Speicherung & Governance:**
 - Der gesamte Korpus lebt in einem **Git-Repository** – volle Versionshistorie, Diffs, Audit-Trail.
 - **Von Menschen verfasste Notes** werden direkt committet.
-- **Von Agenten erzeugte Notes** (`created_by: agent`) landen zunächst auf einem Feature-Branch/als Pull-Request und benötigen eine menschliche Freigabe, bevor sie in den validierten Hauptzweig gemerged werden – das spiegelt exakt die zuvor diskutierte GxP-Trennung (AI schlägt vor, Mensch validiert, Git protokolliert) und macht den PR-Review-Schritt zum Human-in-the-Loop-Gate.
+- **Von Agenten erzeugte Notes** (`created_by: agent`) landen zunächst auf einem Feature-Branch/als Pull-Request und benötigen eine menschliche Freigabe, bevor sie in den validierten Hauptzweig gemerged werden – das spiegelt exakt die zuvor diskutierte Trennung (der Agent schlägt vor, ein Mensch validiert, Git protokolliert) und macht den PR-Review-Schritt zum Human-in-the-Loop-Gate.
 - Temporal schreibt nach Abschluss eines QM-Jobs automatisch eine neue Note (`write_knowledge_node`-Activity) mit strukturiertem Ergebnis + Link auf Rohdaten – auch dieser Schreibvorgang läuft über den PR-Mechanismus.
 - Der `knowledge-graph-query`-Skill exponiert die Graph-Traversal-Funktion als Tool für den Agenten; der `knowledge-graph-write`-Skill kapselt Note-Template + Git-Workflow.
 
@@ -224,7 +224,7 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
 
 ## 7. Identity & Authentication: Entra ID durchgängig
 
-Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesamten Stack zieht – wichtig sowohl für Security als auch für den GxP-Audit-Trail ("wer hat wann welchen Vorschlag/Job ausgelöst"). Der Reifegrad der Entra-ID-Integration ist aber pro Komponente unterschiedlich – das muss man bei der Umsetzung einplanen:
+Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesamten Stack zieht – wichtig sowohl für Security als auch für den Audit-Trail ("wer hat wann welchen Vorschlag/Job ausgelöst"). Der Reifegrad der Entra-ID-Integration ist aber pro Komponente unterschiedlich – das muss man bei der Umsetzung einplanen:
 
 | Komponente | Entra-ID-Integration | Reifegrad |
 |---|---|---|
@@ -352,7 +352,7 @@ Das Gründungsdokument von chemclaw2 (`chemclaw2_features.md`) verfolgt bewusst 
 
 3. **~~pg-boss für kleine Jobs~~ → revidiert, siehe Abschnitt 12.1**: Da wir ohnehin einen Temporal-Cluster für die HPC/QM-Jobs betreiben, ist es einfacher, auch die kleinen asynchronen Aufgaben (ELN-Sync, Re-Indexierung, Benachrichtigungen) über eine **separate Temporal-Task-Queue** laufen zu lassen statt ein zweites Queue-System (pg-boss) einzuführen. Details und Begründung in Abschnitt 12.1.
 
-4. **Bi-temporale Felder** (`valid_from`/`valid_to`) als zusätzliche Frontmatter-Attribute auf Knowledge-Graph-Notes. Trivialer Zusatzaufwand, aber wichtig für GxP-adjacente Nachvollziehbarkeit ("was wussten wir zum Zeitpunkt X").
+4. **Bi-temporale Felder** (`valid_from`/`valid_to`) als zusätzliche Frontmatter-Attribute auf Knowledge-Graph-Notes. Trivialer Zusatzaufwand, aber wichtig für die Nachvollziehbarkeit ("was wussten wir zum Zeitpunkt X").
 
 5. **Arbeitsprinzip "off-the-shelf over self-built" + explizite Deferred-Liste mit Trigger-Bedingungen.** Keine Technologie, sondern eine Disziplin: Jede Fähigkeit muss durch eine gepflegte externe Library/einen Standard gedeckt sein; Eigenentwicklung nur, wenn eine klar benannte Bedingung eintritt. Lohnt sich als Leitplanke für das gesamte Projekt, gerade weil unsere Architektur (Agent-Framework + Temporal + Skills + Wissensgraph + RLS) sonst leicht zum Over-Engineering neigen kann.
 

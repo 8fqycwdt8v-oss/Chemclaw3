@@ -6,7 +6,7 @@ in this test run"* (`data/evals/probes/optimization.yaml`, `reporting.yaml`); th
 Temporal test modules run against the time-skipping test server with no model, no front door and no
 database. So the path a durable capability actually takes in production — agent tool →
 `ConnectorJobWorkflow` on `background-jobs` → the bundle's workflow on `connector-<name>` → the
-calculation cache → `job_records` → the audit chain — has been exercised only in pieces.
+calculation cache → `job_records` — has been exercised only in pieces.
 
 **Why no model is involved here.** The obvious design is to ask the agent to run a job and grade
 the answer. That conflates two failures: a broker that did not run the job, and a model that did
@@ -35,8 +35,6 @@ import json
 import logging
 import os
 import signal
-import subprocess
-import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -349,32 +347,6 @@ async def check_pending_when_worker_wedged(run_dir: Path) -> Check:
     )
 
 
-async def check_audit_chain() -> Check:
-    """The GxP hash chain still verifies after the run — the same check `make audit-verify` runs.
-
-    **The row count is reported, not just the verdict.** An empty `audit_events` verifies trivially,
-    and the first live pass of this smoke passed this check against exactly that: zero rows, because
-    the audit sink records *agent tool calls* and a durable job launched from a script never makes
-    one. "Verifies" and "verifies over something" are different claims, and a check that cannot tell
-    them apart is the same species of defect as a metric that measures its grader's blindfold
-    (D-2026-08-03). The count makes a vacuous pass legible instead of reassuring.
-    """
-    events = await _scalar("select count(*) from audit_events")
-    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
-        [sys.executable, "-m", "chemclaw.cli.verify_audit_chain"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    output = (completed.stdout or completed.stderr).strip()
-    verdict = output.splitlines()[-1] if output else f"exit {completed.returncode}"
-    return Check(
-        name="audit chain verifies",
-        passed=completed.returncode == 0,
-        observed=f"{verdict} (over {events} audit event(s))",
-    )
-
-
 async def run_smoke(run_dir: Path) -> SmokeRun:
     """Launch the job once, then ask the live system every question that has a mechanical answer."""
     run = SmokeRun()
@@ -390,7 +362,6 @@ async def run_smoke(run_dir: Path) -> SmokeRun:
         lambda: check_job_recorded(run),
         lambda: check_idempotent(run),
         lambda: check_pending_when_worker_wedged(run_dir),
-        check_audit_chain,
     ]
     for check in checks:
         run.checks.append(await check())

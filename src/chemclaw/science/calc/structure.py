@@ -5,7 +5,7 @@ breath, so two tasks on "the same molecule" silently produced two different
 geometries and nothing downstream could reuse one. `Structure` makes the geometry an
 explicit, **content-addressed** value: `structure_id` is a stable hash of the chemical
 content, so equal geometries collapse to one cache entry no matter how they were
-produced, and `origin` records which calculation produced one (GxP lineage).
+produced, and `origin` records which calculation produced one (lineage).
 
 Two consequences that pay for the type immediately:
 

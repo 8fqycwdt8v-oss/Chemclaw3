@@ -29,6 +29,11 @@ from typing import Any
 import psycopg
 from langchain_core.messages import AIMessage, HumanMessage
 
+from chemclaw.agent.challenge import (
+    begin_turn_review,
+    current_turn_review,
+    end_turn_review,
+)
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.framing import frame_untrusted
@@ -40,6 +45,7 @@ from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.state import turn_config
+from chemclaw.agent.team import begin_delegation_tally, end_delegation_tally
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.budget import BudgetTracker
@@ -200,6 +206,13 @@ async def run_turn(
     # looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op without the
     # harness, which is what attaches the cap.
     loop_token = begin_loop_watch()
+    # Count the specialists this turn delegates work to, so the challenge gate can tell a *team*
+    # (challenged unconditionally) from a lone subagent (challenged only when already flagged).
+    # No-op unless a team is enabled and the model actually delegates.
+    tally_token = begin_delegation_tally()
+    # Where the challenge gate publishes what it learned about this turn's answer, so the
+    # `AnswerEvent` is stamped from one scoring pass rather than a second judge call.
+    review_token = begin_turn_review()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
     # The tool-bearing messages this turn produced, for the transcript projection: the events
@@ -416,7 +429,16 @@ async def run_turn(
                 retryable=True,
                 correlation_id=correlation_id,
             )
-        answer = await build_answer_event(text, tool_trace.outputs, tool_trace.called_tools)
+        answer = await build_answer_event(
+            text,
+            tool_trace.outputs,
+            tool_trace.called_tools,
+            # The in-graph challenge gate's verdict, when one ran. `None` is the ungated path and
+            # makes `build_answer_event` score the answer itself, exactly as it always has — the
+            # gate is off by default. Read from an ambient rather than off the graph's final state
+            # for `loop_hit_cap`'s reason: this driver streams, so it never receives that state.
+            review=current_turn_review(),
+        )
         await _record_transcript(history, session, user_message, text, tool_exchanges)
         # **Before the yield, not after it.** The turn's rows are committed by now and they are a
         # complete, paired exchange — there is nothing half-written left to undo. The cancellation
@@ -451,7 +473,7 @@ async def run_turn(
         # returned, the history provider committed a complete user+assistant pair and no
         # `tool_use` is left without its result — the sole failure the rollback exists to
         # prevent. Undoing it anyway deleted a finished exchange from the conversation because
-        # the client dropped during the send of its answer. In a GxP system a silently vanished
+        # the client dropped during the send of its answer. A silently vanished
         # answer is worse than a lost turn. (The spent-plan marker used to ride along in that
         # snapshot, so reverting an answered turn's state re-armed the approval it had just used
         # as well; consumption is a durable column now — `plan_approvals.consumed_at` — so the
@@ -570,6 +592,8 @@ async def run_turn(
                 METRICS.increment(name, float(value), spend_labels)
         end_call_watch(calls_token)
         end_loop_watch(loop_token)
+        end_delegation_tally(tally_token)
+        end_turn_review(review_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_correlation_id(correlation_token)

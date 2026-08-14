@@ -37,7 +37,7 @@ an API detail.
 nesting order as the previous engine's, over the *same* decision functions —
 `tool_authz.dry_run_refusal`, `.denial_result`, `.domain_error_result`, `.failure_detail`,
 `repeat_guard.count_call`, and `audit._recording`. Only the plumbing was ported; a second copy of
-any of those sentences would let an authorization decision, a dry-run refusal or a GxP audit row
+any of those sentences would let an authorization decision, a dry-run refusal or an audit row
 depend on which engine a deployment happens to run, which is the one drift this migration must be
 incapable of.
 
@@ -67,6 +67,8 @@ from langgraph.channels.untracked_value import UntrackedValue
 # the `D-NNN` sequence. Three tests already import it across module boundaries; within one package
 # that is the established idiom here.
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
+from chemclaw.agent.challenge import CHALLENGER_PROFILE
+from chemclaw.agent.challenge_gate import build_challenge_gate
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
@@ -104,6 +106,7 @@ def build_langgraph_agent(
     audit_sink: AuditSink | None = None,
     checkpointer: Any | None = None,
     connectors: list[Any] | None = None,
+    response_format: Any | None = None,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -130,6 +133,15 @@ def build_langgraph_agent(
         connectors: This turn's already-open connector tools
             (`chemclaw.connectors.registry.open_connector_specs`), or `None` for an agent with no
             out-of-process capability.
+        response_format: A pydantic model the agent must finish by producing, surfaced on the
+            returned state's `structured_response`. `None` — the conversational default — leaves the
+            agent answering in prose. This exists for callers whose *whole* output is a datum rather
+            than a reply: `agent/challenge.py`'s panel members each return a `ChallengeVerdict`, and
+            letting the framework enforce that makes the failure mode "no structured answer"
+            (handled) instead of "prose that almost parses" — the same reason `verify_answer` uses
+            `with_structured_output` rather than reading a judge's free text. It is a passthrough to
+            `create_agent` and deliberately not a profile field: which shape an answer must take is
+            a property of the *call*, not of the agent's capability.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -189,6 +201,7 @@ def build_langgraph_agent(
                 connectors,
                 [*tools, *(connectors or [])],
             ),
+            *_challenge_middleware(prof, actor, correlation_id, audit_sink, connectors),
             *tool_call_middleware(audit, prof),
             # Above the compaction group so that group keeps the innermost position its own
             # docstring argues for. The two do not contend: caching marks the *system prompt and
@@ -206,6 +219,7 @@ def build_langgraph_agent(
         ],
         name="chemclaw",
         checkpointer=checkpointer,
+        response_format=response_format,
     )
 
 
@@ -313,6 +327,44 @@ def _team_middleware(
                 str(getattr(t, "name", None) or getattr(t, "__name__", ""))
                 for t in supervisor_tools
             ),
+        )
+    ]
+
+
+def _challenge_middleware(
+    profile: AgentProfile,
+    actor: str,
+    correlation_id: str | None,
+    audit_sink: AuditSink | None,
+    connectors: list[Any] | None,
+) -> list[Any]:
+    """The automatic challenge round, when this deployment runs one (`agent/challenge_gate.py`).
+
+    Empty unless `challenge_enabled`, so the default agent is byte-identical to the one before the
+    panel existed — the same promise `_team_middleware` keeps, for the same reason.
+
+    **A challenger never gets a challenge gate of its own**, which is what stops the recursion, and
+    the guard is the profile rather than a depth counter for `_team_middleware`'s reason: "a
+    reviewer is not itself reviewed" is the rule, and a counter would only bound how far a broken
+    version got. A specialist is excluded too — it reports to the supervisor, whose *assembled*
+    answer is the thing worth challenging; putting a panel on each helper's intermediate report
+    would pay N panels to review work no chemist will ever read.
+
+    The turn's identity and sink go down so the panel audits under the same correlation id, and its
+    connectors are passed for the challenger builds — narrowed by the challenger profile inside
+    `build_langgraph_agent`, exactly as any other profile narrows them.
+    """
+    if not settings.challenge_enabled:
+        return []
+    if profile.name in SPECIALISTS or profile.name == CHALLENGER_PROFILE:
+        return []
+    return [
+        build_challenge_gate(
+            profile,
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=audit_sink,
+            connectors=connectors,
         )
     ]
 

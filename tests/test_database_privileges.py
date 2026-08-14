@@ -185,17 +185,24 @@ def test_the_audit_trail_is_append_only_by_grant() -> None:
 
     "Append-only by contract" was enforced by nothing — no GRANT, no REVOKE, no trigger, no second
     role in any migration — while the same DSN that ran a chat turn could rewrite the trail
-    recording it. The hash chain (011) and the signed anchors (032) detect that after the fact;
-    only this prevents it. Asserted separately from the derivation above because it must hold
-    *whatever* the derivation concludes: if a future writer starts issuing `UPDATE audit_events`,
-    the right outcome is this test failing, not the grant widening to match.
+    recording it. A hash chain over the rows used to detect that after the fact; it is gone, so this
+    grant is now the whole of the guarantee. Asserted separately from the derivation above because
+    it must hold *whatever* the derivation concludes: if a future writer starts issuing
+    `UPDATE audit_events`, the right outcome is this test failing, not the grant widening to match.
     """
     allowed = verbs_the_grant_allows()
-    for table in ("audit_events", "audit_anchors"):
-        assert allowed.get(table) == {"INSERT"}, (
-            f"{table} is granted {sorted(allowed.get(table, set()))}; the tamper-evidence chain "
-            "assumes rows are only ever appended"
-        )
+    assert allowed.get("audit_events") == {"INSERT"}, (
+        f"audit_events is granted {sorted(allowed.get('audit_events', set()))}; the trail's whole "
+        "integrity claim is that the credential writing a row cannot rewrite it"
+    )
+    # `audit_anchors` was checked here too while the chain wrote it. The table survives the chain's
+    # removal because the schema is forward-only, but nothing writes it, so the correct grant is
+    # none at all — asserted rather than merely dropped, because a privilege silently reappearing on
+    # a table nobody writes is exactly what the derivation above exists to catch.
+    assert "audit_anchors" not in allowed, (
+        f"audit_anchors is granted {sorted(allowed.get('audit_anchors', set()))} and no code "
+        "writes it; the retired table should carry no privilege"
+    )
 
 
 def test_the_migration_ledger_is_never_granted_to_the_runtime_role() -> None:

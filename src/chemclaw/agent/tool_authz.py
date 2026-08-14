@@ -63,7 +63,7 @@ class UndeclaredWriteRefusal(AuthorizationError):
     tool_result block — the retry-inviting signal `_refusal_message` exists to avoid. The text
     invites the retry in words too ("try one of"), for a tool that was withheld on purpose rather
     than mistyped. And it enumerates the agent's whole remaining inventory into the transcript and
-    into the GxP trail, where the `detail` column is what an auditor reads as *what happened*.
+    into the audit trail, where the `detail` column is what a reviewer reads as *what happened*.
 
     The audit row itself is not what this buys, and the earlier draft of this docstring said it was.
     `ToolNode` *returns* the invalid-name message rather than raising it, and it returns it from

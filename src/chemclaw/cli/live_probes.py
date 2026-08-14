@@ -302,8 +302,8 @@ async def _run_plan_gate(args: argparse.Namespace) -> int:
     findings = [finding for run in runs for finding in run.findings]
     report = _findings_report(
         "M12 · plan → approve → execute, live",
-        "The GxP gate as a *conversation*: a write refused before approval, the same write running "
-        "after it, and the plan changing out from under the decision (DARK-1).",
+        "The approval gate as a *conversation*: a write refused before approval, the same write "
+        "running after it, and the plan changing out from under the decision (DARK-1).",
         findings,
         [
             f"front door `{args.base_url or settings.live_probe_base_url}`",

@@ -22,7 +22,6 @@ from temporalio.client import (
 )
 
 from chemclaw.core.config import settings
-from chemclaw.durable.audit_verify import AuditChainVerifyWorkflow
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
 from chemclaw.durable.memory_jobs import (
@@ -233,22 +232,6 @@ def test_retention_schedule_is_added_only_when_a_policy_is_stated(
     retention = next(p for p in plan if p.workflow is RetentionWorkflow)
     assert retention.schedule_id == "retention"
     assert retention.interval == timedelta(minutes=60)
-
-
-def test_audit_verify_schedule_is_added_only_when_a_sink_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A chain checked only by a manual `make audit-verify` is not a control (gap SCH-5).
-
-    Gated because an offline/dev deployment has no durable sink and would alert on an empty table.
-    """
-    monkeypatch.setattr(settings, "audit_verify_enabled", False)
-    assert AuditChainVerifyWorkflow not in {p.workflow for p in planned_schedules()}
-    monkeypatch.setattr(settings, "audit_verify_enabled", True)
-    monkeypatch.setattr(settings, "audit_verify_schedule_minutes", 360)
-    verify = next(p for p in planned_schedules() if p.workflow is AuditChainVerifyWorkflow)
-    assert verify.schedule_id == "audit-verify"
-    assert verify.interval == timedelta(minutes=360)
 
 
 def test_schedule_health_reports_a_planned_job_that_was_never_created() -> None:

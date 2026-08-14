@@ -66,9 +66,9 @@ def isolated_postgres_schema() -> Iterator[None]:
     """Point every Postgres-backed test at a dedicated schema, and drop it afterwards.
 
     Session-scoped and autouse so it is impossible to opt out of by forgetting a fixture: the
-    destructive tests (`test_audit_chain` truncates `audit_events`, `test_vector_index`
-    truncates `note_index`) would otherwise run against whatever database the developer's
-    `.env` points at. Redirecting `postgres_dsn` is enough to isolate every store, because
+    destructive tests (`test_vector_index` truncates `note_index`) would otherwise run against
+    whatever database the developer's `.env` points at. Redirecting `postgres_dsn` is enough to
+    isolate every store, because
     they all resolve their own connection from it — see `tests/pg.py`.
 
     A missing database is not an error here: the per-test `migrated_db_or_skip` already turns

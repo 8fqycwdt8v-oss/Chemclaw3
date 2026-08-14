@@ -32,7 +32,7 @@ does not look truncated — it looks like the conversation started later than it
 used to shrink it too, applying the model's context-window policy (`keep_last_conversation_groups`)
 to the stored rows. That was right while the rows were the model's context and wrong the moment they
 stopped being: it deleted a chemist's older messages not because any policy said to keep less, but
-because the model no longer needed them — a context heuristic quietly editing a GxP record. Age-
+because the model no longer needed them — a context heuristic quietly editing a durable record. Age-
 based retention is the policy statement a deployment actually makes, and it deletes only whole
 pairing components (`droppable_rows`, D-145).
 """
@@ -124,7 +124,7 @@ def _stored_prose(payload: dict[str, Any]) -> str:
 # The correlation id makes a stored message joinable to the audit rows of the turn that wrote it
 # (D-2026-07-31-the-audit-chain-is-versioned).
 # Without it the two halves of "what happened in this conversation" — the words and the
-# tool calls — sat in tables with no key between them, so the GxP trail could show *that* a tool ran
+# tool calls — sat in tables with no key between them, so the trail could show *that* a tool ran
 # and never *why*.
 _INSERT = (
     "INSERT INTO session_messages (session_id, message, message_shape, correlation_id) "

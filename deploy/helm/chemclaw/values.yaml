@@ -384,13 +384,6 @@ config:
   # real chemist, finite against a loop — and the load run that validated this system ran with
   # budgets on, so "on" is the configuration that was actually measured.
   CHEMCLAW_BUDGET_ENABLED: "true"
-  # Verify the tamper-evident audit chain on a Schedule rather than when someone remembers to run
-  # `make audit-verify` (REV-16). Its own docstring says it "only earns a Schedule where a durable
-  # audit sink is actually configured" — this chart sets `SESSION_STORE: postgres`, which is
-  # exactly what makes `default_audit_sink()` durable, so the precondition holds here and nowhere
-  # else. A chain nobody checks detects tampering only after someone thinks to look, which in a
-  # GxP setting is the one failure mode the chain exists to remove.
-  CHEMCLAW_AUDIT_VERIFY_ENABLED: "true"
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
@@ -451,14 +444,6 @@ secrets:
     # (D-2026-07-31-a-proposal-is-a-record-not-a-branch), so every reviewed note would stay in the
     # queue forever — a review surface that only ever grows is one nobody works.
     noteWebhookSecret: "CHEMCLAW_NOTE_WEBHOOK_SECRET"
-    # The HMAC key the audit-chain high-water anchors are sealed with. A secret and not a config
-    # value for the reason that makes the anchor evidence at all: an actor who can delete audit
-    # rows can also insert a lower anchor, so the seal is only worth anything if its key lives
-    # somewhere a database compromise does not reach
-    # (D-2026-08-01-a-restore-is-a-truncation-nobody-can-see). Absent, the chain still catches
-    # modification, reordering, interior deletion and prefix truncation — and a point-in-time
-    # restore stays what it was: an undetectable trailing deletion of the compliance trail.
-    auditAnchorSecret: "CHEMCLAW_AUDIT_ANCHOR_SECRET"
   # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
   # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
   optionalKeys:

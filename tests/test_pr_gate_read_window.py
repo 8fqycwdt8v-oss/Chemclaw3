@@ -1,8 +1,8 @@
 """Can a reader see an unreviewed note while the PR-gate is submitting it? Measured: no.
 
-This is a compliance question, not a reliability one. The PR-gate is the GxP line — "AI proposes,
-human signs off" (D-005) — and the whole control rests on an agent-authored note being invisible as
-*knowledge* until a human merges it.
+This is a governance question, not a reliability one. The PR-gate is the review line — the agent
+proposes, a human decides (D-005) — and the whole control rests on an agent-authored note being
+invisible as *knowledge* until a human merges it.
 
 **It was reachable, and it was measured here first.** `settings.knowledge_path` is
 `note_repo_dir / knowledge_dir`, so readers resolve into the same working tree the submitter used

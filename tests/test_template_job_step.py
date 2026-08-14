@@ -311,13 +311,13 @@ def test_a_declared_precondition_runs_on_the_template_path_too(costly_bundle: st
         asyncio.run(authorize_job_step(_step(costly_bundle, subject="benzene")))
 
 
-def test_the_launch_leaves_a_gxp_audit_row_naming_the_requester(
+def test_the_launch_leaves_an_audit_row_naming_the_requester(
     monkeypatch: pytest.MonkeyPatch, fixture_bundle: str
 ) -> None:
     """A durable launch from a template used to leave no audit record at all.
 
     The row has to name the job (so it reads like the same launch from a chat turn), the person who
-    asked, and the run that tied the steps together — otherwise the GxP question "who started this
+    asked, and the run that tied the steps together — otherwise the question "who started this
     calculation" has no answer for anything a template did.
     """
     events = _record_audit(monkeypatch)

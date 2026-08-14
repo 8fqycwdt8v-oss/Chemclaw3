@@ -300,7 +300,7 @@ class TemporalWindow(BaseModel):
         """Whether this is inside its validity window on `as_of` (bounds inclusive).
 
         Either bound may be absent (open-ended). Discovery retrieval excludes non-current notes so
-        a not-yet-valid or superseded entry is not served as *current* evidence (GxP freshness —
+        a not-yet-valid or superseded entry is not served as *current* evidence (freshness —
         audit KM-7); the note is never deleted, it stays in Git and is still reachable by explicit
         id, it is only dropped from current-evidence sweeps.
         """
@@ -337,7 +337,7 @@ class Relation(TemporalWindow):
 class Note(TemporalWindow):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 
-    `created_by` is the GxP provenance line: `agent`-authored notes must pass the
+    `created_by` is the provenance line: `agent`-authored notes must pass the
     PR-gate before merge (D-005). `confidence` (0–1) and `valid_from`/`valid_to`
     let a later query weigh and time-scope evidence.
 

@@ -150,7 +150,7 @@ def test_a_result_two_calls_produced_names_neither_of_them() -> None:
     so *every* unexpected tool exception in the system returns the same byte string "Error:
     Function failed." — one blob per session covering every failed call it ever makes. A fetch of
     it under one arbitrary tool name and one arbitrary correlation id would be a mispairing served
-    with full confidence, and `StoredToolResult.correlation_id` is documented as "the join a GxP
+    with full confidence, and `StoredToolResult.correlation_id` is documented as "the join a
     reviewer asks for".
 
     Asserted through `load_tool_result` rather than on the row, because what matters is what a
@@ -394,7 +394,7 @@ def test_a_stored_result_is_fetchable_from_its_session(
     body = res.json()
     assert body["text"] == _SCREEN
     assert body["tool"] == "screen_hazards"
-    # The join a GxP reviewer makes: this fetched result and the audit rows for the turn that
+    # The join a reviewer makes: this fetched result and the audit rows for the turn that
     # produced it carry the same id.
     assert body["correlation_id"] == "corr-1"
 

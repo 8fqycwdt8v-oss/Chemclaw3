@@ -28,8 +28,8 @@ from chemclaw.core.temporal_client import connect
 # side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
 # populated, the sets this worker serves come from it — so adding a durable capability
 # to one of these modules is a decorator at its definition site, not an edit here.
+from chemclaw.durable import answer_review as _answer_review  # noqa: F401
 from chemclaw.durable import artifact_eviction as _artifact_eviction  # noqa: F401
-from chemclaw.durable import audit_verify as _audit_verify  # noqa: F401
 from chemclaw.durable import connector_job as _connector_job  # noqa: F401
 from chemclaw.durable import digest as _digest  # noqa: F401
 from chemclaw.durable import document_sync as _document_sync  # noqa: F401

@@ -29,8 +29,8 @@ tested code, and the first version of this edit is what re-deriving it costs (se
 untouched; the next turn re-derives the same reduction from the full thread. D-025 also ran its
 strategy over the persisted history so the next turn "started smaller", and the commit that removed
 the durable half of that named the reason it was wrong: a context heuristic must not edit a record
-somebody else's policy governs. The checkpointer is turn state rather than the GxP record — that is
-`session_messages` — but the same argument applies to it one step down, and a reduction that is
+somebody else's policy governs. The checkpointer is turn state rather than the durable record — that
+is `session_messages` — but the same argument applies to it one step down, and a reduction that is
 recomputed costs an estimator pass while a reduction that is *applied* costs history. What bounds
 the checkpoint tables is age, in `durable/retention.py`, which is the policy statement a deployment
 actually makes.

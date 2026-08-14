@@ -21,7 +21,7 @@ core owns the obligations that must never vary per capability:
 - **The PR-gate** — a job that produces knowledge returns a `Note` and core publishes it through
   `chemclaw.kg.pr_gate` (via the existing `publish_memory_note_activity`). A connector never writes
   to the
-  graph itself, so "AI proposes, human signs off" cannot be bypassed by adding a connector.
+  graph itself, so "the agent proposes, a human decides" cannot be bypassed by adding a connector.
 - **Session push-back** — the launching chat is woken through the one existing channel (F3-T3), so
   a connector job surfaces in the UI exactly as a QM job does, with no per-connector plumbing.
 - **The durable record** — what ran, on what arguments, what came out, and *why it was asked for*

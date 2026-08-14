@@ -32,7 +32,7 @@ appends whichever branch completes first, while both merge modes downstream depe
 order: `reciprocal_rank_fusion` takes a note's representative chunk from "the first one encountered
 across the lists (stable input order)", and `_interleave_dedup` round-robins in list order, so the
 sequence decides which duplicate survives. Nondeterministic order would make one sweep's evidence
-differ from the next for no reason a chemist could see — a reproducibility problem in a GxP system,
+differ from the next for no reason a chemist could see — a reproducibility problem,
 which is the same argument `connectors/registry._bundle_dirs` sorts for. So every branch carries
 the index of the source it ran, and the fan-in restores that order before returning.
 """

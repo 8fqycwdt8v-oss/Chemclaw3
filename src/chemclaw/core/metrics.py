@@ -6,7 +6,7 @@ which left three things invisible in operations and one thing actively mis-tuned
 - **Load shedding is silent.** Admission control (AG-15) sheds excess turns with a 503 and the
   budget guard refuses with a 429. Both are working as designed and neither is countable, so
   "the service is at capacity" looks identical to "the service is fine" from outside.
-- **Lost GxP audit records are silent.** `chemclaw.agent.audit` deliberately swallows a sink
+- **Lost audit records are silent.** `chemclaw.agent.audit` deliberately swallows a sink
 failure to
   keep tool calls working (SEC-3) and logs an ERROR marker — but nothing counts it, so an audit
   trail can be quietly incomplete for a long time.
@@ -102,7 +102,7 @@ _COUNTERS: dict[str, str] = {
     # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
     "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
     "chemclaw_audit_sink_failures_total": (
-        "GxP audit records that could not be persisted (the trail is incomplete)."
+        "Audit records that could not be persisted (the trail is incomplete)."
     ),
     # The durable subsystem's counterpart to `chemclaw_connectors_unreachable_total`. It did not
     # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
@@ -140,6 +140,23 @@ _COUNTERS: dict[str, str] = {
     # deployment on every dashboard.
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
+    ),
+    # The challenge panel's silent-failure counter, and it is the one number that separates "this
+    # answer survived review" from "review did not happen". Every degraded path in
+    # `agent/challenge.py` returns a *non-corroborating* verdict — deliberately, so an unreachable
+    # endpoint cannot hold an answer — which means an entirely dead panel looks exactly like a panel
+    # that found nothing wrong. Without this series that distinction is unobservable, and a
+    # deployment would read a flat zero objections as a healthy system.
+    "chemclaw_challenge_degraded_total": (
+        "Challenge-panel members that could not be drafted, built or parsed, and were therefore "
+        "counted as raising no objection."
+    ),
+    # What the panel actually did when it ran. Counted per *round* rather than per member, because
+    # the question a deployment tunes on is how often answers get challenged and how often that
+    # changes anything — the per-member detail is on the turn's stream and in the audit trail.
+    "chemclaw_challenge_rounds_total": "Answers put to the challenge panel.",
+    "chemclaw_challenge_upheld_total": (
+        "Challenge rounds where the panel reached quorum on a stated objection."
     ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
@@ -293,7 +310,7 @@ _COUNTERS: dict[str, str] = {
     # is "is anything degraded, and what", which is `sum by (subsystem)` over a single series
     # family, and a per-site counter would make that a union of a dozen metric names that has to be
     # edited every time a site is added. `agent/audit.py`'s dedicated
-    # `chemclaw_audit_sink_failures_total` stays as it is — a lost GxP record is a named
+    # `chemclaw_audit_sink_failures_total` stays as it is — a lost audit record is a named
     # regulatory fact with its own alert, not a member of a general family.
     "chemclaw_degraded_total": (
         "Operations that failed and were continued past with reduced function, by subsystem."

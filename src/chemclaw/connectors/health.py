@@ -108,7 +108,7 @@ async def check_connectors_at_startup() -> list[ConnectorHealth]:
 
     Raises:
         ConnectorsUnavailable: When `connectors_required` is set and at least one enabled connector
-            is unreachable — the fail-fast posture a GxP deployment can opt into, where serving with
+            is unreachable — the fail-fast posture a deployment can opt into, where serving with
             a silently reduced tool surface is worse than not serving.
     """
     health = await probe_connectors()

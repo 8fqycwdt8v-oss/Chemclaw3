@@ -37,7 +37,7 @@ services:
       - "4317:4317"
     environment:
       # SQLite in a named volume. Phoenix supports Postgres and the spine already runs one, but
-      # pointing it at that database would put a third-party schema beside the GxP tables
+      # pointing it at that database would put a third-party schema beside the tables
       # `infra/sql` owns and `tests/test_schema_inventory.py` pins. A separate store is the whole
       # of what keeps this a reader.
       PHOENIX_WORKING_DIR: /data

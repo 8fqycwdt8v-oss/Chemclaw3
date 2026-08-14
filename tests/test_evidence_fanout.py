@@ -71,7 +71,7 @@ def test_the_fan_in_is_in_source_order_not_completion_order() -> None:
     fusion` takes a note's representative chunk from the first list that found it, and the
     round-robin interleaves in list order — so a sweep whose order depended on which database
     answered first would return different evidence for the same question on different runs. In a
-    GxP system that is a reproducibility defect, not a nondeterminism nobody notices.
+    chemist that is a reproducibility defect, not a nondeterminism nobody notices.
     """
     slow = _Retriever("graph", 1, delay=0.05)
     fast = _Retriever("lexical", 1)

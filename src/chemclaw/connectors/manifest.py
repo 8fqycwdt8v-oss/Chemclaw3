@@ -19,7 +19,7 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
 1. **Conversation plumbing** — anything that reads or writes the *turn's* own state (attachments,
    preferences, watches, clarifying questions). Another process does not have the turn.
 2. **The PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`). The gate is the
-   GxP boundary; a connector reaches it only by returning a `Note` in a job envelope, which is a
+   review boundary; a connector reaches it only by returning a `Note` in a job envelope, which is a
    proposal core decides to publish. That asymmetry is the point.
 3. **Core's own data layer — the knowledge graph.** This one is worth stating because it looks like
    a capability and is not (D-115). Thirteen core modules import `kg`: the PR-gate, all six memory

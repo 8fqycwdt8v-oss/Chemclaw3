@@ -159,9 +159,9 @@ def _envelope(result: QMJobResult, calc_key: str) -> ConnectorJobResult:
     """Wrap a finished result in the envelope core reads — the one exit both paths take.
 
     The note is *built* here and published by core (step 2.8): the QM→note mapping is this domain's
-    knowledge, while the PR-gate is the GxP boundary a connector must not be able to reach around.
-    Returned unconditionally — whether it is published is the manifest's `publish_to_graph`, which
-    core reads, so this workflow carries no second switch for the same decision.
+    knowledge, while the PR-gate is the review boundary a connector must not be able to reach
+    around. Returned unconditionally — whether it is published is the manifest's `publish_to_graph`,
+    which core reads, so this workflow carries no second switch for the same decision.
 
     Shared by the computed path and the cache-hit path so the two can never answer differently: a
     result served from the store has to look exactly like the run that produced it, including the

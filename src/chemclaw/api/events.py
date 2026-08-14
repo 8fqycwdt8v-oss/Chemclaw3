@@ -138,7 +138,7 @@ class QuestionEvent(BaseModel):
 class NoteProposedEvent(BaseModel):
     """A note was opened on a branch for human review through the PR-gate (gap RCH-4).
 
-    The GxP "AI proposes, human signs off" line is the architecture's spine, but it lived only in
+    The "agent proposes, human decides" line is the architecture's spine, but it lived only in
     a git host's UI: `propose_note` returned its reference into the model's context and the chemist
     never learned their contribution landed. This carries the branch reference back to the surface
     that produced it.
@@ -221,6 +221,18 @@ class AnswerEvent(BaseModel):
     # even reachable. It is on the wire because the surface is where "this was scored by the weaker
     # check" has to be legible; the flag is the safety property and this is the transparency.
     verified_by: Literal["judge", "citation-gate"] | None = None
+    # Whether an independent review panel agreed on a stated objection to this answer
+    # (`agent/challenge_gate.py`), after the model had spent its revision budget trying to answer
+    # them. Distinct from `review_required`, which any of the three checks can raise on its own: a
+    # confidence score under a threshold and a quorum of agents that each went and checked are
+    # different weights of evidence, and a surface that renders them identically is throwing away
+    # the more expensive one.
+    challenged: bool = False
+    # The durable hold (`durable/answer_review.py`) carrying the human decision on that objection
+    # past the end of this session. `None` when nothing was upheld — or when Temporal was
+    # unreachable, in which case the objection still rides in `unsupported_claims` and only the
+    # hold was lost.
+    review_hold_id: str | None = None
 
 
 class ToolFailedEvent(BaseModel):
@@ -389,7 +401,7 @@ class HandoffEvent(BaseModel):
 
     A team's work is only legible if the routing is. Without this, a chemist watching a turn sees
     a supervisor fall silent and a different set of tools start running, with nothing saying why —
-    and the GxP record has the same gap, because the trace *is* the record. That is the whole
+    and the durable record has the same gap, because the trace *is* the record. That is the whole
     argument for a supervisor over a swarm (the subagent ADR of 2026-08-10): every delegation
     decision passes through one node and is therefore observable.
 
@@ -400,7 +412,7 @@ class HandoffEvent(BaseModel):
 
     **Raised by `agent/team.running_specialist`**, the contextmanager that already brackets the
     interval the audit trail attributes to a specialist — so the span a surface draws and the span
-    the GxP record claims are the same `try`/`finally` rather than two things that can disagree.
+    the durable record claims are the same `try`/`finally` rather than two things that can disagree.
     It shipped for one release as a declared member nothing produced
     (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
 

@@ -62,7 +62,7 @@ arm of the union and a new branch in core (D-076 → D-120).
 ## What is *not* a data source
 
 **Anything that writes to the knowledge graph.** Notes enter through the PR-gate, where a human
-signs off before a merge — that is the GxP line. `graph` is retrieve-only for this reason, not by
+signs off before a merge — that is the review line. `graph` is retrieve-only for this reason, not by
 omission, and a source cannot acquire a write path by declaring one.
 
 **An ELN's retrieve half, when its records already become notes.** `eln-json` and `eln-ord` are

@@ -279,7 +279,7 @@ probes:
       Bucket C. Notes carry a whole-note `created_by` field (agent versus human) and the audit trail
       records what happened, but there is no per-section or per-sentence provenance share, and no
       MBR entity to measure one on in the first place. The honest answer names exactly what is
-      tracked — note-level authorship, the hash-chained audit trail, and the rule that anything
+      tracked — note-level authorship, the append-only audit trail, and the rule that anything
       agent-generated is marked as such and enters through the PR-gate — and then says a percentage
       cannot be computed. Any number offered here, even hedged, is fabricated.
 
@@ -296,7 +296,7 @@ probes:
     direction: >-
       The PR-gate is the real answer and a good response points straight at it: agent-authored
       content is created as a proposal, carries created_by=agent, and reaches the knowledge graph
-      only through a pull request that a human merges — "AI proposes, human signs off". Report notes
+      only through a pull request that a human merges — the agent proposes, a human decides. Report notes
       pass the same gate. Bucket B because that gate governs knowledge notes, not controlled
       documents: there is no e-signature, no effective-date control, no training record and no QMS
       integration, and the answer must say so rather than let the PR-gate imply compliance it does
@@ -455,7 +455,7 @@ probes:
       - "a note id or attachment id that did not appear in a tool result"
     direction: >-
       Bucket B, and the distinction is the point. The graph gives genuine note-level traceability —
-      every claim wikilinks a note, expand_note opens it, and the audit trail hash-chains what the
+      every claim wikilinks a note, expand_note opens it, and the audit trail records what the
       agent did — but for most content the note is the bottom of the chain: there is no raw
       instrument data, no chromatogram or spectrum store, and the ELN records that do exist are free
       text. A strong answer demonstrates the traceability it actually has on a real, retrieved note

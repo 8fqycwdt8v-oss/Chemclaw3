@@ -3,9 +3,9 @@
 -- `006_audit_events.sql` calls that table "append-only by contract", and until this file the
 -- contract had no enforcement of any kind: no GRANT, no REVOKE, no trigger and no second role in
 -- any of the 36 migrations. One DSN with full DDL and DML was mounted on every pod, so the
--- credential that runs a chat turn could also rewrite the GxP trail whose whole purpose is to
--- record what that turn did. The hash chain (011) and the signed anchors (032) detect that
--- afterwards; nothing prevented it.
+-- credential that runs a chat turn could also rewrite the audit trail whose whole purpose is to
+-- record what that turn did. A hash chain (011) and signed anchors (032) detected that afterwards;
+-- nothing prevented it. Those are gone now, so this file is the whole of the guarantee.
 --
 -- **Not a numbered migration, and the distinction is load-bearing.** `infra/sql/*.sql` is applied
 -- exactly once per file and tracked by checksum, which is right for a schema change and wrong for
@@ -45,13 +45,18 @@ BEGIN
     -- write, below.
     EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA public TO %I', app_role);
 
-    -- Append-only, and now by grant. INSERT with no UPDATE and no DELETE is what makes the hash
-    -- chain's assumption true rather than assumed: a chain link cannot be rewritten by the
-    -- credential that writes chain links. `audit_anchors` carries the same argument — an anchor is
-    -- the evidence that a *trailing* truncation happened
-    -- (D-2026-08-01-a-restore-is-a-truncation-nobody-can-see), so an actor able to delete anchors
-    -- could hide the one alteration the chain by itself cannot see.
-    EXECUTE format('GRANT INSERT ON audit_events, audit_anchors TO %I', app_role);
+    -- Append-only, and by grant rather than by convention. INSERT with no UPDATE and no DELETE is
+    -- the whole of the trail's integrity claim: the credential that writes a row cannot rewrite or
+    -- remove it. A per-row hash chain and signed anchors used to sit on top of this and made
+    -- tampering *detectable*; they were built for a regulated deployment, have been removed, and
+    -- this grant is what always did the preventing.
+    --
+    -- `audit_anchors` is deliberately absent. The table still exists — the schema is forward-only —
+    -- but the code that wrote it went with the chain, and a grant nobody exercises is a privilege
+    -- that only matters when someone else exercises it. `tests/test_database_privileges.py` derives
+    -- this matrix from the SQL the code actually issues and fails in *both* directions, which is
+    -- what caught the grant outliving its writer.
+    EXECUTE format('GRANT INSERT ON audit_events TO %I', app_role);
 
     -- Insert and upsert, no delete. These include the three tables `durable/retention.py`
     -- explicitly refuses to prune, each for a stated reason (the cache is bounded by cost policy

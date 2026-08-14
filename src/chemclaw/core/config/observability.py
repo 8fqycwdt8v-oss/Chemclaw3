@@ -1,4 +1,4 @@
-"""Logging, the GxP tool-audit trail, and OpenTelemetry export.
+"""Logging, the tool-audit trail, and OpenTelemetry export.
 
 One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
 every section into the one config object and owns the env prefix, the `.env` loading and the
@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings
 
 
 class ObservabilitySettings(BaseSettings):
-    """Logging, the GxP tool-audit trail, and OpenTelemetry export.
+    """Logging, the tool-audit trail, and OpenTelemetry export.
 
     Grouped because these are the process-wide "what happened" knobs: one config-driven switch
     for verbosity so an admin can raise it to DEBUG for troubleshooting without touching code,
@@ -28,7 +28,7 @@ class ObservabilitySettings(BaseSettings):
     # default *shape* rather than widened with the three ids, because `log_json` supersedes it and
     # two formats to keep in step is how one of them goes stale.
     log_json: bool = False
-    # GxP tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
+    # The tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
     # outcome, latency) by one tool-call middleware. Arguments are truncated to this many
     # characters so a large payload (a full optimization problem, an observation list) cannot
     # flood the log; raise it when a fuller argument record is needed for an audit.
@@ -56,7 +56,7 @@ class ObservabilitySettings(BaseSettings):
     stream_max_result_bytes: int = Field(default=131072, ge=0)
     # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
     # Git SHA the running pod was built from, so a past agent result ties to the exact version that
-    # produced it (GxP reproducibility). The image build sets it — `deploy/Containerfile` takes a
+    # produced it (reproducibility). The image build sets it — `deploy/Containerfile` takes a
     # `CHEMCLAW_REVISION` build arg and exports it under this name, and the image workflow passes
     # the commit SHA. That sentence used to be here as a claim about a build that did not exist:
     # nothing set it anywhere, so every deployment recorded the literal "unknown" while AG-14 read

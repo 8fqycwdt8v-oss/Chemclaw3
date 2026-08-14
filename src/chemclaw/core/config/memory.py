@@ -57,8 +57,8 @@ class MemorySettings(BaseSettings):
     schedule_jitter_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
     # Retention windows in days (gap SCH-1). Nothing in the system deleted anything before this,
     # so every durable table grew for the deployment's lifetime. 0 disables pruning for that
-    # table, which is the default: a retention period is a *policy* decision (GxP: keep for N
-    # years, then dispose, provably), so a deployment must state it rather than inherit a number
+    # table, which is the default: a retention period is a *policy* decision ("keep for N years,
+    # then dispose, provably"), so a deployment must state it rather than inherit a number
     # from code. `audit_events`, `calculation_results` and `job_records` are deliberately absent —
     # see durable/retention.py for why each needs its own design rather than an age cutoff.
     retention_enabled: bool = False
@@ -71,10 +71,10 @@ class MemorySettings(BaseSettings):
     #
     # It was written with a 30-day default first, on the argument that this table holds no *record*
     # of anything — the answers are in `calculation_results` (D-011) and `job_records` (D-157), so
-    # there is no GxP policy to defer and deferring it only means an unbounded table. The argument
-    # is sound and it buys nothing: `retention_enabled` is False by default, so on a default
-    # deployment a number here deletes exactly as much as 0 does. The only deployment the two
-    # differ for is one that switched retention on and did not state this window — and that is
+    # there is no retention policy to defer and deferring it only means an unbounded table. The
+    # argument is sound and it buys nothing: `retention_enabled` is False by default, so on a
+    # default deployment a number here deletes exactly as much as 0 does. The only deployment the
+    # two differ for is one that switched retention on and did not state this window — and that is
     # precisely the case `test_retention_is_off_until_a_policy_is_stated` exists to refuse. One
     # rule for every window is worth more than a default that changes nothing.
     #
@@ -102,28 +102,6 @@ class MemorySettings(BaseSettings):
     # schedule drains the tail. 500 is roughly a minute of round trips: far more than a steady
     # state produces in a day, far less than a first pass over a year of history.
     retention_max_sessions_per_pass: int = Field(default=500, gt=0)
-    # Scheduled verification of the tamper-evident audit chain (gap SCH-5). A chain checked only
-    # by a manual `make audit-verify` detects tampering only when someone remembers to look.
-    # Only earns a Schedule where a durable audit sink is actually configured.
-    audit_verify_enabled: bool = False
-    audit_verify_schedule_minutes: float = Field(default=1440.0, gt=0)
-    audit_verify_timeout_seconds: float = Field(default=600.0, gt=0)
-    # How many audit rows the verifier holds at once. It used to hold all of them — and this is the
-    # one table `retention_*` above refuses to prune, because deleting from a hash chain is
-    # indistinguishable from tampering, so it is the one table with no upper bound. A whole-table
-    # read in the shared background worker was on a path to OOM it (DARK-6). The fold carries the
-    # chain link across pages, so this bounds memory without weakening the check.
-    # The HMAC key the audit anchors are signed with (`agent/audit_anchor.py`). Empty disables
-    # anchoring, and that is the honest default rather than a generated key: an anchor is only
-    # evidence if its secret lives somewhere a database compromise does not reach, and a value this
-    # process invents for itself would not.
-    #
-    # What it buys: the chain catches modification, reordering, interior deletion and prefix
-    # truncation, and cannot see a *trailing* deletion — the survivors link cleanly. A point-in-time
-    # restore is a trailing deletion, so without this a documented recovery procedure silently
-    # shortens the compliance trail every time it is used.
-    audit_anchor_secret: str = ""
-    audit_verify_page_rows: int = Field(default=5000, ge=1)
     # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this
     # long for its result and continue the *same* turn with it, so "compute this, then reason
     # about the result" is one exchange. Off by default — holding a turn open holds an admission

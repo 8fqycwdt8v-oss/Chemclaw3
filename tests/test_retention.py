@@ -1,7 +1,7 @@
 """Retention windows bound the durable stores (gap SCH-1).
 
 Before this, nothing in the system deleted anything: every Postgres table grew for the life of the
-deployment. For a GxP system that is a records gap, not just a disk one — "keep for N years, then
+deployment. That is a records gap, not just a disk one — "keep for N years, then
 dispose, provably" needs a disposal step.
 
 The Postgres round-trip skips offline (like every other PG test), so these pin the *policy* the job
@@ -53,12 +53,14 @@ def test_only_spent_operational_rows_are_prunable() -> None:
     }
 
 
-def test_the_hash_chained_audit_trail_is_never_pruned() -> None:
-    """Deleting from a hash chain is indistinguishable from tampering — the thing it detects.
+def test_the_audit_trail_is_never_pruned() -> None:
+    """The trail is the record of who ran what, and a cleanup job may not decide to dispose of it.
 
-    Safe disposal needs archive-then-reseal (export the prefix, verify it, record an out-of-band
-    genesis anchor), which is a GxP design decision for an ADR, not something a cleanup job should
-    quietly do. The table must therefore be absent from the prunable set entirely.
+    Disposal is a policy decision — which rows, how old, exported where first — and it belongs to
+    whoever owns the record rather than to an age cutoff. The table must therefore be absent from
+    the prunable set entirely. This guard predates the removal of the audit hash chain and outlives
+    it deliberately: the chain used to be the stated reason, and without a test the removal would
+    read as permission to start pruning.
     """
     assert "audit_events" not in _PRUNABLE
 
@@ -88,9 +90,9 @@ def test_a_stated_window_is_read_per_table(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
     assert _window_days("session_events") == 7
     assert _window_days("session_messages") == 365
-    # Turn state is not the conversation and does not age with it: the transcript is a GxP record
-    # kept for years, while a checkpoint is what a suspended turn resumes from and is dead weight
-    # long before that.
+    # Turn state is not the conversation and does not age with it: the transcript is a durable
+    # record kept for years, while a checkpoint is what a suspended turn resumes from and is dead
+    # weight long before that.
     assert _window_days("checkpoints") == 30
 
 
@@ -276,7 +278,7 @@ def test_an_undelivered_push_back_event_survives_the_window() -> None:
     longer than the retention window — exactly the jobs this channel exists for — lost its
     completion, the session waited on it forever, and the harness "awaiting job" todo never
     flipped. It also deleted the `system-audit-integrity` and `system-eval-drift` alerts, which are
-    never consumed by construction, so retention quietly removed the tamper evidence.
+    never consumed by construction, so retention quietly removed the integrity alerts.
     """
 
     async def _run() -> tuple[int, int]:

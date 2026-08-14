@@ -30,7 +30,7 @@ never enters the evidence list (`recall_observations` is its own tool, not a buc
 
 A distilled playbook is a *proposal*. It reaches `knowledge/` the same way every other
 agent-generated note does — through `kg.pr_gate`, as a pull request a human merges. Memory that
-wrote itself into the record would be exactly the thing the GxP line exists to prevent.
+wrote itself into the record would be exactly the thing the review line exists to prevent.
 
 ## The boundary against `retrieval/`
 

@@ -18,7 +18,7 @@ front door runs one uvicorn worker — the bounded worker-thread wrapper the rou
 
 Attachments are **session-scoped and in-memory**: they are working material for a conversation, not
 knowledge. Anything worth keeping goes through `propose_knowledge_note` and the PR-gate like every
-other machine-written note — routing uploads straight into the graph would bypass the GxP line.
+other machine-written note — routing uploads straight into the graph would bypass the review line.
 """
 
 import asyncio

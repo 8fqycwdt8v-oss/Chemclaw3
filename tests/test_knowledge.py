@@ -68,10 +68,10 @@ def test_a_job_result_links_its_compound_and_brings_it_along() -> None:
 
 
 def test_the_bundle_has_no_way_to_write_the_note_itself() -> None:
-    """The QM bundle *builds* a note and cannot *publish* one — the GxP asymmetry, structurally.
+    """The QM bundle *builds* a note and cannot *publish* one — the review asymmetry, structurally.
 
     It used to own a `write_knowledge_node` activity that called `propose_note` directly, which
-    made "AI proposes, human signs off" a convention the bundle chose to honour rather than a
+    made "the agent proposes, a human decides" a convention the bundle chose to honour rather than a
     boundary it could not cross. Core publishes whatever note the job envelope carries now, so a
     connector reaching the graph would first have to import the PR-gate — and no bundle does.
     """

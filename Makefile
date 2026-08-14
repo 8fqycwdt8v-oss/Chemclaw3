@@ -36,7 +36,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-routing live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-routing live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -185,9 +185,6 @@ upstream-check:  ## Re-check every upstream shape this repo borrows (run on any 
 	@# delete our workaround" as easily as "upstream broke us".
 	uv run pytest tests/test_upstream_surface.py -q
 	@uv run python -c "import importlib.metadata as m; print('resolved: ' + ', '.join(f\"{p}=={m.version(p)}\" for p in ('langchain','langchain-core','langgraph','langgraph-checkpoint','deepagents','langchain-mcp-adapters')))"
-
-audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
-	uv run python -m chemclaw.cli.verify_audit_chain
 
 deps-audit:  ## Check the locked dependency closure for known vulnerabilities (supply chain).
 	@# Against the *lockfile* rather than the environment: the exact versions the image installs,

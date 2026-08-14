@@ -52,6 +52,32 @@ gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap 
 `ModelCallLimitMiddleware`, subclassed only to record that it fired (`agent/loop_cap.py`); and a
 specialist team (`agent/team.py`) is available but off by default until its routing is measured.
 
+Two ADRs on 2026-08-13 changed what that team *is* and added the review it was missing. M12 had
+measured the supervisor delegating **2 of 15** and found the cause structural rather than
+promptable — `reject_widening` makes specialists ⊆ supervisor, so delegating is always a longer path
+to a tool already in hand. That argument is about delegating to reach a *capability*, and says
+nothing about spawning for isolation, parallelism or an independent look, so
+`D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` restores upstream's reason
+to spawn and keeps the five names as the **tool surfaces** a helper runs on — no invariant inverted,
+the model authoring each helper's brief while the code still authors its capability. It also records
+the constraint every future dynamic subagent must obey: deepagents builds a bare `SubAgent` dict with
+*only* `spec["middleware"]`, so anything not compiled by `build_langgraph_agent` runs with no audit
+trail, no authz and no plan gate — silently. `D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared`
+then adds the adversarial half (`agent/challenge.py`, `agent/challenge_gate.py`): an `after_model`
+gate puts a finished answer to a panel of independently-briefed agents whose *angles are generated
+for that answer* rather than declared, unconditionally when two or more helpers ran and otherwise
+only when the existing checks flagged it. A quorum sends the critique back for a bounded revision
+round; past the bound the answer ships marked with a durable hold (`durable/answer_review.py`).
+Both ship off (`challenge_enabled`, `agent_teams_enabled`) — whether either helps is a measurement,
+and `docs/planning/BACKLOG.md` carries both. **The first such measurement came back against the
+first ADR**: run live on the M12 corpus, the old and new framings delegated **14/15 each**, so the
+reframing bought nothing detectable — though the old arm was already at ceiling, and 14/15 against
+M12's own 2/15 on the same corpus means that harness (no front door, no connectors, no history) was
+not measuring what M12 measured. Neither number is the deployment's rate. What survives the result
+is the structural half — surfaces rather than a routing partition, the two prompts agreeing, the
+delegation tally, and the ban on bare `SubAgent` dicts, which is a security property no measurement
+bears on.
+
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context
 management*, gone. D-025's compaction lived in the removed framework, and what survived it was the
@@ -172,7 +198,7 @@ rule is D-002's and it got *stricter* when layer 1 gained a checkpointer, becaus
 holds turn state and every long or expensive job is still Temporal's (D-2026-08-10 §3). Skills hold
 judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
 speaks, not the thing that holds the capability (D-110/D-118). Anything agent-generated enters the
-graph via a **PR-gate** (human validates before merge) — this is the GxP "AI proposes, human signs off" line, reused
+graph via a **PR-gate** (human validates before merge) — the agent proposes, a human decides, reused
 everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
 
 ## Commands
@@ -185,7 +211,7 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
   package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
   `skill-validate`, `connector-validate`, `datasource-validate`, `template-validate`,
-  `prose-validate`, `eln-validate`, `helm-validate`, `audit-verify`.
+  `prose-validate`, `eln-validate`, `helm-validate`.
 - **Running things**: `make up` (docker-compose: Temporal + Postgres/pgvector) · `make connectors`
   (every enabled connector in one dev process) · `make chat` · `make db-migrate`.
 - Single test: `pytest path/to/test_file.py::test_name` or `pytest -k "name substring"`.

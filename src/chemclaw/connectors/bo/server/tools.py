@@ -368,7 +368,7 @@ def _recorded_provenance() -> tuple[str, str, str]:
     declares `auth: mode: none`, so the pod does not even authenticate *core*: anything that can
     open a socket to it can name any chemist it likes. Measured before this existed — a call
     carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into `bo_campaigns.
-    opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains as the GxP
+    opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains as the
     answer to "who framed this campaign's decision space", indistinguishable from a real one.
 
     **Why marking rather than sourcing the real principal.** The durable sibling
@@ -550,7 +550,7 @@ async def suggest_next_experiment(
     # the right handle to return even on the turn where the write did not land.
     #
     # `_recorded_provenance`, not `caller_provenance`: this path's actor is an unauthenticated
-    # header, and the row it writes is the GxP record of who proposed an experiment. See that
+    # header, and the row it writes is the record of who proposed an experiment. See that
     # function for why the name is marked rather than replaced by a validated one.
     campaign_id = await record_suggestion(
         problem=featurized.problem,

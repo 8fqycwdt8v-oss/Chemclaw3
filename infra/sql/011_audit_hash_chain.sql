@@ -1,18 +1,16 @@
--- Tamper-evident hash chain over the GxP audit trail (plan F10-G1; completes the step deferred
--- in 006_audit_events.sql and D-034).
+-- RETIRED. Adds `prev_hash` and `row_hash` to `audit_events` for a tamper-evident hash chain, in
+-- which each row committed a hash of the one before it so that modifying, reordering or
+-- interior-deleting a row broke the chain detectably.
 --
--- Each appended row carries `prev_hash` (the previous row's `row_hash`) and `row_hash`
--- (a SHA-256 over prev_hash + this row's audited fields, computed by
--- agents.audit_store.chain_hash). Because every row commits the hash of the one before it,
--- modifying, reordering, or interior-deleting a row — or deleting the leading (genesis) rows —
--- breaks the chain, detectable by `python -m scripts.verify_audit_chain` (`make audit-verify`)
--- without trusting the store. Deleting the trailing rows (tip truncation) is the one alteration the
--- chain alone cannot catch (it needs an external count anchor — see that module's known-limit note).
+-- The chain, its signed anchors (032), its verifier and `make audit-verify` were built for a
+-- regulated deployment and have since been removed: Chemclaw is not one, and the chain cost a
+-- serializing advisory lock on every audit write plus a key to manage. What remains is the
+-- INSERT-only grant in `grants/app_privileges.sql`, which prevents the rewrite the chain merely
+-- detected.
 --
--- Both columns default to '' so rows written before this migration (there are none in a fresh
--- deployment, but a running one may have some) remain valid; the verifier treats a leading run of
--- empty-`row_hash` rows as pre-chain and begins checking at the first chained row. New inserts
--- always set both explicitly. The writer serializes appends with a transaction advisory lock so a
--- concurrent insert cannot fork the chain.
+-- The statements below are unchanged because the schema is forward-only — a migration may not drop
+-- a column (`tests/test_migrations_are_additive.py`), and re-running this file on an existing
+-- database must stay a no-op. Both columns default to '', so the writer simply stopped supplying
+-- them; every row written since carries those defaults and means nothing by them.
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS prev_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS row_hash  TEXT NOT NULL DEFAULT '';

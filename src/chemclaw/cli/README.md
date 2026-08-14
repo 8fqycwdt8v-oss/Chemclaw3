@@ -11,7 +11,7 @@ and the terminal get the same answer.
 | `connectors_dev.py` | every enabled connector in one dev process (`make connectors`) |
 | `schedules.py` | register the Temporal schedules |
 | `backfill_corpus.py`, `refresh_baseline.py` | one-shot operational jobs |
-| `validate_*.py`, `verify_audit_chain.py` | the validators `make` runs |
+| `validate_*.py` | the validators `make` runs |
 
 ## Why the validators are here and not in the packages they check
 
