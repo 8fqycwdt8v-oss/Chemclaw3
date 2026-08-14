@@ -249,7 +249,7 @@ async def prune_expired_rows() -> RetentionOutcome:
                 # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
                 # so the interpolation cannot carry untrusted input; the *value* is bound.
                 await cur.execute(
-                    f"DELETE FROM {table} "  # noqa: S608
+                    f"DELETE FROM {table} "
                     f"WHERE {disposable} AND {column} < now() - make_interval(days => %s)",
                     (days,),
                 )
@@ -381,7 +381,7 @@ async def _prune_checkpoints(
             # `CHECKPOINT_TABLES` is a module constant of the checkpointer's own, never a caller's,
             # so the interpolation cannot carry untrusted input; the thread ids are bound.
             await cur.execute(
-                f"DELETE FROM {table} WHERE thread_id = ANY(%s)",  # noqa: S608
+                f"DELETE FROM {table} WHERE thread_id = ANY(%s)",
                 (threads,),
             )
             deleted[table] = max(cur.rowcount, 0)

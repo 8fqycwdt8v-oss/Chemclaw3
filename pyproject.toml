@@ -162,9 +162,35 @@ line-length = 100
 [tool.ruff.lint]
 # Pragmatic-but-strict: correctness, bugs, imports, comprehensions, pyupgrade,
 # plus mandatory docstrings (D) — CLAUDE.md requires a docstring on every module/function.
-select = ["E", "F", "W", "I", "B", "C4", "UP", "D"]
+#
+# **Four families were added on 2026-08-14, and the rule for adding one is that its findings get
+# fixed rather than suppressed.** Each was run against the tree first and its hits read:
+#
+# - `ASYNC` — this service's whole shape is one event loop serving concurrent turns, and
+#   `tests/test_event_loop_offload.py` exists to police exactly this by hand. It found a busy-wait
+#   poll in the worker's HTTP surface and a stat call on the retrieval request path.
+# - `G` — four logging calls, three of them `logger.error(..., exc_info=True)` where
+#   `logger.exception` is the same thing said once. In a codebase where `degraded()` is a
+#   chokepoint for "we continued with less", how the exception is attached is not cosmetic.
+# - `PIE` — one `endswith` pair.
+# - `RUF100` — 72 `# noqa` directives that suppressed nothing. A dead suppression is worse than
+#   none: it reads as a considered exception and it hides the next real finding on that line.
+#
+# **What was measured and deliberately not adopted**, so the next sweep does not re-litigate it:
+# `TRY003` (528 hits, every one a message string in a `raise` — this repository's errors are written
+# to be read by an operator); `RUF002`/`RUF003` (89, all the em-dashes and arrows the prose here is
+# written with); `S608` (37, all parameterized SQL whose only interpolation is a closed module
+# constant); `T201` (74, all CLI `print`, which is a CLI's output); `DTZ011` (6 `date.today()` calls
+# — a note's `valid_from` is a chemist's calendar date, and forcing UTC there would be a behaviour
+# change dressed as a lint fix); `RET` and `ERA` (10, all style or prose that reads like code).
+select = ["ASYNC", "E", "F", "W", "I", "B", "C4", "G", "PIE", "UP", "D", "RUF100"]
 # D203/D213 conflict with D211/D212; pick the modern (no blank line, summary-first) style.
-ignore = ["D203", "D213"]
+#
+# ASYNC109 flags an `async def` taking a `timeout` argument, on the trio-shaped argument that a
+# deadline belongs to a cancel scope. Every hit here is a `timeout: timedelta` handed to
+# `workflow.execute_activity` — Temporal's budget for a durable step, which is neither an asyncio
+# deadline nor something a caller could express any other way.
+ignore = ["D203", "D213", "ASYNC109"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -176,7 +202,14 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests document behavior in their names; module/function docstrings are not required there.
-"tests/*" = ["D100", "D103"]
+# ASYNC110 (poll in a loop) is what a test waiting for a server to bind or a task to settle does;
+# the rule's answer — an `asyncio.Event` — requires the code under test to signal one.
+"tests/*" = ["D100", "D103", "ASYNC110"]
+# The batch entry points, where "blocking the event loop" has no one to block: a CLI's loop serves
+# one operator at a terminal (`input()` is the REPL), and an eval harness's serves its own run.
+# ASYNC is selected for the server, which is where a stalled loop is somebody else's stalled turn.
+"src/chemclaw/cli/*" = ["ASYNC240", "ASYNC250"]
+"src/chemclaw/evals/*" = ["ASYNC240"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -211,7 +244,27 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# `--strict-markers` because this suite registers **no** custom markers at all: every
+# `@pytest.mark.*` in it is a builtin (`parametrize`, `skipif`, `timeout`, `usefixtures`), so any
+# name pytest does not know is a typo, and without this a typo'd marker is silently a no-op — a
+# `@pytest.mark.skipif` misspelt one letter runs the test it was meant to skip, and a misspelt
+# `timeout` leaves it on the global cap. There is nothing to register and nothing to migrate; the
+# flag simply makes the empty set enforced.
+addopts = "-ra --strict-markers"
+# Deprecations aimed at *first-party* code are errors; everybody else's are left alone.
+#
+# The suite emits third-party deprecations today (torch's `jit.script`, bofire's class-based
+# pydantic config, shap's colormap calls, starlette's httpx test client) and none of them are
+# actionable here — turning those into errors would make an upgrade of a dependency's dependency
+# fail this repository's build for something it cannot fix. What *is* actionable is a library
+# telling `chemclaw.*` that the call it is making is going away, which is precisely the signal that
+# was invisible until the upgrade that removed it. `pandas>=2.2`, `numpy>=2.0` and a pinned-major
+# `mcp`/`deepagents` policy are what make that a live risk rather than a hypothetical one.
+filterwarnings = [
+    "default",
+    "error::DeprecationWarning:chemclaw.*",
+    "error::PendingDeprecationWarning:chemclaw.*",
+]
 # Per-test wall-clock cap. A stuck test once ran for the full 6h Actions job timeout with zero
 # diagnostic output — "cancelled", no test name, no traceback, a day's runner budget on one commit.
 # The job-level `timeout-minutes` in the root workflow is the outer backstop; this is the inner one

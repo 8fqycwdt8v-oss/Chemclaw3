@@ -230,7 +230,7 @@ def _lane(script: str, *args: str, env: Mapping[str, str] | None = None) -> str:
     blocking the event loop for that long would stall the very in-flight turns a chaos check exists
     to observe.
     """
-    completed = subprocess.run(  # noqa: S603 - fixed argv from this module, no shell
+    completed = subprocess.run(
         ["/bin/bash", str(_LANE_DIR / script), *args],
         capture_output=True,
         text=True,
@@ -856,7 +856,7 @@ async def family_e_chaos() -> list[Finding]:
     ):
         try:
             findings.append(await check())
-        except Exception as exc:  # noqa: BLE001 - a chaos check that dies is itself the finding
+        except Exception as exc:
             logger.exception("chaos check %s raised", check.__name__)
             findings.append(
                 Finding(

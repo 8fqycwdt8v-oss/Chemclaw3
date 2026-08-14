@@ -71,7 +71,7 @@ class _FakeAgent(ScriptedTurn):
         """The one non-streaming method the front door calls on an agent."""
         return TurnSession(session_id=session_id)
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         yield "hi "
         yield "there"
 
@@ -288,9 +288,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     class _JobAgent(_FakeAgent):
         """A fake whose turn announces a durable job before it says anything."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             record_job_started("qm-sse", "report")
             yield "submitted"
 
@@ -1138,9 +1136,7 @@ def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: s
     class _GatedAgent(_FakeAgent):
         """A fake whose turn parks until the test releases it."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             if message == blocked_message:
                 started.set()
                 await gate.wait()
@@ -1212,9 +1208,7 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
     class _HungAgent(_FakeAgent):
         """A fake standing in for a hung LLM endpoint: one token, then nothing."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             yield "partial"
             await asyncio.sleep(60)  # a hung LLM endpoint: never yields again
             yield "never"

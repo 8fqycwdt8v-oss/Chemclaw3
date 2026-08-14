@@ -365,7 +365,7 @@ def test_setting_the_cap_to_zero_disables_the_store(monkeypatch: pytest.MonkeyPa
 class _SessionOnlyAgent:
     """Enough agent to create a session and no more — these tests never run a turn."""
 
-    def create_session(self, *, session_id: str) -> TurnSession:  # noqa: D102 - see class
+    def create_session(self, *, session_id: str) -> TurnSession:
         return TurnSession(session_id=session_id)
 
 

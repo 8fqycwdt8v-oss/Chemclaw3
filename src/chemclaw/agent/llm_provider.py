@@ -246,6 +246,12 @@ def _tls_http_client() -> Any | None:
     """
     if not settings.llm_tls_ca_bundle:
         return None
+    import ssl
+
     import httpx
 
-    return httpx.AsyncClient(verify=settings.llm_tls_ca_bundle)
+    # An `SSLContext`, not `verify="<path>"`: httpx deprecated the string form ("`verify=<str>` is
+    # deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and building the context
+    # here is also the only form that says what the bundle *is* — a CA file to verify the peer
+    # against, rather than a path httpx has to guess the meaning of.
+    return httpx.AsyncClient(verify=ssl.create_default_context(cafile=settings.llm_tls_ca_bundle))

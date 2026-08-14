@@ -101,11 +101,10 @@ def _declared_bearer_env(name: str) -> str | None:
     try:
         found = discovered()
     except Exception:
-        logger.error(
+        logger.exception(
             "connector_auth_unresolved: connector %s could not read its manifests, so it cannot "
             "tell whether it requires a bearer token; refusing every MCP request until it can",
             name,
-            exc_info=True,
         )
         return _UNRESOLVED_AUTH
     for _bundle, manifest in found.values():
@@ -297,7 +296,7 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
     Wrapped around `_sanitize_tool_errors`'s interception of the same method rather than merged
     into it: two concerns, two functions, one patch point each.
     """
-    manager = server._tool_manager  # noqa: SLF001 - the only interception point this mcp version offers
+    manager = server._tool_manager
     wrapped_call_tool = manager.call_tool
 
     async def _call_tool(
@@ -350,7 +349,7 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
     passes through before `Tool.run` composes the leaking message. Patched once here, the one
     shared choke point every connector's app is built through, rather than once per bundle.
     """
-    manager = server._tool_manager  # noqa: SLF001 - the only interception point this mcp version offers
+    manager = server._tool_manager
     original_call_tool = manager.call_tool
 
     async def _call_tool(

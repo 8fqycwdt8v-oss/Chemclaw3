@@ -269,7 +269,7 @@ async def _persist(
     """
     try:
         stored = await put_all(artifacts, key.as_str(), files, compute_seconds=compute_seconds)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Same contract as `calc.store.run_cached_with_artifacts`: losing a by-product costs a
         # future recomputation, never the calculation in hand, which this function's caller
         # already holds.

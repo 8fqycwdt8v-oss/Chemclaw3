@@ -142,9 +142,7 @@ def test_a_single_pid_kill_orphans_the_grandchild(tmp_path: Path) -> None:
     grandchild_pid = None
     try:
         with pytest.raises(subprocess.TimeoutExpired):
-            subprocess.run(  # noqa: S603 — fixed argv, no shell, test fixture
-                argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=1.0
-            )
+            subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=1.0)
         grandchild_pid = _wait_for_grandchild_pid(tmp_path)
         time.sleep(1.0)  # the same order of wait the test above gives the fixed path to succeed
         assert _is_alive(grandchild_pid), (

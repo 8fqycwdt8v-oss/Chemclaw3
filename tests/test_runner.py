@@ -47,7 +47,7 @@ from tests.fakes_turn import Piece, ScriptedTurn
 class _FakeAgent(ScriptedTurn):
     """Yields a two-token answer; no MCP tools to open."""
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         yield "Yield was 90% "
         yield "[[reaction-a]]."
 
@@ -148,7 +148,7 @@ class _JobLaunchingAgent(ScriptedTurn):
         self._job_ids = job_ids
         self._on_last = announce_on_last_update
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         if not self._on_last:
             for job_id in self._job_ids:
                 record_job_started(job_id, "report")
@@ -227,7 +227,7 @@ class _PlanClearingAgent(ScriptedTurn):
         self.calls = 0
         self._session = session
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         self.calls += 1
         if self.calls == 1:
             record_job_started("qm-9", "qm")
@@ -246,7 +246,7 @@ class _CappedLoopAgent(ScriptedTurn):
     half — the turn says so.
     """
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         record_loop_cap()
         yield "still working on it"
 
@@ -822,7 +822,7 @@ def test_a_hanging_broker_does_not_hold_up_the_turn(monkeypatch: pytest.MonkeyPa
 class _SilentAgent(ScriptedTurn):
     """Runs, yields no text at all, and ends the turn — the shape a live turn actually took."""
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         yield ""
 
 

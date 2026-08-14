@@ -302,7 +302,7 @@ async def _describe(connection: Client, job: PlannedSchedule) -> ScheduleHealth:
             connection.get_schedule_handle(job.schedule_id).describe(),
             settings.connector_health_timeout_seconds,
         )
-    except Exception as exc:  # noqa: BLE001 - a lookup failure is reported, never raised
+    except Exception as exc:
         entry.note = f"not found in Temporal ({type(exc).__name__}) — was it ever applied?"
         return entry
     info = description.info

@@ -124,7 +124,7 @@ def binary_version() -> str:
     path = binary_path()
     if path is None:
         return "absent"
-    output = subprocess.run(  # noqa: S603 — fixed argv, no shell, resolved path
+    output = subprocess.run(
         [path, "--version"], capture_output=True, text=True, timeout=60, check=False
     ).stdout
     for line in output.splitlines():

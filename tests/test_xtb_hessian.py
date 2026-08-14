@@ -190,7 +190,7 @@ def test_a_cached_hessian_whose_blob_is_gone_recomputes_rather_than_failing(
         assert counted.calls == 1
 
         # Evict everything, leaving the result row pointing at nothing.
-        artifacts._blobs.clear()  # noqa: SLF001 — simulating eviction is the point of the test
+        artifacts._blobs.clear()
 
         recovered, was_cached = await run_cached_hessian(
             results, artifacts, structure, HessianSpec()

@@ -66,9 +66,7 @@ def test_run_turn_reports_failure_as_error_event() -> None:
     class _BoomAgent(_FakeAgent):
         """A turn whose model call raises before it says anything."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             raise RuntimeError("model exploded")
             yield  # pragma: no cover - makes this an async generator
 

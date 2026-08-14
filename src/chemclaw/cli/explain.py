@@ -89,7 +89,7 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
         return "unknown", str(message)
     try:
         restored = message_from_row(message, shape)
-    except Exception:  # noqa: BLE001 - a reconstruction must survive any stored shape
+    except Exception:
         return "unknown", str(message)
     # Rendered by the transcript route's own projection, not a second one: a conversation that
     # reads `assistant` in the browser and `ai` here would make one turn look like two records.

@@ -237,7 +237,7 @@ async def fetchable_refs(session_id: str) -> frozenset[str]:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_SESSION_REFS, (session_id,))
                 rows = await cur.fetchall()
-    except Exception as exc:  # noqa: BLE001 - a rendering must never cost a chemist their history
+    except Exception as exc:
         degraded(
             logger,
             "tool_result_store",
@@ -277,7 +277,7 @@ def session_sink(session_id: str, correlation_id: str) -> ResultSink:
             return await store_tool_result(
                 session_id=session_id, correlation_id=correlation_id, tool=tool, text=text
             )
-        except Exception as exc:  # noqa: BLE001 - a rendering must never escalate into the turn
+        except Exception as exc:
             degraded(
                 logger,
                 "tool_result_store",
