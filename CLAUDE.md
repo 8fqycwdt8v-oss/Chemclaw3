@@ -122,10 +122,11 @@ arity — and the event contract survived unmodified, but v3 reports token usage
 `message-finish`, so a turn abandoned mid-message books **0** tokens where the current driver books
 ~30, which makes "drop the connection just before the answer" a free bypass of the token budget.
 A maintenance coupling is the smaller harm; the finding and the restart condition are in the ADR.
-**GxP is no longer a constraint on
-layer 1**; the audit chain, the durable approval store and the `session_messages` read-model are open
-in `docs/planning/BACKLOG.md` on that basis, alongside `HumanInTheLoopMiddleware` and
-`RubricMiddleware`.
+**GxP is no longer a constraint on layer 1** — a conclusion
+`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` reached
+independently and carried out, removing the audit hash chain while keeping the trail, the gates and
+the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
+store, the `session_messages` read-model, `HumanInTheLoopMiddleware` and `RubricMiddleware`.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See

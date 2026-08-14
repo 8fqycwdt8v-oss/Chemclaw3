@@ -343,5 +343,5 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared](D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared.md) | An answer is attacked by agents briefed for it, and a team is attacked unconditionally |
 | [D-2026-08-13-the-guard-must-not-refuse-a-dependency-bump](D-2026-08-13-the-guard-must-not-refuse-a-dependency-bump.md) | The checkpoint stamp covers the channels this repository declares, and refuses only the direction that was measured to fail |
 
-| [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) | GxP framing and the audit hash chain are removed; the trail, the gates and the INSERT-only grant stay |
 | [D-2026-08-14-the-coupling-is-the-cost-not-the-line-count](D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md) | What upstream already does, what it still does not, and the shapes this repository reads that it was never promised |
+| [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) | GxP framing and the audit hash chain are removed; the trail, the gates and the INSERT-only grant stay |
