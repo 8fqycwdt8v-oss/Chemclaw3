@@ -74,8 +74,11 @@ class SectionRequest(BaseModel):
     **Both halves of the original sentence here were falsified by later work in the same campaign**
     and are corrected rather than left: `ReportRequest.requested_by` is now `min_length=1`, so a
     request without a requester is rejected instead of being the ordinary scheduled case, and
-    `_report_id` *does* key on the actor — it had to, because two principals with different
-    entitlements were colliding on one id and one of them collected the other's report.
+    `chemclaw.agent.durable_tools._report_id` — the *workflow* id — *does* key on the actor: it had
+    to, because two principals with different entitlements were colliding on one id and one of them
+    collected the other's report. That is a different function in a different module from the
+    `_report_id` sixty lines below this one, which mints a *note* id from the title alone; the
+    unqualified name read as a security claim about the wrong one.
 
     It exists at all because the fan-out addresses each child workflow by its argument, so an
     identity that stops at the parent never reaches the activity that does the retrieving — which is

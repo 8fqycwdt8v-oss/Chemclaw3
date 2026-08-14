@@ -172,8 +172,4 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
     Returns:
         Whether the run reached the configured iteration cap.
     """
-    # `>`, not `>=`. `enforce_loop_cap` increments *before* the model call and jumps to `end` when
-    # the count has already reached the cap — so a turn that used its last allowed call and then
-    # finished normally leaves `model_calls == cap` without ever having been stopped. Reading that
-    # as "capped" marks a complete answer partial, which is the opposite of this function's job.
     return bool(state.get("loop_capped", False))

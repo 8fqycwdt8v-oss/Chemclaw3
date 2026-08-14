@@ -64,8 +64,10 @@ from langchain_core.runnables import RunnableConfig
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
 # D-075, D-086 among them) and merged ADRs are never edited, so renaming it to mark this second
 # caller would break every one of those citations to buy nothing — the same argument that freezes
-# the `D-NNN` sequence. Three tests already import it across module boundaries; within one package
-# that is the established idiom here.
+# the `D-NNN` sequence. Several callers outside this module already import it — five test modules
+# and `durable/template_activities.py` — and within one package that is the established idiom here.
+# (Unnumbered deliberately: this said "three tests", and it was six importers including a
+# production one, which is what a count in a comment does.)
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.challenge import CHALLENGER_PROFILE
 from chemclaw.agent.challenge_gate import build_challenge_gate
@@ -486,10 +488,14 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     - audit outermost, so a denied or refused attempt is a recorded attempt;
     - authorization inside audit, then the dry-run and repeat gates beside it, for the same reason:
       each is a decision worth recording;
-    - `announce_tool_failures` innermost, closest to the tool body, because it is the only one that
-      must see the raw exception from *every* failure — including the ones the converters above
-      this list turn into results — so the chemist's transcript shows the step that did not work
-      (D-138).
+    - `announce_tool_failures` **first in this list — outermost within the group, inside both
+      converters** — because it is the only one that must see *every* failure, including a refusal
+      raised by a gate below it, so the chemist's transcript shows the step that did not work
+      (D-138). This bullet used to say "innermost, closest to the tool body", which is where the
+      announcer sat when a plan-gate refusal was measured reaching nobody: `enforce_plan_approval`
+      raises *before* calling its handler, so an announcer it wrapped never ran. The inline comment
+      on the entry below carries the measurement; a reader following the old bullet would restore
+      the defect.
 
     All of them are no-ops on the dev path: the sink is log-only, authz is open until
     `entra_required`, `is_dry_run()` is False off the request path, and the repeat counter is
