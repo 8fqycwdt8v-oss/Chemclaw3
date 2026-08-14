@@ -477,3 +477,58 @@ def test_a_stamp_this_build_cannot_read_is_treated_as_absent() -> None:
         "q2",
         "answered",
     ]
+
+
+def test_concurrent_first_turns_get_one_migrated_saver() -> None:
+    """A cold start with traffic must not hand a turn a saver whose migrations have not run.
+
+    `checkpointer()` published `_saver` *before* awaiting `setup()`, and `_checkpoint_pool()`
+    published `_pool` before awaiting `open()`. Both are check-then-await-then-act, so a second turn
+    arriving inside either await saw a non-`None` global and got an unusable object — `relation
+    "checkpoints" does not exist`. That is not a rare interleaving: `api/runner._turn_checkpointer`
+    is awaited once per turn and the shipped chart runs two replicas, so every deploy under load is
+    the window.
+
+    **`setup()` is slowed here, and that is what gives the test power rather than luck.** Two
+    earlier versions — gather ten `checkpointer()` calls, then gather ten first turns — both passed
+    against the unfixed code, because at real speed the migrations happen to finish inside the first
+    task's slice. What the defect needs is a *second caller inside the first one's await*, so the
+    await is made wide enough to observe instead of being raced for. Measured against the unfixed
+    body, three of four tasks received the saver with `setup()` still unfinished; with the lock, all
+    four wait for it.
+
+    The flag is the assertion because it is the property that matters: what a turn gets back is a
+    checkpointer whose tables exist. Saver identity is checked too — two savers would mean two
+    `setup()` runs and two pools for one process.
+    """
+    migrated: dict[str, bool] = {"done": False}
+    original = ckpt.SchemaStampedSaver.setup
+
+    async def _slow_setup(self: Any) -> None:
+        """Stand in for the ten real migrations, widened so the window is observable."""
+        await asyncio.sleep(0.05)
+        await original(self)
+        migrated["done"] = True
+
+    async def _run() -> list[tuple[bool, int]]:
+        await migrated_db_or_skip()
+        await ckpt.close_checkpointer()
+
+        async def _take(_index: int) -> tuple[bool, int]:
+            saver = await ckpt.checkpointer()
+            return migrated["done"], id(saver)
+
+        try:
+            return list(await asyncio.gather(*(_take(index) for index in range(4))))
+        finally:
+            await ckpt.close_checkpointer()
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(ckpt.SchemaStampedSaver, "setup", _slow_setup)
+    try:
+        taken = asyncio.run(_run())
+    finally:
+        patch.undo()
+
+    assert all(ready for ready, _ in taken), "a turn got a checkpointer that was not migrated"
+    assert len({saver for _, saver in taken}) == 1, "one process, one checkpointer"

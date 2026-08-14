@@ -92,17 +92,26 @@ class NoteConflicts(BaseModel):
 def _strongest(note_id: str, conflicts: list[Conflict]) -> NoteConflicts:
     """One note's disagreements, worst first and capped, with the full count kept.
 
-    Ranked by `severity`, which pins declared conflicts (an author stated them) above every
-    suspected one regardless of confidence gap: dropping a stated contradiction to make room for a
-    heuristic's guess would invert the whole point of `Conflict.kind`. The id is the tiebreak so
-    two equally-severe pairs order deterministically rather than by dict iteration.
+    Declared conflicts rank above every suspected one (an author stated them), then severity, then
+    the id — dropping a stated contradiction to make room for a heuristic's guess would invert the
+    whole point of `Conflict.kind`, and the id tiebreak keeps two equal pairs deterministic rather
+    than dict-ordered.
+
+    **`kind` is the first key because `severity` alone could not carry that guarantee.** It read
+    `(-severity, other_id)`, and the two scales meet: `Conflict.severity` defaults to `1.0` and
+    `_declared` never overrides it, while `_suspected` passes the confidence *gap*, which reaches
+    `1.0` exactly when a 0.0-confidence note faces a 1.0-confidence one. At that tie the ranking
+    fell through to the note id — so whether a stated contradiction survived the cap or a
+    heuristic's guess displaced it was decided alphabetically. Ordering on `kind` first states the
+    invariant the docstring always claimed, and leaves `severity` a meaningful scale within each
+    kind rather than a sentinel doing two jobs.
     """
     ranked = sorted(
         {
             (conflict.other_id if conflict.note_id == note_id else conflict.note_id): conflict
             for conflict in conflicts
         }.items(),
-        key=lambda item: (-item[1].severity, item[0]),
+        key=lambda item: (item[1].kind != "declared", -item[1].severity, item[0]),
     )
     cap = settings.conflict_max_per_note
     return NoteConflicts(ids=[other_id for other_id, _ in ranked[:cap]], total=len(ranked))
@@ -168,10 +177,10 @@ def _widest_disagreements(
         # The signed gaps to the two ends; at least one is non-negative while `low <= high` and,
         # whichever is larger, no candidate still between them can beat it.
         if confidence - below_confidence >= above_confidence - confidence:
-            other, gap = below, confidence - below_confidence
+            other, gap, other_confidence = below, confidence - below_confidence, below_confidence
             low += 1
         else:
-            other, gap = above, above_confidence - confidence
+            other, gap, other_confidence = above, above_confidence - confidence, above_confidence
             high -= 1
         if other is note:
             continue  # the walk reached the note itself, which is not a disagreement
@@ -184,10 +193,14 @@ def _widest_disagreements(
                 note_id=note.id,
                 other_id=other.id,
                 kind="suspected",
+                # The partner's confidence is carried out of the branch that chose it, not
+                # re-derived from the gap. The re-derivation asked `other is below`, and when the
+                # two pointers meet `below` *is* `above` — so the test answered True for both
+                # branches and the `above` case rendered `2*confidence - gap`: a number belonging
+                # to no note, in prose a chemist reads at the PR gate.
                 detail=(
                     f"both describe {note.compound_smiles} as {note.type} notes valid at "
-                    f"the same time, with confidence {confidence} vs "
-                    f"{confidence - gap if other is below else confidence + gap}"
+                    f"the same time, with confidence {confidence} vs {other_confidence}"
                 ),
                 severity=gap,
             )

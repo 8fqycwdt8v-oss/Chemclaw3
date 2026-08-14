@@ -258,6 +258,28 @@ class Settings(
         return self
 
     @model_validator(mode="after")
+    def _the_fan_out_ceiling_covers_the_section_it_bounds(self) -> Self:
+        """The same rule as below, on the other parent/child pair that has a ceiling.
+
+        A fan-out child's longest single piece of work is one report section, budgeted by
+        `report_section_timeout_seconds` (`durable/report_workflow.py`). A ceiling at or under that
+        pre-empts a section that was still running and reports it as a timed-out child — the guard
+        causing the failure it exists to bound. Strictly greater, because equality is the defect.
+
+        Scoped here rather than to `ReportSettings` only for symmetry with the validator below; both
+        settings live in that section, so this one could move if a second cross-section rule ever
+        needs the company.
+        """
+        if self.fan_out_child_timeout_seconds <= self.report_section_timeout_seconds:
+            raise ValueError(
+                f"fan_out_child_timeout_seconds={self.fan_out_child_timeout_seconds} does not "
+                f"cover the section it bounds: one section may take "
+                f"{self.report_section_timeout_seconds}s (report_section_timeout_seconds). Raise "
+                "the ceiling above it, or lower the section budget."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _the_job_ceiling_covers_the_poll_it_bounds(self) -> Self:
         """A parent ceiling no larger than its child's longest activity is not a ceiling.
 

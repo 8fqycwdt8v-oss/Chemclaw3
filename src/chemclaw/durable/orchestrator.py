@@ -57,14 +57,24 @@ async def _run_child(
     parent_id: str,
     task_queue: str,
     retry_policy: RetryPolicy,
+    execution_timeout: timedelta,
 ) -> Any:
-    """Start and await one child workflow with a deterministic, unique id."""
+    """Start and await one child workflow with a deterministic, unique id, under a wall-clock cap.
+
+    **The retry policy is not that cap, and this call had only a retry policy.** `BAD_DATA_RETRY`
+    bounds how many times a child may *fail*; a child that neither fails nor completes — an
+    activity blocked on a dead dependency, a heartbeat that stops — is retried zero times and
+    awaited forever by the `asyncio.gather` in `fan_out`, which is a fan-out that can never
+    isolate-and-drop it. `ConnectorJobWorkflow` bounds its own child exactly this way; these were
+    the two starts in the tree with nothing above them.
+    """
     return await workflow.execute_child_workflow(
         child.run,
         payload,
         id=f"{parent_id}-{id_prefix}-{index}",
         task_queue=task_queue,
         retry_policy=retry_policy,
+        execution_timeout=execution_timeout,
     )
 
 
@@ -111,6 +121,10 @@ async def fan_out(
         retries is logged and omitted (D-030: reject-and-continue), never restarting its siblings.
     """
     queue = task_queue if task_queue is not None else settings.background_task_queue
+    # Read here rather than inside `_run_child` so every child of one fan-out is bounded by the
+    # same number, whatever a live settings edit does between batches — the determinism reason
+    # `max_parallel` is resolved once through a local activity.
+    child_timeout = timedelta(seconds=settings.fan_out_child_timeout_seconds)
     # Bounded by default (D-093) — see the `retry_policy` arg doc for why Temporal's own
     # unlimited-retry default would break the isolate-and-drop contract below.
     child_retry_policy = retry_policy if retry_policy is not None else BAD_DATA_RETRY
@@ -141,6 +155,7 @@ async def fan_out(
                     parent_id=parent_id,
                     task_queue=queue,
                     retry_policy=child_retry_policy,
+                    execution_timeout=child_timeout,
                 )
                 for index, payload in batch
             ),

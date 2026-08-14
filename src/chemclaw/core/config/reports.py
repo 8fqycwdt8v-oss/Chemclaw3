@@ -26,3 +26,15 @@ class ReportSettings(BaseSettings):
     # hundreds of children simultaneously. Per-child retry + durability come from each child's
     # own retry policy; the bound is on concurrency only.
     orchestrator_max_parallel_children: int = Field(default=8, ge=1)
+    # Wall-clock ceiling on one fan-out child. **A retry policy is not a ceiling**: `BAD_DATA_RETRY`
+    # bounds how many times a child may *fail*, and a child that neither fails nor finishes — an
+    # activity stuck on a dead dependency, a heartbeat that stops arriving — is retried zero times
+    # and waited on forever, inside the parent's `asyncio.gather`. `ConnectorJobWorkflow` already
+    # bounds its child this way (`connector_job_timeout_seconds`); the orchestrator's children had
+    # nothing above them at all.
+    #
+    # An hour is generous against what these children do (one retrieval section, one note publish)
+    # and is meant as a "this is stuck" bound rather than a service level. `Settings` checks it
+    # against the section budget it has to contain, so lowering it below that budget is refused
+    # rather than silently pre-empting work that was still running.
+    fan_out_child_timeout_seconds: float = Field(default=3600.0, gt=0)
