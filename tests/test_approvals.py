@@ -156,7 +156,7 @@ def test_decision_is_not_an_agent_tool() -> None:
 
     This is the load-bearing constraint of the whole fix: exposing `decide_approval` as a tool
     would have been the shortest path to "the hold can be answered" and would have collapsed the
-    GxP line the PR-gate exists to draw.
+    review line the PR-gate exists to draw.
     """
     from chemclaw.agent.chemclaw_agent import _capability_tools
 

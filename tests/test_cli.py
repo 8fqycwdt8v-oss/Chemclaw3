@@ -226,7 +226,7 @@ def test_approve_records_and_arms_a_real_plan(
     assert plan_hash in reply, f"the terminal did not name the plan it approved: {reply}"
     # The *session's* actor, not `settings.cli_admin_actor`. `--actor alice@lab` stamps the ambient
     # identity every audit row and `requested_by` reads, and the approval used to hardcode the
-    # default instead — so the durable record of a GxP sign-off named someone who took no action and
+    # default instead — so the durable record of a sign-off named someone who took no action and
     # disagreed with the audit rows for its own session.
     assert recorded == (True, "alice@lab")
 

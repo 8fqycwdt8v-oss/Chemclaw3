@@ -18,7 +18,7 @@ is a shape worth repeating, not a workflow worth overloading.
 **Nothing here writes anything, on either branch.** The hold records that a human made a call; it
 does not act on it. That is deliberate at this stage: the answer has already been delivered to the
 chemist marked for review (`AnswerEvent.review_required`), so there is no pending artifact for an
-approval to release. What a decision buys is the audit trail — a GxP record that an objection was
+approval to release. What a decision buys is the audit trail — a record that an objection was
 raised, and that a named person resolved it — which is exactly the substrate
 `docs/reference/architektur.md` §12 asks this system to keep emitting rather than to self-certify.
 """

@@ -28,7 +28,7 @@ reports "unknown", which is the honest answer and the one that keeps a reviewer'
 **On what a domain check may honestly assert here.** The statistical applicability domain of a
 fitted model — a leverage or a descriptor-space distance — needs its training set, and this
 repository ships none. Inventing bounds and labelling them "the training ranges" would be a
-fabricated threshold in a GxP system, which is worse than no check. What *can* be asserted without
+fabricated threshold, which is worse than no check. What *can* be asserted without
 the training set is the model's **structural** domain: what its terms are defined over at all. ESOL
 is a linear equation in Crippen logP over neutral single-component organic molecules; it is not that
 a salt is far from the training data, it is that the equation's inputs do not describe a salt. Those

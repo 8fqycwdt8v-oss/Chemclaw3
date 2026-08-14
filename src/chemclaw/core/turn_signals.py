@@ -4,8 +4,8 @@
 F2-T2, but nothing ever emitted one: a tool that launches a durable job returns a job id *into the
 model's context*, and the runner — which only sees the model's streamed updates — has no way to know
 a job started. The same is true of a PR-gate proposal: `propose_note` opens a branch and returns a
-reference to the model, so the chemist never learns their contribution landed (the GxP "human signs
-off" line lived only in a git host's UI, disconnected from the conversation that produced it).
+reference to the model, so the chemist never learns their contribution landed (the "a human
+decides" line lived only in a git host's UI, disconnected from the conversation that produced it).
 
 The carrier is LangGraph's own custom stream (`get_stream_writer()`), which is what the rebuild
 bought here. It was a task-local contextvar buffer the runner drained after every streamed update,

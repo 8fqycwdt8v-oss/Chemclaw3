@@ -1,7 +1,7 @@
 -- (Numbering note: there is no 005 migration — it never existed, a renumber artifact. The runner
 -- discovers migrations by filename glob, so the gap is harmless; do not backfill a 005.)
 --
--- GxP tool-audit trail (agents.audit). One append-only row per agent tool call:
+-- The tool-audit trail (agents.audit). One append-only row per agent tool call:
 -- who ran what (actor), in which conversation (correlation_id), with which arguments,
 -- the outcome and a short effect summary (e.g. the PR ref a propose_* tool returned),
 -- and the latency. The stdlib log is the floor; this is the durable, queryable record.
@@ -9,8 +9,11 @@
 -- Append-only by contract: the writer (chemclaw.agent.audit_store.PostgresAuditSink) only
 -- inserts. `actor` carries the turn's Entra object id, read from chemclaw.agent.identity_context
 -- by chemclaw.agent.audit (F4, D-043..D-047). It was a Phase-6 seam holding 'unknown' when this
--- table was written; that was true then and stopped being true at F4. The tamper-evident hash chain over rows
--- (prev_hash/row_hash) is added by 011_audit_hash_chain.sql (F10-G1).
+-- table was written; that was true then and stopped being true at F4. Append-only is enforced by
+-- grant rather than by convention: `grants/app_privileges.sql` gives the application role INSERT on
+-- this table and neither UPDATE nor DELETE, so the credential that writes a row cannot rewrite it.
+-- 011_audit_hash_chain.sql once added a per-row hash chain on top of that; the chain has been
+-- removed and its columns sit unwritten at their defaults.
 CREATE TABLE IF NOT EXISTS audit_events (
     id             BIGSERIAL PRIMARY KEY,
     ts             TIMESTAMPTZ      NOT NULL DEFAULT now(),

@@ -1445,7 +1445,7 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
     The ServiceMonitor made the metrics visible; not one of them fired anything, because no
     PrometheusRule existed anywhere in the repo. The clearest case is the audit-sink failure
     counter, whose emitter logs a stable `audit_sink_failure` marker at ERROR with a comment
-    saying a lost GxP audit record "must be ALERTABLE" — and nothing was watching.
+    saying a lost audit record "must be ALERTABLE" — and nothing was watching.
 
     Pinned by metric name rather than by rule count so renaming a metric without moving its alert
     fails here, which is the drift that makes an alerting stack quietly stop covering anything.

@@ -12,7 +12,7 @@ running in execute mode with nothing recording who allowed it.
 
 **Two backends, chosen the way `default_audit_sink` chooses one** (D-167). Enforcing the approval
 raised a question recording it never had to answer: what does a deployment with no Postgres do —
-fail open, and the GxP gate is decorative, or fail closed, and `make chat --admin` cannot run a
+fail open, and the approval gate is decorative, or fail closed, and `make chat --admin` cannot run a
 single state-changing tool? Both answers are bad, and the question is malformed. The paragraph
 above is the whole argument for durability and it is an argument about a *mismatch*: the approval
 must not outlive, or be outlived by, the mode it authorizes. Under `session_store="memory"` that
@@ -53,7 +53,7 @@ from psycopg.rows import TupleRow
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.core.config import settings
 
-# Append-only: every decision is a GxP record of something a person did at a moment, so a second
+# Append-only: every decision is a record of something a person did at a moment, so a second
 # decision on the same plan is a second row rather than an update of the first. That is also what
 # re-arms a plan: approving an unchanged plan again inserts a fresh, unspent row, so "yes, again"
 # needs no separate operation and cannot be performed by anything but a decision.
@@ -137,7 +137,7 @@ class PlanApprovalStore:
         Effective, not merely recorded: an approval that has already had its turn comes back
         `approved=False` (`_LATEST` folds `consumed_at IS NULL` into the verdict). Returning the
         actor as well is what lets a caller say *who* decided rather than only *that* it was
-        approved — the difference between a usable GxP record and a flag, and what separates
+        approved — the difference between a usable record and a flag, and what separates
         "approved earlier, already used" from "nobody has decided".
         """
         async with self._connection() as conn:

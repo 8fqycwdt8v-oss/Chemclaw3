@@ -159,7 +159,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       *Vindication:* the connect phase is correctly bounded — a black-hole server gave
       `unreachable=['blackhole']` in 3.1 s.
 
-- [ ] **A failed connector tool is recorded in the GxP audit trail as a success** — [S]. MCP tools
+- [ ] **A failed connector tool is recorded in the audit trail as a success** — [S]. MCP tools
       never raise: `langchain_mcp_adapters/tools.py:527-535` converts an `isError=True` result inside
       `StructuredTool.ainvoke` and returns `ToolMessage(status="error")`. `agent/audit.py:315`
       derives `outcome` from control flow, so it writes `ok`. The chemist also never sees a
@@ -181,7 +181,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       only at `deploy/helm/chemclaw/templates/_helpers.tpl:40-42`; `grep LANGSMITH src/` is empty and
       neither `deploy/entrypoint.sh`, CI nor the Makefile sets it. So `make chat`, `make connectors`,
       hand-started workers, local dev, CI and `docker run` of the image (which `image.yml` itself
-      does) are unguarded. The chart's own comment makes the case: a GxP deployment's egress posture
+      does) are unguarded. The chart's own comment makes the case: a deployment's egress posture
       should not rest on a library default. Fix at `entrypoint.sh` and/or the composition root so it
       holds regardless of launcher.
 
@@ -768,7 +768,7 @@ landed; this is what the change surfaced and did not close.
       `agent/interaction_tools.py::start_approval` passes no `id_reuse_policy`, so temporalio's
       ALLOW_DUPLICATE default lets a *closed* run's id be reused: re-surfacing a candidate whose
       hold was already approved or rejected starts a fresh run under the same id and resets it to
-      pending, and a second click can flip a recorded GxP sign-off. The docstring promises "the hold
+      pending, and a second click can flip a recorded sign-off. The docstring promises "the hold
       already exists — idempotent surface", which holds only while the prior run is open.
       REJECT_DUPLICATE was tried and reverted, because expiry is *not* a decision:
       `InteractionApprovalWorkflow` returns `status="expired"` after
@@ -779,17 +779,6 @@ landed; this is what the change surfaced and did not close.
       without one", so the fix is to read the prior run's terminal outcome before starting.
       *Trigger:* a reachable Temporal test server, so the closed-hold and expired-hold paths can be
       exercised rather than reasoned about — they skip offline today.
-
-- [ ] **Seventeen junk anchors still hide a truncated audit trail** — [M].
-      `agent/audit_anchor.py::latest_anchor` now walks the newest `_LATEST_CANDIDATES` (16) rows and
-      returns the first that verifies, so one appended unsigned anchor no longer disables the
-      control. Past the bound it returns None again, and `durable/audit_chain.py` guards its tail
-      comparison with `if held_to is not None:` and records *nothing* in the else branch — so
-      `make audit-verify` prints "OK: the audit trail hash chain is intact" and exits 0 with the
-      tail check silently off. Measured: 17 junk rows, `verify_chain` returned `[]`, CLI exit 0.
-      The fix is in `verify_chain`, not here: when anchors were read and none verified, that is a
-      problem to report, not a reason to skip. *Trigger:* the next change to the audit-chain
-      verifier, or the first deployment that treats anchors as a compliance control.
 
 - [ ] **Inserting a command into an existing workflow path has no versioning convention** — [S].
       `grep -rn 'workflow.patched|get_version' src/` returns nothing. D-2026-08-08-an-outage-is-not-a-missing-job
@@ -1438,8 +1427,6 @@ still pass.
       `chemclaw.science.calc.*` module, so the check has always passed on an empty set.
 - [ ] **[L] `test_harness_agent_still_audits_every_tool_call` asserts only that the middleware list
       is non-empty** (`tests/test_agent.py:279`) — it passes with the audit middleware removed.
-- [ ] **[L] `cli/verify_audit_chain.py` has 0% coverage**, and the "refuse to re-seal a broken
-      chain" control lives nowhere else.
 - [ ] **[L] Eight of the eleven binding transforms in `warehouse/expr.py` are never executed**
       by the suite, including the two the shipped `eln-snowflake` binding uses.
 
@@ -1464,7 +1451,7 @@ Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed
 trigger gate and added the guard that would have caught it. These are what the same lane found and
 did not fix.
 
-- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable GxP attribution — half
+- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution — half
       closed; the record now says which half it is** (`connectors/server.py`). `CallerLogMiddleware`
       documents the identity headers as advisory, but a bundle stamped them into
       `bo_campaigns`/`bo_suggestions`, so anything that could reach the pod could forge who ran an
@@ -2128,7 +2115,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `durable/retention.py` prunes by age — and which a
       failed or abandoned turn never reaches at all, since the projection is written once, after
       the answer. So a trail can point at a conversation that has since been compacted out of
-      recognisability, or at one whose words were never written down. Wants a decision about what a GxP deployment must retain,
+      recognisability, or at one whose words were never written down. Wants a decision about what a deployment must retain,
       not more plumbing.
 - [ ] **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
       `ConnectorJobInput` a required `rationale`; D-2026-07-31-the-audit-chain-is-versioned added an `AuditEvent.purpose` column and
@@ -2244,7 +2231,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       headers, which leaves the ingress NetworkPolicy as the only control. The `bearer` mode exists
       and is unused, and a connector serves its *whole* FastMCP surface — `allowed_tools` is a
       client-side filter. Related and now recorded rather than latent: because the headers cannot be
-      trusted, the `bo` synchronous path records `unverified:<claim>` in its GxP columns
+      trusted, the `bo` synchronous path records `unverified:<claim>` in its attribution columns
       ([`D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim`](../decisions/D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md)),
       which is what this row's closure would let a writer stop doing.
 - [ ] **Egress is still port-scoped by default** — [S]. D-158 made destinations declarable
@@ -3247,8 +3234,9 @@ section, and STO-5/11/13 stay deliberately open.
       marker left on after the ADR merges, because a stale `RESERVED` row reads as a free number.
 
 **Closed as not-gaps:** STO-11 (`embedding_provider="hash"` is the documented offline dev path),
-STO-13 (audit-trail disposal stays refused — deleting from a hash chain is indistinguishable from
-the tampering it detects; needs an ADR with QA sign-off, already in `docs/planning/DEFERRED.md`).
+STO-13 (audit-trail disposal stays refused — the trail is the only record of who ran what, and
+disposing of it belongs to whoever owns that record rather than to an age cutoff;
+D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks).
 
 ## Done — Process/analytical-development capability research (2026-07-26, D-092)
 
@@ -3374,7 +3362,7 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       Measured against the *previous* engine: argument validation returned the parse error before
       the call reached the middleware pipeline, so "the model asked for `find_notes` with arguments
       it could not satisfy" left no trace in `audit_events`. Authorization not running is harmless
-      (nothing executed); the *audit* gap is not, for a GxP trail whose purpose is to answer "what
+      (nothing executed); the *audit* gap is not, for a trail whose purpose is to answer "what
       did the agent attempt". **The first step is now a re-measurement, not a fix**: whether
       LangChain's tool node runs `wrap_tool_call` around argument validation or short-circuits
       ahead of it decides whether this gap still exists at all, and that is one probe rather than
@@ -3916,7 +3904,7 @@ tickets + disposition table: `docs/archive/plans/parity-plan.md`.
       redundant child-level retry. Conversational multi-agent mesh stays gated (single agent + skills
       is KISS).
 - [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
-      (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
+      (Veeva/SAP/LIMS), formal validation artifacts, conversational multi-agent mesh — each with its
       trigger recorded in `docs/archive/plans/parity-plan.md`.
 
 ## Now — Foundation build (docs/archive/plans/foundation-plan.md + docs/planning/implementation-tickets.md)

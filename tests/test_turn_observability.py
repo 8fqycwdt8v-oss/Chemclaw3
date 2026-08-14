@@ -5,7 +5,7 @@ were no histograms, `api/app.py` never called `configure_telemetry` (so `CHEMCLA
 was inert at the one process a chemist talks to), and every turn on a pod shared a single
 correlation id — bound once inside `build_agent`, which caches one agent per profile for the
 process's whole life. The last one is not an observability gap but an audit-trail defect: two
-chemists' tool calls were indistinguishable in the GxP record.
+chemists' tool calls were indistinguishable in the audit record.
 """
 
 import asyncio

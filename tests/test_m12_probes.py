@@ -135,7 +135,7 @@ def test_a_plan_refusal_is_not_counted_as_a_broken_tool() -> None:
     They arrive on the stream as the same event type — `announce_tool_failures` is attached
     innermost, so it sees `PlanNotApprovedError` raw and announces it exactly as it announces a
     database outage. Folding them together would make a correctly-gated turn read as a turn whose
-    tools broke, which is precisely inverted: one is the GxP line holding, the other is a fault.
+    tools broke, which is precisely inverted: one is the gate holding, the other is a fault.
     """
     outcome = _run_one(
         _probe(),

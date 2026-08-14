@@ -142,8 +142,8 @@ def test_the_human_actor_reaches_a_specialist() -> None:
     The actor is read ambiently by every tool that attributes work to a person. If execution inside
     a specialist ran in a context not derived from the turn's, `get_current_actor()` would return
     `None` there — and under `entra_required` that is a loud refusal, but in dev it silently
-    degrades to the service identity and the GxP trail loses its attribution. That is precisely the
-    failure D-040 found in MAF's `mode_set`.
+    degrades to the service identity and the audit trail loses its attribution. That is precisely
+    the failure D-040 found in MAF's `mode_set`.
 
     Driven through the real wrapper the team uses, in a real event loop, so what is proven is the
     execution path rather than the reasoning about it.
@@ -289,7 +289,7 @@ def test_binding_a_config_keeps_the_specialists_name() -> None:
 
     `SubAgentMiddleware` binds each subagent's config and invokes *the result*. If that call
     returned the bare inner runnable, every specialist's tool calls would land in the audit trail
-    attributed to the supervisor — nothing would fail, nothing would be logged, and the GxP record
+    attributed to the supervisor — nothing would fail, nothing would be logged, and the audit record
     would simply be wrong. There is no observable symptom, so there has to be a test.
     """
     from chemclaw.agent.team import _AttributedSpecialist
@@ -387,7 +387,7 @@ def test_a_delegated_turn_announces_the_handoff_and_the_hand_back(
     of the mapping alone would have passed against the shipped code, which is the whole problem.
 
     `reason` is the supervisor's own `description`, which is what makes the event answer "why" and
-    not merely "who": a trace that records a route without its justification is the GxP gap M9's
+    not merely "who": a trace that records a route without its justification is the gap M9's
     argument for a supervisor was about.
     """
     from chemclaw.api.events import HandoffEvent
@@ -511,7 +511,7 @@ def test_a_specialist_that_raises_still_hands_control_back(
     """The `finally` the audit stamp already relied on now closes the trace's span too.
 
     A handoff that never closes leaves a surface showing a turn stuck inside a specialist it left,
-    and leaves the GxP record implying the specialist authored everything that followed. Exercised
+    and leaves the audit record implying the specialist authored everything that followed. Exercised
     on the raising path for the reason the unstamp assertion is: nobody reaches it by hand.
     """
     from chemclaw.core import turn_signals

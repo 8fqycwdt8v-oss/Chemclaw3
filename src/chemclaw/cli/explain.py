@@ -7,7 +7,7 @@ are a schema change nobody would notice. This is what they are *for*: given a se
 conversation and, under each turn, the tools that ran because of it — with a durable job's stated
 rationale where one exists (D-157).
 
-The question this answers is the one a GxP auditor and a chemist ask in the same words: **"why was
+The question this answers is the one a reviewer and a chemist ask in the same words: **"why was
 this run?"** Before the join it was answerable for durable jobs and for nothing else, because a
 tool call recorded its arguments and its actor and had no key back to the conversation.
 

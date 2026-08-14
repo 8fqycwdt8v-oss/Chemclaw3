@@ -3,8 +3,8 @@
 Three things were working correctly and completely invisibly: admission control shedding turns
 with a 503, the budget guard refusing with a 429, and `chemclaw.agent.audit` swallowing a sink
 failure to
-keep tool calls alive. "At capacity" looked identical to "fine" from outside, and a GxP trail could
-be quietly incomplete indefinitely.
+keep tool calls alive. "At capacity" looked identical to "fine" from outside, and the audit trail
+could be quietly incomplete indefinitely.
 
 The gauge set matters as much as the counters: the Helm chart autoscales the front door on CPU,
 which for a stream-bound, model-latency-dominated service is close to noise — a pod blocked on the
@@ -187,7 +187,7 @@ def test_the_series_count_is_capped() -> None:
 
 
 def test_a_swallowed_audit_sink_failure_is_counted() -> None:
-    """The GxP trail can be incomplete while tool calls keep working (SEC-3) — that must be visible.
+    """The trail can be incomplete while tool calls keep working (SEC-3) — that must be visible.
 
     The bridge imports the registry lazily and tolerates its absence, because the workers import
     `chemclaw.agent.audit` without ever building the front door.

@@ -41,5 +41,5 @@ graph.
 ## Submitting
 
 Every `created_by: agent` note goes through **`propose_note`** → a feature branch
-and a review PR (D-005: AI proposes, human signs off). Never write agent knowledge
+and a review PR (D-005: the agent proposes, a human decides). Never write agent knowledge
 straight to the main graph. Human-authored notes are committed directly.

@@ -24,8 +24,8 @@ an httpx error, a `repr` of a config object. `SecretRedactingFilter` scrubs them
 
 **What is deliberately *not* redacted: the audit trail's arguments.** `SECURITY.md` states plainly
 that the trail records each tool call's arguments, that they are user free text and may contain PII
-or confidential chemistry, and that this is *intentional* — GxP requires an attributable "who did
-what to which inputs" record. Redacting that would break the requirement the trail exists to meet.
+or confidential chemistry, and that this is *intentional* — the trail exists to be an attributable
+"who did what to which inputs" record. Redacting that would break the very thing it is for.
 The row asked for redaction and the honest reading of it is credentials, which have no such
 justification and which nothing was protecting.
 """
@@ -202,7 +202,7 @@ def _build_tracer_provider(exporter: "SpanExporter") -> "TracerProvider":
             # service" are in one expression instead of split across a `setdefault` elsewhere.
             SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME") or _DEFAULT_SERVICE_NAME,
             # The Git SHA the pod was built from (`CHEMCLAW_DEPLOYMENT_REVISION`), the same value
-            # every audit record is stamped with — so a trace and the GxP record of the same turn
+            # every audit record is stamped with — so a trace and the audit record of the same turn
             # name the same build.
             SERVICE_VERSION: settings.deployment_revision,
         }
@@ -455,7 +455,6 @@ _SECRET_SETTINGS = (
     "postgres_migration_dsn",
     "session_store_dsn",
     "note_webhook_secret",
-    "audit_anchor_secret",
     # Not a credential to an external system, which is why it was missed — but it is the HMAC key
     # `agent/framing.py` derives `ENVELOPE_TAG` from, and the agent instructions say only an
     # envelope carrying exactly that tag marks retrieved content as data. Anyone who learns it and

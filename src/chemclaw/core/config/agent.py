@@ -133,7 +133,7 @@ class AgentSettings(BaseSettings):
     # the safe fallback.
     # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
     # starts in plan mode and presents a plan for human approval before any execution — the
-    # pre-execution GxP gate — and only loops once approval switches it to execute; `execute`
+    # pre-execution approval gate — and only loops once approval switches it to execute; `execute`
     # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
     # loop so a stuck plan aborts instead of spinning (the runaway guard).
     harness_enabled: bool = False

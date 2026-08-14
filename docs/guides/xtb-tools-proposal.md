@@ -243,7 +243,7 @@ Three properties fall out, and they are the reason this seam is worth building f
   it. The agent chains tools without ever handling coordinates.
 - **Cache sharing across paths** — a Hessian on an optimized geometry hits the cache whether that
   geometry came from ASE, from ANCopt, or from a user upload, because the key is the *content*.
-- **Lineage for GxP** — `origin` makes every geometry traceable to the calculation that produced it,
+- **Lineage** — `origin` makes every geometry traceable to the calculation that produced it,
   which is precisely the provenance story `StoredResult.provenance` was designed for.
 
 **Storage.** Reuse `ResultStore` with `calc_type="structure"` and `calc_version="1"`; no new
@@ -340,7 +340,8 @@ def select_engine(spec: XtbSpec) -> XtbEngine:
 `settings.xtb_backend_preference = "tblite,ase,cli,crest"`. In a container without the binaries, a
 thermochemistry request runs on `ase`; a `conformers` request **fails with a message naming the
 missing backend** rather than returning an RDKit ensemble dressed up as a CREST result. Failing loud
-here is the whole point: a quietly substituted method is an invalid result in a GxP context.
+here is the whole point: a quietly substituted method is an invalid result in any context where the
+number gets cited.
 
 ### 4.4 Seam D — one cache-key derivation
 
@@ -573,7 +574,7 @@ Nothing new is invented — the existing store is used more aggressively.
    the new species. This is where the compute-once rule stops being a micro-optimization: a
    ten-reaction screen of one scaffold reuses most of its work.
 4. **Lineage.** `Structure.origin` records the producing `CalculationKey`; a report can reconstruct
-   the full chain SMILES → embed → opt → hess → ΔG, which is what a GxP reviewer asks for.
+   the full chain SMILES → embed → opt → hess → ΔG, which is what a reviewer asks for.
 5. **Ensembles** are cached as an ordered list of `structure_id`s plus energies and Boltzmann
    weights, so a conformer search is never repeated for a different downstream property.
 
@@ -606,7 +607,7 @@ that request into a property of the data.
 
 ## 9. Security, authorization, audit
 
-- **Every tool is `@tool`-registered**, so the GxP audit middleware and `enforce_tool_authz` wrap it
+- **Every tool is `@tool`-registered**, so the audit middleware and `enforce_tool_authz` wrap it
   with no per-tool wiring. No change to the safety rubric.
 - **Subprocess hardening** for the `cli`/`crest` backends, since this is the first place ChemClaw
   shells out:
@@ -796,10 +797,9 @@ options — build it last, once real usage has shown which options are actually 
 3. **Accuracy expectations.** Are semiempirical free energies (±2–3 kcal/mol) decision-useful for
    the intended users, or is the real requirement DFT — in which case the priority ordering here
    changes and the deferred HPC path moves up?
-4. **GxP method validation.** If xTB results can reach a regulated report, does the method version
-   need formal qualification? That would argue for pinning binary versions in config and recording
-   them in every result, which the cache key already does — but the process question is not
-   technical.
+4. **Method provenance.** If an xTB result can reach a report someone signs, is pinning the binary
+   version enough, or does the method itself need a documented review? The cache key already records
+   the version in every result; what to do with that is a process question, not a technical one.
 
 **Technical risks:**
 

@@ -1,6 +1,6 @@
 """The tool-audit middleware records every call, once, without altering behavior.
 
-Proves the GxP audit trail: a successful tool call is logged at INFO with its name and
+Proves the tool-audit trail: a successful tool call is logged at INFO with its name and
 arguments, a failing one is logged at WARNING and the exception propagates unchanged, and
 oversized arguments are truncated to the configured budget. It also proves the durable seam:
 the per-conversation factory stamps a correlation id and actor and hands each event to an
@@ -148,7 +148,7 @@ def test_a_specialist_is_recorded_beside_the_human_actor() -> None:
 
     Invariant 3 of D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor. A subagent is an
     attenuation of its caller's authority, not a new actor, so recording only the specialist would
-    make the trail worthless under GxP and recording it *as* the actor would repeat the D-040
+    make the trail worthless and recording it *as* the actor would repeat the D-040
     failure — an agent's act attributed to a chemist's Entra oid. Both fields, or neither is true.
     """
     from chemclaw.core.identity_context import (
@@ -183,8 +183,7 @@ def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -
     Empty is the honest record for the turn's own agent, not a gap. The second half is the one that
     matters for the trail already in the database: widening the event must not perturb what a call
     with no specialist records, so the row a main-agent call produces is field-for-field what it was
-    before `agent` existed. `test_the_versioned_hash_reproduces_the_v2_bytes_exactly`
-    (`tests/test_audit_chain.py`) is the same claim at the level of the bytes that get hashed.
+    before `agent` existed.
     """
     from chemclaw.core.identity_context import (
         get_current_specialist,
@@ -243,7 +242,7 @@ def test_a_nested_specialist_restores_its_caller_rather_than_clearing_it() -> No
 
 
 def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every recorded event carries the process's deployment revision (AG-14, GxP provenance)."""
+    """Every recorded event carries the process's deployment revision (AG-14, provenance)."""
     monkeypatch.setattr(settings, "deployment_revision", "sha-abc123")
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-r", actor="a", sink=sink)
@@ -294,7 +293,8 @@ def test_sink_failure_does_not_break_the_tool_call(caplog: pytest.LogCaptureFixt
     mw = make_audit_middleware(correlation_id="c", actor="a", sink=_BrokenSink())
     with caplog.at_level(logging.ERROR):
         _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok)  # must not raise
-    # SEC-3: the lost GxP record is logged at ERROR with a stable, greppable marker so it can alert.
+    # SEC-3: the lost audit record is logged at ERROR with a stable, greppable marker so it can
+    # alert.
     record = next(r for r in caplog.records if "audit_sink_failure" in r.getMessage())
     assert record.levelno == logging.ERROR
     assert getattr(record, "event", None) == "audit_sink_failure"
@@ -303,13 +303,13 @@ def test_sink_failure_does_not_break_the_tool_call(caplog: pytest.LogCaptureFixt
 def test_a_postgres_deployment_gets_the_durable_trail_without_asking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The GxP trail is durable wherever a database is configured — opting in is not required.
+    """The trail is durable wherever a database is configured — opting in is not required.
 
-    The regression test for the pass's highest-ranked finding. `PostgresAuditSink`, the
-    tamper-evident chain, `infra/sql/011` and `make audit-verify` were all built and tested, and
-    the sink was constructed in exactly one place — `cli/chat.py`, behind a flag. The deployed
-    service passed no sink, so the middleware installed `NullAuditSink()` and `audit_events` was
-    empty in production while every document called it the compliance record.
+    The regression test for the pass's highest-ranked finding. `PostgresAuditSink` and its table
+    were built and tested, and the sink was constructed in exactly one place — `cli/chat.py`,
+    behind a flag. The deployed service passed no sink, so the middleware installed
+    `NullAuditSink()` and `audit_events` was empty in production while every document called it
+    the durable record.
 
     Asserted at `default_audit_sink` rather than at a call site on purpose: fixing the service's
     factory alone would have left the identical trap set for the Temporal template activities
@@ -334,7 +334,7 @@ def test_an_omitted_sink_no_longer_silently_means_log_only(
 ) -> None:
     """`make_audit_middleware()` with no `sink` resolves the default, not `NullAuditSink`.
 
-    The polarity that matters for a GxP control: a forgotten argument must not downgrade the
+    The polarity that matters here: a forgotten argument must not downgrade the
     compliance record. Opting *out* stays possible by passing `NullAuditSink()` explicitly.
     """
     recorded: list[str] = []
@@ -388,7 +388,7 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
 
     `CancelledError` is a `BaseException`, so the `except Exception` that records a failure never
     saw it: every tool call interrupted by a client disconnect or the front door's turn deadline
-    left no row at all, and the GxP trail under-reported *attempted* calls exactly when a turn went
+    left no row at all, and the trail under-reported *attempted* calls exactly when a turn went
     wrong. The attempt is what the trail is for, so it is recorded under its own outcome — a
     cancellation is neither a success nor a tool failure.
     """

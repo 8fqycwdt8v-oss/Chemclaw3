@@ -148,7 +148,7 @@ def test_a_profiles_harness_answer_is_the_same_one_the_plan_gate_gets(
     """
     monkeypatch.setattr(settings, "harness_enabled", False)
     monkeypatch.setattr(settings, "harness_autonomy", "execute")
-    profile = AgentProfile(name="gxp", harness_enabled=True, harness_autonomy="plan_only")
+    profile = AgentProfile(name="governed", harness_enabled=True, harness_autonomy="plan_only")
 
     from chemclaw.agent.langgraph_agent import tool_call_middleware
 

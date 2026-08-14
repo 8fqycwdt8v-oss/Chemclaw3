@@ -51,7 +51,7 @@ async def decide(
     """Deliver the human Yes/No to a pending hold — the button click, finally wired.
 
     Deliberately an HTTP route and **not** an agent tool: the agent proposes, a human signs
-    off (D-005). A tool would let the agent approve its own candidate and collapse the GxP
+    off (D-005). A tool would let the agent approve its own candidate and collapse the review
     line the whole PR-gate exists to draw.
     """
     try:

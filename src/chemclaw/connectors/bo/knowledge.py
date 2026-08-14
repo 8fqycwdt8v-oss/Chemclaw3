@@ -6,9 +6,9 @@ validates before it enters the graph.
 
 This module is the *mapping only*, which is the connector split: turning a campaign result into a
 note is the BO domain's knowledge, so it lives in the bundle; pushing that note through the PR-gate
-is the GxP boundary, so it stays in core (`ConnectorJobWorkflow` publishes whatever note the result
-envelope carries). The activity that used to do both is gone — a connector must not be able to reach
-around the gate, and now it structurally cannot.
+is the review boundary, so it stays in core (`ConnectorJobWorkflow` publishes whatever note the
+result envelope carries). The activity that used to do both is gone — a connector must not be able
+to reach around the gate, and now it structurally cannot.
 
 Core also stamps the run and *why it was started* onto this note on the way through
 (`durable/job_record.py::note_with_run_provenance`, D-157). So this builder answers "what came out

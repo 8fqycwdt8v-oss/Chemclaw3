@@ -6,7 +6,7 @@ tests here are written to fail if a property is *removed*, not to pass because t
 The property that most needs a test is the one nothing else would catch. A challenger built as a
 bare deepagents `SubAgent` dict runs with `list(spec.get("middleware", []))` and nothing else: no
 audit trail, no per-tool authorization, no dry-run gate, no plan gate. It would answer correctly,
-its tool calls would work, every other test here would pass, and the GxP trail would be silently
+its tool calls would work, every other test here would pass, and the audit trail would be silently
 empty. `test_a_challenger_is_built_with_the_full_governance_chain` is the guard, and it asserts
 against the middleware the agent is actually compiled with rather than against how it was spelled.
 """

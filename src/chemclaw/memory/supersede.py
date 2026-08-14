@@ -11,7 +11,7 @@ keeps a note's id — and therefore its PR-gate branch and merged file — stabl
   note stays current beside it.
 
 In both cases retrieval can serve a stale note as fact with nothing linking it to the note that
-replaced it. Under GxP that is precisely what the bi-temporal fields exist to prevent, so this
+replaced it. That is precisely what the bi-temporal fields exist to prevent, so this
 module closes the window the *only* way the note schema already supports: the superseded note gets
 `valid_to` set (excluded from current-evidence sweeps by `Note.is_current`, never deleted — it stays
 in Git and remains reachable by id) plus a body line naming its replacement.

@@ -110,7 +110,7 @@ def _bundle_dirs() -> list[Path]:
 
     Sorted rather than filesystem order so the advertised tool order is identical on every
     machine — tool order is part of the prompt the model sees, and a surface that reshuffles per
-    pod is a reproducibility problem in a GxP system.
+    pod is a reproducibility problem.
     """
     found: dict[str, Path] = {}
     for directory in settings.connectors_dirs:
@@ -359,7 +359,7 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     per enabled bundle), so in a cluster the front door probed `127.0.0.1:881x` — its own pod, where
     nothing listens. Every connector therefore reported `unreachable` on `/readyz` and in
     `chemclaw_connectors_unhealthy` however healthy it was, and under `connectors_required: true`
-    — the GxP fail-fast posture — startup would have failed every time. Found by re-running the
+    — the fail-fast posture — startup would have failed every time. Found by re-running the
     Stage 5e connector-kill scenario, which could not tell "killed" from "never probed correctly".
 
     The move is a suffix replacement rather than an origin swap, because the two deployments that

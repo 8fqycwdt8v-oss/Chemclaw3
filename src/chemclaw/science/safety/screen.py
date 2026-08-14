@@ -8,7 +8,7 @@ structural alerts up front rather than having to spot an azide in a SMILES strin
 What this is: SMARTS matching against a committed, cited rule table (`safety/rules.yaml`), plus a
 pairwise incompatibility check across a reaction's components. Deterministic, offline, no model,
 no external database — a flag is reproducible and traceable to a literature source, which is what
-makes it usable in a GxP review.
+makes it usable in a review.
 
 **What this is not, and must never be presented as:** a hazard assessment. No rule matching means
 *no rule in the table matched* — it says nothing about toxicity, exposure, thermal stability of the

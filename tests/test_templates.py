@@ -625,7 +625,7 @@ def _tool_step(tool: str, **arguments: Any) -> Any:
 def test_a_connector_tool_step_is_audited_under_the_requester(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both tool steps of the shipped `hazard-briefing` used to leave no GxP audit row at all.
+    """Both tool steps of the shipped `hazard-briefing` used to leave no audit row at all.
 
     The in-process branch hand-applied audit + authz; the connector branch two lines below called
     `connector.call_tool` and reached the connector directly. The module's own docstring said

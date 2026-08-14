@@ -274,7 +274,7 @@ wächst mit jeder späteren Fähigkeit (jede Capability-Phase registriert ihre e
   die Memory-Ebene (Phase 5) gehören Langzeit-/Temporal-Benchmarks (DMR, LongMemEval) hierher.
 
 Bewusst **noch nicht** first-class (bleibt im Backlog, Nutzerentscheidung): die
-chemische/biologische **Safety-/Compliance-Schicht** (Gefahren, GxP, Datenintegrität) — sie ist
+chemische/biologische **Safety-Schicht** (Gefahren, Datenintegrität) — sie ist
 eigenständig und nicht Teil dieser Output-Qualitätsmetriken.
 
 > **CHECKMATE 2b** (G1–G7): Läuft der Eval-Harness reproduzierbar über das Fall-Set und
@@ -376,8 +376,8 @@ Abschnitt 12.4): ein *stabiler* Harness-Kern mit *pluggable* Source-Retrievern.
   als **Temporal-`background-jobs`-Workflow** → resumierbar, überlebt Worker-Neustarts
   (gleiches Fire-and-Forget-/Durability-Muster wie der QM-Spine, Phase 1).
 - **5b.7** Der Berichtsentwurf ist ein Artefakt und durchläuft das **PR-Gate** (Phase 2):
-  ein Prozesschemiker validiert, bevor er als verlässlich gilt (GxP: "AI schlägt vor,
-  Mensch zeichnet ab").
+  ein Prozesschemiker validiert, bevor er als verlässlich gilt (der Agent schlägt vor,
+  ein Mensch entscheidet).
 
 Bewusst **noch nicht**: externe Literatur/Patente. Diese werden später zu *genau einem
 weiteren Retriever* hinter demselben Interface (5b.2) — kein Umbau des Harness-Kerns.

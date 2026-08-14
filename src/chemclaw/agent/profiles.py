@@ -14,7 +14,7 @@ Design (see `docs/archive/audit/10-config-extensibility.md` §6):
   imports neither `chemclaw_agent` nor `settings` (no cycle, no second config source), and the
   default profile is simply `AgentProfile(name="default")` with every field unset.
 - **A profile *attenuates*, it never *authorizes*.** The tool/MCP subsets can only *narrow* the
-  advertised surface. The GxP audit + per-tool authz middleware and the skill role-gates run in
+  advertised surface. The audit + per-tool authz middleware and the skill role-gates run in
   `build_agent` *after* this narrowing, so a profile that names a tool the caller may not use is
   still denied at call time, and a profile that omits the PR-gate tools merely removes capability.
   A profile is a narrowing seam layered *under* RBAC, never a bypass.

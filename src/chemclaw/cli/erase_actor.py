@@ -4,7 +4,7 @@
     python -m chemclaw.cli.erase_actor <oid> --apply    # commits
 
 The thin `main()` shim over `chemclaw.agent.leaver`, which holds the two-tier rule and the reason
-for it. Read that module before running this: it deletes the conversation and keeps the GxP record,
+for it. Read that module before running this: it deletes the conversation and keeps the record,
 and the second half is not a limitation to work around.
 
 Dry run by default because this is the one irreversible operation an operator performs on live data
@@ -31,7 +31,7 @@ def _render(report: ErasureReport) -> str:
     lines.append(f"  {report.erased_total:>7}  total")
 
     reasons = dict(retention_reasons())
-    lines += ["", "RETAINED (the GxP record — not erasable by this command):"]
+    lines += ["", "RETAINED (the record of who did what — not erasable by this command):"]
     for table, count in report.retained.items():
         lines.append(f"  {count:>7}  {table}")
         if count:

@@ -7,7 +7,7 @@ object itself is the git platform's job (e.g. GitHub "create PR from branch"); t
 submitter guarantees the agent note never lands directly on the base branch.
 
 **The submission happens in its own `git worktree`, and the shared checkout is never switched.**
-That is a GxP property, not a performance one. `note_repo_dir` is also what every reader resolves
+That is a review property, not a performance one. `note_repo_dir` is also what every reader resolves
 through `settings.knowledge_path`, so while a submission held that tree on `note/<id>` the
 unreviewed note was readable *as knowledge* by `find_notes`, `gather_evidence`, the digest job and
 the ELN sync — and, because `load_notes` caches, for up to `graph_cache_ttl_seconds` after the

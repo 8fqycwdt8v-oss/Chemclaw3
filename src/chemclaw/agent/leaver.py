@@ -1,4 +1,4 @@
-"""Erase a departed person's conversational data, and keep every record GxP requires kept.
+"""Erase a departed person's conversational data, and keep the record of what they did.
 
 **The question this answers is "someone left, now what?"** Removing an Entra app role stops new
 access immediately and is the whole of *authorization* offboarding — but it deletes nothing, and
@@ -14,11 +14,9 @@ is built on. Two tiers:
   interest to anyone else (`agent/preferences.py` makes the same argument for why a preference is
   not a knowledge note). Nothing here is evidence about the chemistry.
 - **Retained — the record.** The audit trail, plan approvals, note proposals, BO suggestions, job
-  records and turn costs. Each says *who did what to the science*, which is precisely what a GxP
-  system exists to be able to say, and an attributable record that can be deleted on request is not
-  an attributable record. `audit_events` additionally carries a tamper-evident hash chain
-  (`make audit-verify`): deleting a row does not merely remove information, it breaks the proof
-  that the surrounding rows were never altered.
+  records and turn costs. Each says *who did what to the science*, and an attributable record that
+  can be deleted on request is not an attributable record: a result someone cites is only as good as
+  the ability to say later who produced it and on whose authority.
 
 So this command **reports both tiers** rather than silently doing half the job. An operator who
 needs the retained tier addressed as well has a data-protection question that outranks a CLI flag,
@@ -153,7 +151,8 @@ _ERASE: tuple[tuple[str, str], ...] = (
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 
-# The GxP tier: counted, named, never deleted. Each entry is (table, actor columns, why it stays).
+# The retained tier: counted, named, never deleted. Each entry is (table, actor columns, why it
+# stays).
 #
 # **Columns, plural, and that is not defensive generality.** `note_proposals` carries two — `actor`
 # (who proposed) and `decided_by` (who reviewed) — so a table-to-column mapping could only ever
@@ -166,15 +165,16 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "audit_events",
         ("actor",),
-        "the GxP trail, and a tamper-evident hash chain — a deletion breaks the proof over the "
-        "rows either side of it, not just the row removed (see `make audit-verify`)",
+        "the record of every tool call this person's turns made — which is the only place some "
+        "actions are recorded at all, and the credential writing it has no DELETE either",
     ),
     ("plan_approvals", ("actor",), "who approved a plan before it was allowed to spend anything"),
     (
         "note_proposals",
         ("actor", "decided_by"),
         "who proposed a knowledge note, and who signed it off at the PR-gate — the second is the "
-        "human half of 'AI proposes, human disposes' and is the whole reason the gate is auditable",
+        "human half of 'the agent proposes, a human decides' and is the whole reason the gate is "
+        "auditable",
     ),
     ("bo_suggestions", ("actor",), "who a campaign's recommendation was made for"),
     ("bo_campaigns", ("opened_by",), "who framed an optimization campaign's decision space"),
@@ -300,7 +300,7 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
 
 
 def retention_reasons() -> tuple[tuple[str, str], ...]:
-    """(table, why it is retained) for every GxP table, so a report can print the reason.
+    """(table, why it is retained) for every retained table, so a report can print the reason.
 
     Exposed rather than inlined into the CLI's formatter because the reason is the substantive part
     of the answer: an operator asking "why is this row still here?" should read it from the module

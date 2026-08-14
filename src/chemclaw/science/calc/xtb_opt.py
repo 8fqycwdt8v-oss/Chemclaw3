@@ -76,7 +76,7 @@ class OptimizationResult(BaseModel):
     `structure` is the optimized geometry and is the value downstream tasks consume;
     it carries `origin`, the key of the calculation that produced it, so a
     thermochemistry or reaction result computed from it has its lineage recorded
-    rather than implied (GxP).
+    rather than implied.
 
     A *non*-converged optimization is never returned: it raises. A geometry that is
     not a stationary point produces frequencies, thermochemistry and reaction energies

@@ -37,7 +37,7 @@ an API detail.
 nesting order as the previous engine's, over the *same* decision functions —
 `tool_authz.dry_run_refusal`, `.denial_result`, `.domain_error_result`, `.failure_detail`,
 `repeat_guard.count_call`, and `audit._recording`. Only the plumbing was ported; a second copy of
-any of those sentences would let an authorization decision, a dry-run refusal or a GxP audit row
+any of those sentences would let an authorization decision, a dry-run refusal or an audit row
 depend on which engine a deployment happens to run, which is the one drift this migration must be
 incapable of.
 

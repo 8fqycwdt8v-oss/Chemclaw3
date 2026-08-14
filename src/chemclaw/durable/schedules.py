@@ -41,7 +41,6 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
-from chemclaw.durable.audit_verify import AuditChainVerifyWorkflow
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
@@ -80,6 +79,11 @@ OWNED_SCHEDULE_IDS = frozenset(
         "eval-drift",
         "note-reindex",
         "retention",
+        # Retired with the audit hash chain. The id stays because this set is the *prune*
+        # namespace: it is the only thing authorising the applier to delete a Schedule, so
+        # dropping the name would strand a live `audit-verify` Schedule firing a workflow no
+        # worker registers. It is deleted on the next apply and can go once every deployment
+        # has run one.
         "audit-verify",
         "digest",
         "artifact-eviction",
@@ -120,11 +124,6 @@ def planned_schedules() -> list[PlannedSchedule]:
     if share_sources():
         share_every = timedelta(minutes=settings.document_sync_schedule_minutes)
         schedules.append(PlannedSchedule("document-sync", DocumentShareSyncWorkflow, share_every))
-    # The integrity check only earns a Schedule where a durable audit sink exists to verify
-    # (gap SCH-5); an offline/dev deployment has no chain and would alert on an empty table.
-    if settings.audit_verify_enabled:
-        verify_every = timedelta(minutes=settings.audit_verify_schedule_minutes)
-        schedules.append(PlannedSchedule("audit-verify", AuditChainVerifyWorkflow, verify_every))
     # Digests only earn a Schedule where someone has subscribed (gap IDEA-1); otherwise the job
     # would sweep the corpus daily to deliver nothing.
     if settings.digest_enabled:

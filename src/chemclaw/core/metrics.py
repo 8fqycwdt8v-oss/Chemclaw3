@@ -6,7 +6,7 @@ which left three things invisible in operations and one thing actively mis-tuned
 - **Load shedding is silent.** Admission control (AG-15) sheds excess turns with a 503 and the
   budget guard refuses with a 429. Both are working as designed and neither is countable, so
   "the service is at capacity" looks identical to "the service is fine" from outside.
-- **Lost GxP audit records are silent.** `chemclaw.agent.audit` deliberately swallows a sink
+- **Lost audit records are silent.** `chemclaw.agent.audit` deliberately swallows a sink
 failure to
   keep tool calls working (SEC-3) and logs an ERROR marker — but nothing counts it, so an audit
   trail can be quietly incomplete for a long time.
@@ -102,7 +102,7 @@ _COUNTERS: dict[str, str] = {
     # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
     "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
     "chemclaw_audit_sink_failures_total": (
-        "GxP audit records that could not be persisted (the trail is incomplete)."
+        "Audit records that could not be persisted (the trail is incomplete)."
     ),
     # The durable subsystem's counterpart to `chemclaw_connectors_unreachable_total`. It did not
     # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
@@ -310,7 +310,7 @@ _COUNTERS: dict[str, str] = {
     # is "is anything degraded, and what", which is `sum by (subsystem)` over a single series
     # family, and a per-site counter would make that a union of a dozen metric names that has to be
     # edited every time a site is added. `agent/audit.py`'s dedicated
-    # `chemclaw_audit_sink_failures_total` stays as it is — a lost GxP record is a named
+    # `chemclaw_audit_sink_failures_total` stays as it is — a lost audit record is a named
     # regulatory fact with its own alert, not a member of a general family.
     "chemclaw_degraded_total": (
         "Operations that failed and were continued past with reduced function, by subsystem."

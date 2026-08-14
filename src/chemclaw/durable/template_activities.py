@@ -131,7 +131,7 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     scope)` exactly as written. So a template naming `compute_dft_energy` started HPC work for
     anyone entitled to run its `run_<name>` tool, a job's declared domain guard — the one
     `JobSpec.precondition` documents as having no other replay-safe home — never ran on this path,
-    and the launch left no GxP audit row. The module docstring above claimed the opposite.
+    and the launch left no audit row. The module docstring above claimed the opposite.
 
     The pre-flight is `chemclaw.connectors.jobs.prepare_job_launch`, shared with the chat launcher
     rather than reimplemented, so the two cannot drift; the identity is stamped from the step first,
@@ -203,7 +203,7 @@ async def _audited(
     arguments: dict[str, Any],
     action: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Run a job step's pre-flight through the governed chain, so the launch leaves a GxP row.
+    """Run a job step's pre-flight through the governed chain, so the launch leaves an audit row.
 
     Through the chain over a real tool rather than by emitting an `AuditEvent` directly: there is
     exactly one place that decides what an audit record looks like, and a second emitter would
@@ -279,7 +279,7 @@ async def _invoke(tools: list[Any], step: ToolStepInput, unreachable: list[str])
     # to be searched separately and called differently — the connector half through
     # `connector.call_tool`, which reaches the connector directly and skipped both the audit trail
     # and `enforce_tool_authz`. The consequence was not theoretical: both tool steps of the shipped
-    # `hazard-briefing` template left no GxP audit row, and a template naming a role-gated tool ran
+    # `hazard-briefing` template left no audit row, and a template naming a role-gated tool ran
     # it for anyone who could run the template. A connector tool is an ordinary LangChain tool, so
     # there is no longer a second shape to tempt a second path.
     for tool in tools:

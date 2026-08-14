@@ -34,9 +34,9 @@ claims, and deleting one deletes the claim with it.
 The notes live in `knowledge/` at the repository root — one directory per note type, and
 `CHEMCLAW_NOTE_REPO_DIR` can point them at a dedicated checkout. Nothing here holds a note.
 
-## The PR-gate is the GxP line
+## The PR-gate is the review line
 
 `pr_gate.py` and `git_submitter.py` are the one mechanism by which anything agent-generated becomes
-knowledge: the agent opens a pull request, a human validates, a merge makes it true. That is "AI
-proposes, human signs off", and it is reused everywhere — job results, reports, distilled
+knowledge: the agent opens a pull request, a human validates, a merge makes it true. That is "the
+agent proposes, a human decides", and it is reused everywhere — job results, reports, distilled
 playbooks — rather than reimplemented per feature. An agent never writes to the graph directly.

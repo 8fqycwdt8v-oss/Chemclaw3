@@ -1,4 +1,4 @@
-# The `reporting` specialist: turning finished work into a record a human signs off on.
+# The `reporting` specialist: turning finished work into a record a human reviews and accepts.
 #
 # The file's stem is the profile name. Everything here only ever narrows — see `evidence.yaml`.
 # Note what this specialist can and cannot do: it may *propose* a knowledge note, and a proposal is

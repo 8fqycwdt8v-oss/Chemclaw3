@@ -25,7 +25,7 @@ observation instead of an opinion.
 question the corpus run cannot, and each resolves to a mechanical observation — never to prose:
 
 * `run_plan_gate_probe` drives a whole *conversation* (refuse → approve → execute → re-gate),
-  because whether the GxP gate holds is a property of a session and not of a turn.
+  because whether the approval gate holds is a property of a session and not of a turn.
 * `degradation_findings` asks where `capability_degraded` sits in the event *order*, because the
   event already being recorded says only that the outage was announced, not that it was announced
   in time for the answer to be planned against it.

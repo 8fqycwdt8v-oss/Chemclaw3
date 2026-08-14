@@ -354,7 +354,7 @@ def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
     the client drops while sse-starlette is writing the `AnswerEvent`, and the runner's teardown
     clause runs unconditionally. Under MAF that clause ran `rollback_to`, which DELETEd the user
     and assistant rows the finished turn had already committed — the turn billed `completed=True`
-    and its output gone, silent loss of conversation history, which in a GxP system is the
+    and its output gone, silent loss of conversation history, which is the
     expensive outcome rather than the cheap one.
 
     The rollback is gone, and this is the test that has to keep holding without it — which is

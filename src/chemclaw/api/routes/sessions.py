@@ -146,7 +146,7 @@ async def upload_attachment(
 
     Session-scoped and in-memory by design: an attachment is working material for a
     conversation, not knowledge. Anything in it worth keeping goes through the PR-gate like
-    every other machine-touched write; routing uploads into the graph would bypass the GxP
+    every other machine-touched write; routing uploads into the graph would bypass the review
     line.
 
     Unsupported formats are refused with a message naming what *is* supported (422), never

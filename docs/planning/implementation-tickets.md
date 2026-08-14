@@ -179,7 +179,7 @@ current tool+skill+middleware set.
 - **Deps:** F1-T1.
 
 ### F1-T3 — Plan→approve→execute + runaway cap (DONE)
-- **Goal:** `plan_only` proposes a plan and stops for approval (the pre-execution GxP gate);
+- **Goal:** `plan_only` proposes a plan and stops for approval (the pre-execution gate);
   `execute` runs the capped completion loop.
 - **How:** MAF's `AgentModeProvider` ships `plan`/`execute` modes whose built-in flow is "present the
   plan → ask approval → `mode_set` execute". Starting in `plan` (for `plan_only`) plus a loop predicate

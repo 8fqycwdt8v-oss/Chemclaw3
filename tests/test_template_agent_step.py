@@ -125,7 +125,7 @@ def test_an_undeclared_write_never_runs_and_the_step_still_answers(
 
     1. the write's **body never ran** — not that it was hidden from the model, that it did not
        happen;
-    2. the attempt is a GxP row with `outcome="error"` **saying why it was refused**. The outcome
+    2. the attempt is an audit row with `outcome="error"` **saying why it was refused**. The outcome
        alone proves less than it looks: `ToolNode` *returns* its invalid-name message from inside
        the wrapper chain, so `returned_failure` books an error row either way, and with the refusal
        middleware deleted this row reads "compute_xtb_energy is not a valid tool, try one of

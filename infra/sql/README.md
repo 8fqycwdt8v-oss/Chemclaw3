@@ -45,7 +45,7 @@ the pair applies in filename order and neither shadows the other.
 | `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an HPC run (D-011). Bounded by cost policy, not by a clock |
 | `molecule_fingerprints` | 002 (+004) | `science/fingerprints/store.py` | — |
 | `reaction_fingerprints` | 003 (+004) | `science/fingerprints/store.py` | — |
-| `audit_events` | 006 (+010, 011, 026, 044) | `agent/audit_store.py` | **refused**: deleting from a hash chain is indistinguishable from the tampering it detects. Safe disposal needs archive-then-reseal — BACKLOG STO-13 |
+| `audit_events` | 006 (+010, 011, 026, 044) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
 | `session_messages` | 008 (+022, 026, 043) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
@@ -64,7 +64,7 @@ the pair applies in filename order and neither shadows the other.
 | `measurements` | 030 | `science/calc/calibration.py` | — |
 | `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | — |
 | `bo_suggestions` | 031 (+037) | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
-| `audit_anchors` | 032 | `agent/audit_anchor.py` | never — an anchor is the evidence a trailing truncation happened, so the runtime role cannot delete one |
+| `audit_anchors` | 032 | — (retired with the audit hash chain; nothing writes it) | never — the table is empty and kept only because the schema is forward-only |
 | `turn_costs` | 033 | `agent/turn_cost_store.py` | — |
 | `document_files` | 037 (+040, 041) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
 | `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
