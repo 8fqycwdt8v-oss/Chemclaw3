@@ -49,7 +49,12 @@ dependencies = [
     # whichever transitive constraint happened to be tightest, so dropping an unrelated `langchain-*`
     # package could silently relax the pin on the library that owns a durably-retained serialization.
     "langchain-core>=1.5.3",
-    "langchain>=1.0",
+    # `>=1.3.14`, not the `>=1.0` this was. The floor is a claim about what the code needs, and
+    # `>=1.0` was false in two places that would have failed at import or, worse, silently: the v3
+    # stream-transformer seam (`AgentMiddleware.transformers`, which `create_agent` merges at compile
+    # time) and `InterruptOnConfig.when`, which arrived in 1.3.3. `tests/test_upstream_surface.py`
+    # asserts the same floor from the other side, against the installed distribution.
+    "langchain>=1.3.14",
     "langchain-anthropic>=1.5.1",
     "langchain-mcp-adapters>=0.3.2",
     "langchain-openai>=1.4.2",

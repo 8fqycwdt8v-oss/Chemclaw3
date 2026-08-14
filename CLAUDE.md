@@ -48,9 +48,9 @@ extracted decision functions, so an authorization refusal or an audit row cannot
 engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
 three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
 publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
-gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is a counted state
-field rather than an inference (`agent/loop_cap.py`); and a specialist team (`agent/team.py`) is
-available but off by default until its routing is measured.
+gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is upstream's
+`ModelCallLimitMiddleware`, subclassed only to record that it fired (`agent/loop_cap.py`); and a
+specialist team (`agent/team.py`) is available but off by default until its routing is measured.
 
 Two ADRs on 2026-08-13 changed what that team *is* and added the review it was missing. M12 had
 measured the supervisor delegating **2 of 15** and found the cause structural rather than
@@ -104,6 +104,29 @@ readers that only knew the *old* stored message shape — `chemclaw.cli.explain`
 current session's audit reconstruction blank — so `session_store.message_from_row` is now the one
 function allowed to decide which serialization a `session_messages` row holds
 (D-2026-08-11-what-the-removal-found).
+
+A later pass (D-2026-08-14-the-coupling-is-the-cost-not-the-line-count) asked what the LangGraph
+stack now does out of the box, and answered it against the installed distributions rather than the
+documentation. The finding worth carrying: **what breaks on a dependency bump is not the volume of
+first-party code but the number of places reading a shape upstream never promised.** Six existed;
+`tests/test_upstream_surface.py` now asserts every one in a single file, each naming the module that
+would break, two of them asserting an *absence* so that upstream fixing something turns the
+workaround red instead of letting it outlive its reason. The same pass moved the runaway cap onto
+`ModelCallLimitMiddleware` (which costs one superstep per model call — the step-ceiling constant was
+re-measured with it) and reduced `ReloadingSkillsMiddleware` to a single `UntrackedValue` channel,
+deleting a dependency on the *arity* LangChain invokes a hook with. It also declined three adoptions
+that looked obvious and are not: `ToolErrorMiddleware` and `ToolRetryMiddleware` both trigger on
+raised exceptions, and MCP tools never raise. The same pass **built and reverted** the front door's
+move to `stream_events(version="v3")`: it retires the largest coupling of all — `astream`'s tuple
+arity — and the event contract survived unmodified, but v3 reports token usage only at
+`message-finish`, so a turn abandoned mid-message books **0** tokens where the current driver books
+~30, which makes "drop the connection just before the answer" a free bypass of the token budget.
+A maintenance coupling is the smaller harm; the finding and the restart condition are in the ADR.
+**GxP is no longer a constraint on layer 1** — a conclusion
+`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` reached
+independently and carried out, removing the audit hash chain while keeping the trail, the gates and
+the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
+store, the `session_messages` read-model, `HumanInTheLoopMiddleware` and `RubricMiddleware`.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See

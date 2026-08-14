@@ -3,6 +3,138 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the upstream-adoption pass (2026-08-14)
+
+Source: `docs/decisions/D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md`. That ADR
+landed the small half — the runaway cap on `ModelCallLimitMiddleware`, the skills reload as a
+channel, `tests/test_upstream_surface.py`, and the honest `langchain>=1.3.14` floor. These four are
+the large half. **Each is a breaking change to the SSE contract or to a merged decision**, and two
+need a coordinated pull request in `Chemclaw3_ui`, so none of them should ship half-migrated. What
+is recorded here is what was *verified* about each against the installed distributions, so the work
+does not start by re-checking.
+
+- [ ] **The front door on `stream_events(version="v3")` — built, measured, and reverted; do not
+      restart it until upstream reports usage incrementally** — [L]. The migration was written and
+      the whole suite run against it. Most of it worked, and one thing did not.
+      **What worked, and is worth having when this becomes possible:** v3 owns `stream_mode` and
+      `subgraphs` and raises `TypeError` if a caller passes either, which retires the dependency on
+      `astream`'s tuple arity — the single largest unpromised-shape coupling in the tree, the one
+      that had to be verified by reading `langgraph.pregel.main._output` and that changed silently
+      if the mode list was written as a tuple. Prose becomes a `text-delta` content block and a tool
+      call's fragments a different block type, so "the token stream carries prose and never a
+      tool-call fragment" is structural instead of a filter. `_MODES` becomes
+      `transformers=[UpdatesTransformer, CustomTransformer]`, because v3 derives its modes from the
+      union of the registered transformers' `required_stream_modes` and a bare run yields only
+      `values` and `messages` (measured). And the **event contract did not have to change at all** —
+      all sixteen conformance assertions passed unmodified, so no `Chemclaw3_ui` or `Chemclaw3_mock`
+      change was needed. The projections (`run.messages`, `run.tool_calls`, `run.subagents`) must
+      *not* be used: they are single-consumer cursors and consuming several concurrently loses the
+      global order the contract is about. Iterate the raw protocol stream, which is ordered.
+      **The blocker, which is why it is reverted: v3 reports token usage only at `message-finish`.**
+      Searched every v3 event for an incremental signal and there is none — usage arrives once,
+      aggregated, when a message completes, and again in `updates`/`values` after the node does.
+      `tests/test_turn_cancellation.py` requires that a turn abandoned *mid-message* still books the
+      tokens it has already spent, and its docstring says why: "a user could bypass the token budget
+      indefinitely by dropping each connection just before the answer, which is the cheapest
+      possible attack on the runaway-cost guard". Measured under v3: **0 tokens booked** where the
+      current driver books ~30. That is a security-relevant regression on a deliberate guard, so the
+      arity coupling — real but merely a maintenance risk — is the lesser cost. *Restart when v3
+      emits usage per content block, or when it exposes the raw `(chunk, metadata)` message stream
+      alongside the content-block one.*
+      **A second finding, independent of the blocker:** v3's native `tools` method carries
+      `tool-started`/`tool-finished` whole — the shape that would retire the fragment reassembly
+      D-138 came from — but it only sees the tools the *parent* graph's `ToolNode` runs.
+      `SubAgentMiddleware` invokes a compiled specialist as an ordinary runnable inside the `task`
+      tool, so a specialist's own calls never reach it: measured, a team turn reported the `task`
+      call and nothing the specialist did. Calls and results must keep coming from `updates`.
+      **Also note:** v3 is `.. beta::` and warns once per run from two places, and
+      `LangChainBetaWarning` lives in `langchain_core._api`, which `tests/test_third_party_layering.py`
+      forbids importing — suppress by message, not by category.
+
+- [ ] **Approvals on `HumanInTheLoopMiddleware`** — [L]. `InterruptOnConfig` in the pinned
+      `langchain 1.3.14` carries `when` (a `ToolCallRequest` predicate), `allowed_decisions`, a
+      description factory, and the four decision types (`approve`/`edit`/`reject`/`respond`), with
+      resumption by `Command(resume={"decisions": […]})`. The `when` predicate is the shape
+      `gate_applies` and `rewrites_the_plan_in_this_batch` already have. Cross-turn durability moves
+      from the `plan_approvals` table to the checkpointer, which removes the second, disagreeing
+      answer to "may this session act" that defect DARK-1 was about. Also closes the acknowledged
+      gap that there is no mechanism for a short in-turn clarification. *Two real risks the existing
+      row already names and this must handle:* a `thread_id` collision silently discarding a pending
+      interrupt, and `propose_note`'s 12 call sites. *Supersede the reason, not the decision* — the
+      declining reason is measurably false (`invoke()` returns normally with `__interrupt__`).
+- [ ] **`RubricMiddleware` in the turn loop** — [M]. `agent/verifier.py`'s own docstring says a
+      low-confidence answer is "marked, not blocked": nothing routes a `review_required` answer back
+      into the model. `deepagents 0.7.5` — **already pinned, no bump needed** — ships
+      `RubricMiddleware(model=…, system_prompt=…, tools=…, max_iterations=3, on_evaluation=…)`, an
+      LLM-as-judge with a bounded revision loop, verdicts `satisfied`/`needs_revision`/`failed`/
+      `max_iterations_reached`/`grader_error`, and a grader prompt that already frames `<transcript>`
+      as untrusted observation and only `<rubric>` as authoritative — which is the injection concern
+      that killed `SummarizationMiddleware`, answered upstream. Keep the *deterministic* half of
+      `verifier.py` (the citation gate over `retrieval.harness.verify_claims`, `turn_evidence`,
+      `ungrounded_parameter_shapes`, `promised_uncalled_tools`) and expose it as rubric criteria and
+      grader `tools`; delete the hand-rolled `with_structured_output` judge and its timeout/fallback
+      plumbing. `on_evaluation` feeds `evals/phoenix.py` for free. *Ship behind a setting*, because
+      it changes what a turn returns.
+      **Two interactions to settle first, both found by reading the middleware rather than the
+      docs.** (1) `after_agent` is declared `@hook_config(can_jump_to=["model"])` and loops by
+      jumping *back into the same run*, so every revision iteration passes `before_model` and is
+      counted by `CappedModelCallLimit`'s `run_limit`. With `max_iterations=3` the revisions spend
+      the turn's runaway budget, and if the cap fires first the turn ends capped rather than
+      revised — the two bounds must be chosen together, and `agent_recursion_limit` re-measured
+      again underneath both. (2) The grader reads the *transcript*, whereas `verifier.py` scores
+      against this turn's `ToolCallTrace` — which lives in the runner, not in graph state. Making
+      the deterministic citation gate a grader `tool` therefore needs it bound to the turn's trace
+      the way `skill_read_tool` is bound to a backend; a grader that only reads the transcript is a
+      weaker check than the one already shipped, so this is a design step, not wiring.
+- [ ] **The audit trail as OpenTelemetry spans, and the transcript from the checkpointer** — [L].
+      Unblocked by GxP no longer being a constraint (ADR §5), and **partly overtaken**: `#176`/`#177`
+      (`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks`) landed
+      independently and removed the GxP framing and the audit *hash chain*, keeping the trail, the
+      gates and the INSERT-only grant. So `audit_anchor.py` is already gone and what is left of this
+      row is the narrower question below — whether the agent-layer `wrap_tool_call` recorder is
+      still worth keeping beside the spans. Re-read that ADR before starting; this row was written
+      against a tree that still had the chain. The tool-call span half is already
+      emitted natively by the OpenInference `LangChainInstrumentor` that `CHEMCLAW_OTEL_LLM_SPANS`
+      attaches, *including nested spans per subagent run* — which is what would let
+      `team._AttributedSpecialist` go, the wrapper whose `with_config` override depends on the order
+      `SubAgentMiddleware` binds and invokes. `session_messages` has one reader left
+      (`GET /sessions/{id}/messages`) that `graph.aget_state(config).values["messages"]` answers, so
+      `message_migration.py` and most of `message_pairing.py` and `session_store.py` go with it.
+      **Scope boundary, stated so it is not discovered late:** `agent/audit_store.py` is also read by
+      `durable/job_record_store.py`, `durable/audit_chain.py`, `durable/audit_verify.py`,
+      `cli/verify_audit_chain.py`, `core/migrate.py` and the database-privileges tests, so the store
+      and its Temporal-side readers are a separate, cross-layer decision from the agent-layer writer.
+      **The transcript half is blocked on a product decision, found by trying it.** The *read* moves
+      cleanly — verified that compaction is non-destructive (6 turns with tool calls left all 24
+      messages in the checkpoint, first `HumanMessage` intact), so `channel_values["messages"]` is a
+      complete and in fact *richer* source than `session_messages`, which stores only the question,
+      the answer and the tool exchanges. What does not move is `cli/explain`: it groups a turn's
+      words with that turn's audit rows on `session_messages.correlation_id`, and **the checkpoint
+      carries no per-message correlation id**. Reconstructing turn boundaries from the checkpoint
+      chain would mean reading checkpoint *metadata* — a new internal coupling, which is the thing
+      this whole workstream reduces. So the choice is: keep writing `session_messages` purely as
+      `explain`'s per-turn record (which leaves almost nothing to delete and is not worth the
+      churn), or decide that without GxP `explain`'s conversation half is no longer needed and it
+      becomes a tool-call reconstruction that points at the transcript route. **That is a product
+      call about a shipped CLI command, not an engineering one** — take it before starting, because
+      it decides whether this row is a large deletion or a small one.
+- [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S]. `durable/retention.py`
+      and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE thread_id = …` over
+      `agent/checkpointer.CHECKPOINT_TABLES`, a hand-maintained tuple invisible to
+      `tests/test_schema_inventory.py` (its own open row). `adelete_thread` exists on the base class
+      and on `AsyncPostgresSaver` (verified) and deletes the same three tables for the same thread
+      scope, so a new checkpoint table upstream could not be silently missed. **Two costs to weigh
+      first, which is why this did not just land:** it returns no rowcounts, and both callers report
+      per-table counts an operator compares between runs; and it uses the saver's own connection, so
+      on Chemclaw's autocommit checkpoint pool the three deletes stop being one transaction — the
+      atomicity `_prune_checkpoints`'s docstring argues for. **The second cost is now measured and
+      does not apply:** `AsyncPostgresSaver(conn).adelete_thread(tid)` constructed on the caller's
+      own non-autocommit connection runs *inside the caller's transaction* — seeded a thread,
+      deleted it through the saver, rolled the caller's transaction back, and the row was still
+      there. So atomicity and the dry-run rollback both survive, and the only real cost left is the
+      rowcounts. Decide that one deliberately: per-table counts become a per-*thread* count, which
+      changes two operator-facing report shapes (`durable/retention.py`'s `deleted` mapping and
+      `agent/leaver.py`'s `report.erased` keys) and their tests. Everything else is a substitution.
 ## Open — Left by the challenge panel and the delegation reframing (2026-08-13)
 
 Both ADRs ship the mechanism and defer the *number*, deliberately: the two open rows below are

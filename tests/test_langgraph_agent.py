@@ -712,8 +712,8 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
 def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
     """The cap is per turn, and it is the *channel* that makes it so — not the call site.
 
-    `model_calls` was a plain field, which resolves to a checkpointed `LastValue` on a thread keyed
-    by the session id, so the count accumulated across turns: measured at
+    The cap's counter was a plain field, which resolves to a checkpointed `LastValue` on a thread
+    keyed by the session id, so the count accumulated across turns: measured at
     `harness_max_loop_iterations=3`, turns 0-2 answered and turn 3 ended before the model was called
     at all — the last message was the chemist's own question, and every later turn on that session
     did the same. There is no recovery path from a durable counter that has already passed the cap.
@@ -784,26 +784,33 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
 
     `create_agent` bakes `recursion_limit=9999` (verified: a built agent's `.config` carries it) and
     nothing here had ever chosen otherwise, so the only bound on a turn was thousands of model calls
-    — measured by binary search at 2 supersteps per call with the harness off and 4 with it on, i.e.
-    roughly 5,000 and 2,500. Reaching it raises `GraphRecursionError`, which discards the work the
+    — measured by binary search at 2 supersteps per call with the harness off and 5 with it on, i.e.
+    roughly 5,000 and 2,000. Reaching it raises `GraphRecursionError`, which discards the work the
     turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial
     answer still goes out. So the cap is the graceful stop and this is the backstop under it.
 
-    Asserted against the derivation rather than a literal, so the test says *why* 151 is the number
+    Asserted against the derivation rather than a literal, so the test says *why* 153 is the number
     and follows the two settings it comes from. `9999` is named explicitly because that is the value
     this exists to displace.
+
+    **The `+ 3` is the part that has actually been wrong.** It was `+ 1`, and when M14 moved the
+    runaway cap onto `ModelCallLimitMiddleware` — which declares `after_model` as well as
+    `before_model`, one more node per iteration — a one-iteration harness turn needed 8 supersteps
+    against the 7 the formula granted, and died with the `GraphRecursionError` this ceiling exists
+    to avoid. Only the smallest cap was affected, which is why it took the whole-turn test at
+    `harness_max_loop_iterations=1` to find it. Re-measure the constant and the multiplier together.
     """
     config = turn_config("session-1")
 
     assert config["recursion_limit"] == settings.agent_recursion_limit
     assert config["recursion_limit"] != 9999
     assert config["recursion_limit"] == (
-        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 1
+        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 3
     )
     assert config["configurable"] == {"thread_id": "session-1"}
 
     # A template step has no thread — one bounded turn, no conversation before or after it — and
-    # still gets the ceiling. That path runs with the harness off, so `enforce_loop_cap` is not
+    # still gets the ceiling. That path runs with the harness off, so the loop cap is not
     # attached and this is its only bound.
     assert "configurable" not in turn_config()
     assert turn_config()["recursion_limit"] == settings.agent_recursion_limit

@@ -404,7 +404,7 @@ async def run_agent_step(step: AgentStepInput) -> str:
             )
             # No thread — a template step is one bounded turn — but the step ceiling still
             # applies, and it matters more here: this path runs with the harness off, so
-            # `enforce_loop_cap` is not attached and this is the only bound on the loop.
+            # the loop cap is not attached and this is the only bound on the loop.
             result = await graph.ainvoke(turn_input(step.prompt), turn_config())
             return _answer_text(result)
     finally:

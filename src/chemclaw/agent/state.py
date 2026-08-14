@@ -31,23 +31,25 @@ design somebody can rely on.
 **Every field here is either per-turn or per-thread, and the *channel* is what makes that true.**
 The checkpointer persists the whole state under `thread_id`, and `thread_id` is the *session* id —
 so a plain field resolves to a `LastValue` channel, which is checkpointed, which makes it per-thread
-whatever its docstring says. Nothing reset `model_calls` and the consequence was not
-theoretical: it accumulated across turns, so the runaway cap fired on the *session's*
+whatever its docstring says. Nothing reset the runaway guard's fields and the consequence was not
+theoretical: the model-call count accumulated across turns, so the cap fired on the *session's*
 fourth model call rather than the turn's, and every later turn on that session ended before the
 model was called at all. Measured at `harness_max_loop_iterations=3`: turns 0-2 answered, turn 3
 returned the user's own question. A session bricked with no way back.
 
-That defect was first closed by zeroing it by hand in `turn_input`, which worked and was
+That defect was first closed by zeroing the fields by hand in `turn_input`, which worked and was
 the wrong shape: it made "per-turn" a property of every *call site* rather than of the field, so a
 caller that hand-built `{"messages": ...}` — and `graph.ainvoke` accepts one — silently got the
-bricked session back. The fields are now `UntrackedValue` channels, which LangGraph never
-checkpoints (`checkpoint()` returns `MISSING`), so they start empty on every run of the graph
+bricked session back. The field below is an `UntrackedValue` channel, which LangGraph never
+checkpoints (`checkpoint()` returns `MISSING`), so it starts empty on every run of the graph
 because there is nothing for the checkpoint to restore. The invariant moved out of a convention and
 into the schema, and there is no longer a way to spell the mistake.
 
 `ModelCallLimitMiddleware` upstream declares its own per-run counter exactly this way
 (`run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]`), which is
-where the shape comes from — minus `PrivateStateAttr`, for the reason the fields below give.
+where the shape comes from — and, since M14, where the *count itself* comes from:
+`agent/loop_cap.py` subclasses that middleware rather than counting again, and the one field left
+here is the record `PrivateStateAttr` makes upstream unable to leave behind.
 """
 
 from typing import Annotated, Any, NotRequired
@@ -64,43 +66,29 @@ class ChemclawState(PlanningState):
     Fields arrive with the phase that reads one — a declared field nothing consults is the same
     stub as a function nothing calls, and reads as coverage while proving nothing.
 
-    **No field here carries `PrivateStateAttr`**, and that is deliberate rather than an omission
-    from the upstream declaration they otherwise copy. `PrivateStateAttr` is
+    **The field does not carry `PrivateStateAttr`**, and that is deliberate rather than an omission
+    from the upstream declaration it otherwise copies. `PrivateStateAttr` is
     `OmitFromSchema(input=True, output=True)`, so it would strip the field from what `ainvoke`
     *returns* — and once the value is out of the checkpoint, the return is the only place left to
     read it. `loop_cap.loop_capped(state)` is that reader: it takes "the turn's final graph state",
     which callers get from `ainvoke`, and hiding the field from the output would leave it with
     nothing to read — a capped turn unreportable again, which is the defect `agent/loop_cap.py`
-    exists to fix.
+    exists to fix. It is exactly why the count itself is *not* declared here any more: upstream's
+    `run_model_call_count` carries `PrivateStateAttr`, so it is unreadable by the time anyone asks,
+    and this field is the answer to that rather than a second counter beside it.
     """
 
-    # How many model calls *this turn* has made — the runaway guard's counter
-    # (`agent/loop_cap.py`). A field rather than a framework internal because the whole defect being
-    # fixed is that the previous engine's cap fired where nothing could observe it.
+    # Whether the runaway guard stopped this turn. The *count* belongs to
+    # `ModelCallLimitMiddleware` (`run_model_call_count`, an `UntrackedValue` channel this
+    # declaration was copied from); what upstream cannot leave behind is the fact, because that
+    # counter is stripped from the run's output by `PrivateStateAttr` and never checkpointed.
+    # `loop_cap.CappedModelCallLimit.before_model` writes this on the branch that fires.
     #
-    # `UntrackedValue` is what makes "this turn" true of it: the channel is never written to a
-    # checkpoint, so a new run of the graph on the same `thread_id` starts it empty and
-    # `enforce_loop_cap`'s `state.get("model_calls", 0)` reads 0. See the module docstring for what
-    # the checkpointed version cost, and why a hand-written reset was not the fix.
-    model_calls: NotRequired[Annotated[int, UntrackedValue]]
-
-    # Whether the runaway guard stopped this turn. Written only by the branch of
-    # `enforce_loop_cap` that fires, because the count above cannot answer it: that branch stops
-    # the loop *without* incrementing, so a capped turn and one that spent its last allowed call
-    # and finished normally both end at exactly the cap.
-    #
-    # Untracked for the same reason as the count — a session whose third turn hit the cap would
-    # otherwise report every later turn as capped, marking complete answers partial forever. The
-    # cost is that `get_state(config).values` no longer carries it: the value lives only in what the
-    # run returns, which is where every reader already looks.
+    # Untracked, because a session whose third turn hit the cap would otherwise report every later
+    # turn as capped, marking complete answers partial forever. The cost is that
+    # `get_state(config).values` does not carry it: the value lives only in what the run returns,
+    # which is where every reader already looks.
     loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
-
-    # How many revision rounds the challenge panel has already forced this turn. Bounds the
-    # `jump_to: "model"` loop in `agent/challenge_gate.py` against `challenge_max_attempts`, and it
-    # is a counted field for exactly the reason `model_calls` is: the alternative is inferring
-    # "have we been round this before" from the message list, which is the inference
-    # `agent/loop_cap.py` was written to delete.
-    challenge_attempts: NotRequired[Annotated[int, UntrackedValue]]
 
 
 def turn_input(message: str) -> dict[str, Any]:
@@ -131,7 +119,7 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     and 2,500. Worse, reaching it raises `GraphRecursionError`, which discards whatever the turn had
     produced; `agent.loop_cap` states the opposite position explicitly, that a chemist is entitled
     to see the work the last iteration managed. The cap is the graceful stop and this is the
-    backstop under it — and on the classic path, where `enforce_loop_cap` is not attached at all, it
+    backstop under it — and on the classic path, where the loop cap is not attached at all, it
     is the only bound there is.
 
     One function so the number is chosen once. `turn_input` is its sibling on the input side; the
