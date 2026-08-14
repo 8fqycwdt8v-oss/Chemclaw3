@@ -315,3 +315,59 @@ def test_the_ambient_is_absent_outside_a_turn() -> None:
 def test_a_profile_narrowed_to_nothing_still_builds_a_gate() -> None:
     """The gate is built per agent, so an unusual profile must not break its construction."""
     assert build_challenge_gate(AgentProfile(name="x", tool_names=frozenset())) is not None
+
+
+def test_a_panel_that_raises_cannot_kill_the_turn(monkeypatch: Any) -> None:
+    """A failure assembling the panel costs the review, never the answer.
+
+    **The regression guard for the defect that made this gate fatal.** Each panel member already
+    contained its own failure, but *assembling* one did not: `run_panel` resolves a profile and
+    asserts the attenuation invariant before any member is built, so a deployment whose profiles did
+    not line up raised straight through this hook and destroyed an answer the chemist had already
+    earned. `challenger_for` removed the cause; this asserts the class is gone, so the next thing
+    that learns to raise in there cannot do the same.
+    """
+
+    async def boom(*_a: Any, **_k: Any) -> list[ChallengeBrief]:
+        raise RuntimeError("profiles do not line up")
+
+    monkeypatch.setattr(gate_module, "draft_briefs", boom)
+    assert _run(_gate(), _answered(), delegations=2) is None
+    review = _last_review(monkeypatch, delegations=2, attempts=0)
+    assert review is not None, "the turn produced no verdict at all"
+    assert review.challenged is False
+
+
+def test_the_revision_round_briefs_the_panel_on_the_chemists_question(monkeypatch: Any) -> None:
+    """The critique this gate appends must not become the question the next panel reviews.
+
+    Measured before the fix: pass two briefed the panel with "A review panel examined your answer…"
+    as the QUESTION, so every revision round was judged against the wrong problem — and the answer
+    that finally shipped had been reviewed by a panel that never saw what was asked.
+    """
+    seen: list[str] = []
+
+    async def draft(question: str, *_a: Any, **_k: Any) -> list[ChallengeBrief]:
+        seen.append(question)
+        return [ChallengeBrief(angle="a0", brief="b")]
+
+    async def panel(*_a: Any, **_k: Any) -> list[ChallengeVerdict]:
+        return [ChallengeVerdict(corroborates=False, rationale="", angle="a0")]
+
+    monkeypatch.setattr(gate_module, "draft_briefs", draft)
+    monkeypatch.setattr(gate_module, "run_panel", panel)
+
+    revised = [
+        *_answered(),
+        HumanMessage(content=_feedback_text(), name=gate_module._CRITIQUE_MARKER),
+        AIMessage(content="a revised answer"),
+    ]
+    _run(_gate(), revised, delegations=2, attempts=1)
+    assert seen == ["what is the melting point?"]
+
+
+def _feedback_text() -> str:
+    """What the gate appends on a revision round, as it actually words it."""
+    return gate_module._feedback(
+        [ChallengeVerdict(corroborates=True, rationale="unsupported", angle="a0")]
+    )

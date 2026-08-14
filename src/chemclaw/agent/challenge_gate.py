@@ -75,6 +75,11 @@ logger = logging.getLogger(__name__)
 # point at which the answer is assembled from pieces no single context held.
 _TEAM_SIZE = 2
 
+# The `name` stamped on the critique this gate appends to the thread, so `_question` can tell the
+# chemist's question from the gate's own revision request. A name rather than a text match: the
+# critique's wording is prose and will change, and a check that reads prose is a check that rots.
+_CRITIQUE_MARKER = "challenge-panel"
+
 
 def _final_answer(messages: Sequence[Any]) -> str | None:
     """The text of the turn's finished answer, or `None` if this is not the end of one.
@@ -93,14 +98,25 @@ def _final_answer(messages: Sequence[Any]) -> str | None:
 
 
 def _question(messages: Sequence[Any]) -> str:
-    """What the chemist asked this turn — the newest human message.
+    """What the chemist asked this turn — the newest human message that this gate did not write.
 
     Newest rather than first: a checkpointed thread carries every turn of the session, so the first
     `HumanMessage` is the question that opened the conversation and usually not the one being
     answered now. The panel is briefed on the wrong problem if this picks the wrong end.
+
+    **And the gate's own critique is skipped, which is not a detail.** A revision round appends the
+    panel's objections *as a `HumanMessage`* — that is what makes the model actually revise — so
+    from the second pass onward the newest human message is the critique this hook wrote. Measured
+    before the fix: pass two briefed the panel with "A review panel examined your answer…" as the
+    question, so every revision round was reviewed against the wrong problem, and the answer that
+    finally shipped had been judged by a panel that never saw what was asked.
+
+    Marked by `name` rather than by matching the text, because the text is prose that will be
+    reworded and a check against it would rot silently — the failure mode this whole file is
+    written against.
     """
     for message in reversed(messages):
-        if isinstance(message, HumanMessage):
+        if isinstance(message, HumanMessage) and message.name != _CRITIQUE_MARKER:
             return message.text
     return ""
 
@@ -187,14 +203,27 @@ def build_challenge_gate(
             return None
         record_metric(lambda metrics: metrics.increment("chemclaw_challenge_rounds_total"))
         question = _question(messages)
-        briefs = await draft_briefs(question, answer, turn_evidence(answer, outputs))
-        verdicts = await run_panel(
-            question,
-            answer,
-            briefs,
-            caller_profile=caller_profile,
-            **build_kwargs,
-        )
+        # **The whole panel is inside one guard, and that is a fix rather than caution.** Each
+        # member already contains its own failure, but assembling the panel does not: `run_panel`
+        # resolves a profile and checks the attenuation invariant before any member is built, so a
+        # deployment whose profiles do not line up raised `TeamError` straight through this hook and
+        # killed the turn — an answer the chemist had already earned, destroyed by its own review.
+        # Measured before the fix: every shipped profile but `evidence` raised on every challenged
+        # turn. `challenger_for` removes the cause; this removes the class.
+        try:
+            briefs = await draft_briefs(question, answer, turn_evidence(answer, outputs))
+            verdicts = await run_panel(
+                question,
+                answer,
+                briefs,
+                caller_profile=caller_profile,
+                **build_kwargs,
+            )
+        except Exception:
+            logger.exception("challenge_panel_failed: the answer goes out unchallenged")
+            record_metric(lambda metrics: metrics.increment("chemclaw_challenge_degraded_total"))
+            record_turn_review(review)
+            return None
         upheld = corroborated(verdicts)
         if len(upheld) < panel_quorum(len(briefs) or 1):
             # The panel looked and did not agree there is a problem. That is a result, not a
@@ -223,7 +252,9 @@ def build_challenge_gate(
             return {
                 "jump_to": "model",
                 "challenge_attempts": attempts + 1,
-                "messages": [HumanMessage(content=_feedback(upheld))],
+                "messages": [
+                    HumanMessage(content=_feedback(upheld), name=_CRITIQUE_MARKER),
+                ],
             }
         # Out of revisions and the panel still objects. The answer goes out marked, and a durable
         # hold carries the decision past the end of this session.

@@ -20,9 +20,11 @@ peculiar to *this* question. `draft_briefs` asks one structured call for the ang
 against the answer actually in hand, and each brief becomes one challenger's whole instruction.
 
 **What the model authors is the brief; what the code authors is the surface.** Every challenger runs
-on `data/profiles/challenger.yaml` — read-only, checked against the caller by `reject_widening` —
-whatever its generated instructions say. This is the line that keeps a generated persona from being
-a capability-escalation channel: a brief is text the challenger reads, never a set of tools it gets.
+on `data/profiles/challenger.yaml` — read-only — *intersected with what the answering agent itself
+holds* (`challenger_for`), whatever its generated instructions say. This is the line that keeps a
+generated persona from being a capability-escalation channel: a brief is text the challenger reads,
+never a set of tools it gets. The intersection is what makes that true for a caller narrower than
+the challenger file, which is most of them — see `challenger_for` for the measurement.
 
 **Every challenger is compiled by `build_langgraph_agent`, never handed to deepagents as a bare
 `SubAgent` dict**, and that is a security property rather than a style preference. Upstream's
@@ -57,6 +59,46 @@ logger = logging.getLogger(__name__)
 # giving each generated persona its own tool list would put capability on the far side of a model's
 # authorship — the thing this module's docstring says it will not do.
 CHALLENGER_PROFILE = "challenger"
+
+
+def challenger_for(caller: AgentProfile) -> AgentProfile:
+    """The challenger surface for one caller: declared tools intersected with the caller's.
+
+    **A fixed surface cannot be a subset of every caller, and requiring it to be was a defect.**
+    `reject_widening` is the right check for a *declared* specialist, whose caller is known at build
+    time. A challenger's caller is whichever agent produced the answer, and this deployment ships
+    profiles narrower than the challenger: measured, `challenger.yaml` widens `property-lookup`,
+    `safety`, `computation`, `design` and `reporting` — every shipped profile except `evidence`. So
+    the subset rule made the panel raise `TeamError` on almost every narrowed deployment, which the
+    gate then had no reason to expect.
+
+    Intersecting is the fix and it is the same move `team._narrowed_connectors` already makes for
+    connector tools: the invariant is *attenuation*, and an intersection is attenuating by
+    construction — the result cannot contain a name the caller lacks, whatever the file says. A
+    challenger reviewing a narrow agent therefore checks what that agent could itself have checked,
+    which is also the honest scope for a review: an objection resting on evidence the answering
+    agent could never have reached is a complaint about the deployment, not about the answer.
+
+    Returns:
+        A profile named for the challenger, carrying its instructions and the intersected tools.
+        `reject_widening(caller, result)` passes by construction; the caller checks it anyway,
+        because a guarantee worth having is worth asserting.
+    """
+    declared = get_profile(CHALLENGER_PROFILE)
+    # `None` means "everything the deployment offers" on both sides, so the intersection of an
+    # unnarrowed challenger with an unnarrowed caller is still unnarrowed.
+    if declared.tool_names is None:
+        return (
+            declared
+            if caller.tool_names is None
+            else declared.model_copy(update={"tool_names": caller.tool_names})
+        )
+    held = (
+        declared.tool_names
+        if caller.tool_names is None
+        else declared.tool_names & caller.tool_names
+    )
+    return declared.model_copy(update={"tool_names": held})
 
 
 class ChallengeBrief(BaseModel):
@@ -359,6 +401,7 @@ async def _run_one(
     question: str,
     answer: str,
     *,
+    profile: AgentProfile,
     build: Any,
     build_kwargs: dict[str, Any],
 ) -> ChallengeVerdict:
@@ -381,7 +424,7 @@ async def _run_one(
                 # a profile the deployment did not ship — degrades like any other, rather than
                 # escaping `run_panel` and taking the whole panel with it.
                 agent = build(
-                    profile=get_profile(CHALLENGER_PROFILE),
+                    profile=profile,
                     response_format=ChallengeVerdict,
                     **build_kwargs,
                 )
@@ -445,14 +488,42 @@ async def run_panel(
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
     builder = build if build is not None else build_langgraph_agent
-    # Once for the panel, not once per member: every challenger runs on the same profile, so the
-    # check has one answer, and asking it N times would only make an unreachable registry N times
-    # more expensive to discover.
-    reject_widening(caller_profile, get_profile(CHALLENGER_PROFILE))
+    # Intersected with the caller rather than required to be a subset of it — see `challenger_for`
+    # for the measurement that forced that change. `reject_widening` is then an assertion about a
+    # value this function just constructed rather than a check on a file somebody might edit, and
+    # it is kept for exactly that reason: the intersection is the guarantee, and this is the line
+    # that fails loudly if the intersection ever stops guaranteeing it.
+    profile = challenger_for(caller_profile)
+    reject_widening(caller_profile, profile)
+    # **A challenger with no tools is not a cheap challenger, it is a worse verifier.** The whole
+    # case for a panel over `verify_answer` is in this module's first paragraph: a challenger can go
+    # and *look* — re-read a cited note, find the job whose result contradicts the answer. Intersect
+    # the surface with a sufficiently narrow caller and nothing is left to look with, and what
+    # remains is an opinion about the text, which is what the judge already produces for one
+    # structured call instead of a panel of agent builds. Measured against the shipped profiles,
+    # `property-lookup` and `design` land here.
+    #
+    # Skipped loudly rather than silently: a deployment reading "0 objections" is entitled to know
+    # the difference between "the panel looked and found nothing" and "there was nothing to look
+    # with".
+    if profile.tool_names is not None and not profile.tool_names:
+        logger.warning(
+            "challenge_panel_skipped: %r holds none of the challenger's tools, so a panel could "
+            "only re-judge the text the verifier already scores — not challenging",
+            caller_profile.name,
+        )
+        return []
     return list(
         await asyncio.gather(
             *(
-                _run_one(brief, question, answer, build=builder, build_kwargs=build_kwargs)
+                _run_one(
+                    brief,
+                    question,
+                    answer,
+                    profile=profile,
+                    build=builder,
+                    build_kwargs=build_kwargs,
+                )
                 for brief in briefs
             )
         )

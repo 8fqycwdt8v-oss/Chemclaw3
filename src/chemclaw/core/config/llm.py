@@ -134,8 +134,15 @@ class LlmSettings(BaseSettings):
     #
     # Off by default for the reason `agent_teams_enabled` is (`agent/team.py`): a panel that
     # over-flags is worse than no panel, and which of those this deployment gets is a measurement
-    # nobody has taken yet. Turning it on with both checks above off gives a team-only challenge,
-    # which is a coherent deployment rather than a misconfiguration.
+    # nobody has taken yet.
+    #
+    # **It has two ways of being on and doing nothing, and both are worth naming.** With
+    # `verifier_enabled` and `answer_shape_gate_enabled` both off, only a *team* triggers a
+    # challenge — which is coherent, but only while `agent_teams_enabled` is on; with teams off too,
+    # nothing can ever reach the threshold and the gate is dead config that reads as a live feature.
+    # And a profile narrowed away from every tool the challenger declares leaves a panel with
+    # nothing to check with, so it is skipped with a warning rather than run as a weaker verifier
+    # (`agent/challenge.run_panel`).
     challenge_enabled: bool = False
     # One challenger's deadline. Same argument as `verifier_timeout_seconds`: the panel sits between
     # the model's last token and the AnswerEvent, so an unreachable endpoint must cost the challenge

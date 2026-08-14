@@ -21,6 +21,7 @@ from chemclaw.agent.challenge import (
     ChallengeBrief,
     ChallengePanel,
     ChallengeVerdict,
+    challenger_for,
     corroborated,
     draft_briefs,
     panel_quorum,
@@ -28,7 +29,7 @@ from chemclaw.agent.challenge import (
 )
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.team import TeamError, reject_widening
+from chemclaw.agent.team import reject_widening
 from chemclaw.core.config import settings
 
 
@@ -118,24 +119,36 @@ def test_the_challenger_surface_is_read_only() -> None:
     assert not (held & side_effecting_tools())
 
 
-def test_a_challenger_that_would_widen_its_caller_fails_the_panel() -> None:
-    """A challenger surface naming a tool the answering agent lacks raises rather than running.
+def test_a_narrow_caller_gets_a_narrow_challenger_rather_than_an_error() -> None:
+    """A caller holding one of the challenger's tools is reviewed with exactly that one.
 
-    The regression guard for invariant 1 at the panel's own boundary: `reject_widening` is checked
-    once per panel, before any challenger is built, so a misconfigured surface cannot get one model
-    call in before it is caught.
+    **This test used to assert the opposite** — that a caller narrower than `challenger.yaml` raised
+    `TeamError` — and that assertion was the bug wearing a green tick. Every shipped profile but
+    `evidence` is narrower than the challenger file, so the behaviour it locked in was "the review
+    kills the turn", and the gate awaited the panel with nothing to catch it.
+
+    The invariant was never "the file must be a subset"; it is *attenuation*. An intersection
+    delivers that unconditionally, and the panel that runs is scoped to what the answering agent
+    could itself have checked.
     """
     narrow = AgentProfile(name="narrow", tool_names=frozenset({"find_notes"}))
-    with pytest.raises(TeamError):
-        asyncio.run(
-            run_panel(
-                "q",
-                "a",
-                [ChallengeBrief(angle="x", brief="b")],
-                caller_profile=narrow,
-                build=_builder(ChallengeVerdict()),
-            )
+    built: list[dict[str, Any]] = []
+
+    def spy(**kwargs: Any) -> Any:
+        built.append(kwargs)
+        return _ScriptedChallenger(ChallengeVerdict(corroborates=True, rationale="found it"))
+
+    verdicts = asyncio.run(
+        run_panel(
+            "q",
+            "a",
+            [ChallengeBrief(angle="x", brief="b")],
+            caller_profile=narrow,
+            build=spy,
         )
+    )
+    assert verdicts[0].corroborates is True
+    assert built[0]["profile"].tool_names == frozenset({"find_notes"})
 
 
 def test_a_challenger_is_built_with_the_full_governance_chain() -> None:
@@ -318,3 +331,49 @@ def test_the_quorum_can_never_exceed_the_panel(
     """
     monkeypatch.setattr(settings, "challenge_quorum", configured)
     assert panel_quorum(panel_size) == expected
+
+
+# --- the surface is intersected with the caller, not required to be a subset of it ----------------
+
+
+@pytest.mark.parametrize(
+    "caller", [None, "property-lookup", "safety", "computation", "design", "reporting", "evidence"]
+)
+def test_the_challenger_never_widens_any_shipped_profile(caller: str | None) -> None:
+    """`challenger_for` produces an attenuation of *every* caller, not just the widest one.
+
+    **The regression guard for a defect that made the gate fatal.** `challenger.yaml` declares ten
+    read-only tools and most shipped profiles hold fewer, so requiring the file to be a subset of
+    its caller raised `TeamError` for every profile but `evidence` — measured — and the gate awaited
+    the panel with nothing to catch it. Intersecting makes attenuation structural: the result cannot
+    name a tool the caller lacks, whatever the file grows to.
+    """
+    profile = get_profile(caller)
+    reject_widening(profile, challenger_for(profile))
+
+
+def test_a_caller_holding_none_of_the_challengers_tools_is_not_challenged() -> None:
+    """An empty intersection skips the panel instead of running a weaker, costlier verifier.
+
+    The case for a panel over `verify_answer` is that a challenger can *look*. Narrow the caller
+    far enough and there is nothing to look with, and what is left is an opinion about the text —
+    which the judge already produces for one structured call rather than a panel of agent builds.
+    `property-lookup` is a shipped profile that lands here.
+    """
+    built: list[Any] = []
+
+    def spy(**kwargs: Any) -> Any:
+        built.append(kwargs)
+        return _ScriptedChallenger(ChallengeVerdict(corroborates=True, rationale="x"))
+
+    verdicts = asyncio.run(
+        run_panel(
+            "q",
+            "a",
+            [ChallengeBrief(angle="x", brief="b")],
+            caller_profile=get_profile("property-lookup"),
+            build=spy,
+        )
+    )
+    assert verdicts == []
+    assert not built, "a challenger was built with no tools to challenge with"
