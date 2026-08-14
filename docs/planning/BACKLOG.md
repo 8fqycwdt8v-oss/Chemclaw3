@@ -30,6 +30,30 @@ does not start by re-checking.
       v3's native projections rather than translating into today's 17 classes, which is what makes
       this breaking. *Blocked on:* a `Chemclaw3_ui` change landing in step, or a settings flag
       selecting the v3 path until it does.
+      **The mechanics are validated against a real graph — start from these, not from the docs.**
+      (1) *Iterate the raw protocol stream, not the projections.* `run.messages` / `run.tool_calls` /
+      `run.subagents` are separate single-consumer cursors, so consuming several concurrently loses
+      the **global order** that `api/events.py` is a contract about
+      (`test_a_scripted_turn_emits_the_declared_event_sequence` asserts a whole sequence). `async for
+      ev in run` is globally ordered and carries a monotonic `seq`; switch on `ev["method"]`, which
+      is structurally today's `mode` switch. (2) *The modes you need must be asked for.* v3 derives
+      its stream modes from the union of the registered transformers' `required_stream_modes`, so by
+      default only `values` and `messages` arrive — measured. Passing
+      `transformers=[UpdatesTransformer, CustomTransformer]` restores `updates` and `custom` on the
+      ordered stream and additionally yields a native `tools` method; measured counts on one scripted
+      turn: `messages` 10, `values` 5, `updates` 4, `tools` 2, `custom` 1. That is the replacement
+      for the `_MODES` list *and* for the arity dependency, because v3 owns `stream_mode`/`subgraphs`
+      and raises `TypeError` if you pass them. (3) *Namespace comes from* `ev["params"]["namespace"]`,
+      which is what lets `team._AttributedSpecialist` go — but only once the handoff pair is re-sourced
+      from `SubgraphTransformer`, so schedule that with this row rather than after it. (4) **Event
+      order does change**: on the measured turn the `custom` signal landed after the native `tools`
+      event, where today's contract puts the `question` between the call and its result. That is the
+      contract change that was accepted, and it is what the `Chemclaw3_ui` PR has to absorb.
+      (5) **v3 is `.. beta:: experimental and may change`** in the pinned langgraph and emits a
+      `LangChainBetaWarning` per run from `Pregel.astream_events` and `AsyncGraphRunStream`;
+      accepted deliberately, but the warning needs suppressing at the one call site rather than
+      globally, and `tests/test_upstream_surface.py` should assert the beta marker is still there so
+      its removal is noticed.
 - [ ] **Approvals on `HumanInTheLoopMiddleware`** — [L]. `InterruptOnConfig` in the pinned
       `langchain 1.3.14` carries `when` (a `ToolCallRequest` predicate), `allowed_decisions`, a
       description factory, and the four decision types (`approve`/`edit`/`reject`/`respond`), with
@@ -77,6 +101,20 @@ does not start by re-checking.
       `durable/job_record_store.py`, `durable/audit_chain.py`, `durable/audit_verify.py`,
       `cli/verify_audit_chain.py`, `core/migrate.py` and the database-privileges tests, so the store
       and its Temporal-side readers are a separate, cross-layer decision from the agent-layer writer.
+      **The transcript half is blocked on a product decision, found by trying it.** The *read* moves
+      cleanly — verified that compaction is non-destructive (6 turns with tool calls left all 24
+      messages in the checkpoint, first `HumanMessage` intact), so `channel_values["messages"]` is a
+      complete and in fact *richer* source than `session_messages`, which stores only the question,
+      the answer and the tool exchanges. What does not move is `cli/explain`: it groups a turn's
+      words with that turn's audit rows on `session_messages.correlation_id`, and **the checkpoint
+      carries no per-message correlation id**. Reconstructing turn boundaries from the checkpoint
+      chain would mean reading checkpoint *metadata* — a new internal coupling, which is the thing
+      this whole workstream reduces. So the choice is: keep writing `session_messages` purely as
+      `explain`'s per-turn record (which leaves almost nothing to delete and is not worth the
+      churn), or decide that without GxP `explain`'s conversation half is no longer needed and it
+      becomes a tool-call reconstruction that points at the transcript route. **That is a product
+      call about a shipped CLI command, not an engineering one** — take it before starting, because
+      it decides whether this row is a large deletion or a small one.
 - [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S]. `durable/retention.py`
       and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE thread_id = …` over
       `agent/checkpointer.CHECKPOINT_TABLES`, a hand-maintained tuple invisible to
