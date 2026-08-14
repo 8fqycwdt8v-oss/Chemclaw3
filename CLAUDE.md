@@ -48,9 +48,9 @@ extracted decision functions, so an authorization refusal or an audit row cannot
 engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
 three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
 publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
-gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is a counted state
-field rather than an inference (`agent/loop_cap.py`); and a specialist team (`agent/team.py`) is
-available but off by default until its routing is measured.
+gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is upstream's
+`ModelCallLimitMiddleware`, subclassed only to record that it fired (`agent/loop_cap.py`); and a
+specialist team (`agent/team.py`) is available but off by default until its routing is measured.
 
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context
@@ -78,6 +78,22 @@ readers that only knew the *old* stored message shape — `chemclaw.cli.explain`
 current session's audit reconstruction blank — so `session_store.message_from_row` is now the one
 function allowed to decide which serialization a `session_messages` row holds
 (D-2026-08-11-what-the-removal-found).
+
+A later pass (D-2026-08-14-the-coupling-is-the-cost-not-the-line-count) asked what the LangGraph
+stack now does out of the box, and answered it against the installed distributions rather than the
+documentation. The finding worth carrying: **what breaks on a dependency bump is not the volume of
+first-party code but the number of places reading a shape upstream never promised.** Six existed;
+`tests/test_upstream_surface.py` now asserts every one in a single file, each naming the module that
+would break, two of them asserting an *absence* so that upstream fixing something turns the
+workaround red instead of letting it outlive its reason. The same pass moved the runaway cap onto
+`ModelCallLimitMiddleware` (which costs one superstep per model call — the step-ceiling constant was
+re-measured with it) and reduced `ReloadingSkillsMiddleware` to a single `UntrackedValue` channel,
+deleting a dependency on the *arity* LangChain invokes a hook with. It also declined three adoptions
+that looked obvious and are not: `ToolErrorMiddleware` and `ToolRetryMiddleware` both trigger on
+raised exceptions, and MCP tools never raise. **GxP is no longer a constraint on layer 1**; the audit
+chain, the durable approval store and the `session_messages` read-model are open in
+`docs/planning/BACKLOG.md` on that basis, alongside the v3 streaming migration,
+`HumanInTheLoopMiddleware` and `RubricMiddleware`.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See

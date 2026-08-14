@@ -3,6 +3,87 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the upstream-adoption pass (2026-08-14)
+
+Source: `docs/decisions/D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md`. That ADR
+landed the small half — the runaway cap on `ModelCallLimitMiddleware`, the skills reload as a
+channel, `tests/test_upstream_surface.py`, and the honest `langchain>=1.3.14` floor. These four are
+the large half. **Each is a breaking change to the SSE contract or to a merged decision**, and two
+need a coordinated pull request in `Chemclaw3_ui`, so none of them should ship half-migrated. What
+is recorded here is what was *verified* about each against the installed distributions, so the work
+does not start by re-checking.
+
+- [ ] **The front door on `stream_events(version="v3")` with per-middleware transformers** — [L].
+      `api/graph_stream.py:114` drives `graph.astream(stream_mode=_MODES, subgraphs=True)` and
+      depends on a 3-tuple arity verified by reading `langgraph.pregel.main._output`, then
+      reverse-engineers plan and tool events out of `updates` payloads in `_from_update()`. The
+      supported replacement is already in the pinned `langgraph 1.2.10`: `stream_events(version="v3")`
+      builds its stream modes from the union of registered transformers' `required_stream_modes`
+      and *owns* `stream_mode`/`subgraphs` itself (`_V3_INVARIANT_KWARGS` raises if a caller passes
+      either), and `create_agent(transformers=…)` merges `AgentMiddleware.transformers` at compile
+      time (`factory.py:1841-1858`). `langgraph.stream.transformers` ships `MessagesTransformer`,
+      `UpdatesTransformer`, `CustomTransformer` and `SubgraphTransformer`; the last already carries
+      the namespace, which is the reason `team._AttributedSpecialist` exists. Neither
+      `TodoListMiddleware` nor `SubAgentMiddleware` ships a transformer, so the plan, handoff and
+      compaction projections stay first-party — but as *registered* projections rather than as a
+      parser of somebody else's tuple. Decision taken with the ADR: reshape `api/events.py` around
+      v3's native projections rather than translating into today's 17 classes, which is what makes
+      this breaking. *Blocked on:* a `Chemclaw3_ui` change landing in step, or a settings flag
+      selecting the v3 path until it does.
+- [ ] **Approvals on `HumanInTheLoopMiddleware`** — [L]. `InterruptOnConfig` in the pinned
+      `langchain 1.3.14` carries `when` (a `ToolCallRequest` predicate), `allowed_decisions`, a
+      description factory, and the four decision types (`approve`/`edit`/`reject`/`respond`), with
+      resumption by `Command(resume={"decisions": […]})`. The `when` predicate is the shape
+      `gate_applies` and `rewrites_the_plan_in_this_batch` already have. Cross-turn durability moves
+      from the `plan_approvals` table to the checkpointer, which removes the second, disagreeing
+      answer to "may this session act" that defect DARK-1 was about. Also closes the acknowledged
+      gap that there is no mechanism for a short in-turn clarification. *Two real risks the existing
+      row already names and this must handle:* a `thread_id` collision silently discarding a pending
+      interrupt, and `propose_note`'s 12 call sites. *Supersede the reason, not the decision* — the
+      declining reason is measurably false (`invoke()` returns normally with `__interrupt__`).
+- [ ] **`RubricMiddleware` in the turn loop** — [M]. `agent/verifier.py`'s own docstring says a
+      low-confidence answer is "marked, not blocked": nothing routes a `review_required` answer back
+      into the model. `deepagents 0.7.5` — **already pinned, no bump needed** — ships
+      `RubricMiddleware(model=…, system_prompt=…, tools=…, max_iterations=3, on_evaluation=…)`, an
+      LLM-as-judge with a bounded revision loop, verdicts `satisfied`/`needs_revision`/`failed`/
+      `max_iterations_reached`/`grader_error`, and a grader prompt that already frames `<transcript>`
+      as untrusted observation and only `<rubric>` as authoritative — which is the injection concern
+      that killed `SummarizationMiddleware`, answered upstream. Keep the *deterministic* half of
+      `verifier.py` (the citation gate over `retrieval.harness.verify_claims`, `turn_evidence`,
+      `ungrounded_parameter_shapes`, `promised_uncalled_tools`) and expose it as rubric criteria and
+      grader `tools`; delete the hand-rolled `with_structured_output` judge and its timeout/fallback
+      plumbing. `on_evaluation` feeds `evals/phoenix.py` for free. *Ship behind a setting*, because
+      it changes what a turn returns.
+- [ ] **The audit trail as OpenTelemetry spans, and the transcript from the checkpointer** — [L].
+      Unblocked by GxP no longer being a constraint (ADR §5). The tool-call span half is already
+      emitted natively by the OpenInference `LangChainInstrumentor` that `CHEMCLAW_OTEL_LLM_SPANS`
+      attaches, *including nested spans per subagent run* — which is what would let
+      `team._AttributedSpecialist` go, the wrapper whose `with_config` override depends on the order
+      `SubAgentMiddleware` binds and invokes. `session_messages` has one reader left
+      (`GET /sessions/{id}/messages`) that `graph.aget_state(config).values["messages"]` answers, so
+      `message_migration.py` and most of `message_pairing.py` and `session_store.py` go with it.
+      **Scope boundary, stated so it is not discovered late:** `agent/audit_store.py` is also read by
+      `durable/job_record_store.py`, `durable/audit_chain.py`, `durable/audit_verify.py`,
+      `cli/verify_audit_chain.py`, `core/migrate.py` and the database-privileges tests, so the store
+      and its Temporal-side readers are a separate, cross-layer decision from the agent-layer writer.
+- [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S]. `durable/retention.py`
+      and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE thread_id = …` over
+      `agent/checkpointer.CHECKPOINT_TABLES`, a hand-maintained tuple invisible to
+      `tests/test_schema_inventory.py` (its own open row). `adelete_thread` exists on the base class
+      and on `AsyncPostgresSaver` (verified) and deletes the same three tables for the same thread
+      scope, so a new checkpoint table upstream could not be silently missed. **Two costs to weigh
+      first, which is why this did not just land:** it returns no rowcounts, and both callers report
+      per-table counts an operator compares between runs; and it uses the saver's own connection, so
+      on Chemclaw's autocommit checkpoint pool the three deletes stop being one transaction — the
+      atomicity `_prune_checkpoints`'s docstring argues for. **The second cost is now measured and
+      does not apply:** `AsyncPostgresSaver(conn).adelete_thread(tid)` constructed on the caller's
+      own non-autocommit connection runs *inside the caller's transaction* — seeded a thread,
+      deleted it through the saver, rolled the caller's transaction back, and the row was still
+      there. So atomicity and the dry-run rollback both survive, and the only real cost left is the
+      rowcounts. Decide that one deliberately: per-table counts become a per-*thread* count, which
+      changes two operator-facing report shapes (`durable/retention.py`'s `deleted` mapping and
+      `agent/leaver.py`'s `report.erased` keys) and their tests. Everything else is a substitution.
+
 ## Open — Left by the external synthesis review (2026-08-13)
 
 Source: `docs/planning/REVIEW-2026-08-13-external-synthesis-and-gap-analysis.md`, 15

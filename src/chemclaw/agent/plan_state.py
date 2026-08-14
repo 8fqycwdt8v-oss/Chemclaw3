@@ -36,8 +36,16 @@ async def session_todos(session_id: str, *, saver: Any | None = None) -> list[st
     **`None` and `[]` are different answers and the callers act on them differently**, which is the
     whole reason this does not return one list. `[]` means "this session has proposed nothing" — a
     fact. `None` means "the plan could not be read": no checkpoint, an unreachable checkpointer, or
-    a checkpoint whose shape this does not recognise. Two of those three are upstream-owned literals
-    (`channel_values`, and `TodoListMiddleware`'s `todos` key), so a version bump can produce them.
+    a checkpoint whose shape this does not recognise.
+
+    **Only one of the two keys read here is an unpromised literal, and it is not the one this
+    docstring used to name first.** `channel_values` is a declared field of
+    `langgraph.checkpoint.base.Checkpoint`, a public `TypedDict`, so reading it is API use rather
+    than a reach into an internal — the earlier wording put it beside `todos` as if a bump could
+    move either. What upstream genuinely never promised is `todos`, which is `TodoListMiddleware`'s
+    own state key; that one is pinned by
+    `tests/test_upstream_surface.py::test_the_todo_middleware_still_names_the_plan_channel_todos`,
+    so a rename is a red build rather than a gate that silently reads every plan as empty.
 
     Collapsing the two was a fail-*open*: `consume_turn_approval` hashes what this returns, and on
     `[]` it found no decision and returned early **without spending the approval** — leaving a

@@ -8,19 +8,22 @@ sent while the plan still held unchecked steps. Residue cannot tell "abandoned a
 "correctly deferred to a durable job", because a turn that defers correctly leaves exactly the same
 trace — an open todo — behind.
 
-**The cap is now a counted state field, not an inference.** `enforce_loop_cap` is a `before_model`
-hook over `ChemclawState.model_calls`: it counts each model call, and when the count reaches
-`harness_max_loop_iterations` it jumps the graph to `end` and marks the turn. So the number that
-enforces the limit and the number that records it are the same number, and there is nothing to
-reason about. What this replaced was an inference — "the loop stopped at the cap exactly when its
-last stop decision was keep going" — which was sound and had a hole at a cap of 1, where the
-predicate was never consulted at all and a capped turn reported no cap.
+**The counting is upstream's; only the observation is ours.** `ModelCallLimitMiddleware` already
+enforces exactly this cap, and it keeps its per-run counter as
+`run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]` — the same
+untracked channel this module used to declare by hand, which is where that shape was copied from in
+the first place. What upstream does not supply is the *record*: the counter carries
+`PrivateStateAttr` (`OmitFromSchema(input=True, output=True)`), so it is absent from what `ainvoke`
+returns, and it is `UntrackedValue`, so it is absent from the checkpoint too. Between the two there
+is nowhere left to read "was this turn capped" from. So `CappedModelCallLimit` subclasses the
+middleware, delegates the decision to it, and writes the one field upstream cannot: `loop_capped`.
 
-**The count is per *turn*, and that is a property of the channel rather than of the caller.**
-`model_calls` and `loop_capped` are declared `UntrackedValue` in `chemclaw.agent.state`, so the
-checkpointer never persists them and every run of the graph starts the count at 0 — including a run
-on a `thread_id` a previous turn already used. Nothing here has to be reset, and nothing here can
-be forgotten.
+The earlier first-party counter is gone with the hand-written half. Its enforcement half was a
+second implementation of upstream's, and the two counts agree exactly — with `run_limit = N` both
+let the model run `N` times and stop the run on call `N + 1`, because upstream checks in
+`before_model` and increments in `after_model` while the old hook checked and incremented in the
+same `before_model`. `tests/test_langgraph_stream.py` pins that against a compiled graph rather than
+against the arithmetic.
 
 **Two readers, because they ask from different places.** `loop_capped(state)` reads the flag off
 the state a finished run *returns* — the untracked channel is absent from `get_state()`, by
@@ -34,12 +37,13 @@ task of its own.
 """
 
 import logging
-from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents.middleware import before_model
+from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware.types import hook_config
+from langgraph.runtime import Runtime
 
 from chemclaw.core.config import settings
 
@@ -76,51 +80,58 @@ def loop_hit_cap() -> bool:
     return watch is not None and watch.capped
 
 
-# `can_jump_to` is not decoration, it is the edge. **Without it the cap was inert**, and inert in
-# the worst way: the hook ran, counted correctly, decided correctly and returned `{"jump_to":
-# "end"}` on every call after the limit — and the graph went on looping, because `before_model`'s
-# conditional edge is *built from this declaration*. No declaration, no edge, so nothing reads the
-# instruction. Measured at a cap of 1: the hook fired five times and said "end" four times while
-# four further model/tool round-trips completed anyway.
-#
-# That is why the unit test passed and the turn did not. Calling the hook proves the decision; only
-# a compiled graph proves the decision is connected to anything. This is the same shape as the
-# `to_regclass` guard M6 nearly shipped — a check that runs, returns the right answer, and is wired
-# to nothing.
-@before_model(can_jump_to=["end"])
-def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
-    """Count this turn's model calls and end the run when it reaches the cap.
+class CappedModelCallLimit(ModelCallLimitMiddleware[Any]):
+    """`ModelCallLimitMiddleware` that also *records* the cap it enforces.
 
-    **Why a counter here rather than `ModelCallLimitMiddleware`.** That middleware enforces exactly
-    this, and using it was the first attempt. It keeps two counts — `thread_model_call_count`, which
-    persists, and `run_model_call_count`, which does not — and the one that matches a *turn* is the
-    run count. Measured against a checkpointed session, the final state carries the thread count and
-    no run count at all, so "was this turn capped" was unanswerable from it. Enforcing with that
-    middleware and counting again here would have meant two counters for one number; enforcing here
-    means one number that is both the limit and the record.
+    Upstream decides; this adds the two marks nothing upstream can leave behind — the `loop_capped`
+    state field and the ambient watch — because both of upstream's counters are unreadable by the
+    time anyone wants to ask. See the module docstring.
 
-    That is the whole point. The cap this replaced fired inside the framework's own loop where
-    nothing could observe it, so a capped turn was externally identical to a finished one and
-    `loop_hit_cap` had to *infer* it — an inference blind at a cap of 1, because the loop never
-    consulted the predicate there. Here the count is a declared state field, so a cap of 1 leaves
-    a count of 1.
-
-    Ending the run rather than raising: the answer the last iteration managed still goes out, and
-    a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`). A raised error
-    would discard work a chemist is entitled to see.
+    Ending the run rather than raising (`exit_behavior="end"`, upstream's default): the answer the
+    last iteration managed still goes out, and a surface marks it partial (`chemclaw.api.runner`
+    does this off `loop_hit_cap`). `exit_behavior="error"` would discard work a chemist is entitled
+    to see.
     """
-    calls = int(state.get("model_calls", 0))
-    if calls >= settings.harness_max_loop_iterations:
-        logger.warning("the model loop hit its %d-iteration cap", calls)
+
+    # `can_jump_to` is not decoration, it is the edge, and re-declaring it on an override is not
+    # optional. **Without it the cap is inert**, and inert in the worst way: the hook runs, decides
+    # correctly and returns `{"jump_to": "end"}` on every call after the limit — and the graph goes
+    # on looping, because `before_model`'s conditional edge is *built from this declaration* and an
+    # override that drops it drops the edge. Measured on the first-party version at a cap of 1: the
+    # hook fired five times and said "end" four times while four further model/tool round-trips
+    # completed anyway. That is why a unit test on the hook proves nothing here and
+    # `tests/test_langgraph_stream.py` asserts against a compiled graph.
+    @hook_config(can_jump_to=["end"])
+    def before_model(self, state: Any, runtime: Runtime[Any]) -> dict[str, Any] | None:
+        """Delegate the cap decision upstream, and record it when it fires."""
+        decision = super().before_model(state, runtime)
+        if decision is None:
+            return None
+        logger.warning("the model loop hit its %d-iteration cap", self.run_limit)
         record_loop_cap()
-        # `loop_capped` is written here and nowhere else, because **the count cannot answer the
-        # question**. This branch stops the loop without incrementing, so a capped turn and a turn
-        # that used its last allowed call and then finished normally both end at exactly `cap` —
-        # measured at a cap of 1, where a one-call turn that answered was reported as capped and its
-        # complete answer was marked partial. A comparison on the count is a guess either way round;
-        # a flag set by the branch that fires is the fact.
-        return {"jump_to": "end", "loop_capped": True}
-    return {"model_calls": calls + 1}
+        # `loop_capped` is written here and nowhere else. Upstream's own counters cannot answer the
+        # question later: `run_model_call_count` is stripped from the output by `PrivateStateAttr`
+        # and never checkpointed, and `thread_model_call_count` counts the *session*, not the turn.
+        return {**decision, "loop_capped": True}
+
+    # `abefore_model` is deliberately not overridden: upstream's implementation is
+    # `return self.before_model(state, runtime)`, so it already dispatches to the override above.
+    # Re-declaring it here would be a second copy of the same delegation, and one that could drift.
+
+
+def loop_cap_middleware() -> CappedModelCallLimit:
+    """Build the runaway cap for one graph, reading the limit at build time.
+
+    A factory rather than a module-level instance because the limit is configuration:
+    `settings.harness_max_loop_iterations` is ENV-overridable and the tests set it per case, and an
+    instance frozen at import would answer with whatever was in the environment when the module was
+    first imported.
+
+    `run_limit`, not `thread_limit`: the cap bounds one *turn*. A thread limit would count a whole
+    checkpointed session and stop the fourth turn of a long conversation for the sins of the first
+    three.
+    """
+    return CappedModelCallLimit(run_limit=settings.harness_max_loop_iterations)
 
 
 def record_loop_cap() -> None:
@@ -132,13 +143,8 @@ def record_loop_cap() -> None:
     `loop_capped(state)` — the authoritative reader — is unreachable from there.
 
     Without this mark a capped turn was externally identical to a finished one: no error event, no
-    counter, nothing for a surface to mark the answer partial with. That is the very defect
-    `enforce_loop_cap` exists to fix, reintroduced one layer up by leaving the runner with no
-    reader at all.
-
-    Marking rather than branching in the runner is what keeps it one number: the count still lives
-    in `model_calls` and `loop_capped` still reads it, and this records only the *fact* the runner
-    asks about.
+    counter, nothing for a surface to mark the answer partial with. That is the very defect this
+    module exists to fix, reintroduced one layer up by leaving the runner with no reader at all.
     """
     watch = _watch.get()
     if watch is not None:
@@ -147,7 +153,7 @@ def record_loop_cap() -> None:
         watch.capped = True
 
 
-def loop_capped(state: Mapping[str, Any]) -> bool:
+def loop_capped(state: Any) -> bool:
     """Whether this turn's model loop was stopped by its cap — **read, not inferred**.
 
     The authoritative answer, and a different kind of answer from `loop_hit_cap`. The framework
@@ -158,11 +164,10 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
     `harness_max_loop_iterations == 1` the predicate was never consulted at all, so nothing was
     recorded and a capped turn reported no cap.
 
-    `enforce_loop_cap` sets `loop_capped` on the branch that stops the loop, so here the question is
-    answered by reading the fact rather than by reasoning about a decision — or, as an earlier
-    version did, by comparing the count, which cannot distinguish the two cases: the stopping branch
-    does not increment, so a capped turn and a turn that spent its last allowed call and then
-    finished both end at exactly `cap`.
+    `CappedModelCallLimit.before_model` sets `loop_capped` on the branch that stops the loop, so
+    here the question is answered by reading the fact rather than by reasoning about a decision — or
+    by comparing a count, which cannot distinguish "stopped at the cap" from "spent the last allowed
+    call and then finished", because both end at exactly `cap`.
 
     Args:
         state: The state the finished run **returned**. Not `graph.get_state(config).values`:
@@ -172,8 +177,4 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
     Returns:
         Whether the run reached the configured iteration cap.
     """
-    # `>`, not `>=`. `enforce_loop_cap` increments *before* the model call and jumps to `end` when
-    # the count has already reached the cap — so a turn that used its last allowed call and then
-    # finished normally leaves `model_calls == cap` without ever having been stopped. Reading that
-    # as "capped" marks a complete answer partial, which is the opposite of this function's job.
     return bool(state.get("loop_capped", False))
