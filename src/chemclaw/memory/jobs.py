@@ -1,12 +1,15 @@
 """Memory synthesis jobs (plan steps 5.3, 5.4, core) — chains/candidates → PR-gated notes.
 
-The deterministic core of the two periodic background jobs: `synthesize_campaigns` turns
-detected chains into `campaign` notes, and `distill_playbooks` turns cross-project candidates
-into `playbook` notes — each proposed through the **same** PR-gate as every other agent note
-(D-005), no new write path. The reaction set and the submitter are injected, so both run
-in-memory in tests; `chemclaw.durable.memory_jobs` wraps them as Temporal activities that read the
-reactions from the ELN adapter. The factual note bodies are built here; the richer narrative /
-distilled rule is the corresponding skill's judgment, layered on top.
+The deterministic core of the periodic background jobs: `build_campaign_notes` turns detected
+chains into `campaign` notes, `build_playbook_notes` turns cross-project candidates into `playbook`
+notes, and `build_optimization_notes` groups same-transformation runs — each then proposed through
+the **same** PR-gate as every other agent note (D-005), no new write path.
+
+**Building and publishing are separate, and only building lives here.** `durable/memory_jobs.py`
+runs each builder as one activity and fans each note out to its own PR-gate child (F10-D2), so a
+note that cannot be published does not take its siblings with it. The reaction set is injected, so
+every builder runs in-memory in tests. The factual note bodies are built here; the richer narrative
+/ distilled rule is the corresponding skill's judgment, layered on top.
 """
 
 from datetime import date
@@ -15,8 +18,6 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
-from chemclaw.kg.submission import NoteSubmitter
 from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
@@ -28,11 +29,10 @@ from chemclaw.memory.supersede import supersede_updates
 def build_campaign_notes(reactions: list[OrdReaction]) -> list[Note]:
     """Detect chains and build (not publish) one `campaign` note per chain, plus any supersedes.
 
-    The deterministic half of campaign synthesis: it produces the notes but writes nothing, so it
-    is reused both by the in-process `synthesize_campaigns` and by the durable workflow that fans
-    each note out to its own PR-gate child (plan F10-D2) — one place decides *what* the notes are,
-    the caller decides *how* they are written. "What" includes retiring the notes this run's
-    clusters replaced (`_with_supersedes`), which is the one thing here that reads the corpus.
+    The deterministic half of campaign synthesis: it produces the notes but writes nothing, so the
+    durable workflow that fans each note out to its own PR-gate child (plan F10-D2) decides *how*
+    they are written while this decides *what* they are. "What" includes retiring the notes this
+    run's clusters replaced (`_with_supersedes`), the one thing here that reads the corpus.
     """
     by_id = {r.reaction_id: r for r in reactions}
     return _with_supersedes(
@@ -82,26 +82,17 @@ def _with_supersedes(notes: list[Note]) -> list[Note]:
     return [*notes, *supersede_updates(notes, existing, date.today())]
 
 
-async def _propose_all(notes: list[Note], submitter: NoteSubmitter) -> list[str]:
-    """Propose each already-built note through the PR-gate; return the references (DRY)."""
-    return [await propose_note(note, submitter) for note in notes]
-
-
-async def synthesize_campaigns(reactions: list[OrdReaction], submitter: NoteSubmitter) -> list[str]:
-    """Detect chains and propose a `campaign` note for each; return the PR references."""
-    return await _propose_all(build_campaign_notes(reactions), submitter)
-
-
-async def distill_playbooks(reactions: list[OrdReaction], submitter: NoteSubmitter) -> list[str]:
-    """Find cross-project candidates and propose a `playbook` note for each; return the refs."""
-    return await _propose_all(build_playbook_notes(reactions), submitter)
-
-
-async def synthesize_optimization_campaigns(
-    reactions: list[OrdReaction], submitter: NoteSubmitter
-) -> list[str]:
-    """Group same-transformation runs and propose an `optimization-campaign` note for each."""
-    return await _propose_all(build_optimization_notes(reactions), submitter)
+# Three `synthesize_*`/`distill_*` coroutines and their shared `_propose_all` stood here: build the
+# notes, then publish them all in one pass. Nothing ran them. F10-D2 split each job into a builder
+# and a durable fan-out — `durable/memory_jobs.py` imports only `build_campaign_notes`,
+# `build_playbook_notes` and `build_optimization_notes` and gives each note its own PR-gate child,
+# so a note that fails to publish no longer takes its siblings with it — and the old whole-batch
+# publishers were left behind with the tests that exercised them.
+#
+# One of those tests asserted a *parity* between the live builder and the dead publisher, which is
+# the strongest reason to delete rather than keep: it read as coverage of the shipped path while
+# pinning a path nothing runs, and it would have gone on passing after the live half broke. The
+# tests now build and propose the way the durable job does.
 
 
 def _summary(candidate: PlaybookCandidate, reactions: dict[str, OrdReaction]) -> str:

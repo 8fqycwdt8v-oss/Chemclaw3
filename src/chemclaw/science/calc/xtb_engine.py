@@ -24,6 +24,7 @@ from chemclaw.science.calc.solvents import SUGGESTED_SOLVENTS
 # and this module is the single place tblite is imported from (the unit boundary).
 __all__ = [
     "ANGSTROM_TO_BOHR",
+    "AU_TO_DEBYE",
     "Calculator",
     "HARTREE_TO_KCAL",
     "engine_version",
@@ -45,6 +46,14 @@ ANGSTROM_TO_BOHR = 1.8897259886
 # this single value, so a truncated copy cannot drift from the rest (see the ADR
 # for this fix).
 HARTREE_TO_KCAL = 627.5094740631
+
+# CODATA atomic-unit-to-Debye, for the same reason and by the same rule as the line above: every
+# module that reports a dipole or a dipole derivative in Debye converts through this one value. It
+# was three literals in three modules — `xtb_props` (dipole), `xtb_hessian` (dipole derivatives, so
+# Debye/Angstrom) and a *third* copy in `xtb_thermo` that nothing used at all, sitting inside the
+# module that does the unit arithmetic and waiting to be applied a second time to numbers that had
+# already been converted. This module is the unit boundary; the constant belongs to it.
+AU_TO_DEBYE = 2.5417464519
 
 # The tblite result properties any calculator here reads. Named explicitly rather than
 # taking the whole result: it also carries the density matrix and orbital coefficients,

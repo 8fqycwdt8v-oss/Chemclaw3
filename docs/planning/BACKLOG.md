@@ -343,13 +343,17 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       **still an open row in its own right** — the cap bounds which `mcp` resolves, it does not pass
       a `read_timeout_seconds`.
 
-- [ ] **Two shipped settings govern nothing** — [S]. `calibration_conformal_coverage` and
-      `calibration_conformal_min_samples` (`core/config/calculators.py:193-194`) have zero readers in
-      `src/`, `tests/` or the chart, yet ship in `.env.example:234-235`.
-      `science/calc/uncertainty.py:195` takes exactly these two parameters and is never wired to
-      them. Wire or delete — a capability decision, not a cleanup. Weaker third:
-      `service_uvicorn_workers` has no reader, and `entrypoint.sh` maps four other settings to
-      uvicorn flags but not this one.
+- [ ] **Split-conformal uncertainty is implemented and unwired** — [S].
+      `science/calc/uncertainty.conformal_uncertainty` is correct and tested and has no caller:
+      `solubility.py` reports the constant `solubility_rmse_log` instead, so no prediction has ever
+      carried an interval derived from this deployment's own residuals. Wiring it is a capability
+      decision — which predictors, over which reconciled measurements — not a cleanup.
+      *The configuration half is closed*: `calibration_conformal_coverage` and
+      `calibration_conformal_min_samples` were deleted (2026-08-14) rather than left as knobs an
+      operator could set with no effect; they come back with the caller. The row's weaker third was
+      **wrong** and is dropped: `service_uvicorn_workers` has three readers
+      (`core/config/__init__.py:195` refuses `>1`, and the fleet connection-budget arithmetic at
+      `:208`/`:214` reads it).
 
 - [ ] **The checkpoint tables are reached only by a hand-maintained tuple** — [S].
       `CHECKPOINT_TABLES` (`agent/checkpointer.py:52`) is the sole route for both erasure
@@ -624,11 +628,14 @@ what those fixes deliberately did not close.
       needs to survive a broken bundle, i.e. the moment "which bundle" stops being obvious from the
       gate that already failed.
 
-- [ ] **The old `CHEMCLAW_TEST_TIMEOUT_SCALE` spelling survives in two places** — [XS]. The knob is
-      `PYTEST_TIMEOUT_SCALE` now (it is a pytest knob; the `CHEMCLAW_` prefix is the claim that a key
-      is a `Settings` field, and prose rule 7 enforces exactly that). `tasks/todo.md` still uses the
-      old name in a session log, and so does a merged ADR, which is never edited. Neither is in any
-      gate's corpus. *Trigger:* the next edit to `tasks/todo.md` for any other reason.
+- [x] **The old `CHEMCLAW_TEST_TIMEOUT_SCALE` spelling — closed, and the row was already wrong**
+      — [XS]. The knob is `PYTEST_TIMEOUT_SCALE` now (it is a pytest knob; the `CHEMCLAW_` prefix
+      claims a key is a `Settings` field, and prose rule 7 enforces that). This row named
+      `tasks/todo.md` as one of the two survivors: it had **zero** occurrences when checked
+      (2026-08-14), so the stated trigger — "the next edit to `tasks/todo.md`" — could never have
+      fired on the stated basis. What is left is a merged ADR, which is never edited, and
+      `tests/conftest.py` + `tests/test_suite_timeouts.py`, which name the old spelling *deliberately*
+      to pin that it is refused. Nothing to change.
 
 ## Open — Left by the pluggable vector store (2026-08-08)
 

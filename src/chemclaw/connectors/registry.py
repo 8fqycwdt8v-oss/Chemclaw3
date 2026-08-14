@@ -27,7 +27,7 @@ import asyncio
 import importlib
 import logging
 import os.path
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from functools import cache
@@ -242,15 +242,7 @@ def skills_dirs() -> list[str]:
     reported, so handing a non-existent path to the skills source here would fail the *agent*
     for a *packaging* problem.
     """
-    found = discovered()
-    dirs = []
-    for manifest in enabled():
-        if not manifest.skills:
-            continue
-        candidate = found[manifest.name][0] / "skills"
-        if candidate.is_dir():
-            dirs.append(str(candidate))
-    return dirs
+    return _bundle_content_dirs("skills", lambda manifest: bool(manifest.skills))
 
 
 def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
@@ -537,12 +529,28 @@ def profiles_dirs() -> list[str]:
     content a deployment has not mounted and that is `make connector-validate`'s complaint to
     make, not a reason to fail the agent.
     """
+    return _bundle_content_dirs("profiles", lambda manifest: bool(manifest.profiles))
+
+
+def _bundle_content_dirs(kind: str, declares: Callable[[ConnectorManifest], bool]) -> list[str]:
+    """Every enabled bundle's `<kind>/` directory, for the bundles that declare that content.
+
+    `skills_dirs` and `profiles_dirs` were this function twice, three hundred lines apart, differing
+    in two tokens and each carrying its own copy of the "only directories that exist" paragraph —
+    which is the sentence most likely to be fixed in one copy and not the other. Two callers is the
+    second one, so this is the extraction rather than a speculative one; the third bundle-local
+    content type costs a line instead of another twelve.
+
+    `declares` is passed rather than derived from `kind` by `getattr`: the manifest fields are a
+    typed surface, and reaching into them by string would make a renamed field a silently empty list
+    instead of a type error.
+    """
     found = discovered()
     dirs = []
     for manifest in enabled():
-        if not manifest.profiles:
+        if not declares(manifest):
             continue
-        candidate = found[manifest.name][0] / "profiles"
+        candidate = found[manifest.name][0] / kind
         if candidate.is_dir():
             dirs.append(str(candidate))
     return dirs

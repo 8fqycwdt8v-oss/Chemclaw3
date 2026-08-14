@@ -43,14 +43,10 @@ from chemclaw.science.calc import xtb_cli
 from chemclaw.science.calc.artifacts import ArtifactRef, ArtifactStore, put_all
 from chemclaw.science.calc.store import CalculationKey, ResultStore, StoredResult
 from chemclaw.science.calc.structure import Structure
-from chemclaw.science.calc.xtb_engine import evaluate_point, make_calculator
+from chemclaw.science.calc.xtb_engine import AU_TO_DEBYE, evaluate_point, make_calculator
 from chemclaw.science.calc.xtb_spec import XtbSpec
 
 logger = logging.getLogger(__name__)
-
-# (Debye/Angstrom) per atomic unit — the dipole-derivative conversion the finite-difference loop
-# applies as it collects them.
-_AU_TO_DEBYE = 2.5417464519
 
 # Artifact names. The `.npy` suffix is load-bearing: it is what `calc.artifacts` maps to the numpy
 # media type, and what tells a human reading a `calculation_artifacts` row how to open the blob.
@@ -167,7 +163,7 @@ def _finite_difference(
         shifted[index] -= 2 * step
         _, gradient_minus, dipole_minus = evaluate_point(calc, shifted.reshape(-1, 3))
         hessian[index] = (gradient_plus.ravel() - gradient_minus.ravel()) / (2 * step)
-        dipole_derivatives[index] = (dipole_plus - dipole_minus) * _AU_TO_DEBYE / (2 * step)
+        dipole_derivatives[index] = (dipole_plus - dipole_minus) * AU_TO_DEBYE / (2 * step)
     return 0.5 * (hessian + hessian.T), dipole_derivatives, energy
 
 

@@ -68,7 +68,6 @@ _LIGHT_CM = 2.99792458e10  # cm/s
 _HARTREE_J = 4.3597447222071e-18
 _AMU_KG = 1.66053906660e-27
 _J_PER_MOL_TO_KCAL = 1.0 / 4184.0
-_AU_TO_DEBYE = 2.5417464519
 
 # Grimme's free-rotor moment of inertia, the value that keeps the free-rotor entropy
 # finite as the frequency goes to zero (kg m^2).

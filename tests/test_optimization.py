@@ -9,7 +9,8 @@ git).
 import asyncio
 
 from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
-from chemclaw.memory.jobs import synthesize_optimization_campaigns
+from chemclaw.kg.pr_gate import propose_note
+from chemclaw.memory.jobs import build_optimization_notes
 from chemclaw.memory.optimization import (
     OptimizationCampaign,
     find_optimization_campaigns,
@@ -81,12 +82,17 @@ def test_note_lays_out_runs_with_citations() -> None:
 
 
 def test_job_pr_gates_one_note_per_campaign() -> None:
-    """synthesize_optimization_campaigns proposes exactly one note per detected campaign."""
+    """The optimization job proposes exactly one note per detected campaign.
+
+    Driven as the durable job drives it — `build_optimization_notes`, then one PR-gate proposal per
+    note — rather than through the whole-batch `synthesize_optimization_campaigns` wrapper, which
+    nothing in `src/` had called since F10-D2 and which is now gone.
+    """
 
     async def _run() -> None:
         reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
         submitter = FakeSubmitter()
-        refs = await synthesize_optimization_campaigns(reactions, submitter)
+        refs = [await propose_note(note, submitter) for note in build_optimization_notes(reactions)]
         assert len(refs) == 1
         assert len(submitter.submissions) == 1
         assert submitter.submissions[0].files[0].path.startswith("knowledge/optimization-campaign/")

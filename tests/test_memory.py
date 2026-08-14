@@ -15,12 +15,13 @@ import pytest
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
 from chemclaw.kg.note import Note
+from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.render import render_note
 from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
-from chemclaw.memory.jobs import build_campaign_notes, distill_playbooks, synthesize_campaigns
+from chemclaw.memory.jobs import build_campaign_notes, build_playbook_notes
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
     SOURCE_DISTILLATION,
@@ -380,22 +381,34 @@ def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------
 
 
-def test_synthesize_campaigns_proposes_notes_via_pr_gate() -> None:
+async def _build_and_propose(notes: list[Note], submitter: FakeSubmitter) -> list[str]:
+    """Publish built notes the way the durable job does: one PR-gate proposal each.
+
+    These three tests used to call `synthesize_campaigns` / `distill_playbooks`, which built and
+    published in one pass and which nothing in `src/` has run since F10-D2 split the jobs — the
+    durable workflow imports the builders and fans each note out to its own child. They are gone, so
+    the tests take the same two steps the live path takes rather than a convenience wrapper that
+    only tests had.
+    """
+    return [await propose_note(note, submitter) for note in notes]
+
+
+def test_campaign_synthesis_proposes_notes_via_pr_gate() -> None:
     """The campaign job proposes one PR-gated campaign note per detected chain."""
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
     sub = FakeSubmitter()
-    refs = asyncio.run(synthesize_campaigns([a, b], sub))
+    refs = asyncio.run(_build_and_propose(build_campaign_notes([a, b]), sub))
     assert len(refs) == 1
     assert sub.submissions[0].files[0].path.startswith("knowledge/campaign/campaign-")
 
 
-def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
+def test_playbook_distillation_proposes_evidence_backed_notes() -> None:
     """The playbook job proposes a cross-project playbook note citing its evidence."""
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
     sub = FakeSubmitter()
-    refs = asyncio.run(distill_playbooks([ester_x, ester_y], sub))
+    refs = asyncio.run(_build_and_propose(build_playbook_notes([ester_x, ester_y]), sub))
     assert len(refs) == 1
     assert sub.submissions[0].files[0].path.startswith("knowledge/playbook/playbook-")
     assert (
@@ -404,21 +417,19 @@ def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
     )
 
 
-def test_build_campaign_notes_is_the_pure_half_of_synthesis() -> None:
-    """`build_campaign_notes` builds exactly the notes `synthesize_campaigns` publishes (F10-D2).
+def test_every_built_campaign_note_reaches_the_pr_gate() -> None:
+    """What the builder yields is what the gate receives — ids, order and type (F10-D2).
 
-    The fan-out workflow builds notes in one activity and publishes each in its own child; this pins
-    that the extracted builder yields the same content the in-process publish path does, so the
-    refactor is behavior-preserving.
+    The fan-out workflow builds notes in one activity and publishes each in its own child, so the
+    property worth pinning is that nothing is dropped or reordered between the two halves. This
+    assertion used to be a *parity* between the builder and a publisher nothing ran, which would
+    have gone on passing while the live path broke.
     """
-    from chemclaw.memory.jobs import build_campaign_notes
-
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
     notes = build_campaign_notes([a, b])
     sub = FakeSubmitter()
-    asyncio.run(synthesize_campaigns([a, b], sub))
-    # The builder yields exactly the notes the publish path submits (same ids, in order).
+    asyncio.run(_build_and_propose(notes, sub))
     assert len(notes) == len(sub.submissions)
     assert all(n.id in s.files[0].path for n, s in zip(notes, sub.submissions, strict=True))
     assert all(n.type == "campaign" for n in notes)
