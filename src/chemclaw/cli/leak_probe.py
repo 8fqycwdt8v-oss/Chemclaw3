@@ -81,6 +81,46 @@ def _type_histogram() -> dict[str, int]:
     return counts
 
 
+def _positive(value: str) -> int:
+    """A turn count argparse will not accept as zero or negative — the driving loop cannot end.
+
+    `--batch 0` makes `batch = min(args.batch, ...)` zero, so `done` never advances, `while done <
+    args.turns` never ends, and every iteration appends another full type histogram: a leak probe
+    that leaks. A negative batch is the same loop walking backwards, and `--turns 0` drives nothing
+    at all, so there is no series to fit.
+
+    **`--warmup` is not one of these** — it is the one count zero is meaningful for, and it takes
+    `_non_negative` instead.
+
+    Deliberately four lines here rather than a shared helper imported from `cli/sync_share.py`,
+    which states the same rule about its own pass size: what the two have in common is `int(value)
+    < 1` and an argparse exception type, which is smaller than the import that would carry it, and
+    the messages they raise are about different things.
+    """
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _non_negative(value: str) -> int:
+    """The warm-up count, where zero is a run and not a mistake — measuring from a cold process.
+
+    `--warmup 0` asks what the *first* turns cost: the agent pool, every connector's first session,
+    the JWKS and profile caches and the allocator finding its arenas all land inside the fitted
+    series instead of ahead of it. That is a deliberately different measurement, not a degenerate
+    one — `_drive(client, 0)` returns immediately, the first sample is taken at turn 0, and the
+    loop below is bounded by `--turns` exactly as it always is.
+
+    Only a *negative* warm-up is nonsense: it offsets every turn count in the report below zero and
+    makes `span` larger than the turns actually driven, so every per-turn rate comes out too small.
+    """
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("cannot be negative")
+    return parsed
+
+
 def _rss_kb() -> float:
     """This process's resident set, read the way the soak reads the front door's."""
     with open("/proc/self/statm", encoding="utf-8") as handle:
@@ -122,6 +162,18 @@ def _sample(turns: int, *, trace: bool, baseline: Any) -> Sample:
     return sample
 
 
+def _per_turn(delta: float, span: float) -> float:
+    """A rate over `span` turns, or 0.0 when no turns separate the first and last sample.
+
+    One reader for the guard, because two columns of the report need it and the version that had it
+    in only one of them raised `ZeroDivisionError` out of the middle of the type table while the
+    series table above it printed `+0.00`. `report` is public and is the single durable artefact a
+    leak hunt produces, so a degenerate series — two samples taken at the same turn count — has to
+    render what it does know rather than take the whole deliverable down with it.
+    """
+    return delta / span if span else 0.0
+
+
 def report(samples: Sequence[Sample]) -> str:
     """What each series did per turn, as a fit — the whole deliverable."""
     if len(samples) < 2:
@@ -141,7 +193,7 @@ def report(samples: Sequence[Sample]) -> str:
     ):
         if not any(values):
             continue
-        per_turn = (values[-1] - values[0]) / span if span else 0.0
+        per_turn = _per_turn(values[-1] - values[0], span)
         # `describe` fits against the *batch index*, so its slope is per batch; the per-turn column
         # beside it is the number a reader wants and the verdict is the number they can trust.
         lines.append(
@@ -161,7 +213,7 @@ def report(samples: Sequence[Sample]) -> str:
         for delta, name in grown:
             if delta <= 0:
                 continue
-            lines.append(f"| `{name}` | {delta / span:+.2f} | {delta:+d} |")
+            lines.append(f"| `{name}` | {_per_turn(delta, span):+.2f} | {delta:+d} |")
     allocations = [line for sample in samples for line in sample.top_allocations]
     if allocations:
         lines += ["", "## Largest growth since the first batch", ""]
@@ -181,9 +233,11 @@ def leaks(samples: Sequence[Sample]) -> bool:
 def main(argv: list[str] | None = None) -> int:
     """Drive the turns, print the fits, and exit non-zero when RSS growth is resolvable."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--turns", type=int, default=300, help="total turns to drive")
-    parser.add_argument("--batch", type=int, default=25, help="turns between samples")
-    parser.add_argument("--warmup", type=int, default=25, help="turns before the first sample")
+    parser.add_argument("--turns", type=_positive, default=300, help="total turns to drive")
+    parser.add_argument("--batch", type=_positive, default=25, help="turns between samples")
+    parser.add_argument(
+        "--warmup", type=_non_negative, default=25, help="turns before the first sample (0 = cold)"
+    )
     parser.add_argument(
         "--trace", action="store_true", help="also take tracemalloc snapshots (slower)"
     )
@@ -237,7 +291,8 @@ def main(argv: list[str] | None = None) -> int:
     with TestClient(app) as client:
         # The warm-up is not cosmetic. The first turns build the agent pool, open every connector's
         # first session, fill the JWKS and profile caches and let the allocator find its arenas —
-        # all one-time costs that would otherwise be fitted as a slope.
+        # all one-time costs that would otherwise be fitted as a slope. `--warmup 0` opts into
+        # exactly that, which is what a run measuring a cold process wants.
         answered = _drive(client, args.warmup)
         logger.info("warm-up: %d/%d turns answered", answered, args.warmup)
         gc.collect()

@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from chemclaw.core import db
 from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
 from chemclaw.core.errors import SubsystemUnavailableError
+from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
 from chemclaw.ingest.documents.binding import DocumentShareError
 
 
@@ -251,7 +252,15 @@ class DocumentIndex(Protocol):
     async def search_lexical(
         self, source: str, query: str, top_k: int, filters: DocumentFilter
     ) -> list[DocumentHit]:
-        """Return up to `top_k` chunks best matching the terms in `query`, best first."""
+        """Return up to `top_k` chunks best matching the terms in `query`, best first.
+
+        **The same one boolean rule the note index states** (`chemclaw.core.fulltext`): a chunk
+        matching every term outranks one matching some, a chunk matching some is still a hit, and a
+        chunk carrying a `-excluded` term is not a hit at all. Both backends, because this is the
+        divergence PR #173 fixed for notes and left standing here — the durable statement ANDed the
+        terms while the in-memory reference OR'd them, so an ordinary multi-word question about the
+        share returned nothing from the database and everything from the tests.
+        """
         ...
 
 
@@ -300,11 +309,6 @@ def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
     return min(1.0, max(0.0, dot / norm)) if norm else 0.0
-
-
-def _tokens(text: str) -> set[str]:
-    """Lowercased alphanumeric tokens — the offline proxy of Postgres `to_tsvector`."""
-    return set("".join(c if c.isalnum() else " " for c in text.lower()).split())
 
 
 class InMemoryDocumentIndex:
@@ -482,17 +486,33 @@ class InMemoryDocumentIndex:
     async def search_lexical(
         self, source: str, query: str, top_k: int, filters: DocumentFilter
     ) -> list[DocumentHit]:
-        """Rank chunks by shared-token count with the query; drop non-matches."""
-        wanted = _tokens(query)
-        if not wanted:
+        """Rank chunks by how much of the query they carry; drop non-matches and exclusions.
+
+        The *fraction* of the query's wanted terms this chunk carries, not the raw count: a score is
+        contractually in [0, 1], and a count is only a ranking within one query length. The fraction
+        is also what makes "a complete match first" fall out of the ordering rather than needing its
+        own sort key — a chunk holding every term scores 1.0.
+
+        A query that only excludes (`-solvent`) has no wanted terms to be a fraction of, so every
+        surviving chunk carries all zero of them: a complete match, scored 1.0. Anything less would
+        be dropped by `_rank`'s zero floor and the durable backend — which does return those rows —
+        would be answering a different question again.
+        """
+        wanted, excluded = reference_terms(query)
+        if not wanted and not excluded:
             return []
-        # The *fraction* of the query's terms this chunk carries, not the raw count: a score is
-        # contractually in [0, 1], and a count is only a ranking within one query length.
         scored = [
-            (chunk, len(wanted & _tokens(chunk.content)) / len(wanted))
-            for chunk in self._chunks.values()
+            (chunk, self._coverage(chunk, wanted, excluded)) for chunk in self._chunks.values()
         ]
         return self._rank(source, filters, scored, top_k)
+
+    @staticmethod
+    def _coverage(chunk: ChunkRecord, wanted: set[str], excluded: set[str]) -> float:
+        """How much of the query this chunk answers, in [0, 1]; 0.0 when it is not a hit at all."""
+        tokens = reference_tokens(chunk.content)
+        if excluded & tokens:
+            return 0.0
+        return len(wanted & tokens) / len(wanted) if wanted else 1.0
 
 
 def _matches(file: FileRecord, filters: DocumentFilter) -> bool:
@@ -633,12 +653,21 @@ class PostgresDocumentIndex:
             f"ORDER BY c.embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, doc_id, ordinal"
         )
+        # **The same one boolean rule the note index runs** — `chemclaw.core.fulltext.TSQUERY_TERMS`
+        # builds both forms of the query, `any_terms` deciding which chunks match and `all_terms`
+        # putting the complete matches on top. This statement was `websearch_to_tsquery` alone,
+        # which ANDs, while `InMemoryDocumentIndex` — the reference every share test stands on —
+        # scored any chunk sharing a token. That is the identical divergence PR #173 fixed for
+        # notes, left in place on the backend that carries the mounted share's evidence, so the
+        # one-legged RRF fusion it measured for notes was still happening here. Measured on a
+        # four-document corpus, live PostgreSQL 16 / pgvector 0.8.0, "amide coupling solvent
+        # screen": this backend returned **0 rows** where the reference returned all four.
         self._lexical = (
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
-            f"ts_rank(c.lexeme, query) AS score, {CITATION_SQL}"
-            "FROM document_chunks c, websearch_to_tsquery('english', %(q)s) AS query "
-            f"WHERE c.lexeme @@ query AND {_ELIGIBLE}"
-            "ORDER BY score DESC, c.doc_id, c.ordinal LIMIT %(k)s"
+            f"ts_rank(c.lexeme, any_terms) AS score, {CITATION_SQL}"
+            f"FROM document_chunks c, {TSQUERY_TERMS} "
+            f"WHERE c.lexeme @@ any_terms AND {_ELIGIBLE}"
+            "ORDER BY (c.lexeme @@ all_terms) DESC, score DESC, c.doc_id, c.ordinal LIMIT %(k)s"
         )
 
     def _require_vector_column(self) -> None:
@@ -840,8 +869,25 @@ class PostgresDocumentIndex:
             "until": filters.until,
         }
 
-    async def _run(self, statement: str, params: dict[str, object]) -> list[DocumentHit]:
+    async def _run(
+        self, statement: str, params: dict[str, object], *, vector_recall: bool = False
+    ) -> list[DocumentHit]:
         """Execute a ranked search and build hits, dropping any whose citation resolved to NULL.
+
+        `vector_recall` puts the configured pgvector recall parameters on this statement's own
+        transaction (`db.apply_vector_recall_settings`). Off for the lexical leg, whose `ts_rank`
+        over a GIN index is exact and has no such parameter, and on for the dense one — which is
+        the path those knobs were named for and, until now, the one path that never read them.
+        `settings.hnsw_ef_search`'s own documentation cites a residual on *this* index, so a knob
+        wired only into the note index left its stated reason untouched. What it governs here is
+        real and measured (the eligibility `EXISTS` stays a semi join *above* the HNSW scan); the
+        residual itself did not reproduce on a 20,000-chunk corpus. Both measurements are in
+        `db.apply_vector_recall_settings`.
+
+        Args:
+            statement: The ranked search to run.
+            params: Its bound parameters.
+            vector_recall: Whether this statement takes an HNSW scan worth parametrizing.
 
         Raises:
             DocumentIndexError: The backend could not answer. Wrapped rather than left as
@@ -868,6 +914,8 @@ class PostgresDocumentIndex:
         try:
             async with self._connection() as conn:
                 async with conn.cursor() as cur:
+                    if vector_recall:
+                        await db.apply_vector_recall_settings(cur)
                     await cur.execute(statement, params)
                     rows = await cur.fetchall()
         except psycopg.Error as exc:
@@ -900,7 +948,7 @@ class PostgresDocumentIndex:
             return []
         params = self._params(source, top_k, filters)
         params["q"] = _vector_literal(query_embedding)
-        return await self._run(self._dense, params)
+        return await self._run(self._dense, params, vector_recall=True)
 
     async def search_lexical(
         self, source: str, query: str, top_k: int, filters: DocumentFilter

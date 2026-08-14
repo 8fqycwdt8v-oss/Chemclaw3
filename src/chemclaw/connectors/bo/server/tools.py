@@ -352,6 +352,50 @@ def _require_params_match(
         )
 
 
+# The namespace stamped onto an actor this process was in no position to authenticate. Not a
+# setting: it is part of the shape of a written record, and a marker that varied per deployment
+# would make the column unreadable across two of them.
+_UNVERIFIED_ACTOR_PREFIX = "unverified:"
+
+
+def _recorded_provenance() -> tuple[str, str, str]:
+    """The caller's `(actor, session_id, correlation_id)`, with the actor marked unauthenticated.
+
+    **The actor reaching this tool is a claim, not an identity, and the record has to say so.**
+    `caller_provenance` reads `X-Chemclaw-Actor` off the serving HTTP request, and
+    `chemclaw.connectors.caller` says in its own module docstring that these values "arrive on an
+    unauthenticated header from outside this process's trust boundary". This bundle's manifest
+    declares `auth: mode: none`, so the pod does not even authenticate *core*: anything that can
+    open a socket to it can name any chemist it likes. Measured before this existed — a call
+    carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into `bo_campaigns.
+    opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains as the GxP
+    answer to "who framed this campaign's decision space", indistinguishable from a real one.
+
+    **Why marking rather than sourcing the real principal.** The durable sibling
+    (`connectors/bo/workflows.py`) reads `requested_by` off the run's Temporal memo, which core sets
+    from the validated front-door principal — a value that crossed no attacker-writable surface. No
+    such channel exists here: a synchronous MCP call carries headers and nothing else, there is no
+    memo, no token bound to the user, and no signed assertion. Inventing one is connector
+    bearer/OIDC auth, a separate piece of work. So the honest move is the one this codebase already
+    makes everywhere else — the system flags, it never certifies — and the two writers of this
+    column now say which of them could vouch for the name it holds.
+
+    **An absent actor stays absent.** Empty means "not recorded" (a test, a CLI, a direct call), and
+    stamping `unverified:` onto nothing would manufacture a claim where none was made.
+
+    `session_id` and `correlation_id` pass through unmarked on purpose: they are join keys, not
+    attribution, and they are what lets an auditor recover the *validated* actor from core's own
+    audit trail, which is the same recovery `record_campaign_run` argues for when it declines to
+    duplicate a session id.
+    """
+    actor, session_id, correlation_id = caller_provenance()
+    return (
+        f"{_UNVERIFIED_ACTOR_PREFIX}{actor}" if actor else actor,
+        session_id,
+        correlation_id,
+    )
+
+
 def _as_list(value: object, noun: str) -> list[Any]:
     """Accept an array the model JSON-*encoded* as a string, and refuse anything that is not a list.
 
@@ -504,12 +548,16 @@ async def suggest_next_experiment(
     # swallows its own failures, because the chemist asked for a suggestion and a database blip
     # must not turn one into an error. The campaign id is a pure function of the problem, so it is
     # the right handle to return even on the turn where the write did not land.
+    #
+    # `_recorded_provenance`, not `caller_provenance`: this path's actor is an unauthenticated
+    # header, and the row it writes is the GxP record of who proposed an experiment. See that
+    # function for why the name is marked rather than replaced by a validated one.
     campaign_id = await record_suggestion(
         problem=featurized.problem,
         candidates=candidates,
         observations=history,
         calc_refs=featurized.calc_refs,
-        provenance=caller_provenance(),
+        provenance=_recorded_provenance(),
     )
     scales = [_objective_scale(problem, history, obj) for obj in problem.objectives]
     return ExperimentSuggestion(

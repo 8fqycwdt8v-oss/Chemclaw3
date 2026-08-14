@@ -203,7 +203,8 @@ def test_finding_past_jobs_reports_what_ran_and_why(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(durable_tools, "search_job_records", _search)
     hits = asyncio.run(durable_tools.find_past_jobs("stalled", "bo"))
     assert seen == {"text": "stalled", "connector": "bo"}
-    assert hits[0].rationale == "the Tuesday batch stalled at 60%"
+    # Verbatim inside the data envelope another chemist's free text arrives in (tests/test_framing).
+    assert "the Tuesday batch stalled at 60%" in hits[0].rationale
     # The listing carries no result blob: a campaign's history is one lookup away, not in every hit.
     assert not hasattr(hits[0], "result")
 

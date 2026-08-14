@@ -30,6 +30,11 @@ different timeouts must not share connections.
 unpooled one the migration runner uses — does not. The asymmetry is the point: a connection you
 own may run an index build for an hour, and one borrowed from a pool the request path shares may
 not (D-2026-08-08-a-borrowed-connection-is-bounded-by-default).
+
+Two helpers below take an open cursor rather than opening one, and both are here for the same
+reason: two subsystems in two packages have to ask the identical question of the identical
+transaction. `existing_tables` is one; `apply_vector_recall_settings` — the pgvector recall
+parameters a dense search runs under — is the other.
 """
 
 import logging
@@ -274,6 +279,73 @@ def pool_stats() -> dict[str, int]:
         for name in total:
             total[name] += int(stats.get(name, 0))
     return total
+
+
+def vector_recall_settings() -> dict[str, str]:
+    """The pgvector recall parameters the configuration asks a dense query to run under.
+
+    Empty is the default and means "issue no statement": pgvector's own `ef_search` (40) and
+    `iterative_scan` (`off`) stand, the dense path costs exactly the round trips it did before this
+    existed, and a server without `hnsw.iterative_scan` (pgvector < 0.8, where the reserved `hnsw.`
+    prefix makes an unknown parameter an error rather than an ignored placeholder) is never handed
+    one. See `core/config/retrieval.py` for why neither knob is the first thing to reach for — the
+    measured cause of the large `within=` shortfalls was stale planner statistics, and these address
+    only the residual.
+    """
+    wanted: dict[str, str] = {}
+    if settings.hnsw_ef_search:
+        wanted["hnsw.ef_search"] = str(settings.hnsw_ef_search)
+    if settings.hnsw_iterative_scan != "off":
+        wanted["hnsw.iterative_scan"] = settings.hnsw_iterative_scan
+    return wanted
+
+
+async def apply_vector_recall_settings(cur: Any) -> None:
+    """Put the configured pgvector recall parameters on this cursor's transaction, if any are set.
+
+    `set_config(name, value, is_local => true)` rather than `SET LOCAL` because the values come from
+    configuration: `SET` accepts no placeholders, so the alternative is interpolating an
+    operator-supplied value into statement text. One `unnest` over two arrays applies however many
+    are set in a single round trip, and nothing is sent at all when none are — which is the default,
+    so a dense path costs exactly what it did before this existed.
+
+    **Transaction-local is the load-bearing half, not an implementation detail.** `connection()`
+    commits on exit and pooled connections are reused, so a session-level `SET` here would leak one
+    query's widened candidate list onto every later borrower of that connection — including the
+    unscoped searches that never wanted it. `is_local => true` makes the setting die with the
+    transaction that asked for it.
+
+    **Here rather than on one index, because the shape these knobs govern is on both.** They were
+    introduced for the note index (`chemclaw.retrieval.vector_index`) and cited a residual on the
+    *document* one (`chemclaw.ingest.documents.index`), which read them nowhere — so the knob did
+    nothing for the case named as its reason. Measured on the document index, live PostgreSQL 16 /
+    pgvector 0.8.0, 20,000 chunks with one file row each, `ANALYZE`d: the plan really is a
+    `Nested Loop Semi Join` over an `Index Scan using document_chunks_embedding_idx`, i.e. the
+    eligibility `EXISTS` sits *above* the HNSW scan — the shape in which `ef_search` decides how
+    many candidates survive the filter — for an unfiltered query and for tags matching 100%, 50%,
+    20% and 10% of the corpus; at 5% and below the planner abandons the vector index for an exact
+    plan.
+
+    **The shortfall itself did not reproduce, and that is worth saying plainly.** 20 queries × 6
+    selectivities × 4 settings of the two knobs: **0 of 480 searches returned fewer than `top_k`**,
+    and the HNSW scan handed the semi join 62 rows where `ef_search=40` would suggest 40. So this is
+    applied because the plan permits the shortfall and the knob must be able to reach the plan, not
+    because this corpus exhibits one — the same conclusion `PostgresNoteIndex.__init__` reached when
+    it re-measured its own.
+
+    Args:
+        cur: An open async cursor. Taken rather than opened here so the settings join the
+            transaction the search itself runs in — applying them on another connection would
+            parametrize a transaction nobody is searching in.
+    """
+    wanted = vector_recall_settings()
+    if not wanted:
+        return
+    await cur.execute(
+        "SELECT set_config(name, value, true) "
+        "FROM unnest(%(names)s::text[], %(values)s::text[]) AS parameter(name, value)",
+        {"names": list(wanted), "values": list(wanted.values())},
+    )
 
 
 async def existing_tables(cur: Any, tables: Iterable[str]) -> set[str]:
