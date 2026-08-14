@@ -65,7 +65,7 @@ class _RecordingSink:
         self.events: list[AuditEvent] = []
 
     async def record(self, event: AuditEvent) -> None:
-        """Keep the event; the real sink writes a hash-chained row."""
+        """Keep the event; the real sink writes an append-only row."""
         self.events.append(event)
 
 

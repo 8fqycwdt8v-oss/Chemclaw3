@@ -159,6 +159,21 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       *Vindication:* the connect phase is correctly bounded — a black-hole server gave
       `unreachable=['blackhole']` in 3.1 s.
 
+- [ ] **A database still on whole-file migration checksums fails `db-migrate` after the
+      2026-08-14 comment edits** — [S]. D-2026-08-14 rewrote the leading comments of eight already-
+      applied migrations (006, 010, 011, 020, 026, 027, 032, 044) to drop GxP vocabulary. That is
+      safe for any database whose `schema_migrations.checksum` is already the *statement-only* hash
+      — `_statements` strips comments, so the hash is unchanged — and it is **not** safe for one
+      still holding the pre-2026-08-05 whole-file hash. `migrate()` accepts a legacy row only when
+      it equals `_legacy_checksum(text)` computed over the file **as it is now**, so an old row
+      matches neither branch and raises `MigrationError`, blocking every later migration.
+      The window is narrow (a deployment that last migrated before 2026-08-05 and next migrates
+      after 2026-08-14) and no such database is known to exist — the live edges are still open, and
+      CI and `make up` start empty every time. Fix if one turns up: one `UPDATE schema_migrations
+      SET checksum = <statement hash>` per affected row, or re-record the eight rows. *Trigger:* the
+      first `MigrationError` naming a file whose statements demonstrably did not change, or the
+      first migration run against a database older than 2026-08-05.
+
 - [ ] **A failed connector tool is recorded in the audit trail as a success** — [S]. MCP tools
       never raise: `langchain_mcp_adapters/tools.py:527-535` converts an `isError=True` result inside
       `StructuredTool.ainvoke` and returns `ToolMessage(status="error")`. `agent/audit.py:315`

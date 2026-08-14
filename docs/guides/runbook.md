@@ -1069,9 +1069,11 @@ It removes their sessions, messages, events, turn lease, preferences and watch s
 **keeps and counts** the rows that attribute scientific work to them — `audit_events`,
 `plan_approvals`, `note_proposals`, `bo_suggestions`, `job_records`, `turn_costs` — and prints the
 reason beside each. That is not a limitation to work around: an attributable record that can be
-deleted on request is not an attributable record, and `audit_events` carries a tamper-evident hash
-chain whose proof spans the rows either side of any deletion (see (xvi)). If a data-protection
-obligation reaches the retained tier, that is a decision to take with the record's owner.
+deleted on request is not an attributable record, and for a tool call that changed nothing durable
+the trail is the only place it is recorded at all. The application credential cannot delete from
+`audit_events` either — the grant withholds DELETE (see *Splitting the database principal*). If a
+data-protection obligation reaches the retained tier, that is a decision to take with the record's
+owner.
 
 The dry run executes the deletes and rolls back, so the number you sign off on is the number that
 will be deleted rather than a second query's guess at it.
