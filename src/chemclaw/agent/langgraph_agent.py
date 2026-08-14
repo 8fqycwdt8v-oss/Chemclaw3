@@ -169,7 +169,14 @@ def build_langgraph_agent(
         actor=actor,
         sink=audit_sink,
     )
-    backend = skills_backend(prof, tools)
+    # One walk of the skills trees per build, shared by the backend that routes them and the
+    # middleware that labels them. They used to derive it independently — two `_skill_dirs()`
+    # fan-outs (each a `Path.is_dir()` per enabled bundle) and two `_labelled()` passes per turn —
+    # which also left "routes and sources cannot disagree" resting on the two calls happening to see
+    # the same filesystem. Passing one value makes that structural, which is what `_skill_dirs`'s
+    # own docstring says the single definition is for.
+    labelled = _labelled(_skill_dirs())
+    backend = skills_backend(prof, tools, labelled=labelled)
     return create_agent(
         model=model if model is not None else build_chat_model(),
         # The skills read tool is agent-scoped rather than a `@tool` in the process registry,
@@ -185,7 +192,7 @@ def build_langgraph_agent(
         state_schema=ChemclawState,
         middleware=[
             *_harness_middleware(prof),
-            _skills_middleware(backend),
+            _skills_middleware(backend, labelled),
             # `[*tools, *connectors]`, not `tools`: the widening assertion this feeds compares
             # *connector* tool names against the supervisor's surface, and `tools` is the in-process
             # half only — so every connector tool a specialist kept read as a widening and
@@ -373,7 +380,7 @@ def _challenge_middleware(
     ]
 
 
-def _skills_middleware(backend: CompositeBackend) -> Any:
+def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:
     """Wrap a narrowed backend in deepagents' provider — the plumbing around the decision.
 
     Private, and split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split
@@ -383,15 +390,17 @@ def _skills_middleware(backend: CompositeBackend) -> Any:
 
     Takes the backend rather than building one, because the caller has to hold it anyway — the
     skills read tool is bound to the same instance, and two backends built from one config would be
-    two objects that merely happen to agree.
+    two objects that merely happen to agree. `labelled` arrives for the same reason: the backend was
+    routed from it, and re-deriving it here is a second walk of the trees that could disagree.
     """
     return ReloadingSkillsMiddleware(
-        backend=backend,
-        sources=[(f"/{label}", label) for label, _ in _labelled(_skill_dirs())],
+        backend=backend, sources=[(f"/{label}", label) for label, _ in labelled]
     )
 
 
-def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
+def skills_backend(
+    profile: AgentProfile, tools: list[Any], *, labelled: list[tuple[str, str]] | None = None
+) -> CompositeBackend:
     """The skills backend for one profile — a backend that can only reach what it may.
 
     The LangGraph twin of `chemclaw_agent.skills_source`, narrowed by the *same* three predicates
@@ -414,8 +423,12 @@ def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
     a single directory. So each tree gets a virtual prefix routed to its own narrowed backend, and
     an unrouted path reaches `StateBackend` — which is empty, holds no filesystem, and is therefore
     the right thing for a path that matches no skills tree to find.
+
+    `labelled` is the caller's already-walked `(label, directory)` list, so one build walks the
+    trees once; omitting it walks them here, which is what a test building a backend alone wants.
     """
-    dirs = _skill_dirs()
+    labelled = labelled if labelled is not None else _labelled(_skill_dirs())
+    dirs = [directory for _label, directory in labelled]
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
         declared=declared_tools(dirs),
@@ -425,8 +438,7 @@ def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
     return CompositeBackend(
         default=StateBackend(),
         routes={
-            f"/{label}/": NarrowedSkillsBackend(directory, permits)
-            for label, directory in _labelled(dirs)
+            f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
         },
     )
 

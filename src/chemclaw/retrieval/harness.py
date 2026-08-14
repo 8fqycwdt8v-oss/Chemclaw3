@@ -11,6 +11,7 @@ declares each section's memory layer, so evidenced and analogical content stay s
 separated (5b.5).
 """
 
+import asyncio
 import re
 from typing import Any, Literal
 
@@ -156,10 +157,21 @@ async def gather_section(
     A section whose query returns nothing from any retriever is kept but empty
     (`supported` is False) — the report will mark it unsupported rather than invent content.
     This is the durable unit of the report workflow (5b.6): one section, one activity.
+
+    **Concurrently, which is the fix the conversational sweep already made.** The retrievers are
+    independent — up to four of them, three hitting Postgres — so a `for` loop made one section
+    cost the *sum* of their latencies inside an activity that has a `start_to_close_timeout`, and a
+    report pays that per section. `retrieval/fanout.py` states the same argument for
+    `gather_evidence` ("a list comprehension made this tool cost the sum of their latencies when it
+    only needs the maximum"); this is the durable path, which never got it.
+
+    `gather` preserves argument order, so the retriever order the fusion treats as load-bearing
+    (`fanout.py`) is the order the chunks still arrive in.
     """
-    evidence: list[EvidenceChunk] = []
-    for retriever in retrievers:
-        evidence.extend(await retriever.retrieve(section.query, section.filters))
+    gathered = await asyncio.gather(
+        *(retriever.retrieve(section.query, section.filters) for retriever in retrievers)
+    )
+    evidence = [chunk for chunks in gathered for chunk in chunks]
     return SynthesizedSection(
         heading=section.heading, memory_layer=section.memory_layer, evidence=evidence
     )

@@ -194,7 +194,18 @@ def build_challenge_gate(
         if answer is None:
             return None
         outputs = _tool_outputs(messages)
-        review = await score_answer(answer, outputs, _called_tools(messages))
+        # Built here, once, and handed to both readers. The panel needs the turn's evidence for its
+        # briefs and `score_answer` needs it for the judge, and each used to derive it — the same
+        # ~14 ms scan (one `re.search` per tool output × cited id, over untruncated outputs) run
+        # twice on the answer hot path.
+        #
+        # Only when the verifier is on, and that is what keeps this free rather than eager:
+        # `score_answer` builds exactly this value internally on that path, so building it here
+        # moves the work instead of adding it. With the verifier off, nothing has built it yet and a
+        # turn that returns below would have paid for a value it never uses — so that case stays
+        # lazy, at the one call site that then needs it.
+        evidence = turn_evidence(answer, outputs) if settings.verifier_enabled else None
+        review = await score_answer(answer, outputs, _called_tools(messages), evidence=evidence)
         team = delegations() >= _TEAM_SIZE
         if not team and not review.review_required:
             # Nothing to add: a solo turn the existing checks were happy with. The score is still
@@ -211,7 +222,11 @@ def build_challenge_gate(
         # Measured before the fix: every shipped profile but `evidence` raised on every challenged
         # turn. `challenger_for` removes the cause; this removes the class.
         try:
-            briefs = await draft_briefs(question, answer, turn_evidence(answer, outputs))
+            briefs = await draft_briefs(
+                question,
+                answer,
+                evidence if evidence is not None else turn_evidence(answer, outputs),
+            )
             verdicts = await run_panel(
                 question,
                 answer,

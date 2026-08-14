@@ -19,6 +19,7 @@ surface (`python -m chemclaw.cli.schedules`, `make schedules-apply`) is now a th
 `chemclaw.cli.schedules` that calls `apply_schedules()` here.
 """
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -272,29 +273,46 @@ async def describe_schedules(client: Client | None = None) -> list[ScheduleHealt
     A planned Schedule that does not exist in Temporal is reported with a note, never omitted:
     "the job was never created" is precisely the failure this surface exists to show, and a silent
     omission is indistinguishable from a healthy quiet job.
+
+    **Concurrently and each bounded, because this is a probe on the front door's event loop.** The
+    lookups are independent and there are up to eleven of them; run in sequence with the SDK's own
+    retry underneath and no timeout, an unreachable broker made an authenticated route hang for
+    (retry budget × 11) — at exactly the moment an operator opens the "is the machinery running"
+    page. Both halves are already argued elsewhere in this repository, on the two probes that face
+    the same broker: `connectors/health.py` ("concurrent because probes are independent and a serial
+    sweep would make startup wait for the sum of the timeouts rather than the slowest one") and
+    `api/runner.py` ("`retry=False` keeps it a *probe* — the SDK's default retry would turn one
+    unreachable broker into a per-turn backoff loop"). A timeout is what bounds it here, since
+    `describe()` takes no `retry` argument.
+
+    `gather` preserves order, so the report is still in plan order.
     """
     connection = client if client is not None else await connect()
-    health: list[ScheduleHealth] = []
-    for job in planned_schedules():
-        entry = ScheduleHealth(
-            schedule_id=job.schedule_id,
-            interval_seconds=job.interval.total_seconds(),
+    return list(await asyncio.gather(*(_describe(connection, job) for job in planned_schedules())))
+
+
+async def _describe(connection: Client, job: PlannedSchedule) -> ScheduleHealth:
+    """One planned Schedule's health — never raising, so one dead lookup cannot end the sweep."""
+    entry = ScheduleHealth(
+        schedule_id=job.schedule_id,
+        interval_seconds=job.interval.total_seconds(),
+    )
+    try:
+        description = await asyncio.wait_for(
+            connection.get_schedule_handle(job.schedule_id).describe(),
+            settings.connector_health_timeout_seconds,
         )
-        try:
-            description = await connection.get_schedule_handle(job.schedule_id).describe()
-        except Exception as exc:  # noqa: BLE001 - a lookup failure is reported, never raised
-            entry.note = f"not found in Temporal ({type(exc).__name__}) — was it ever applied?"
-            health.append(entry)
-            continue
-        info = description.info
-        entry.paused = description.schedule.state.paused
-        entry.runs_total = info.num_actions
-        entry.skipped_overlap = info.num_actions_skipped_overlap
-        entry.running_now = len(list(info.running_actions or []))
-        recent = list(info.recent_actions or [])
-        if recent:
-            entry.last_run = recent[-1].started_at
-        else:
-            entry.note = "no run recorded yet"
-        health.append(entry)
-    return health
+    except Exception as exc:  # noqa: BLE001 - a lookup failure is reported, never raised
+        entry.note = f"not found in Temporal ({type(exc).__name__}) — was it ever applied?"
+        return entry
+    info = description.info
+    entry.paused = description.schedule.state.paused
+    entry.runs_total = info.num_actions
+    entry.skipped_overlap = info.num_actions_skipped_overlap
+    entry.running_now = len(list(info.running_actions or []))
+    recent = list(info.recent_actions or [])
+    if recent:
+        entry.last_run = recent[-1].started_at
+    else:
+        entry.note = "no run recorded yet"
+    return entry

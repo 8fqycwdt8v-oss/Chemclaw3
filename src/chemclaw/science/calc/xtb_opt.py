@@ -311,6 +311,13 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
     # property `test_a_converged_structure_is_a_fixed_point` exists to pin. The gradient here
     # costs nothing: `evaluate_point` above already computed it and threw it away.
     max_gradient = float(np.max(np.abs(np.where(free_mask, initial_gradient.ravel(), 0.0))))
+    # The energy at whatever geometry `current` holds, carried forward rather than recomputed after
+    # the loop. Every `evaluate_point` is a full SCF, and the one that used to sit below the loop
+    # ran at a geometry already evaluated — by the last leg's convergence check, or (for a structure
+    # that was already a minimum, so no leg runs) by `initial_energy` above. One SCF per
+    # optimization, unconditionally, on every cache miss; `relax_to_minimum` drives this in a loop
+    # and `compute_reaction_energy` drives that once per species per solvent.
+    energy = initial_energy
     while max_gradient > spec.gradient_tolerance and steps < spec.max_steps:
         # The basis is rebuilt each leg, from the geometry the last one reached: the
         # model Hessian depends on the distances, and a leg can move them enough to
@@ -322,13 +329,12 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
             calc, spec, origin, free_mask, vectors, scale, spec.max_steps - steps
         )
         steps += iterations
-        _, gradient, _ = evaluate_point(calc, current.reshape(-1, 3))
+        energy, gradient, _ = evaluate_point(calc, current.reshape(-1, 3))
         max_gradient = float(np.max(np.abs(np.where(free_mask, gradient.ravel(), 0.0))))
         if max_gradient <= spec.gradient_tolerance:
             break
 
     final = current.reshape(-1, 3)
-    energy, _, _ = evaluate_point(calc, final)
     if max_gradient > spec.gradient_tolerance:
         raise ValueError(
             f"geometry optimization did not converge in {steps} steps: "
