@@ -26,6 +26,6 @@ def map_to_hpc_identity(entra_oid: str) -> str:
     """
     hpc_identity = settings.hpc_bridge_identity
     # The audit record: the cluster sees only `hpc_identity`, so this line is the sole link back to
-    # the real user. Logged at INFO like the tool-audit trail, for the same GxP reason.
+    # the real user. Logged at INFO like the tool-audit trail, for the same reason.
     _logger.info("hpc identity bridge: entra oid %s -> hpc identity %s", entra_oid, hpc_identity)
     return hpc_identity

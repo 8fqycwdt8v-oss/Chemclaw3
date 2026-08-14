@@ -47,24 +47,22 @@ the reason for A→B does not excuse B→A.
 **Three of the nine cycles this file declared a phase ago were made of one or two imports each**,
 and R2 deleted all three by moving the code rather than excusing the edge: `kg.proposal` reached
 into `chemclaw.agent` for the turn's ambient actor/session/correlation id, `connectors.server`
-reached into `chemclaw.api` for the metrics registry, and `durable.audit_verify` reached into
-`chemclaw.cli` for the hash-chain check. The primitives now live in `chemclaw.core` (which every
-package already depends on) and the chain check in `chemclaw.durable`, so `kg -> agent`,
+reached into `chemclaw.api` for the metrics registry, and a durable workflow reached into
+`chemclaw.cli` for a check's implementation. The primitives now live in `chemclaw.core` (which every
+package already depends on) and the check in `chemclaw.durable`, so `kg -> agent`,
 `connectors -> api` and `durable -> cli` are gone from the graph *and* from the policy — those
 imports are now forbidden rather than merely unused. `cli -> durable` survives as an ordinary
 downward edge and is declared in `_ALLOWED_MODULE_EDGES` rather than here.
 
 **`chemclaw.cli` is not a special case**, even though it carries no cycle. A previous version of
 this file excluded `cli` from the sibling list on the premise that "nothing imports it". That was
-false while `cli.schedules` and `cli.verify_audit_chain` still held the library logic `api.app` and
-`durable.audit_verify` needed at module scope — a front door and a Temporal workflow reaching into
-the entrypoint layer for library functions, which is exactly backwards for a layer that is supposed
-to be the outermost one. Both moved to `durable/` (R2.B): `chemclaw.durable.schedules` and
-`chemclaw.durable.audit_chain` now hold the logic, `api.app` and `durable.audit_verify` import them
-directly (an ordinary same-or-lower-layer edge, no `cli` involved), and `cli.schedules` /
-`cli.verify_audit_chain` are left as thin `main()` shims that call back down into `durable` to run
-— a plain `cli→durable` edge, declared in the flat set below like every other package `cli` reaches
-into, not a cycle.
+false while `cli.schedules` still held the library logic `api.app` and a durable workflow needed at
+module scope — a front door and a Temporal workflow reaching into the entrypoint layer for library
+functions, which is exactly backwards for a layer that is supposed to be the outermost one. It
+moved to `durable/` (R2.B): `chemclaw.durable.schedules` holds the logic, its callers import it
+directly (an ordinary same-or-lower-layer edge, no `cli` involved), and `cli.schedules` is left as a
+thin `main()` shim that calls back down into `durable` to run — a plain `cli→durable` edge, declared
+in the flat set below like every other package `cli` reaches into, not a cycle.
 
 **The kernel rule stays a runtime check, driven by the derived module list.** A static walk cannot
 see a *transitive* import — module A importing module B which happens, at runtime, to import
@@ -315,11 +313,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.api"),
     ("chemclaw.cli", "chemclaw.connectors"),
     ("chemclaw.cli", "chemclaw.core"),
-    # `cli.schedules`/`cli.verify_audit_chain` are thin `main()` shims that call back down into
-    # their durable-layer implementations (`durable.schedules`, `durable.audit_chain`) — the
-    # library logic itself moved out of `cli` (R2.B) because `api.app` and `durable.audit_verify`
-    # needed it at module scope, which no longer makes this a cycle: only `cli` reaches into
-    # `durable` now.
+    # `cli.schedules` is a thin `main()` shim that calls back down into its durable-layer
+    # implementation (`durable.schedules`) — the library logic itself moved out of `cli` (R2.B)
+    # because `api.app` needed it at module scope, which no longer makes this a cycle: only `cli`
+    # reaches into `durable` now.
     ("chemclaw.cli", "chemclaw.durable"),
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),

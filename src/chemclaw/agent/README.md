@@ -31,7 +31,7 @@ bundles now, advertised out of `connectors/` — including their durable launche
 generated from each bundle's manifest rather than hand-written here (D-118). Structural
 fingerprint search is reached over the MCP capability servers, and **only** over them: the
 in-process `search_tools` wrapper that shadowed them is gone, along with the "keep the two in
-sync" obligation it had already broken (D-2026-08-05). Every tool call is recorded by the one GxP audit
+sync" obligation it had already broken (D-2026-08-05). Every tool call is recorded by the one audit
 middleware (`audit`), and retrieved note content is framed as data before it reaches the
 model (`framing`). The interaction-approval starter/decider seam lives in
 `interaction_tools`.

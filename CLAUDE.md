@@ -176,7 +176,7 @@ rule is D-002's and it got *stricter* when layer 1 gained a checkpointer, becaus
 holds turn state and every long or expensive job is still Temporal's (D-2026-08-10 §3). Skills hold
 judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
 speaks, not the thing that holds the capability (D-110/D-118). Anything agent-generated enters the
-graph via a **PR-gate** (human validates before merge) — this is the GxP "AI proposes, human signs off" line, reused
+graph via a **PR-gate** (human validates before merge) — the agent proposes, a human decides, reused
 everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
 
 ## Commands
@@ -189,7 +189,7 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
   package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
   `skill-validate`, `connector-validate`, `datasource-validate`, `template-validate`,
-  `prose-validate`, `eln-validate`, `helm-validate`, `audit-verify`.
+  `prose-validate`, `eln-validate`, `helm-validate`.
 - **Running things**: `make up` (docker-compose: Temporal + Postgres/pgvector) · `make connectors`
   (every enabled connector in one dev process) · `make chat` · `make db-migrate`.
 - Single test: `pytest path/to/test_file.py::test_name` or `pytest -k "name substring"`.

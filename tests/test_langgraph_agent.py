@@ -349,7 +349,7 @@ def test_a_repeated_call_is_refused_on_this_engine(monkeypatch: pytest.MonkeyPat
 
 
 def test_the_audit_trail_records_a_call_on_this_engine() -> None:
-    """A tool call lands in the GxP trail with its identity, outcome and result.
+    """A tool call lands in the audit trail with its identity, outcome and result.
 
     `make_audit_middleware` shares `_recording` with the MAF middleware, so what this
     pins is that the adapter reaches it with the three fields only the engine knows: the tool's
@@ -552,7 +552,7 @@ def test_a_role_change_mid_session_renarrows_the_listing(monkeypatch: pytest.Mon
 def test_a_state_changing_call_is_refused_without_an_approved_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pre-execution GxP gate holds on this engine: propose before you act.
+    """The pre-execution approval gate holds on this engine: propose before you act.
 
     A fresh session has no plan, so it has no *approved* plan, so the first state-changing call is
     refused — the documented behaviour rather than an edge case. Asserted through a real turn, so

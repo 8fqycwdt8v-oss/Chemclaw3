@@ -25,7 +25,7 @@ detail that changes quietly.
 this was written, under a deprecation warning that said so outright: *"leaving `virtual_mode=False`
 allows absolute paths and `'..'` to bypass `root_dir`"*. deepagents 0.7 made it the default and
 dropped the warning, so the citation is gone and the argument is not: under `False`, a model handed
-a filesystem tool could read any file the pod's service account can — in a GxP system, over a tool
+a filesystem tool could read any file the pod's service account can — over a tool
 surface whose whole point is that capability is enumerated. It stays written out rather than
 inherited, because a security property that arrives as somebody else's default can leave the same
 way. Virtual mode roots every path at `/`, refuses traversal with a `ValueError`, and has the useful

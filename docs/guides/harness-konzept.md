@@ -165,8 +165,8 @@ Temporal. Die Fan-out-Stufe selbst ist inzwischen echte Parallelität im Graphen
 sichtbar macht — vorher war eine Quelle mit null Treffern nicht von einer nicht befragten zu
 unterscheiden.
 
-**(d) Plan-Modus als Human-in-the-Loop-Punkt (GxP).** Der Plan-Modus ist die natürliche Stelle, an
-der „AI schlägt vor, Mensch zeichnet ab" *vor* der Ausführung greift — komplementär zum PR-Gate,
+**(d) Plan-Modus als Human-in-the-Loop-Punkt.** Der Plan-Modus ist die natürliche Stelle, an
+der „der Agent schlägt vor, ein Mensch entscheidet" *vor* der Ausführung greift — komplementär zum PR-Gate,
 das *nach* der Wissensproduktion greift (§6).
 
 ## 6. Governance-Verzahnung (mehr Autonomie ⇒ mehr Gates, nicht weniger)
@@ -317,7 +317,7 @@ dritter, komplementärer Baustein.**
 | Ansatz | Zweck | Verhältnis zum Harness |
 |---|---|---|
 | **Temporal-Workflows** | Durable, lang laufende, deterministisch wiederholbare Ausführung | **Bleibt.** Teure/lange Schritte gehen unverändert fire-and-forget dorthin. Keine Überschneidung. |
-| **Report-Pipeline** (D-020) | *Fester*, deterministischer Synthese-Fluss (decompose → retrieve → verify → cite) mit erzwungener Zitat-Treue | **Bleibt.** Die Pipeline garantiert reproduzierbare Struktur und Belegpflicht (GxP-relevant); der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan erzwingt die Provenienz-/Zitatstruktur nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
+| **Report-Pipeline** (D-020) | *Fester*, deterministischer Synthese-Fluss (decompose → retrieve → verify → cite) mit erzwungener Zitat-Treue | **Bleibt.** Die Pipeline garantiert reproduzierbare Struktur und Belegpflicht; der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan erzwingt die Provenienz-/Zitatstruktur nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
 | **Spezialisten-Team** (§7) | Aufteilung *einer* Anfrage auf mehrere schmal geschnittene Agenten | Orthogonal: das Team ändert, *wer* einen Schritt ausführt, nicht *ob* geplant und freigegeben wird. Beide Gates gelten eine Ebene tiefer unverändert. |
 
 **Empfehlung:** Die Pipeline für die feste Berichts-/Provenienz-Struktur behalten und den Harness

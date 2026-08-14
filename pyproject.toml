@@ -47,7 +47,7 @@ dependencies = [
     # import it directly — including `agent/session_store.py`, which uses `message_to_dict` /
     # `messages_from_dict` for the *durable* `session_messages` column. Its floor would otherwise be
     # whichever transitive constraint happened to be tightest, so dropping an unrelated `langchain-*`
-    # package could silently relax the pin on the library that owns a GxP-retained serialization.
+    # package could silently relax the pin on the library that owns a durably-retained serialization.
     "langchain-core>=1.5.3",
     "langchain>=1.0",
     "langchain-anthropic>=1.5.1",
@@ -260,7 +260,7 @@ fail_under = 84
 # mutants over an hours-long suite, and most of them land in code where a surviving mutant means
 # nothing (a log message, a docstring-shaped constant). These seven are where a silently-wrong
 # answer is expensive: the authorization gate, the PR-gate and the note schema behind it, the
-# calculation cache's identity, the budget guard, the GxP audit chain, and `runner_trace.py` —
+# calculation cache's identity, the budget guard, the durable audit sink, and `runner_trace.py` —
 # which shipped a real defect on 2026-08-04 and is therefore the best available test of whether
 # its own tests are any good.
 [tool.mutmut]
@@ -333,9 +333,6 @@ pytest_add_cli_args_test_selection = [
     "tests/test_tool_authz.py",
     "tests/test_audit.py",
     "tests/test_audit_store.py",
-    "tests/test_audit_chain.py",
-    "tests/test_audit_anchor.py",
-    "tests/test_concurrency_audit_chain.py",
     "tests/test_budget.py",
     "tests/test_concurrency_claims.py",
     "tests/test_runner.py",

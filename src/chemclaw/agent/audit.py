@@ -1,8 +1,8 @@
-"""GxP tool-audit trail: record every agent tool call once, from one place.
+"""The tool-audit trail: record every agent tool call once, from one place.
 
-Why this exists: in a pharma/GxP setting "who ran what, with which inputs, when, did it
-succeed, and to what effect" must be answerable, and it is the first thing needed to
-troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 tools
+Why this exists: "who ran what, with which inputs, when, did it succeed, and to what
+effect" must be answerable about work a chemist will cite, and it is also the first
+thing needed to troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 tools
 (duplication that would drift), one **tool-call middleware** wraps *every* registered
 tool uniformly — the audit trail is a single reusable piece (DRY), like the PR-gate.
 
@@ -12,7 +12,7 @@ correlation id (which conversation), the actor (who — a Phase-6 seam, the conf
 instead — empty for the main agent), the tool name, its truncated arguments, the
 outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
-supplied (the Postgres append-only trail) — the log is the floor, the sink is the GxP record.
+supplied (the Postgres append-only trail) — the log is the floor, the sink is the durable record.
 
 **Three outcomes, not two, because a turn can end without the tool ending.** A client disconnect
 and the front door's turn deadline both arrive as `asyncio.CancelledError` (D-130), which is a
@@ -21,7 +21,7 @@ interrupted mid-flight left no row at all, and `audit_events` under-reported *at
 whenever a turn was torn down. The gap was bounded rather than total — the side effect itself stays
 traced by `job_records` for a durable job, the `ToolCallEvent` already streamed to the client, the
 teardown warning in `chemclaw.api.runner`, and a `turn_costs` row with `completed=false` — but none
-of those is the GxP trail, and "who attempted what" is exactly what the trail is for. A cancelled
+of those is the audit trail, and "who attempted what" is exactly what the trail is for. A cancelled
 attempt is now its own `cancelled` outcome, distinguishable from both a success and a failure,
 written on a shielded task so the write outlives the cancellation that caused it.
 
@@ -30,7 +30,7 @@ each derived from whether the handler returned, raised, or was cancelled — whi
 for tools that signal failure by raising. An **MCP tool never raises**: `langchain_mcp_adapters`
 attaches a `handle_tool_error` callback, so an `isError=True` result is converted *inside*
 `StructuredTool.ainvoke` and comes back as a `ToolMessage(status="error")`. The handler returned,
-so every failed connector call was written to the GxP trail as `ok` — with the error text sitting
+so every failed connector call was written to the trail as `ok` — with the error text sitting
 in `detail`, the field an auditor reads as the call's *effect*. `returned_failure` is the missing
 half of the test: a returned failure is recorded under `error` like a raised one, so the outcome
 column means the same thing for a tool that runs in this process and one that runs behind a
@@ -82,7 +82,7 @@ class AuditEvent(BaseModel):
 
     correlation_id: str
     # The conversation this call belongs to
-    # (D-2026-07-31-the-audit-chain-is-versioned).
+    # (D-2026-07-31-the-audit-chain-is-versioned, whose hash chain has since been removed).
     # `correlation_id` identifies the *turn* and was
     # stamped on nothing holding the user's words, so a tool call could not be joined to the
     # question that caused it — the trail proved *that* a tool ran and never *why*. D-157 closed
@@ -91,7 +91,7 @@ class AuditEvent(BaseModel):
     # those are most of the trail. Empty off the request path, where there genuinely is no session.
     session_id: str = ""
     # Why this call was made, in the requester's terms. Reserved and deliberately unpopulated: the
-    # column is here because schema churn on a hash-chained table is worth doing once, but nothing
+    # column is here because schema churn on an append-only table is worth doing once, but nothing
     # fills it yet. Making the model author a reason per call means changing every tool signature,
     # and deriving one from the harness's active todo step is a *heuristic* — a provenance field
     # that is sometimes an inference is worse than an empty one, so it stays empty until it can be
@@ -110,12 +110,12 @@ class AuditEvent(BaseModel):
     # column that is honest about being empty.
     #
     # A trail that names only the person cannot say which of five specialists ran a tool; a trail
-    # that names only the agent is worthless under GxP. It has to carry both, so it does.
+    # that names only the agent is worthless: it has to carry both, so it does.
     agent: str = ""
     tool: str
     arguments: str
     # "ok" | "error" | "cancelled". Deliberately a plain string with no CHECK behind it: the column
-    # has none (`infra/sql/006`), and adding one to a hash-chained append-only table to police three
+    # has none (`infra/sql/006`), and adding one to an append-only table to police three
     # literals would cost a migration on every future outcome. The producer is this module alone.
     outcome: str
     # Result summary on success, the exception text — or the failure the tool *returned*, for a
@@ -150,16 +150,15 @@ def default_audit_sink() -> AuditSink:
     """The sink a caller gets when it names none: durable where a database exists, else log-only.
 
     **The default is here, and not at each entry point, because "each entry point remembers" is
-    exactly what failed.** `PostgresAuditSink`, the tamper-evident hash chain, `infra/sql/011`,
-    `make audit-verify` and `durable/audit_chain.py` were all built and tested — and the sink
-    was constructed in exactly one place, `cli/chat.py`, behind `--audit-postgres`. The deployed
-    service passed nothing, so this module installed `NullAuditSink()` and the entire GxP trail was
-    log-only in every process a chemist actually talks to. `audit_events` was empty in production
-    while every document called it the compliance record. The Temporal template activities had the
-    same gap, independently.
+    exactly what failed.** `PostgresAuditSink`, its table and its tests were all built — and the
+    sink was constructed in exactly one place, `cli/chat.py`, behind `--audit-postgres`. The
+    deployed service passed nothing, so this module installed `NullAuditSink()` and the entire trail
+    was log-only in every process a chemist actually talks to. `audit_events` was empty in
+    production while every document called it the durable record. The Temporal template activities
+    had the same gap, independently.
 
-    Opting *in* to the compliance record, per call site, is the wrong polarity for a GxP control: a
-    forgotten argument must not silently downgrade it. So the durable sink is what you get, and
+    Opting *in* to the durable record, per call site, is the wrong polarity: a forgotten argument
+    must not silently downgrade it. So the durable sink is what you get, and
     log-only is what a deployment with no database falls back to.
 
     Gated on `session_store="postgres"` for the same reason `_default_owner_store` is: that switch
@@ -280,7 +279,7 @@ async def _recording(
     sink: AuditSink,
     revision: str,
 ) -> AsyncIterator[_Recorded]:
-    """The GxP trail itself, with no framework in it — both engines' middlewares are wrappers.
+    """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
     Everything that makes this the *record* lives here: the identity precedence, the span, the
     latency histogram, the three outcomes, and the shielded write that survives a teardown. A
@@ -435,10 +434,10 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
         await sink.record(event)
     except Exception as exc:  # a broken audit store must not fail a tool call
         # Counted as well as logged (gap DEP-4): the ERROR marker is alertable only if something
-        # is watching the logs, whereas an incomplete GxP trail should be visible on the same
+        # is watching the logs, whereas an incomplete audit trail should be visible on the same
         # dashboard as everything else.
         record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
-        # Swallow-and-continue keeps availability, but a lost GxP audit record must be ALERTABLE,
+        # Swallow-and-continue keeps availability, but a lost audit record must be ALERTABLE,
         # not a generic warning (SEC-3): log at ERROR with a stable `audit_sink_failure` marker and
         # the trail identifiers, so monitoring can fire on the marker and name the affected trail.
         logger.error(

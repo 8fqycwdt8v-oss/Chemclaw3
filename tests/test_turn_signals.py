@@ -3,7 +3,7 @@
 `JobStartedEvent` and `PlanEvent` had been in the typed contract and rendered by the chat UI since
 F2 — and were never emitted by anything. `plan_only` autonomy (the Helm chart's production default)
 therefore asked a human to approve a plan the surface could not show, and a chemist whose turn
-opened a knowledge PR was never told: the reference went into the model's context and the GxP
+opened a knowledge PR was never told: the reference went into the model's context and the review
 "human signs off" line existed only in a git host's UI.
 
 The runner only sees the model's streamed updates, so tools hand these facts over out of band

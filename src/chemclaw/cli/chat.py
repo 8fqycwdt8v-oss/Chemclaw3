@@ -24,7 +24,7 @@ map, so one overlapping role name silently made this terminal fully privileged.
 `resolve_identity` is the seam where a non-admin branch could resolve identity
 from some other token source in the future; today that branch fails loudly rather than silently
 running unauthenticated. Requiring the flag keeps "no authentication" a conscious choice, not a
-default — the GxP posture, in a dev tool.
+default — the deployed posture, in a dev tool.
 
 Run: `make chat`, `uv run chemclaw --admin`, or one-shot `uv run chemclaw --admin -m "…"`.
 """
@@ -201,7 +201,7 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
     not the one the graph holds and under either setting was not the one an unwired graph wrote to.
 
     All three arguments are required. `actor` in particular must never default: it flows into
-    `plan_approval_store().record(...)`, whose entire purpose is that the GxP record names the
+    `plan_approval_store().record(...)`, whose entire purpose is that the record names the
     identity that approved, and a default that would write an anonymous approval is not a safe
     fallback but one that must never be taken.
 
@@ -281,7 +281,7 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
         return "there is no plan to approve yet; ask a question first"
     # `actor`, not `settings.cli_admin_actor`. The session runs under whatever `--actor` resolved
     # to, and every other identity consumer in this module reads that — so hardcoding the default
-    # made the durable approval record, which is the artifact of the "AI proposes, human signs off"
+    # made the durable approval record, which is the artifact of the "agent proposes, human decides"
     # line, name an identity that took no action and disagree with the audit rows for its own
     # session.
     await plan_approval_store().record(_CLI_SESSION_ID, plan_hash, actor, True)

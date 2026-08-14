@@ -145,7 +145,7 @@ def _arguments(arguments: Any) -> dict[str, Any]:
 
     Both forms are in the table: the decoded object for a call that arrived whole, and the raw JSON
     *string* for one assembled from streamed fragments. Only the first was read, so every streamed
-    call in the archive converted to `args: {}` — the arguments a GxP reviewer asks "what was this
+    call in the archive converted to `args: {}` — the arguments a reviewer asks "what was this
     run with" about, replaced by nothing, in the irreversible pass.
 
     A string that will not parse still degrades to `{}` rather than raising: it is a half-streamed

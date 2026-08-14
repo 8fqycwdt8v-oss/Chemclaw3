@@ -5,7 +5,7 @@ nothing about *what governs it*. Two of the four safety-rubric invariants are th
 boundary could plausibly break, because both are tool-call middleware and a connector's tools are
 not functions we wrote:
 
-1. **GxP audit** — every call recorded with the turn's actor, whether it succeeded or was denied.
+1. **Audit** — every call recorded with the turn's actor, whether it succeeded or was denied.
 2. **Per-tool authorization** — `tool_role_gates` addresses a connector tool by the same name the
    model calls, and a denied call never runs on the connector.
 
@@ -59,7 +59,7 @@ endpoint:
 
 
 class _RecordingSink:
-    """An `AuditSink` that keeps every event, so the test can assert on the GxP trail."""
+    """An `AuditSink` that keeps every event, so the test can assert on the trail."""
 
     def __init__(self) -> None:
         self.events: list[AuditEvent] = []
@@ -209,7 +209,7 @@ def _signals_from_turn_calling(tool_name: str, sink: _RecordingSink) -> list[Sig
     return asyncio.run(_go())
 
 
-def test_a_connector_tool_call_is_recorded_in_the_gxp_audit_trail(governed: _Observed) -> None:
+def test_a_connector_tool_call_is_recorded_in_the_audit_trail(governed: _Observed) -> None:
     """Invariant 1: the audit middleware wraps a connector's tool, not just the in-process ones.
 
     This is the assertion that could not be made by reading the wiring. A connector's tools are
@@ -248,7 +248,7 @@ def test_a_failed_connector_tool_is_audited_as_an_error_not_a_success(
     `isError=True` result is converted inside `StructuredTool.ainvoke` and returned as a
     `ToolMessage(status="error")`. Deriving the outcome from control flow alone therefore wrote `ok`
     for every failed connector call — with the error text in `detail`, the field an auditor reads as
-    the call's *effect*. A GxP trail that records a failure as a success is worse than one that
+    the call's *effect*. A trail that records a failure as a success is worse than one that
     records nothing, because it looks answered.
     """
     sink = _RecordingSink()
@@ -317,7 +317,7 @@ def test_a_denied_connector_tool_never_runs_and_is_still_audited(
 
     Two halves, and both matter. The gate must *stop* the call — a connector that is reachable
     from the front door would otherwise happily serve a user who was refused — and the denial
-    must still appear in the trail, because "who was refused what" is exactly the question a GxP
+    must still appear in the trail, because "who was refused what" is exactly the question an audit
     audit asks. The audit middleware is attached outermost for this reason, and this proves it
     holds across the process boundary too.
     """

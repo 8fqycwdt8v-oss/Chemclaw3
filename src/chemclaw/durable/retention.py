@@ -2,9 +2,9 @@
 
 Nothing in this system ever deleted anything: no `DELETE`, no TTL, no retention window anywhere in
 the tree. `session_messages`, `session_events`, `audit_events`, `calculation_results`, `note_index`
-and both fingerprint tables grew for the life of the deployment. For a GxP system that is not only
-a disk-cost problem — retention is a *requirement* ("keep for N years, then dispose, provably"), and
-a records story with no disposal story is incomplete.
+and both fingerprint tables grew for the life of the deployment. That is not only a disk-cost
+problem: a records story with no disposal story is incomplete, and "keep for N years, then dispose"
+is a policy a deployment has to be able to state and act on.
 
 **What this prunes, and what it deliberately refuses to.**
 
@@ -52,13 +52,13 @@ a records story with no disposal story is incomplete.
   across three keys with no foreign key to enforce it — `_prune_checkpoints` says what committing
   them separately would cost.
 
-- `audit_events` is **refused**, by design, not by omission. The table is hash-chained
-  (`infra/sql/011`), so deleting its oldest rows leaves the surviving head pointing at a `prev_hash`
-  that no longer exists — indistinguishable from tampering, which is precisely what the chain is
-  built to detect. Safe disposal needs archive-then-reseal (export the pruned prefix, verify it,
-  record an out-of-band genesis anchor the verifier accepts), which is a design decision with GxP
-  consequences and belongs in an ADR with QA sign-off — not in a cleanup job. The job says so out
-  loud rather than silently skipping the table.
+- `audit_events` is **refused**, by design, not by omission. The trail is the record of who ran
+  what, and for a tool call that changed nothing durable it is the *only* record — so disposing of
+  it is not a cache decision, it is deciding to stop being able to answer a question about the past.
+  Which rows, how old, and exported where first are questions for whoever owns that record; a
+  cleanup job on a clock is the wrong place to answer them. The refusal used to be argued from the
+  row hash chain that once sat over this table; the chain is gone and the refusal is not, because
+  the chain was never the reason. The job says so out loud rather than silently skipping the table.
 
 - `job_records` is **refused**, and it is the newest reason to be careful here (D-157). The table
   exists precisely because a durable run's result used to expire — with Temporal's own history —

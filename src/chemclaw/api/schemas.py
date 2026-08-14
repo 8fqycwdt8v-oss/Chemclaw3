@@ -200,7 +200,7 @@ class ProposalDetail(ProposalSummary):
     """A proposal with everything it would write, exactly as it would land in the tree.
 
     The bytes rather than a summary of them: a reviewer signing off on machine-written knowledge is
-    signing off on the bytes, and a paraphrase is the one thing a GxP review must not be given.
+    signing off on the bytes, and a paraphrase is the one thing a review must not be given.
 
     `dependencies` is the rest of the submission — the `compound` note a `job-result` cites, say —
     and it is here because without it the sentence above was false for exactly the submissions that

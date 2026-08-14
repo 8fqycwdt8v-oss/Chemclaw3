@@ -181,7 +181,7 @@ RUN set -eux; \
 # The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
 # config docstring has always said "the F6 image build injects the digest" and no build ever did —
 # nothing in the Containerfile, the chart or CI set it, so `deployment_revision` was "unknown" in
-# every deployment while AG-14 read as met. A GxP trail whose "which version produced this result"
+# every deployment while AG-14 read as met. An audit trail whose "which version produced this result"
 # column is a constant is not answering the question it exists to answer.
 #
 # A build ARG rather than a chart value because the image is the thing that has a revision: a chart

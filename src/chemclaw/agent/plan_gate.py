@@ -1,6 +1,6 @@
 """The harness's pre-execution approval, applied to the act rather than latched onto the session.
 
-`SECURITY.md` and `docs/guides/harness-konzept.md` §6 describe a GxP gate: under
+`SECURITY.md` and `docs/guides/harness-konzept.md` §6 describe an approval gate: under
 `harness_autonomy="plan_only"` the agent proposes a plan and waits for a human before executing.
 D-137 built the human-only path into execute mode and retracted MAF's self-service `mode_set` tool,
 which closed the hole where the *model* granted itself autonomy. What it did not do was make the
@@ -28,7 +28,7 @@ anyway, because a mode a surface displays should be true — but the enforcement
 **Why reads stay open.** MAF's own plan-mode instructions tell the agent to "do some exploratory
 checks to help build a plan", and `gather_evidence`/`find_notes` are how a chemist gets an answer
 at all. A gate over every tool would make `plan_only` unusable — the agent could not look anything
-up to build the plan it needs approved — so the deployments that want the GxP posture would turn it
+up to build the plan it needs approved — so the deployments that want the gate would turn it
 off, which is the worst outcome available. The line is drawn at state change
 (`chemclaw.agent.authz.STATE_CHANGING_TOOLS`, plus every durable launcher), so an unapproved
 session can research and propose and can do nothing else.

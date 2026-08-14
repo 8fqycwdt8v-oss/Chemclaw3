@@ -12,10 +12,10 @@ only form that holds — a check that fails.
 
 **Why additive-forward rather than a tested down-path** (D-2026-08-04-the-schema-only-goes-forward):
 
-* A down migration for a GxP system is a compliance hazard wearing a safety net's clothes. The
-  audit trail is append-only and hash-chained precisely so that history cannot be rewritten; a
-  scripted `DROP COLUMN` on `audit_events` is the thing that control exists to prevent, and having
-  it in the repository makes it one command away.
+* A down migration is a data-loss hazard wearing a safety net's clothes. The audit trail is
+  append-only precisely so that history cannot be rewritten; a scripted `DROP COLUMN` on
+  `audit_events` is the thing that property exists to prevent, and having it in the repository
+  makes it one command away.
 * For an additive schema the rollback already exists and needs no script: **deploy the previous
   image**. The old code ignores the new column, the new table sits unread, and the data stays.
   That property is exactly what "additive" buys, and it is worth more than a down-path because it

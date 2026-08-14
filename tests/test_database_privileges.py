@@ -185,16 +185,16 @@ def test_the_audit_trail_is_append_only_by_grant() -> None:
 
     "Append-only by contract" was enforced by nothing — no GRANT, no REVOKE, no trigger, no second
     role in any migration — while the same DSN that ran a chat turn could rewrite the trail
-    recording it. The hash chain (011) and the signed anchors (032) detect that after the fact;
-    only this prevents it. Asserted separately from the derivation above because it must hold
-    *whatever* the derivation concludes: if a future writer starts issuing `UPDATE audit_events`,
-    the right outcome is this test failing, not the grant widening to match.
+    recording it. A hash chain over the rows used to detect that after the fact; it is gone, so this
+    grant is now the whole of the guarantee. Asserted separately from the derivation above because
+    it must hold *whatever* the derivation concludes: if a future writer starts issuing
+    `UPDATE audit_events`, the right outcome is this test failing, not the grant widening to match.
     """
     allowed = verbs_the_grant_allows()
     for table in ("audit_events", "audit_anchors"):
         assert allowed.get(table) == {"INSERT"}, (
-            f"{table} is granted {sorted(allowed.get(table, set()))}; the tamper-evidence chain "
-            "assumes rows are only ever appended"
+            f"{table} is granted {sorted(allowed.get(table, set()))}; the trail's whole integrity "
+            "claim is that the credential writing a row cannot rewrite it"
         )
 
 

@@ -1,5 +1,5 @@
--- Join the audit trail to the conversation that caused it, and version the hash chain so that
--- doing so does not invalidate the trail it is joining (D-166).
+-- Join the audit trail to the conversation that caused it, and version the (since-removed) hash
+-- chain so that doing so did not invalidate the trail it is joining (D-166).
 --
 -- `correlation_id` has always been minted per turn (`api/runner.py`) and stamped on `audit_events`,
 -- on a connector job's Temporal memo, and on the connector request header. It was stamped on
@@ -8,13 +8,14 @@
 -- `gather_evidence`, `predict_pka`, `suggest_next_experiment` and `propose_knowledge_note` are all
 -- ordinary tool calls, and for those "which conversation was this?" had no answer: `audit_events`
 -- had no `session_id`, `session_messages` had no `correlation_id`, and no table mapped one to the
--- other. The GxP trail could prove *that* a tool ran and never *why*.
+-- other. The trail could prove *that* a tool ran and never *why*.
 --
--- **Why the chain needs a version.** `agents.audit_store.chain_hash` hashes
+-- **Why the chain needed a version** (historical — the chain is gone, and `chain_version` is now
+-- an unwritten column at its default). `agents.audit_store.chain_hash` hashed
 -- `{"prev": prev_hash, "event": event.model_dump()}`. `model_dump()` is the whole model, so adding
 -- a field to `AuditEvent` changes the bytes hashed for every row — including rows written before
 -- this migration, whose stored `row_hash` was computed over the old field set. Verification would
--- fail on the entire history, and a compliance trail that reports itself tampered with is worse
+-- fail on the entire history, and a trail that reports itself tampered with is worse
 -- than one that reports nothing: the first thing an auditor asks is which of the two happened.
 --
 -- So each row records which field set its hash covers. `chain_version = 1` is everything written

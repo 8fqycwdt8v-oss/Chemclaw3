@@ -63,7 +63,7 @@ def _build_submission(
             f"Agent-proposed **{note.type}** note `{note.id}`"
             + (f" (source: {note.source})" if note.source else "")
             + extra
-            + ".\n\nRequires human review before merge — GxP: AI proposes, human signs off."
+            + ".\n\nRequires human review before merge — the agent proposes, a human decides."
         ),
     )
 

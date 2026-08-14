@@ -8,14 +8,14 @@
        the repo, no SLO, and no Alertmanager route.
 
        The tell is `agent/audit.py`, which logs `audit_sink_failure` at ERROR with a stable marker
-       and increments a counter, with a comment saying in as many words that a lost GxP audit
+       and increments a counter, with a comment saying in as many words that a lost audit
        record "must be ALERTABLE, not a generic warning". Nothing alerted. Same for the turn-claim
        lease lapsing (two turns on one session), the rollback watermark (which fired 32 times in a
        126-second load test and leads to bricked sessions), and a note publish failing (knowledge
        lost, silently, since the publish is best-effort by design).
 
        Every rule below alerts on a *rate*, not a total, so a counter that moved once during a
-       deploy does not page anyone forever. Severities: `critical` = a GxP record or a correctness
+       deploy does not page anyone forever. Severities: `critical` = a durable record or a correctness
        invariant is being lost right now; `warning` = degraded, look at it today.
 
        **`for:` cannot express "sustained" over an `increase(...) > 0`, and two rules here used to
@@ -37,16 +37,17 @@ spec:
   groups:
     - name: chemclaw.records
       rules:
-        {{- /* Losing an audit row is not a degradation, it is a hole in the compliance record —
-               and `durable/retention.py` refuses to prune this table precisely because deleting
-               from a hash chain is indistinguishable from tampering. */}}
+        {{- /* Losing an audit row is not a degradation, it is a hole in the record of who ran
+               what — and for a tool call that changed nothing durable, the trail is the only
+               place it is recorded at all. `durable/retention.py` refuses to prune this table
+               for the same reason. */}}
         - alert: ChemclawAuditTrailIncomplete
           expr: increase(chemclaw_audit_sink_failures_total[10m]) > 0
           for: 0m
           labels:
             severity: critical
           annotations:
-            summary: GxP audit records are not being persisted
+            summary: Audit records are not being persisted
             description: >-
               The audit sink failed to record at least one tool call in the last 10 minutes, so the
               trail is incomplete. Tool calls keep succeeding, which is why this is invisible

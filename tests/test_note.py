@@ -161,7 +161,7 @@ def test_note_error_is_chemclaw_error() -> None:
 
 
 def test_agent_authored_provenance(tmp_path: Path) -> None:
-    """created_by carries the GxP provenance line for the PR-gate."""
+    """created_by carries the provenance line for the PR-gate."""
     note = parse_note(
         _write(tmp_path / "e.md", "---\nid: x\ntype: job-result\ncreated_by: agent\n---\n")
     )

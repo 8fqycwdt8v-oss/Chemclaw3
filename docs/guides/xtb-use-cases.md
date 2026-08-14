@@ -146,7 +146,7 @@ semiempirical number will plausibly-looking answer.
   a DSC, an ARC, or a hazard evaluation. It may *triage* which compounds get sent for
   calorimetry; it may never appear in an answer as reassurance. `safety-screening`'s
   rule — the screen flags, it never clears — extends to computation unchanged.
-- **Any GxP-reportable number without human sign-off.** Computed values enter the
+- **Any reportable number without human review.** Computed values enter the
   knowledge graph through the PR-gate like everything else agent-generated.
 - **Absolute pKa, logP, or solubility for a specification.** Ranking, not values (§4).
 - **Yields, rates, selectivity ratios.** xTB gives orderings and energy differences, not
@@ -166,7 +166,7 @@ it. None is a new calculator; each is a connection between layers.
 1. **Computed values as citable, reproducible evidence.** Every result is content-addressed
    by structure, method, and engine build, so a number in a report can be traced to the
    exact geometry and stack that produced it, and re-derived years later. That is the
-   GxP-shaped property no ad-hoc calculation has. **Available now.**
+   traceability property no ad-hoc calculation has. **Available now.**
 2. **Descriptors as BO featurization.** BoFire campaigns currently treat ligand/base/solvent
    as *categorical* — the model cannot generalize to an option never tried. Replacing the
    category with computed electronic descriptors lets it interpolate across the space.

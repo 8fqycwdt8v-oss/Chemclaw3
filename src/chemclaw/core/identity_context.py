@@ -18,10 +18,10 @@ The **running specialist** rides here too, for the third time and the same reaso
 attenuation of its caller's authority, not a new actor
 (`docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md`), so the trail has to
 name two things at once — which person authorized the turn and which agent made the call — and lose
-neither. Attribution to "the agent" is what makes a GxP trail worthless; attribution of an agent's
-act to a person is the D-040 failure repeated. The specialist is therefore recorded *beside* the
-actor, never instead of it, which is why it is a separate carrier here rather than a value written
-over `_current_actor`.
+neither. Attribution to "the agent" is what makes an audit trail worthless; attribution of an
+agent's act to a person is the D-040 failure repeated. The specialist is therefore recorded *beside*
+the actor, never instead of it, which is why it is a separate carrier here rather than a value
+written over `_current_actor`.
 
 **Plain `str`/`frozenset` values and nothing but `contextvars`**, which is what makes this kernel
 material: seven packages read the turn's actor — audit, the authz gate, the PR-gate, connector

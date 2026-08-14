@@ -25,7 +25,7 @@ merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the parts
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data and relations).
 
 Skills hold judgment; connectors hold capability (deterministic tools). Anything the agent
-generates enters the graph through a **PR-gate**, so a human signs off before it becomes knowledge.
+generates enters the graph through a **PR-gate**, so a human decides before it becomes knowledge.
 
 ## The code: `src/chemclaw/`
 

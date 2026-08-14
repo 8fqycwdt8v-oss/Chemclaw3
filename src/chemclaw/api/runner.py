@@ -473,7 +473,7 @@ async def run_turn(
         # returned, the history provider committed a complete user+assistant pair and no
         # `tool_use` is left without its result — the sole failure the rollback exists to
         # prevent. Undoing it anyway deleted a finished exchange from the conversation because
-        # the client dropped during the send of its answer. In a GxP system a silently vanished
+        # the client dropped during the send of its answer. A silently vanished
         # answer is worse than a lost turn. (The spent-plan marker used to ride along in that
         # snapshot, so reverting an answered turn's state re-armed the approval it had just used
         # as well; consumption is a durable column now — `plan_approvals.consumed_at` — so the

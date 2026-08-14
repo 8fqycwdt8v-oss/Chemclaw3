@@ -6,9 +6,9 @@ so every Postgres-backed test uses the same connect-check + migration (DRY); eac
 test file only constructs its own store on top of the migrated database.
 
 **Isolation.** Every table here is created in a dedicated schema, never the one the running
-system uses. Without that, the suite operates on live data: `test_audit_chain` truncates
-`audit_events` (the GxP hash chain) and leaves a deliberately corrupted row behind,
-`test_vector_index` truncates `note_index`, and the rest leak fixture rows permanently — a
+system uses. Without that, the suite operates on live data: `test_vector_index` truncates
+`note_index`, the audit suites append rows nothing cleans up, and the rest leak fixture rows
+permanently — a
 stray `id='CCO'` row from real ELN ingestion once tied with this suite's own `pg-ethanol`
 fixture and broke a similarity assertion. CI never noticed because its database is a
 throwaway container; a shared dev database is where this bites.

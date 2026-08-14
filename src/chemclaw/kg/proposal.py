@@ -1,9 +1,9 @@
 """The durable record of a note proposed to the PR-gate, and of what a human decided.
 
 Why this exists: the PR-gate is the control every other control in this system is justified by —
-"AI proposes, human signs off" (D-005) — and until now it terminated in a branch push. Nothing
-listed what was awaiting review, nothing told the chemist who proposed a note what became of it,
-and a rejection left no trace whatsoever, because a rejection is a deleted branch. A gate whose
+"the agent proposes, a human decides" (D-005) — and until now it terminated in a branch push.
+Nothing listed what was awaiting review, nothing told the chemist who proposed a note what became of
+it, and a rejection left no trace whatsoever, because a rejection is a deleted branch. A gate whose
 outcomes are invisible is a gate nobody operates.
 
 This module is the dependency-free half: the models, the two backends' contract, the in-memory

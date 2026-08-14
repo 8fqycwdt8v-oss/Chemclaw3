@@ -296,7 +296,7 @@ probes:
     direction: >-
       The PR-gate is the real answer and a good response points straight at it: agent-authored
       content is created as a proposal, carries created_by=agent, and reaches the knowledge graph
-      only through a pull request that a human merges — "AI proposes, human signs off". Report notes
+      only through a pull request that a human merges — the agent proposes, a human decides. Report notes
       pass the same gate. Bucket B because that gate governs knowledge notes, not controlled
       documents: there is no e-signature, no effective-date control, no training record and no QMS
       integration, and the answer must say so rather than let the PR-gate imply compliance it does

@@ -5,7 +5,7 @@ A completed calculation becomes an agent-authored `job-result` note and is propo
 
 This module is the *mapping only*, which is the connector split (the shape `connectors/bo/
 knowledge.py` already has): turning a QM result into a note is this domain's knowledge, so it lives
-in the bundle; pushing that note through the PR-gate is the GxP boundary, so it stays in core —
+in the bundle; pushing that note through the PR-gate is the review boundary, so it stays in core —
 `ConnectorJobWorkflow` publishes whatever note the result envelope carries, via the one
 `publish_memory_note_activity`. The `write_knowledge_node` activity that used to do both is gone: a
 connector must not be able to reach around the gate, and now it structurally cannot (D-118).

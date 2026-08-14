@@ -1,7 +1,7 @@
 -- Every agent-authored note ever submitted to the PR-gate, and what a human decided about it.
 --
--- The PR-gate is named in `CLAUDE.md`, `ARCHITECTURE.md`, `SECURITY.md` and D-005 as the GxP line
--- the whole system is justified by: AI proposes, a human signs off. In code it ended at a branch
+-- The PR-gate is named in `CLAUDE.md`, `ARCHITECTURE.md`, `SECURITY.md` and D-005 as the line the
+-- whole system is justified by: the agent proposes, a human reviews before it becomes knowledge. In code it ended at a branch
 -- push. `chemclaw.kg.git_submitter.submit` returns `note/<id>` and nothing calls a git platform,
 -- so there was no way to *list* what is awaiting review, no way for the chemist who proposed a
 -- note to see what became of it, and — the part that matters for an audit — **no record at all of

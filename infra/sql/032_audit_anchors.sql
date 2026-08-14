@@ -1,26 +1,11 @@
--- Signed high-water anchors over the audit chain — the one alteration the chain cannot see.
+-- RETIRED. Signed high-water anchors over the audit chain — how many rows the trail held at a
+-- moment, its tip hash, and an HMAC over all of it — because a *trailing* deletion (which is what a
+-- point-in-time restore is) left the surviving rows chaining cleanly and so was the one alteration
+-- the chain by itself could not see.
 --
--- `011_audit_hash_chain.sql` makes modification, reordering, interior deletion and *prefix*
--- truncation detectable, because each of those breaks a link. Deleting a *trailing* run does not:
--- the remaining rows still chain cleanly, and nothing recorded how many rows there should have
--- been. That limit is written into `cli/verify_audit_chain.py` and was deferred as a regulatory
--- question — until backup/restore made it an operational one. **A point-in-time restore is exactly
--- a trailing deletion.** Any restore silently shortens the compliance trail in the single way the
--- chain was built not to notice.
---
--- An anchor records what the trail looked like at a moment — how many rows, the highest id, and the
--- tip's `row_hash` — and signs it. Signed, because an actor who can delete rows can also insert a
--- lower anchor; the HMAC key (`CHEMCLAW_AUDIT_ANCHOR_SECRET`) is not in the database, so a forgery
--- needs something a database compromise alone does not give.
---
--- **This table is not by itself the control, and pretending otherwise would be the whole failure
--- again.** A PITR rolls the anchors back with the events. What makes a restore detectable is that
--- every anchor is *also* emitted to the process log at a stable marker (`audit_chain_anchor=`), so
--- it lands in a store Postgres cannot roll back — and an operator hands that recovered value to the
--- verifier with `--anchor`. The table is the convenient copy; the log line is the out-of-band one.
---
--- Append-only in use: nothing updates or deletes a row here, for the same reason nothing prunes
--- `audit_events`.
+-- The chain and the anchors were built for a regulated deployment and have been removed. Nothing
+-- writes this table; the schema is forward-only, so the statements below stay and re-running them
+-- on an existing database is a no-op.
 CREATE TABLE IF NOT EXISTS audit_anchors (
     id            BIGSERIAL PRIMARY KEY,
     taken_at      TIMESTAMPTZ  NOT NULL,
@@ -35,8 +20,8 @@ CREATE TABLE IF NOT EXISTS audit_anchors (
     chain_version INTEGER      NOT NULL,
     signature     TEXT         NOT NULL,
     -- Set only on an anchor written by a deliberate `--reseal` after a restore, naming who
-    -- accepted the gap and why. A GxP trail may be shortened by a legitimate recovery; what it may
-    -- never do is pretend it was not (`docs/guides/runbook.md` §(xiii)).
+    -- accepted the gap and why. A trail may be shortened by a legitimate recovery; what it may
+    -- never do is pretend it was not.
     reseal_reason TEXT         NOT NULL DEFAULT '',
     reseal_by     TEXT         NOT NULL DEFAULT ''
 );

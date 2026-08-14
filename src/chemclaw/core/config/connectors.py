@@ -48,7 +48,7 @@ class ConnectorSettings(BaseSettings):
     # service still starts, the failure is logged, reported by `/readyz` and counted by the
     # `chemclaw_connectors_unhealthy` gauge, and that connector's tools are simply not
     # reachable. `true` is fail-fast for a deployment where serving with a silently reduced tool
-    # surface is worse than not serving at all (the GxP posture).
+    # surface is worse than not serving at all (the fail-fast posture).
     connectors_required: bool = False
 
     # Bound on the startup health probe of one connector. Small: this runs before the service is

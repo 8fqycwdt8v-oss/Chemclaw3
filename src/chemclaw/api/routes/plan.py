@@ -1,7 +1,7 @@
 """The pre-execution plan gate: read the plan a session proposes, and record the human decision.
 
-These two routes are the HTTP half of the harness's GxP line (D-137/D-167): the agent proposes a
-plan, a human approves the exact plan they were shown (hash-bound), and `chemclaw.agent.plan_gate`
+These two routes are the HTTP half of the harness's approval line (D-137/D-167): the agent proposes
+a plan, a human approves the exact plan they were shown (hash-bound), and `chemclaw.agent.plan_gate`
 enforces the recorded decision. Deliberately routes and not agent tools — see `decide_plan`.
 """
 
@@ -77,7 +77,7 @@ async def decide_plan(
     principal: CurrentUser,
     live: CurrentSession,
 ) -> Response:
-    """Approve (or reject) a harness plan — the pre-execution GxP gate, finally enforced.
+    """Approve (or reject) a harness plan — the pre-execution gate, finally enforced.
 
     Deliberately an HTTP route and **not** an agent tool, for the same reason
     `POST /approvals/{id}/decision` is not (D-005): a model must never be able to authorize its

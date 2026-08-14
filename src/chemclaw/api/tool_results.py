@@ -67,7 +67,7 @@ _INSERT_BLOB = """
 # Guaranteed rather than hypothetical: `include_detailed_errors` is off (`agent/tool_authz.py`
 # documents why), so **every** unexpected tool exception in the system returns the same byte string
 # "Error: Function failed." — one blob per session for every failed call it ever makes, and the
-# `correlation_id` `StoredToolResult` calls "the join a GxP reviewer asks for" would name one
+# `correlation_id` `StoredToolResult` calls "the join a reviewer asks for" would name one
 # arbitrary turn among them.
 #
 # An empty column is the honest answer: these bytes are not one call's, so the store names no call.
@@ -124,7 +124,7 @@ class StoredToolResult(BaseModel):
     about the ones that are not.
 
     `correlation_id` rides along so a fetched result joins the audit trail and the logs of the turn
-    that produced it, which is the join a GxP reviewer asks for and the one a ref alone cannot make.
+    that produced it, which is the join a reviewer asks for and the one a ref alone cannot make.
 
     **Both `tool` and `correlation_id` are empty when the store cannot name one call**, and a
     reader must treat an empty one as "unknown" rather than as a value. A ref names *bytes*: two

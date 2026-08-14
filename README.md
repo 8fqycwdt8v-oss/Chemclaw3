@@ -76,6 +76,6 @@ per-phase status live in `docs/planning/implementation-tickets.md`.
 
 `SECURITY.md` describes the enforced posture (Entra OIDC at the front door, the
 `require_actor` reject-if-absent rule, the single `authorize_trigger` gate, role-scoped
-skills, the GxP audit trail and PR-gate), the `entra_required` enforcement switch, and the
+skills, the audit trail and PR-gate), the `entra_required` enforcement switch, and the
 live-infrastructure edges still open. Run shared/exposed deployments only with
 `entra_required=true`.

@@ -1,4 +1,4 @@
-"""Offboarding: the conversation is erasable, the GxP record is not (D-2026-08-08).
+"""Offboarding: the conversation is erasable, the record of what was done is not (D-2026-08-08).
 
 The two-tier rule in `chemclaw.agent.leaver` is a data-protection decision, so these tests assert
 the *line* rather than the plumbing: that a departed person's sessions, preferences and watches go,
@@ -162,7 +162,7 @@ def test_one_persons_erasure_leaves_another_persons_data_alone() -> None:
 
 
 def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
-    """The GxP half of the rule, and the half a caller must not be able to miss.
+    """The retained half of the rule, and the half a caller must not be able to miss.
 
     An attributable record that can be deleted on request is not an attributable record, and
     `audit_events` additionally carries a hash chain whose proof spans the rows either side of any

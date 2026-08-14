@@ -29,12 +29,12 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 - **Ambient identity, one carrier.** The runner stamps the validated identity into
   `src/chemclaw/core/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
   and skill scoping all read it there, so concurrent turns never cross identities.
-- **GxP audit trail.** `src/chemclaw/agent/audit.py` logs every agent tool call once (correlation id, actor,
+- **The audit trail.** `src/chemclaw/agent/audit.py` logs every agent tool call once (correlation id, actor,
   truncated args, outcome, latency) via a single middleware, with an optional append-only Postgres
   `audit_events` sink (default log-only).
 - **The PR-gate.** Anything the agent generates (job results, notes, reports, distilled playbooks)
   enters the knowledge graph only through a human-reviewed pull request. The agent can *propose*
-  truth; it cannot *merge* it — the "AI proposes, human signs off" GxP line.
+  truth; it cannot *merge* it — the agent proposes, a human decides.
 - **Transport identity (non-Entra bridges).** Identity rides *inside* the workflow payload, so the
   transports are authenticated separately: Temporal by mTLS (`temporal_tls_*`) or a Cloud API key,
   and the HPC launcher by a bridged/mounted token (F4-T6). Backend pods mint their own short-lived
@@ -43,10 +43,10 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 
 ## Data handling & logging (PII in the audit trail)
 
-The GxP audit trail records **who ran what**: alongside the actor's Entra `oid`, it stores each tool
+The audit trail records **who ran what**: alongside the actor's Entra `oid`, it stores each tool
 call's *arguments*, which are user free text (a chemist's message, a confirmed-answer payload) and so
-may contain PII or confidential chemistry. This is intentional — GxP requires an attributable "who
-did what to which inputs" record — but it has data-handling consequences:
+may contain PII or confidential chemistry. This is intentional — the trail exists to be an
+attributable "who did what to which inputs" record — but it has data-handling consequences:
 
 - **Bounded, not omitted.** `agent_audit_max_arg_chars` (default 200) caps how much of each argument
   is stored, so a record cannot balloon, but the excerpt is still real user content.

@@ -213,7 +213,7 @@ def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
 def test_a_recorded_proposal_carries_the_turn_that_made_it(
     store: InMemoryProposalStore,
 ) -> None:
-    """Who proposed this note — the provenance half of "AI proposes, human signs off".
+    """Who proposed this note — the provenance half of "the agent proposes, a human decides".
 
     `propose_note` reads `(actor, session_id, correlation_id)` ambiently and stamps them on the
     row. Nothing asserted that it does, and the three fields default to `""`, so dropping any of

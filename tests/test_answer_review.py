@@ -8,7 +8,7 @@ seven-day hold resolves instantly.
 The property worth a server-backed test rather than a unit test is that **"nobody looked" is not
 filed as "somebody agreed"**. A hold that expired and a hold a human dismissed both end with no
 objection outstanding, and only the workflow's own terminal state tells them apart — which is
-exactly the distinction a GxP trail is for.
+exactly the distinction an audit trail is for.
 """
 
 import asyncio

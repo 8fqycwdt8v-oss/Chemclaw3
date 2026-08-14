@@ -1,8 +1,14 @@
-"""The durable Postgres audit sink persists a GxP tool-audit row (INV-3).
+"""The durable Postgres audit sink persists a tool-audit row (INV-3).
 
-`PostgresAuditSink` is the compliance-relevant "who ran what" record; it had no direct test. This
-proves an append-only round trip against a real database (CI provides one; the offline sandbox
-skips): a recorded `AuditEvent` lands in `audit_events` with every field intact.
+`PostgresAuditSink` is the "who ran what" record; it had no direct test. This proves an append-only
+round trip against a real database (CI provides one; the offline sandbox skips): a recorded
+`AuditEvent` lands in `audit_events` with every field intact, and concurrent appenders lose nothing.
+
+The concurrency test came from the deleted concurrency-chain suite, which drove twenty-four
+writers at the sink to prove the hash chain could not fork under a lost advisory lock.
+The chain is gone and so is the lock, but the other half of what that test measured is not about
+the chain at all: an insert that races another insert must still arrive. Rows are independent now,
+so there is no ordering to get wrong — only the arrival, which is what is asserted here.
 """
 
 import asyncio
@@ -12,7 +18,13 @@ import psycopg
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.core.config import settings
+from chemclaw.core.db import connect
 from tests.pg import migrated_db_or_skip
+
+# Enough writers that a sink dropping rows under contention shows up as a count, not a coin flip.
+# Each is its own sink and therefore its own connection, which is what a second pod is; sharing one
+# would serialize them in the client and prove nothing.
+_WRITERS = 24
 
 
 def test_postgres_audit_sink_persists_an_event() -> None:
@@ -51,5 +63,44 @@ def test_postgres_audit_sink_persists_an_event() -> None:
         assert row[3] == "ok"
         assert row[4] == "job qm-1 started"
         assert float(row[5]) == 12.5
+
+    asyncio.run(_run())
+
+
+def _race_event(index: int) -> AuditEvent:
+    """One distinguishable audit event — distinct fields so a lost row is a detectable loss."""
+    return AuditEvent(
+        correlation_id=f"c-race-{index}",
+        actor="u-race",
+        tool="find_notes",
+        arguments=f'{{"text": "race {index}"}}',
+        outcome="ok",
+        detail=f"concurrent append {index}",
+        latency_ms=float(index),
+    )
+
+
+def test_concurrent_appends_all_arrive() -> None:
+    """Twenty-four sinks append at once and every event is in the trail afterwards.
+
+    Counted by `correlation_id` rather than over the whole table, so this needs no `TRUNCATE` and
+    cannot be perturbed by another test's rows — which is also why it is safe to run beside the
+    round-trip test above against one shared schema.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+
+        await asyncio.gather(
+            *(PostgresAuditSink().record(_race_event(index)) for index in range(_WRITERS))
+        )
+
+        async with await connect(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT count(*) FROM audit_events WHERE correlation_id LIKE 'c-race-%'"
+            )
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == _WRITERS, f"{row[0]} of {_WRITERS} concurrent appends survived"
 
     asyncio.run(_run())

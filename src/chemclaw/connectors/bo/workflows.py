@@ -185,7 +185,7 @@ class BoCampaignWorkflow:
 
         # The recommendation as a PR-gated note (step 1d.5) — *built* here, because the BO→note
         # mapping is this domain's knowledge, and *published* by core, because the PR-gate is
-        # the GxP boundary and a connector must not be able to reach around it. Best-effort
+        # the review boundary and a connector must not be able to reach around it. Best-effort
         # publishing (a failed git write must never fail a completed campaign) is core's
         # discipline too, so this workflow no longer carries it.
         # Always built, never conditional: whether it is *published* is the manifest's

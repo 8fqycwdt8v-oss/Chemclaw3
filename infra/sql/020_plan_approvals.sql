@@ -1,6 +1,6 @@
 -- The pre-execution approval a human gives a harness plan (D-137 / REV-1).
 --
--- `SECURITY.md` and `docs/guides/harness-konzept.md` §6 describe a GxP gate: in `plan_only` the agent
+-- `SECURITY.md` and `docs/guides/harness-konzept.md` §6 describe an approval gate: in `plan_only` the agent
 -- proposes and waits for a human before executing. In practice MAF injected a `mode_set` tool into
 -- the model's own tool surface, so the agent flipped itself — and the audit middleware recorded
 -- that flip under the *chemist's* Entra oid, because it attributes every tool call to the ambient
@@ -15,7 +15,7 @@
 -- authorization. The hash is over the rendered todo lines the chemist actually saw, so a changed
 -- plan is a different key and is unapproved until someone approves it too.
 --
--- Rows are kept, never updated: a decision is a GxP record of something a person did at a moment,
+-- Rows are kept, never updated: a decision is a record of something a person did at a moment,
 -- and a second decision on the same plan is a second record. `decided_at` orders them, and the
 -- read path takes the latest — so a rejection after an approval revokes it, which is the
 -- behaviour a human would expect from clicking "no" second.

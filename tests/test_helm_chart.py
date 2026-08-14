@@ -8,7 +8,7 @@ Two failure modes live in that gap, and both are silent until production:
 1. **A key that is not a field** — pydantic-settings tolerates an unknown prefixed *environment*
    variable (unlike an unknown key in a `.env` file, which is what broke the quickstart in DA-1),
    so the operator who sets it gets no error and no effect. A setting they believe they turned on
-   is quietly ignored. In a GxP deployment that is worse than a crash.
+   is quietly ignored. For a deployment that is worse than a crash.
 2. **A malformed value on a real field** — this one *does* crash, at import, in every pod at once.
 
 These tests close both, offline, against the same `Settings` the pods construct.
@@ -231,15 +231,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     works. Note the polarity: an *absent* secret is safe here (the route refuses to decide
     anything), unlike the four above, where absent means the capability fails.
 
-    The audit-anchor key is the sixth (D-2026-08-01-a-restore-is-a-truncation-nobody-can-see), and
-    it is a secret for the reason that makes the anchor evidence rather than a note-to-self: an
-    actor able to delete audit rows is able to insert a lower anchor too, so the seal only means
-    something if its key lives somewhere a database compromise does not reach. It shares the
-    webhook secret's polarity — absent is *safe* rather than broken. The chain keeps catching
-    modification, reordering, interior deletion and prefix truncation, and a point-in-time restore
-    stays what it has always been: a trailing deletion nothing can see.
-
-    The framing envelope key is the seventh, and it is the first to land in `optionalKeys` rather
+    The framing envelope key is the sixth, and it is the first to land in `optionalKeys` rather
     than `keys` — a distinction that exists because putting it in `keys` broke every upgrade.
     `chemclaw.env` renders `keys` as a **required** `secretKeyRef`, and `secrets.create` defaults to
     false, so the Secret is operator-managed and predates any chart version naming a new key: a
@@ -262,7 +254,6 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_POSTGRES_DSN",
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
-        "CHEMCLAW_AUDIT_ANCHOR_SECRET",
     }
     assert set(_VALUES["secrets"]["optionalKeys"].values()) == {
         "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
@@ -535,33 +526,6 @@ def test_the_shipped_budget_guard_actually_refuses_a_turn(monkeypatch: pytest.Mo
     with pytest.raises(Exception) as refused:
         tracker.check("s1", "alice")
     assert "budget" in str(refused.value).lower() or "cap" in str(refused.value).lower()
-
-
-def test_the_shipped_config_schedules_the_audit_chain_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The tamper-evident chain is verified on a Schedule under the shipped values (REV-16).
-
-    `audit_verify_enabled` "only earns a Schedule where a durable audit sink is actually
-    configured" — and this chart sets `SESSION_STORE: postgres`, which is precisely what makes
-    `default_audit_sink()` durable. So the precondition holds here and the flag was still off: the
-    one deployment that *has* a chain was the one never checking it, and a chain nobody checks
-    detects tampering only after somebody thinks to look.
-
-    Asserted on the built schedule list rather than on the flag, because the flag is one branch
-    away from a schedule that is planned but never applied.
-    """
-    from chemclaw.durable import schedules as schedules_module
-
-    chart = _settings_from_chart(monkeypatch)
-    assert chart.session_store == "postgres", "no durable audit sink; the precondition changed"
-    monkeypatch.setattr(schedules_module, "settings", chart)
-
-    planned = {job.schedule_id for job in schedules_module.planned_schedules()}
-    assert "audit-verify" in planned, (
-        "the shipped configuration plans no audit-chain verification, so the GxP hash chain is "
-        "only ever checked by someone remembering to run `make audit-verify`"
-    )
 
 
 def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(

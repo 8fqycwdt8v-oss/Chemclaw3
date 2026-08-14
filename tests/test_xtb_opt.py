@@ -88,7 +88,7 @@ def test_non_convergence_raises_rather_than_returning_a_geometry() -> None:
 
 
 def test_optimized_structure_records_its_origin() -> None:
-    """The output geometry carries the key of the calculation that produced it (GxP)."""
+    """The output geometry carries the key of the calculation that produced it."""
     result = optimize_structure(OptSpec(), structure_from_smiles("O", optimize=True))
     assert (
         result.structure.origin

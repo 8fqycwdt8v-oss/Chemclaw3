@@ -175,7 +175,7 @@ not binding.**
   does not need to — it synthesizes no prose, only renders retrieved chunks. The module docstring
   reads as though the gate runs inside the report; it does not, and the report is safe for a
   different reason.
-- **17.2** a boundary between autonomous and sign-off work — the PR-gate is real and binding for
+- **17.2** a boundary between autonomous and reviewed work — the PR-gate is real and binding for
   *knowledge notes*. Nothing gates a drafted document.
 - **17.3** an audit trail — genuinely hash-chained and verified by `make audit-verify`. But
   `AuditEvent.purpose` is deliberately unpopulated, so the trail records *what* and not *why*.

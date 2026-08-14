@@ -1,6 +1,6 @@
 """What the two BO writers are allowed to claim about *who* proposed an experiment.
 
-`bo_campaigns.opened_by` and `bo_suggestions.actor` are the GxP answer to "who framed this
+`bo_campaigns.opened_by` and `bo_suggestions.actor` are the answer to "who framed this
 decision space" — `agent/leaver.py` retains them for exactly that reason, where it erases the
 conversation around them. Two code paths write those columns, and until this module they wrote
 them with equal confidence from unequal evidence:

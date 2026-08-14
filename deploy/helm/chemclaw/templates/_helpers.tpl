@@ -35,7 +35,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
        ambient environment: either LANGSMITH_TRACING or LANGCHAIN_TRACING_V2 being truthy sends
        conversation content to api.smith.langchain.com. It is off by default today (measured), which
        is exactly the kind of fact that changes in a patch release or gets set by a base image. A
-       GxP deployment's egress posture should not rest on a library default, so both names are
+       deployment's egress posture should not rest on a library default, so both names are
        pinned false here, beside the NetworkPolicy that is the other half of the control. */}}
 - name: LANGSMITH_TRACING
   value: "false"
