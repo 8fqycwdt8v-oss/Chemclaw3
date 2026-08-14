@@ -18,9 +18,10 @@ doing DDL against a live database with neither.
 transactional, and there is a single commit at the end), so a transaction-scoped lock covers
 exactly the right span and is released by the commit, the rollback, or the connection dropping —
 there is no path that leaks it. The second migrator then waits, and finds every file already
-recorded in `schema_migrations`. This is the same mechanism `agent/audit_store.py` uses to keep two
-appends from forking the hash chain (`infra/sql/011`), which is what made its absence here
-conspicuous: the audit writer serialized its *inserts* and the migrator did not serialize its *DDL*.
+recorded in `schema_migrations`. This is the same mechanism `agent/audit_store.py` used to keep two
+appends from forking the audit hash chain, which is what made its absence here conspicuous: the
+audit writer serialized its *inserts* and the migrator did not serialize its *DDL*. That chain and
+its lock are gone (D-2026-08-14); this lock is not, because DDL still races.
 
 `lock_timeout` bounds how long a statement waits for a table lock. It is not a nicety and it is not
 `statement_timeout`: an `ALTER TABLE` needs `ACCESS EXCLUSIVE`, Postgres's lock queue is FIFO, and a

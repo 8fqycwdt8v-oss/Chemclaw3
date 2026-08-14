@@ -164,10 +164,10 @@ def test_one_persons_erasure_leaves_another_persons_data_alone() -> None:
 def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
     """The retained half of the rule, and the half a caller must not be able to miss.
 
-    An attributable record that can be deleted on request is not an attributable record, and
-    `audit_events` additionally carries a hash chain whose proof spans the rows either side of any
-    deletion. So the row stays — and the report *names it and counts it*, because a partial erasure
-    that looks complete is worse than one that refuses out loud.
+    An attributable record that can be deleted on request is not an attributable record, and for a
+    tool call that changed nothing durable the trail is the only place it is recorded at all. So the
+    row stays — and the report *names it and counts it*, because a partial erasure that looks
+    complete is worse than one that refuses out loud.
     """
 
     async def _run() -> None:
