@@ -33,11 +33,19 @@ parameter shapes* in an answer that no tool in the turn produced. It is a heuris
 not a proof of grounding, and it exists because prompting was measured to be insufficient — see its
 own docstring.
 
-Confidence *routing* (stamping a low-confidence answer so a surface can flag it for review) lives in
-`api/runner.py`; this module only scores. The durable hold itself exists (D-032's
-`InteractionApprovalWorkflow`), but nothing routes a `review_required` answer into it, so today a
-low-confidence answer is marked, not blocked. That wiring is the deferred part; see
-docs/planning/DEFERRED.md.
+**`score_answer` is where the checks combine, and it is here rather than in either caller because
+two callers need one answer.** `agent/challenge_gate.py` needs the verdict *inside* the graph, to
+decide whether a solo turn is worth putting to a review panel while the turn can still be revised;
+`api/runner_answer.build_answer_event` needs it to stamp the event. A second copy of the combination
+rules would let the two paths disagree about whether the same answer is flagged, and the judge is a
+paid call, so scoring twice would also double what an enabled deployment pays per turn.
+
+What this module still does not do is *act* on a verdict. It scores; the gate routes. A
+low-confidence answer is delivered marked rather than withheld — that part is unchanged, and the
+half that is no longer true of it is the hold: `durable/answer_review.py` now opens one when a
+challenge panel upholds an objection (D-2026-08-13), so a human decision does outlive the session.
+Withholding the answer itself remains deferred, and `docs/planning/DEFERRED.md` carries the row with
+what would close it.
 """
 
 import asyncio
@@ -346,6 +354,101 @@ async def verify_answer(
     # degrades to the citation check rather than dropping verification entirely.
     record_metric(lambda metrics: metrics.increment("chemclaw_verifier_degraded_total"))
     return _deterministic_result(answer, evidence)
+
+
+class TurnReview(BaseModel):
+    """Everything known about a finished answer's trustworthiness, computed once.
+
+    Produced by `score_answer` below, which is the one implementation of the combination rules.
+    Two callers need it: `agent/challenge_gate.py` decides whether a solo turn is worth putting to
+    the panel, and `api/runner_answer.build_answer_event` stamps the `AnswerEvent` from it. **One
+    instance because the LLM judge is one paid call** — scoring in both would put two judge calls on
+    every turn's hot path, so the gate publishes what it computed and the runner reads it.
+    """
+
+    confidence: float | None = None
+    verified_by: Literal["judge", "citation-gate"] | None = None
+    unsupported: list[str] = Field(default_factory=list)
+    review_required: bool = False
+    # Whether the panel ran *and* reached quorum. Distinct from `review_required`, which any of the
+    # three checks can set: a reviewer wants to know that independent agents agreed on a stated
+    # objection, which is a different weight of evidence from a confidence score under a threshold.
+    challenged: bool = False
+    # The durable hold opened for a human decision, when one was. `None` means no hold — either
+    # nothing was upheld, or Temporal was unreachable and the answer went out marked anyway.
+    hold_id: str | None = None
+
+
+async def score_answer(
+    answer: str, tool_outputs: Sequence[str], tools_called: Sequence[str] = ()
+) -> TurnReview:
+    """Run whichever honesty checks this deployment enabled, and combine them into one verdict.
+
+    **The single implementation of the combination rules**, called by
+    `api/runner_answer.build_answer_event` on the ungated path and by `agent/challenge_gate.py`
+    inside the graph. It lives here rather than in either caller because both need the same answer
+    and neither may own it: the gate cannot import from `chemclaw.api` without inverting a layer,
+    and the runner cannot be the authority on a decision the graph has to make before the runner
+    exists. A second copy would let two paths disagree about whether the same answer is flagged.
+
+    Three rules, each learned from a defect rather than designed:
+
+    - **Each check flags independently.** They measure different things, so an answer that passes
+      one and fails the other is a flagged answer.
+    - **A check that was configured on and did not complete flags.** Leaving the flag false on a
+      crash made a failed verification indistinguishable from a clean verdict.
+    - **A verdict the judge did not produce flags, with its reason stated.** The citation gate
+      scores *resolvability* and the judge scores *faithfulness*, and measured, the substitute is
+      the more generous: the same cited-but-contradicted answer scored 1.0/supported degraded
+      against 0.0/unsupported judged. A verdict that could not be taken must not clear the gate on
+      strength of a check that never ran.
+
+    Args:
+        answer: The finished answer text.
+        tool_outputs: What this turn's tools returned, untruncated.
+        tools_called: Every tool this turn invoked, for the promised-but-uncalled scan.
+
+    Returns:
+        The verdict. Never raises: a check that fails flags the answer rather than sinking the turn.
+    """
+    review = TurnReview()
+    if settings.verifier_enabled:
+        try:
+            result = await verify_turn_answer(answer, tool_outputs)
+        except Exception:
+            logger.exception("answer verification crashed; routing the turn to review")
+            review.unsupported = ["verification did not run"]
+            review.review_required = True
+        else:
+            review.confidence = result.confidence
+            review.verified_by = result.verified_by
+            review.unsupported = [claim.text for claim in result.unsupported]
+            review.review_required = result.confidence < settings.verifier_confidence_threshold
+            # `answer.strip()` because an empty turn already emits its own `empty_answer` error
+            # event, and "review this empty answer, maximum confidence" is not a judgement anyone
+            # can use.
+            if result.verified_by != "judge" and answer.strip():
+                review.unsupported = [
+                    *review.unsupported,
+                    "verified by the citation gate only; the judge did not run",
+                ]
+                review.review_required = True
+    if settings.answer_shape_gate_enabled:
+        shapes = [
+            *ungrounded_parameter_shapes(answer, tool_outputs),
+            *promised_uncalled_tools(answer, tools_called),
+        ]
+        if shapes:
+            # WARNING because this is the signal an operator tunes the gate on — how often it fires,
+            # and on what — and the matched text is in the message so a false positive is
+            # diagnosable without reading the transcript.
+            logger.warning(
+                "answer marked for review: claims no tool in this turn supports (%s)",
+                "; ".join(shapes),
+            )
+            review.unsupported = [*review.unsupported, *shapes]
+            review.review_required = True
+    return review
 
 
 def _mentions(text: str, note_id: str) -> bool:

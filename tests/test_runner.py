@@ -22,8 +22,8 @@ from typing import Any
 import pytest
 
 import chemclaw.agent.verifier as verifier
+import chemclaw.agent.verifier as verifier_module
 import chemclaw.api.runner as runner
-import chemclaw.api.runner_answer as runner_answer
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.loop_cap import record_loop_cap
 from chemclaw.agent.session import TurnSession
@@ -102,7 +102,7 @@ def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
             verified_by="judge",
         )
 
-    monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
+    monkeypatch.setattr(verifier_module, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
     assert answer.confidence == 0.2
     assert answer.unsupported_claims == ["Yield was 90%"]
@@ -119,7 +119,7 @@ def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) 
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(claims=[], confidence=1.0, verified_by="judge")
 
-    monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
+    monkeypatch.setattr(verifier_module, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
     assert answer.confidence == 1.0
     assert answer.review_required is False  # 1.0 >= 0.7 threshold
@@ -135,7 +135,7 @@ def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.Monk
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(claims=[], confidence=0.7, verified_by="judge")
 
-    monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
+    monkeypatch.setattr(verifier_module, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
     assert answer.confidence == 0.7
     assert answer.review_required is False  # meeting the threshold is acceptable, not sub-threshold
@@ -282,7 +282,7 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
     async def _boom(answer: str, *_: Any, **__: Any) -> VerificationResult:
         raise RuntimeError("verifier down")
 
-    monkeypatch.setattr(runner_answer, "verify_turn_answer", _boom)
+    monkeypatch.setattr(verifier_module, "verify_turn_answer", _boom)
     answer = _answer(_run_turn())
     assert answer.text == "Yield was 90% [[reaction-a]]."
     assert answer.confidence is None

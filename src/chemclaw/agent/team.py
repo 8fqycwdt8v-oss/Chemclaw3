@@ -10,9 +10,26 @@ one level down.
 **What a team buys, and what it costs.** A single agent holding sixty tools chooses badly among
 them and pays for the whole surface in every prompt; five agents holding a dozen each choose within
 a coherent set. The cost is that a supervisor which mis-routes is *worse* than no team at all —
-which is why this ships disabled (`settings.agent_teams_enabled`) until M12 measures routing
-accuracy and per-specialist token cost against the single-agent baseline. A capability that is not
-yet known to help is not a default.
+which is why this ships disabled (`settings.agent_teams_enabled`). A capability that is not yet
+known to help is not a default.
+
+**The five names are surfaces now, not a routing partition, and that is a changed decision.** M12
+measured what the partition framing bought and the answer was 2 delegations in 15
+(`D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate.md`), for a structural
+reason that no prompt could reach: the supervisor holds every tool its specialists hold, so
+"delegate to whoever has the tool" is always advice to take a longer path to something already in
+hand. That ADR's own lever was to invert invariant 1 and narrow the supervisor. This module takes
+the other road — the surfaces stay exactly as they are, and the *reason to spawn* goes back to
+upstream's: isolation, parallelism, and a second agent's independent look, none of which the
+supervisor's inventory makes redundant. So `SPECIALISTS` is the list of tool-sets a helper may run
+on, and which one to pick is a question about the work's tools rather than about who is allowed to
+answer. See `_TASK_TOOL_DESCRIPTION` for the argument in full.
+
+**Whatever spawns, the answer is challenged.** `agent/challenge_gate.py` puts a finished answer to a
+panel of independently-briefed agents, and it treats a *team* — two or more helpers, counted here by
+`_count_delegation` — as unconditionally worth challenging, because work split across contexts is
+exactly the case where nothing saw the whole thing. That gate is this module's main consumer besides
+the graph builder, and `delegations()` is the seam.
 
 **The four invariants, and where each one lives.** They are what the ADR records, and three of them
 needed code that did not exist:
@@ -56,6 +73,8 @@ import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, cast
 
 from deepagents.backends import StateBackend
@@ -68,11 +87,18 @@ from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# The five specialists, in the order a supervisor is told about them. One per natural capability
-# cluster across the seven connector bundles and the in-process surface — the clusters are the
-# reason there are five rather than one per bundle: `evidence` spans the knowledge graph, the
-# fingerprint search and the job history, while `qm` and `calc` are one specialist because
+# The five surfaces a helper may run on, in the order a supervisor is told about them. One per
+# natural capability cluster across the seven connector bundles and the in-process surface — the
+# clusters are the reason there are five rather than one per bundle: `evidence` spans the knowledge
+# graph, the fingerprint search and the job history, while `qm` and `calc` are one surface because
 # "compute a property" is one job whichever engine answers it.
+#
+# Still five profiles and still the same five files; what changed is what naming one *means*. It
+# used to answer "who should handle this question" and now answers "which tools should this helper
+# hold", because the first question had no good answer from a supervisor holding every tool (see the
+# module docstring). The tuple keeps its name: it is cited by four merged ADRs and read by
+# `langgraph_agent._team_middleware`'s recursion guard, and renaming it would cost every citation to
+# buy a more accurate word.
 SPECIALISTS: tuple[str, ...] = ("evidence", "computation", "design", "safety", "reporting")
 
 # The specialist that may never be narrowed out of a team. Named rather than inlined because two
@@ -81,47 +107,126 @@ SPECIALISTS: tuple[str, ...] = ("evidence", "computation", "design", "safety", "
 REQUIRED_SPECIALIST = "safety"
 
 _SUPERVISOR_PROMPT = (
-    "You lead a team of specialists. Delegate a question to the specialist whose surface fits it "
-    "rather than answering from memory, wait for what it returns, and assemble the final answer "
-    "yourself with the citations it gave you. Delegate to `evidence` for what this programme "
-    "already knows, `computation` for a property or a quantum-chemistry job, `design` for which "
-    "experiment to run next, `safety` for any hazard, genotoxicity or impurity-limit question, and "
-    "`reporting` to turn finished work into a report or a proposed note. Ask `safety` whenever the "
-    "work involves handling a substance, whether or not the chemist raised it."
+    "You can hand work to helper agents that run with their own context and report back. Spawn one "
+    "when the work is large enough to be worth isolating, when independent parts can proceed at "
+    "once, or when a second agent looking at something separately would be more reliable than you "
+    "doing it inline — and answer directly when none of that is true. A one-step lookup you can do "
+    "yourself is not worth a helper.\n\n"
+    "Each helper runs on a named *surface* — the set of tools it holds. Pick the surface whose "
+    "tools the work needs (`evidence` for finding what this programme already knows, `computation` "
+    "for a property or a quantum-chemistry job, `design` for which experiment to run next, "
+    "`safety` for hazard, genotoxicity and impurity-limit work, `reporting` for turning finished "
+    "work into a report or a proposed note) and write that helper its own brief: it cannot see "
+    "this "
+    "conversation, so tell it what to do and what to return. Send independent briefs together so "
+    "they run at once.\n\n"
+    "Consult `safety` whenever the work involves handling a substance, whether or not the chemist "
+    "raised it. Assemble the final answer yourself from what comes back, keeping the citations the "
+    "helpers gave you."
 )
 
-# What the `task` tool says it is for. Overridden for the same reason `_SUPERVISOR_PROMPT` is: this
-# deployment's subagents are not upstream's.
+# What the `task` tool says it is for.
 #
-# **Upstream's description describes a different mechanism.** It opens "Launch an ephemeral subagent
-# to handle complex, multi-step independent tasks with isolated context windows" — the tool as a
-# context-window optimisation, to be reached for when a job is big. Chemclaw's specialists are a
-# *capability partition*: each holds a different set of tools, one of them (`safety`) is a gate
-# rather than a convenience, and the question of which to use is not "is this big enough to be
-# worth isolating" but "whose surface answers this". So the supervisor was reading a system prompt
-# that told it to route every question by surface and a tool description that told it the tool was
-# for complex multi-step work — and on a one-tool question those disagree.
+# **This is a deliberate return to upstream's framing, and it reverses one half of
+# `docs/decisions/D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate.md`.**
+# That ADR replaced upstream's "launch an ephemeral subagent to handle complex, multi-step
+# independent tasks with isolated context windows" with a capability-partition description, on the
+# sound observation that the system prompt and the tool description were then telling the
+# supervisor two different things. It measured the result: still 1 of 15, then 2 of 15 — and
+# diagnosed why in its own §"What it actually is": `reject_widening` makes specialists ⊆ supervisor,
+# so "delegating is always a strictly longer path to a tool already in hand… and the model
+# declining it is the model being right".
 #
-# Measured, and the measurement is why this is not a guess about prompts: against the 15-probe
-# routing corpus, whose specialist is unambiguous by construction, the supervisor delegated **1**.
-# Rewriting the five specialist descriptions from identity to capability (see `_description`) left
-# it at 1, which is what ruled the menu out as the binding constraint and pointed here.
+# That diagnosis is correct and it is an argument about **delegating to reach a capability**. It
+# says nothing about delegating for context isolation, for parallelism, or for a second agent's
+# independent look — none of which the supervisor's own tool inventory makes redundant. The ADR's
+# named lever was to invert invariant 1 so the supervisor *lacks* what its specialists hold; this
+# takes the other road, which costs no invariant: keep the surfaces exactly as they are, and give
+# the supervisor back the reason to spawn that upstream always had.
+#
+# The two descriptions no longer disagree, which was the real defect that ADR found: the system
+# prompt above and this text now say the same thing, that a helper is worth spawning when work is
+# large, parallelisable or better checked separately, and that the surface is *which tools it gets*
+# rather than *why you delegated*.
 #
 # `{available_agents}` is upstream's placeholder and is filled with the `- name: description` menu.
 _TASK_TOOL_DESCRIPTION = (
-    "Hand a question to the specialist whose tools answer it, and wait for what it returns.\n\n"
-    "Available specialists and what each one is for:\n{available_agents}\n\n"
-    "These are not context-isolation helpers to reach for only when a job is large. They are this "
-    "system's capability partition: each specialist holds a different set of tools and a different "
-    "set of skills, and the supervisor's own surface is the union of theirs. A question with one "
-    "obvious tool still belongs to the specialist that holds it — being small is not a reason to "
-    "answer it yourself, because the specialist is the one carrying the domain rules for reading "
-    "that tool's output.\n\n"
-    "Give `description` the whole question plus any context the specialist needs, and say what to "
-    "return: it cannot see the conversation and you cannot send it a follow-up. Delegate "
-    "independent parts of a question in one message so they run at once. Assemble the final answer "
-    "yourself from what comes back, keeping the citations it gave you."
+    "Hand a piece of work to a helper agent with its own context, and wait for its report.\n\n"
+    "Available surfaces — the tools a helper gets, not the reason to spawn one:\n"
+    "{available_agents}\n\n"
+    "Spawn a helper when the work is big enough that isolating it helps, when independent pieces "
+    "can run at the same time, or when having it checked separately is worth more than doing it "
+    "inline. Do the work yourself when none of those hold — a single lookup does not need a "
+    "helper.\n\n"
+    "`subagent_type` picks the surface whose tools the work needs. `description` is the helper's "
+    "entire brief: it cannot see this conversation and you cannot send it a follow-up, so state "
+    "the task, the context it needs, and exactly what to return. Send independent briefs in one "
+    "message "
+    "so they run at once. Assemble the final answer yourself from what comes back, keeping the "
+    "citations the helpers gave you."
 )
+
+
+@dataclass(slots=True)
+class _DelegationTally:
+    """How many specialists this turn has entered — the challenge gate's team-vs-single trigger."""
+
+    count: int = 0
+
+
+_tally: ContextVar[_DelegationTally | None] = ContextVar("chemclaw_delegations", default=None)
+
+
+def begin_delegation_tally() -> object:
+    """Start counting this turn's delegations; returns a token for `end_delegation_tally`.
+
+    **A contextvar holding a mutable record, not a state field, and the reason is where the count is
+    written.** `running_specialist` runs inside a tool call, several nodes deep — there is no state
+    update to return from there, and a middleware that tried to derive the count from the message
+    list afterwards would be inferring what this records. That is precisely the trade
+    `agent/loop_cap.py` documents, and this is the same carrier for the same reasons: it is
+    task-local, so concurrent turns cannot see each other's counts; it is absent off the graph path
+    (a template step, a CLI call), where `delegations()` reads 0 and the gate correctly does
+    nothing.
+
+    **Mutated rather than rebound**, which is what makes it survive the hop. LangGraph's executor
+    and LangChain's sync-in-async bridge both spawn with `copy_context()`, so a child task gets a
+    *copy* of the contextvar mapping: rebinding inside a specialist's task would be invisible to the
+    middleware that reads it, while mutating the record both copies point at is not. The same
+    mechanism `loop_cap.record_loop_cap` relies on, and the same trap avoided.
+    """
+    return _tally.set(_DelegationTally())
+
+
+def end_delegation_tally(token: object) -> None:
+    """Tear the turn's tally down (mirrors every other ambient's reset)."""
+    _tally.reset(token)  # type: ignore[arg-type]
+
+
+def delegations() -> int:
+    """How many specialists this turn entered to do work — 0 where nothing started a tally.
+
+    Safe to ask unconditionally, which is what makes the gate's trigger a plain comparison: no
+    tally, no delegations, so a turn that never ran through the graph path reads 0 rather than
+    raising.
+
+    Counts *work* only. The challenge panel's own members are bracketed by `running_specialist` for
+    attribution but never counted here — see that function for why conflating the two would make
+    the gate mistake its own panel for a team.
+    """
+    tally = _tally.get()
+    return 0 if tally is None else tally.count
+
+
+def _count_delegation() -> None:
+    """Record that one specialist was invoked to do work.
+
+    Mutated rather than rebound, which is what makes the count survive the hop into the specialist's
+    own task — see `begin_delegation_tally`.
+    """
+    tally = _tally.get()
+    if tally is not None:
+        tally.count += 1
 
 
 class TeamError(ValueError):
@@ -217,6 +322,15 @@ def running_specialist(name: str, reason: str = "") -> Iterator[None]:
     the stream's pair of events are the same `try`/`finally`. The exit fires in the `finally` for
     the reason the unstamp does: a specialist that raises has still stopped running, and a trace
     that never closes the handoff would show a turn stuck inside a specialist it left.
+
+    **The turn's delegation count is deliberately *not* incremented here**, and the reason is that
+    two different things reach this bracket. Work delegations arrive through
+    `_AttributedSpecialist`; the challenge panel (`agent/challenge.py`) also brackets each of its
+    members here, because a challenger's tool calls need attributing to it exactly as a specialist's
+    do. But a challenger does not contribute to the answer — it reviews one — and counting it would
+    make the gate's own panel look like a team on the revision pass, so a turn that delegated once
+    would be challenged unconditionally the second time round. `_count_delegation` is therefore
+    called from the work path only.
     """
     # Imported lazily so this module does not depend on the identity layer's import order; the
     # contextvar lives beside the actor's because they are read together and reset together.
@@ -245,6 +359,13 @@ class _AttributedSpecialist:
     the whole invocation — a `wrap_tool_call` inside the subagent would miss the model call, and
     the audit trail records tool calls made by the specialist's own middleware chain, which is
     below this point.
+
+    **This is also where a work delegation is counted** (`_count_delegation`), and it is the right
+    place precisely because it is the wrapper the *task tool* path goes through: the challenge
+    panel brackets its members with `running_specialist` directly and never arrives here, so the
+    count means "agents that contributed to the answer" rather than "agents that ran". `with_config`
+    re-wraps rather than unwrapping, so the count survives the middleware's config binding for the
+    same reason the attribution does.
     """
 
     def __init__(self, name: str, runnable: Any) -> None:
@@ -253,12 +374,14 @@ class _AttributedSpecialist:
         self._runnable = runnable
 
     def invoke(self, state: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Run the specialist synchronously, attributed."""
+        """Run the specialist synchronously, attributed and counted."""
+        _count_delegation()
         with running_specialist(self._name, _stated_reason(state)):
             return self._runnable.invoke(state, config, **kwargs)
 
     async def ainvoke(self, state: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Run the specialist, attributed — the path a turn actually takes."""
+        """Run the specialist, attributed and counted — the path a turn actually takes."""
+        _count_delegation()
         with running_specialist(self._name, _stated_reason(state)):
             return await self._runnable.ainvoke(state, config, **kwargs)
 

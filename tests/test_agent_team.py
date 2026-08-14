@@ -636,23 +636,93 @@ def test_an_opening_sentence_that_says_something_is_not_read_as_identity() -> No
     assert _description(profile) == "You are given a reaction and must return its hazards."
 
 
-def test_the_task_tool_describes_the_mechanism_this_deployment_built() -> None:
-    """The `task` tool must not tell the supervisor it is a context-isolation helper.
+def test_the_task_tool_and_the_supervisor_prompt_agree() -> None:
+    """The two texts the supervisor reads must describe one mechanism, not two.
 
-    Upstream's description opens "Launch an ephemeral subagent to handle complex, multi-step
-    independent tasks with isolated context windows", which frames delegation as something to do
-    when a job is *large*. Chemclaw's specialists are a capability partition with a mandatory
-    safety gate, so on a one-tool question that framing and `_SUPERVISOR_PROMPT` disagree — and the
-    tool's own description is the half the supervisor acts on. Measured twice against the routing
-    corpus at 1 delegation in 15.
+    This is the defect `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate`
+    found: the system prompt said "route by surface" and the tool description said "for complex,
+    multi-step work", and on a one-tool question those disagree. That ADR settled the disagreement
+    toward the capability partition and measured 2 of 15.
 
-    Asserted on the two properties that make it Chemclaw's rather than upstream's: the menu is
-    interpolated (a description without `{available_agents}` lists no specialists at all), and
-    small questions are not carved out.
+    **It has since been settled the other way**, and this test moved with it: the reason to spawn is
+    isolation, parallelism or an independent look — upstream's reason, which does not depend on the
+    supervisor lacking a tool — while the five names are the *surfaces* a helper runs on. The
+    property under test is unchanged and is the one that actually matters: whatever the framing, the
+    two texts must not contradict each other, the menu must be interpolated (a description without
+    `{available_agents}` lists no surfaces at all), and every buildable surface must be named
+    somewhere the supervisor reads.
     """
     assert "{available_agents}" in _TASK_TOOL_DESCRIPTION
-    assert "complex, multi-step" not in _TASK_TOOL_DESCRIPTION
+    # Both texts must offer the same grounds for spawning. Asserted as a shared vocabulary rather
+    # than by string equality, which would just be a copy of the prompt in the test.
+    for ground in ("isolat", "at once"):
+        assert ground in _SUPERVISOR_PROMPT.lower()
+        assert ground in _TASK_TOOL_DESCRIPTION.lower()
     for specialist in SPECIALISTS:
         assert specialist in _SUPERVISOR_PROMPT, (
             f"{specialist} is buildable but the supervisor is never told when to use it"
         )
+
+
+# --- the delegation tally the challenge gate reads ------------------------------------------------
+
+
+def test_a_specialist_invocation_is_counted() -> None:
+    """Every work delegation advances the tally the challenge gate reads.
+
+    The count is what lets `agent/challenge_gate.py` tell a team from a solo turn without asking a
+    model, and it rides `_AttributedSpecialist` so that a specialist which ran is a specialist which
+    was stamped, announced *and* counted, in one place.
+    """
+    from chemclaw.agent.team import (
+        _AttributedSpecialist,
+        begin_delegation_tally,
+        delegations,
+        end_delegation_tally,
+    )
+
+    class _Runnable:
+        async def ainvoke(self, _state: Any, _config: Any = None, **_kw: Any) -> str:
+            return "done"
+
+    async def _run() -> int:
+        token = begin_delegation_tally()
+        try:
+            wrapped = _AttributedSpecialist("evidence", _Runnable())
+            await wrapped.ainvoke({"messages": []})
+            await wrapped.ainvoke({"messages": []})
+            return delegations()
+        finally:
+            end_delegation_tally(token)
+
+    assert asyncio.run(_run()) == 2
+
+
+def test_the_tally_is_zero_outside_a_turn() -> None:
+    """No tally means no delegations, so the gate's trigger is safe to evaluate anywhere.
+
+    A template step and a CLI call never start one, and both must read 0 rather than raise — the
+    same "safe to ask unconditionally" property `loop_cap.loop_hit_cap` has.
+    """
+    from chemclaw.agent.team import delegations
+
+    assert delegations() == 0
+
+
+def test_a_challenger_is_attributed_but_not_counted_as_a_delegation() -> None:
+    """The panel's own members must not make the gate mistake its review for a team.
+
+    `running_specialist` brackets a challenger for the audit trail exactly as it brackets a
+    specialist — a challenger's tool calls have to be attributable — but counting them would mean a
+    turn that delegated once got challenged *unconditionally* on the revision pass, because the
+    first panel had inflated the count past the team threshold.
+    """
+    from chemclaw.agent.team import begin_delegation_tally, delegations, end_delegation_tally
+
+    token = begin_delegation_tally()
+    try:
+        with running_specialist("challenger:grounding", "check the citations"):
+            pass
+        assert delegations() == 0
+    finally:
+        end_delegation_tally(token)

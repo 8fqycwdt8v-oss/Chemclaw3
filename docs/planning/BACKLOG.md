@@ -3,6 +3,39 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the challenge panel and the delegation reframing (2026-08-13)
+
+Both ADRs ship the mechanism and defer the *number*, deliberately: the two open rows below are
+measurements, and D-2026-08-12 is the precedent for keeping the measurement and the default-on
+decision in one ADR rather than asserting either here.
+
+- [ ] **Re-measure delegation through the front door — the first attempt did not settle it** — [M].
+      Run live 2026-08-13 on `claude-sonnet-5`, both arms differing only in the two prompt strings:
+      **old 14/15, new 14/15**, same probe (`rt-08`) self-answering in both. Two problems with that
+      number. It shows the reframing bought nothing measurable — recorded against the ADR in
+      `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` — but the old arm
+      was already at ceiling, so the run had no power to detect an improvement either. And 14/15
+      against D-2026-08-12's **2/15** on the same corpus and the same prompts means the harness is
+      not measuring what that ADR measured: this one drove `build_langgraph_agent()` directly, with
+      no front door, no connectors, no history and no session profile, and possibly a different
+      model. Redo it the way M12 did — two configured front doors, connectors open, the model that
+      ADR used — and with repeats per probe, because a throwaway single run of `rt-01` self-answered
+      while both scored arms delegated it. Until then **neither 2/15 nor 14/15 is the deployment's
+      rate**, and no default-on decision can rest on either.
+
+- [ ] **Measure whether the challenge panel finds real defects or over-flags** — [M].
+      `challenge_enabled` is off for the reason `agent_teams_enabled` is, and the same instrument
+      settles it: probes where the answer is known-wrong (does the panel reach quorum?) and probes
+      where it is known-good but low-confidence (does it stay quiet?). Watch
+      `chemclaw_challenge_degraded_total` in the same run — every degraded path returns a
+      *non-corroborating* verdict, so a dead panel and a clean answer are indistinguishable without
+      it, and a "0 objections" result means nothing until that series is known to be flat.
+- [ ] **A sixth copy of the Temporal launch idiom now exists in layer 1** — [S].
+      `challenge.start_answer_review` joins `durable_tools`, `interaction_tools`, `job_results` and
+      `templates/registry` in `tests/test_third_party_layering._KNOWN_LEAKS`. It is function-scope
+      so the agent layer stays importable without Temporal, which bounds the leak rather than
+      removing it. Same fix as the other four: one `start_job()` in `durable/`.
+
 ## Open — Left by the external synthesis review (2026-08-13)
 
 Source: `docs/planning/REVIEW-2026-08-13-external-synthesis-and-gap-analysis.md`, 15

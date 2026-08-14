@@ -221,6 +221,18 @@ class AnswerEvent(BaseModel):
     # even reachable. It is on the wire because the surface is where "this was scored by the weaker
     # check" has to be legible; the flag is the safety property and this is the transparency.
     verified_by: Literal["judge", "citation-gate"] | None = None
+    # Whether an independent review panel agreed on a stated objection to this answer
+    # (`agent/challenge_gate.py`), after the model had spent its revision budget trying to answer
+    # them. Distinct from `review_required`, which any of the three checks can raise on its own: a
+    # confidence score under a threshold and a quorum of agents that each went and checked are
+    # different weights of evidence, and a surface that renders them identically is throwing away
+    # the more expensive one.
+    challenged: bool = False
+    # The durable hold (`durable/answer_review.py`) carrying the human decision on that objection
+    # past the end of this session. `None` when nothing was upheld — or when Temporal was
+    # unreachable, in which case the objection still rides in `unsupported_claims` and only the
+    # hold was lost.
+    review_hold_id: str | None = None
 
 
 class ToolFailedEvent(BaseModel):

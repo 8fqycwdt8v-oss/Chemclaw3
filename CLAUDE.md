@@ -52,6 +52,32 @@ gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap 
 field rather than an inference (`agent/loop_cap.py`); and a specialist team (`agent/team.py`) is
 available but off by default until its routing is measured.
 
+Two ADRs on 2026-08-13 changed what that team *is* and added the review it was missing. M12 had
+measured the supervisor delegating **2 of 15** and found the cause structural rather than
+promptable — `reject_widening` makes specialists ⊆ supervisor, so delegating is always a longer path
+to a tool already in hand. That argument is about delegating to reach a *capability*, and says
+nothing about spawning for isolation, parallelism or an independent look, so
+`D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` restores upstream's reason
+to spawn and keeps the five names as the **tool surfaces** a helper runs on — no invariant inverted,
+the model authoring each helper's brief while the code still authors its capability. It also records
+the constraint every future dynamic subagent must obey: deepagents builds a bare `SubAgent` dict with
+*only* `spec["middleware"]`, so anything not compiled by `build_langgraph_agent` runs with no audit
+trail, no authz and no plan gate — silently. `D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared`
+then adds the adversarial half (`agent/challenge.py`, `agent/challenge_gate.py`): an `after_model`
+gate puts a finished answer to a panel of independently-briefed agents whose *angles are generated
+for that answer* rather than declared, unconditionally when two or more helpers ran and otherwise
+only when the existing checks flagged it. A quorum sends the critique back for a bounded revision
+round; past the bound the answer ships marked with a durable hold (`durable/answer_review.py`).
+Both ship off (`challenge_enabled`, `agent_teams_enabled`) — whether either helps is a measurement,
+and `docs/planning/BACKLOG.md` carries both. **The first such measurement came back against the
+first ADR**: run live on the M12 corpus, the old and new framings delegated **14/15 each**, so the
+reframing bought nothing detectable — though the old arm was already at ceiling, and 14/15 against
+M12's own 2/15 on the same corpus means that harness (no front door, no connectors, no history) was
+not measuring what M12 measured. Neither number is the deployment's rate. What survives the result
+is the structural half — surfaces rather than a routing partition, the two prompts agreeing, the
+delegation tally, and the ban on bare `SubAgent` dicts, which is a security property no measurement
+bears on.
+
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context
 management*, gone. D-025's compaction lived in the removed framework, and what survived it was the
