@@ -135,38 +135,23 @@ does not start by re-checking.
       rowcounts. Decide that one deliberately: per-table counts become a per-*thread* count, which
       changes two operator-facing report shapes (`durable/retention.py`'s `deleted` mapping and
       `agent/leaver.py`'s `report.erased` keys) and their tests. Everything else is a substitution.
-## Open — Left by the challenge panel and the delegation reframing (2026-08-13)
+## Closed — the challenge panel and the delegation reframing (2026-08-13, closed 2026-08-15)
 
-Both ADRs ship the mechanism and defer the *number*, deliberately: the two open rows below are
-measurements, and D-2026-08-12 is the precedent for keeping the measurement and the default-on
-decision in one ADR rather than asserting either here.
+All three rows are closed by `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which
+deletes the features they were measurements of.
 
-- [ ] **Re-measure delegation through the front door — the first attempt did not settle it** — [M].
-      Run live 2026-08-13 on `claude-sonnet-5`, both arms differing only in the two prompt strings:
-      **old 14/15, new 14/15**, same probe (`rt-08`) self-answering in both. Two problems with that
-      number. It shows the reframing bought nothing measurable — recorded against the ADR in
-      `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` — but the old arm
-      was already at ceiling, so the run had no power to detect an improvement either. And 14/15
-      against D-2026-08-12's **2/15** on the same corpus and the same prompts means the harness is
-      not measuring what that ADR measured: this one drove `build_langgraph_agent()` directly, with
-      no front door, no connectors, no history and no session profile, and possibly a different
-      model. Redo it the way M12 did — two configured front doors, connectors open, the model that
-      ADR used — and with repeats per probe, because a throwaway single run of `rt-01` self-answered
-      while both scored arms delegated it. Until then **neither 2/15 nor 14/15 is the deployment's
-      rate**, and no default-on decision can rest on either.
-
-- [ ] **Measure whether the challenge panel finds real defects or over-flags** — [M].
-      `challenge_enabled` is off for the reason `agent_teams_enabled` is, and the same instrument
-      settles it: probes where the answer is known-wrong (does the panel reach quorum?) and probes
-      where it is known-good but low-confidence (does it stay quiet?). Watch
-      `chemclaw_challenge_degraded_total` in the same run — every degraded path returns a
-      *non-corroborating* verdict, so a dead panel and a clean answer are indistinguishable without
-      it, and a "0 objections" result means nothing until that series is known to be flat.
-- [ ] **A sixth copy of the Temporal launch idiom now exists in layer 1** — [S].
-      `challenge.start_answer_review` joins `durable_tools`, `interaction_tools`, `job_results` and
-      `templates/registry` in `tests/test_third_party_layering._KNOWN_LEAKS`. It is function-scope
-      so the agent layer stays importable without Temporal, which bounds the leak rather than
-      removing it. Same fix as the other four: one `start_job()` in `durable/`.
+- [x] **Re-measure delegation through the front door — closed, not answered.** The measurement
+      cannot be taken: there is no supervisor to route. What the row established stands and is the
+      reason the feature went — old 14/15 against new 14/15 with the old arm at ceiling, and 14/15
+      against D-2026-08-12's 2/15 on the same corpus, so **neither number was the deployment's rate**.
+- [x] **Measure whether the challenge panel finds real defects or over-flags — closed, not answered.**
+      Same reason. `deepagents.RubricMiddleware` is the upstream shape if in-loop self-critique is
+      wanted back; the ADR names its two measured obstacles.
+- [x] **A sixth copy of the Temporal launch idiom — closed by deletion.** `challenge.start_answer_review`
+      is gone and its `_KNOWN_LEAKS` row with it. **Five copies remain** and the fix is unchanged:
+      one `start_job()` in `durable/`, with `id_reuse_policy` a required argument — two of the five
+      pass none today, which `agent/interaction_tools.py` documents as a live defect where a decided
+      approval hold can be reopened.
 
 ## Open — Left by the external synthesis review (2026-08-13)
 
@@ -252,7 +237,9 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       question is a `DEFERRED.md` row with its trigger, because it inverts D-2026-08-10's invariant
       1. D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate.
 
-- [ ] **The routing corpus cannot express a question that spans two specialists** — [S].
+- [x] **The routing corpus cannot express a question that spans two specialists — closed by deleting
+      the corpus** (D-2026-08-15). The floor it describes is one of the reasons the measurement was
+      not repairable.
       `expects_specialist` in `data/evals/probes/m12/routing.yaml` is a single name, and the surface
       score found two probes it cannot describe: `rt-13` reaches `find_past_jobs` and
       `gather_evidence`, `rt-14` reaches `gather_evidence`, both declared `reporting`, and both fall

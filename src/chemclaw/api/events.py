@@ -228,10 +228,10 @@ class AnswerEvent(BaseModel):
     # different weights of evidence, and a surface that renders them identically is throwing away
     # the more expensive one.
     challenged: bool = False
-    # The durable hold (`durable/answer_review.py`) carrying the human decision on that objection
-    # past the end of this session. `None` when nothing was upheld — or when Temporal was
-    # unreachable, in which case the objection still rides in `unsupported_claims` and only the
-    # hold was lost.
+    # **Both this and `challenged` above are permanently at their defaults** since the challenge
+    # panel was removed (D-2026-08-15). They stay declared because removing a member of this union
+    # is a coordinated change across `Chemclaw3_ui` and `Chemclaw3_mock`, and they go in the same
+    # cut that moves the transcript route off `session_messages`.
     review_hold_id: str | None = None
 
 
@@ -417,8 +417,12 @@ class HandoffEvent(BaseModel):
     (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
 
     Like every other signal-borne event, emitted only where a consumer is draining the graph's
-    custom stream: absence means "not reported", never "no delegation happened". A deployment with
-    `agent_teams_enabled` off has no specialists and therefore raises none of these at all.
+    custom stream: absence means "not reported", never "no delegation happened".
+
+    **Nothing produces it today** — the specialist team was deleted in D-2026-08-15 — and it is kept
+    declared rather than removed because dropping a member of this union is a coordinated change
+    across `Chemclaw3_ui` and `Chemclaw3_mock`. It is the one member whose absence is expected to
+    be temporary: subagents return for isolation and parallel fan-out, and this is what they raise.
     """
 
     type: Literal["handoff"] = "handoff"

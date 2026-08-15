@@ -68,8 +68,6 @@ from langgraph.channels.untracked_value import UntrackedValue
 # the `D-NNN` sequence. Three tests already import it across module boundaries; within one package
 # that is the established idiom here.
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
-from chemclaw.agent.challenge import CHALLENGER_PROFILE
-from chemclaw.agent.challenge_gate import build_challenge_gate
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
@@ -85,7 +83,6 @@ from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend, skill_read_tool
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import ChemclawState
-from chemclaw.agent.team import SPECIALISTS, build_team_middleware, team_enabled
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -137,10 +134,10 @@ def build_langgraph_agent(
         response_format: A pydantic model the agent must finish by producing, surfaced on the
             returned state's `structured_response`. `None` — the conversational default — leaves the
             agent answering in prose. This exists for callers whose *whole* output is a datum rather
-            than a reply: `agent/challenge.py`'s panel members each return a `ChallengeVerdict`, and
-            letting the framework enforce that makes the failure mode "no structured answer"
-            (handled) instead of "prose that almost parses" — the same reason `verify_answer` uses
-            `with_structured_output` rather than reading a judge's free text. It is a passthrough to
+            than a reply, where letting the framework enforce the shape makes the failure mode "no
+            structured answer" (handled) instead of "prose that almost parses" — the same reason
+            `verify_answer` uses `with_structured_output` rather than reading a judge's free text.
+            It has no caller today, and is kept because it is a passthrough to
             `create_agent` and deliberately not a profile field: which shape an answer must take is
             a property of the *call*, not of the agent's capability.
 
@@ -187,22 +184,6 @@ def build_langgraph_agent(
         middleware=[
             *_harness_middleware(prof),
             _skills_middleware(backend),
-            # `[*tools, *connectors]`, not `tools`: the widening assertion this feeds compares
-            # *connector* tool names against the supervisor's surface, and `tools` is the in-process
-            # half only — so every connector tool a specialist kept read as a widening and
-            # `_narrowed_connectors` raised `TeamError` before the model was ever called. Measured
-            # live with `agent_teams_enabled=true`: 15 of 15 turns failed at graph construction,
-            # each booking a `turn_costs` row with `completed=false` and zero tokens. The guard was
-            # right and the set it was given was the wrong half of the surface.
-            *_team_middleware(
-                prof,
-                actor,
-                correlation_id,
-                audit_sink,
-                connectors,
-                [*tools, *(connectors or [])],
-            ),
-            *_challenge_middleware(prof, actor, correlation_id, audit_sink, connectors),
             *tool_call_middleware(audit, prof),
             # Above the compaction group so that group keeps the innermost position its own
             # docstring argues for. The two do not contend: caching marks the *system prompt and
@@ -287,87 +268,6 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     if not harness_enabled_for(profile):
         return []
     return [TodoListMiddleware(), loop_cap_middleware()]
-
-
-def _team_middleware(
-    profile: AgentProfile,
-    actor: str,
-    correlation_id: str | None,
-    audit_sink: AuditSink | None,
-    connectors: list[Any] | None,
-    supervisor_tools: list[Any],
-) -> list[Any]:
-    """The specialist team, when this deployment routes turns through one (M9).
-
-    Empty unless `agent_teams_enabled`, so the default agent is byte-identical to the one before
-    teams existed — a capability M12 has not yet shown to help is not something to switch on for
-    everybody (`agent/team.py` says why at length).
-
-    **A specialist is only ever built for a profile that is not itself a specialist**, which is what
-    stops the recursion: `build_team_middleware` builds each one through this same function, and a
-    specialist whose own profile enabled a team would build five more. The guard is the profile's
-    membership in `SPECIALISTS` rather than a depth counter, because "a specialist does not have a
-    team" is the rule, and a depth counter would merely bound how badly it was broken.
-
-    The turn's identity and sink are passed down so a specialist audits under the same correlation
-    id. Its connectors are **narrowed to its own profile before they are passed**, which
-    `build_team_middleware` does — handing them down whole was a real widening: `reject_widening`
-    compares *declarations*, and the connector tools arrive already open, so a specialist declaring
-    two bundles received every bundle the supervisor had.
-    """
-    if not team_enabled() or profile.name in SPECIALISTS:
-        return []
-    return [
-        build_team_middleware(
-            profile,
-            actor=actor,
-            correlation_id=correlation_id,
-            audit_sink=audit_sink,
-            connectors=connectors,
-            supervisor_tool_names=frozenset(
-                str(getattr(t, "name", None) or getattr(t, "__name__", ""))
-                for t in supervisor_tools
-            ),
-        )
-    ]
-
-
-def _challenge_middleware(
-    profile: AgentProfile,
-    actor: str,
-    correlation_id: str | None,
-    audit_sink: AuditSink | None,
-    connectors: list[Any] | None,
-) -> list[Any]:
-    """The automatic challenge round, when this deployment runs one (`agent/challenge_gate.py`).
-
-    Empty unless `challenge_enabled`, so the default agent is byte-identical to the one before the
-    panel existed — the same promise `_team_middleware` keeps, for the same reason.
-
-    **A challenger never gets a challenge gate of its own**, which is what stops the recursion, and
-    the guard is the profile rather than a depth counter for `_team_middleware`'s reason: "a
-    reviewer is not itself reviewed" is the rule, and a counter would only bound how far a broken
-    version got. A specialist is excluded too — it reports to the supervisor, whose *assembled*
-    answer is the thing worth challenging; putting a panel on each helper's intermediate report
-    would pay N panels to review work no chemist will ever read.
-
-    The turn's identity and sink go down so the panel audits under the same correlation id, and its
-    connectors are passed for the challenger builds — narrowed by the challenger profile inside
-    `build_langgraph_agent`, exactly as any other profile narrows them.
-    """
-    if not settings.challenge_enabled:
-        return []
-    if profile.name in SPECIALISTS or profile.name == CHALLENGER_PROFILE:
-        return []
-    return [
-        build_challenge_gate(
-            profile,
-            actor=actor,
-            correlation_id=correlation_id,
-            audit_sink=audit_sink,
-            connectors=connectors,
-        )
-    ]
 
 
 def _skills_middleware(backend: CompositeBackend) -> Any:

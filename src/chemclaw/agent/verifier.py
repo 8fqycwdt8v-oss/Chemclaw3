@@ -33,19 +33,16 @@ parameter shapes* in an answer that no tool in the turn produced. It is a heuris
 not a proof of grounding, and it exists because prompting was measured to be insufficient — see its
 own docstring.
 
-**`score_answer` is where the checks combine, and it is here rather than in either caller because
-two callers need one answer.** `agent/challenge_gate.py` needs the verdict *inside* the graph, to
-decide whether a solo turn is worth putting to a review panel while the turn can still be revised;
-`api/runner_answer.build_answer_event` needs it to stamp the event. A second copy of the combination
-rules would let the two paths disagree about whether the same answer is flagged, and the judge is a
-paid call, so scoring twice would also double what an enabled deployment pays per turn.
+**`score_answer` is where the checks combine, and it is here rather than in its caller** because the
+reasoning about which checks run belongs beside the checks. It had a second caller inside the graph
+— a gate deciding whether an answer was worth putting to a review panel — until D-2026-08-15 removed
+the panel; one implementation was what stopped the two paths disagreeing about whether the same
+answer was flagged, and it is now simply the only one.
 
-What this module still does not do is *act* on a verdict. It scores; the gate routes. A
-low-confidence answer is delivered marked rather than withheld — that part is unchanged, and the
-half that is no longer true of it is the hold: `durable/answer_review.py` now opens one when a
-challenge panel upholds an objection (D-2026-08-13), so a human decision does outlive the session.
-Withholding the answer itself remains deferred, and `docs/planning/DEFERRED.md` carries the row with
-what would close it.
+What this module does not do is *act* on a verdict. It scores; a low-confidence answer is
+delivered marked rather than withheld. Withholding remains deferred, and `docs/planning/DEFERRED.md`
+carries the row with what would close it. The durable hold that once carried a panel's upheld
+objection past the end of a session went with the panel (D-2026-08-15).
 """
 
 import asyncio
@@ -359,23 +356,23 @@ async def verify_answer(
 class TurnReview(BaseModel):
     """Everything known about a finished answer's trustworthiness, computed once.
 
-    Produced by `score_answer` below, which is the one implementation of the combination rules.
-    Two callers need it: `agent/challenge_gate.py` decides whether a solo turn is worth putting to
-    the panel, and `api/runner_answer.build_answer_event` stamps the `AnswerEvent` from it. **One
-    instance because the LLM judge is one paid call** — scoring in both would put two judge calls on
-    every turn's hot path, so the gate publishes what it computed and the runner reads it.
+    Produced by `score_answer` below, which is the one implementation of the combination rules, and
+    read by `api/runner_answer.build_answer_event` to stamp the `AnswerEvent`.
     """
 
     confidence: float | None = None
     verified_by: Literal["judge", "citation-gate"] | None = None
     unsupported: list[str] = Field(default_factory=list)
     review_required: bool = False
-    # Whether the panel ran *and* reached quorum. Distinct from `review_required`, which any of the
-    # three checks can set: a reviewer wants to know that independent agents agreed on a stated
-    # objection, which is a different weight of evidence from a confidence score under a threshold.
+    # **Both of these are permanently at their defaults**, and they are declared rather than deleted
+    # because they are `AnswerEvent` fields the frontend and the mock server both read: removing a
+    # member of the SSE union is a coordinated three-repo change, and this phase is not it. They
+    # written by the challenge panel, which is gone (D-2026-08-15). They go in the same cut that
+    # retires the transcript route, which is already coordinated across the three repositories.
+    #
+    # This is the one shape the repo otherwise forbids — a field nothing writes reads as coverage
+    # while proving nothing — so it is on a deadline rather than left to be rediscovered.
     challenged: bool = False
-    # The durable hold opened for a human decision, when one was. `None` means no hold — either
-    # nothing was upheld, or Temporal was unreachable and the answer went out marked anyway.
     hold_id: str | None = None
 
 
@@ -385,11 +382,9 @@ async def score_answer(
     """Run whichever honesty checks this deployment enabled, and combine them into one verdict.
 
     **The single implementation of the combination rules**, called by
-    `api/runner_answer.build_answer_event` on the ungated path and by `agent/challenge_gate.py`
-    inside the graph. It lives here rather than in either caller because both need the same answer
-    and neither may own it: the gate cannot import from `chemclaw.api` without inverting a layer,
-    and the runner cannot be the authority on a decision the graph has to make before the runner
-    exists. A second copy would let two paths disagree about whether the same answer is flagged.
+    `api/runner_answer.build_answer_event`. It lives here rather than in its caller because the
+    reasoning about which checks run belongs beside the checks; it had a second caller inside the
+    graph until D-2026-08-15 removed the challenge panel.
 
     Three rules, each learned from a defect rather than designed:
 

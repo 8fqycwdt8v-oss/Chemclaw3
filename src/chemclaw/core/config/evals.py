@@ -105,14 +105,6 @@ class EvalSettings(BaseSettings):
     # re-publishing the same probe set under the same name is what makes two runs comparable.
     # A second name would produce two datasets that cannot be diffed, which is the whole ask.
     phoenix_dataset_name: str = "chemclaw-live-probes"
-    # Share of the team arm's delegated turns that must reach the specialist the routing corpus
-    # names, before a team is worth enabling. The M9 ADR shipped `agent_teams_enabled=false`
-    # precisely because a supervisor that mis-routes is *worse* than the single agent it replaces,
-    # so this is the number that decision was deferred to. 0.8 rather than 1.0: the five
-    # specialists partition the surface, but a question spanning two of them (a hazard question
-    # about a computed property) has a defensible second answer, and demanding perfection would
-    # grade the corpus's edges rather than the supervisor.
-    live_routing_accuracy_min: float = Field(default=0.8, ge=0.0, le=1.0)
     # Minimum share of the pinned hazard rules that must still fire on their reference molecules
     # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
     # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports

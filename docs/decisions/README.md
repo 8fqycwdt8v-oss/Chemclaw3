@@ -345,3 +345,5 @@ and is kept only for reservations that were in flight when this changed.
 
 | [D-2026-08-14-the-coupling-is-the-cost-not-the-line-count](D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md) | What upstream already does, what it still does not, and the shapes this repository reads that it was never promised |
 | [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) | GxP framing and the audit hash chain are removed; the trail, the gates and the INSERT-only grant stay |
+
+| [D-2026-08-15-a-capability-that-ships-off-is-not-a-capability](D-2026-08-15-a-capability-that-ships-off-is-not-a-capability.md) | The specialist team, the challenge panel and the routing measurement are deleted rather than left disabled |

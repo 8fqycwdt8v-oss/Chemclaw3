@@ -286,15 +286,6 @@ _KNOWN_LEAKS: dict[Site, str] = {
         "the fifth copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
         "`TemplateWorkflow` is legitimate work — reaching for `temporalio` to do it is what is not"
     ),
-    ("src/chemclaw/agent/challenge.py", "temporal"): (
-        "the sixth copy of the launch idiom, and the one that shows the debt is still accruing. "
-        "`start_answer_review` opens the hold a challenge panel's upheld objection needs "
-        "(D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared) and catches "
-        "`WorkflowAlreadyStartedError` to make re-surfacing idempotent — durable policy inside "
-        "layer 1, exactly like the four rows above it. It is function-scope rather than "
-        "module-scope so the agent layer stays importable without Temporal, which bounds the leak "
-        "and does not remove it. Same fix, same BACKLOG row: one `start_job()` in `durable/`"
-    ),
     ("src/chemclaw/agent/job_results.py", "temporal"): (
         "the collection half of the same seam, and the row this file's by-file keying was written "
         "to catch: it was added by a parallel lane of the same campaign, after this test was "

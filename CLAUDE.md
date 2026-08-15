@@ -49,34 +49,24 @@ engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrow
 three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
 publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
 gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is upstream's
-`ModelCallLimitMiddleware`, subclassed only to record that it fired (`agent/loop_cap.py`); and a
-specialist team (`agent/team.py`) is available but off by default until its routing is measured.
+`ModelCallLimitMiddleware`, subclassed only to record that it fired (`agent/loop_cap.py`).
 
-Two ADRs on 2026-08-13 changed what that team *is* and added the review it was missing. M12 had
-measured the supervisor delegating **2 of 15** and found the cause structural rather than
-promptable — `reject_widening` makes specialists ⊆ supervisor, so delegating is always a longer path
-to a tool already in hand. That argument is about delegating to reach a *capability*, and says
-nothing about spawning for isolation, parallelism or an independent look, so
-`D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` restores upstream's reason
-to spawn and keeps the five names as the **tool surfaces** a helper runs on — no invariant inverted,
-the model authoring each helper's brief while the code still authors its capability. It also records
-the constraint every future dynamic subagent must obey: deepagents builds a bare `SubAgent` dict with
-*only* `spec["middleware"]`, so anything not compiled by `build_langgraph_agent` runs with no audit
-trail, no authz and no plan gate — silently. `D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared`
-then adds the adversarial half (`agent/challenge.py`, `agent/challenge_gate.py`): an `after_model`
-gate puts a finished answer to a panel of independently-briefed agents whose *angles are generated
-for that answer* rather than declared, unconditionally when two or more helpers ran and otherwise
-only when the existing checks flagged it. A quorum sends the critique back for a bounded revision
-round; past the bound the answer ships marked with a durable hold (`durable/answer_review.py`).
-Both ship off (`challenge_enabled`, `agent_teams_enabled`) — whether either helps is a measurement,
-and `docs/planning/BACKLOG.md` carries both. **The first such measurement came back against the
-first ADR**: run live on the M12 corpus, the old and new framings delegated **14/15 each**, so the
-reframing bought nothing detectable — though the old arm was already at ceiling, and 14/15 against
-M12's own 2/15 on the same corpus means that harness (no front door, no connectors, no history) was
-not measuring what M12 measured. Neither number is the deployment's rate. What survives the result
-is the structural half — surfaces rather than a routing partition, the two prompts agreeing, the
-delegation tally, and the ban on bare `SubAgent` dicts, which is a security property no measurement
-bears on.
+**There is no specialist team and no challenge panel** (D-2026-08-15). Both shipped off, stayed off
+in every configuration, and were deleted with the routing measurement built to decide whether the
+first should ever be turned on — 1,442 lines of agent code, ~400 of eval machinery, 1,506 lines of
+tests, seven settings and three metric series, none of it reachable. The delegation question was
+never settled and this corpus could not settle it: D-2026-08-12 measured **2 of 15**, D-2026-08-13's
+reframing measured **14/15 against 14/15** with the old arm already at ceiling, and two of the
+fifteen probes span two specialists so the accuracy figure had an unpassable floor before any model
+was involved. Neither number was a deployment's rate.
+
+`reject_widening` went with it, deliberately: a guard with no caller, kept alive by a test that
+calls it directly, is the `map_to_hpc_identity` shape — a claim that a control exists. The invariant
+is not lost, because an invariant is not a function. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`
+is merged and states the rule, and it binds whoever re-adds subagents. So does the constraint that
+outlives all of this: deepagents builds a bare `SubAgent` dict with *only* `spec["middleware"]`, so
+anything not compiled by `build_langgraph_agent` runs with no audit trail, no authz and no plan
+gate — silently.
 
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context

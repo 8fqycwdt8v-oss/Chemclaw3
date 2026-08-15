@@ -24,7 +24,6 @@ The claims under test, in the order the phases landed:
 
 import asyncio
 import re
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -753,30 +752,6 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
     assert answered == [f"answer {turn}" for turn in range(4)], (
         "a turn answered with something other than the model's reply — the cap counted the session"
     )
-
-
-def test_a_specialist_is_handed_only_the_connectors_its_profile_declares() -> None:
-    """Invariant 1 at *runtime*: the declaration check is necessary and was not sufficient.
-
-    `reject_widening` compares profiles, and the connector tools are passed down **already open** —
-    so a specialist declaring one bundle was receiving every bundle the supervisor had opened. It
-    declared one surface and got another, which is the widening the invariant forbids, reached
-    without any profile ever naming a tool it should not.
-    """
-    from chemclaw.agent.team import _narrowed_connectors
-
-    calc = SimpleNamespace(name="compute_xtb_energy")
-    hazard = SimpleNamespace(name="screen_hazards")
-    supervisor_surface = frozenset({"compute_xtb_energy", "screen_hazards"})
-
-    narrowing = AgentProfile(name="computation", mcp_server_names=frozenset({"calc"}))
-    kept = _narrowed_connectors(narrowing, [calc, hazard], supervisor_surface)
-
-    assert [t.name for t in kept] == ["compute_xtb_energy"], "the safety bundle leaked into calc"
-
-    # A profile that narrows nothing keeps the supervisor's set — attenuate-only, at the top.
-    wide = AgentProfile(name="reporting")
-    assert len(_narrowed_connectors(wide, [calc, hazard], supervisor_surface)) == 2
 
 
 def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> None:

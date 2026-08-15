@@ -141,23 +141,6 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
     ),
-    # The challenge panel's silent-failure counter, and it is the one number that separates "this
-    # answer survived review" from "review did not happen". Every degraded path in
-    # `agent/challenge.py` returns a *non-corroborating* verdict — deliberately, so an unreachable
-    # endpoint cannot hold an answer — which means an entirely dead panel looks exactly like a panel
-    # that found nothing wrong. Without this series that distinction is unobservable, and a
-    # deployment would read a flat zero objections as a healthy system.
-    "chemclaw_challenge_degraded_total": (
-        "Challenge-panel members that could not be drafted, built or parsed, and were therefore "
-        "counted as raising no objection."
-    ),
-    # What the panel actually did when it ran. Counted per *round* rather than per member, because
-    # the question a deployment tunes on is how often answers get challenged and how often that
-    # changes anything — the per-member detail is on the turn's stream and in the audit trail.
-    "chemclaw_challenge_rounds_total": "Answers put to the challenge panel.",
-    "chemclaw_challenge_upheld_total": (
-        "Challenge rounds where the panel reached quorum on a stated objection."
-    ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it
