@@ -59,6 +59,26 @@ lives in the tool docstrings, in `ScreenResult.verdict` as a serialized `compute
 test asserting no clearance-like phrasing can appear — all three ported verbatim to the server,
 because an over-trusted screen is more dangerous than none.
 
+## What this was verified against
+
+Not asserted from the manifest — run against the merged server on 8859, driven through this
+repository's own `registry.open_connector_specs` so the path under test is the one a turn takes:
+
+| check | result |
+|---|---|
+| the manifest's three tool names vs what the server advertises | exact match, nothing not-connected |
+| `screen_hazards(["CCCN=[N+]=[N-]"])` | `organic-azide`, severity `high` |
+| `screen_hazards(["CCO"])` | no flags — *"No rule in the hazard table matched. This is not a safety assessment."* |
+| `screen_genotoxic_alerts(["CN(C)N=O"])` | `n-nitroso` |
+| `ich_impurity_limit("palladium")` | Class 2B, ICH Q3D(R2) Table A.2.1 |
+| `/mcp` with no bearer / a wrong bearer / the right bearer | **401** / **401** / past auth |
+
+The ethanol row is the one that matters most: the invariant crosses the wire intact as the
+serialized `verdict`, which is the whole reason it was a `computed_field` rather than a property.
+The three auth rows matter for the reason they did on `chem` — `auth: mode: none` against a server
+that enforces a bearer means every call is *refused*, and the manifest guard for that reads the
+declared url, which is loopback here, so it would never have fired on this file.
+
 ## Why this is not `reject_widening` in reverse
 
 `D-2026-08-15` deleted `reject_widening` on the grounds that **a guard with no caller, kept alive by
