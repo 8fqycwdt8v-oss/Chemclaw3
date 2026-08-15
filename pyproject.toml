@@ -36,13 +36,31 @@ dependencies = [
     # response types — so they are declared rather than relied on through the `langchain-*` wrappers
     # that happen to pull them today.
     "anthropic>=0.40",
-    "openai>=1.60",
+    # `>=3`, not the old `>=1.60`: the floor is where the decision lives. 3.0 is the release that
+    # switches the SDK's default transport to httpx2, and leaving the floor under it would let an
+    # unrelated `uv lock --upgrade` resolve back to 2.x — quietly undoing a major this repository
+    # chose, and leaving the `httpx2` line below it declared for nobody
+    # (`docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`).
+    "openai>=3.1",
     "drfp>=0.3.7",
-    "fastapi>=0.139.2",
+    "fastapi>=0.141.1",
     # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp).
     "httpx>=0.28",
+    # **The second HTTP stack, declared rather than left transitive** (see
+    # `docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`). `openai` 3
+    # makes httpx2 its default client and stops installing `httpx`; `starlette` 1.6's test client
+    # says the same thing in a deprecation warning. httpx2 is Pydantic's stewardship of httpx under
+    # a new name — same design, maintained — so this is a rename with support behind it.
+    #
+    # `httpx` stays above it, and the pair is the recorded cost of taking those two majors: `mcp` 1.x
+    # and the `langchain-*` packages require `httpx` regardless of what this repository imports, so
+    # the closure carries both until the `mcp` 2.x migration (`docs/planning/DEFERRED.md`) removes
+    # the last first-party reason for the older one. Rewriting every transport now would buy a
+    # smaller image at the moment the thing that would *complete* the migration is deliberately not
+    # being taken.
+    "httpx2>=2.10",
     # Declared, not left transitive, for the reason stated above `httpx`: eight first-party modules
     # import it directly — including `agent/session_store.py`, which uses `message_to_dict` /
     # `messages_from_dict` for the *durable* `session_messages` column. Its floor would otherwise be
@@ -52,7 +70,10 @@ dependencies = [
     "langchain>=1.0",
     "langchain-anthropic>=1.5.1",
     "langchain-mcp-adapters>=0.3.2",
-    "langchain-openai>=1.4.2",
+    # `>=1.5.1` because that is the release whose own requirement is `openai<4`; 1.4.2 pins
+    # `openai<3` and silently holds the major above at 2.x. A floor that contradicts another floor
+    # resolves to the older one and reports success, which is the shape this pair was found in.
+    "langchain-openai>=1.5.1",
     "langgraph>=1.2.10",
     "langgraph-checkpoint-postgres>=3.1.2",
     # Capped on the `deepagents` argument above, transposed: this repository reaches into `mcp` for

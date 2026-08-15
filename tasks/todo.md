@@ -57,4 +57,46 @@ were verified by running them, not by reading alone; one reported finding was ch
 
 ## Review
 
-(Filled in at the end of the sweep.)
+**What the sweep was worth.** Five things were broken in a deployment and none of them had a failing
+test: `GET /profiles` answered `[]` on every request in every environment, a connector served its
+`/mcp` surface unauthenticated whenever its manifest was not discovered, the checkpointer handed
+concurrent first turns a saver whose migrations had not run, the production LLM path leaked a
+connection pool per turn, and two child-workflow starts had no wall-clock bound. The common shape is
+that each was *invisible*: an empty list is a valid list, an open door answers 200, an unmigrated
+saver is a live object, a leaked pool is collected eventually, and a hung child looks like a slow
+one.
+
+**Two claims were rejected on verification, one of them mine.**
+
+- A sweep reported `tests/test_prompt_caching.py`'s `"API-KEY" not in os.environ` skip as permanently
+  dead, on the grounds that `API-KEY` is not a settable shell identifier. It is real: CLAUDE.md
+  documents it as the credential name in this repository's remote environments,
+  `infra/live/e2e-full-stack/up.sh` maps it with `printenv 'API-KEY'`, and it was set in the session
+  that checked. No change.
+- My own first version of the Hessian finding said the path ran "a second SCF". Counted, the SCF
+  total is unchanged at 6N+1 — what was duplicated is the *calculator* (2 Hamiltonian assemblies to
+  1). The docstring says so explicitly, because "a second SCF" is the more interesting claim and is
+  not the true one.
+
+**Two tests were written that passed against the unfixed code, and had to be rewritten.** The
+checkpointer race needed `setup()` widened before a second caller could be observed inside it; at
+real speed the first task wins and both earlier versions measured nothing. A test that cannot fail
+is an execution trace — the repository's own mutation-testing note makes the same point, and it cost
+two attempts to relearn it here.
+
+**One fix was re-planned mid-batch.** Failing closed whenever a connector's manifest was undiscovered
+broke six transport tests, which is how it surfaced that an app no bundle backs is a *supported*
+construction here rather than a misconfiguration. The distinction that resolves it — does a
+`connector.yaml` for this name ship beside the module? — also has a stated limit: a bundle an
+operator ships outside the package cannot be spoken for, and the docstring says so rather than
+implying coverage it does not have.
+
+**What the environment gave.** The sandbox has no Docker, so the Postgres-backed tests would have
+skipped as they do offline. Building Postgres 16 + pgvector 0.8 in the container took one detour
+(the packaged pgvector is 0.6 and lacks `bit_jaccard_ops`) and turned 22 skips into 4,407 tests
+actually run — which is what made the checkpointer, retention and store findings verifiable at all.
+
+**Left open, deliberately.** `mcp` 2.0.0 (a migration with a security gate to re-verify, now a
+`DEFERRED.md` row with the `<2` cap as its trigger); wiring `conformal_uncertainty` to a predictor
+(a capability decision, its dead settings deleted); and `langchain` 1.3.15's `state_schema` /
+`trace_policy`, named in the ADR so a later reader knows they were seen and not adopted.

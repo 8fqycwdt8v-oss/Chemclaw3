@@ -16,6 +16,7 @@ refused. The cap described what the parser would accept, never what the process 
 
 import asyncio
 import threading
+from collections.abc import Iterable
 
 import httpx
 import pytest
@@ -223,7 +224,7 @@ def test_an_undeclared_body_is_still_bounded(monkeypatch: pytest.MonkeyPatch) ->
     """
     monkeypatch.setattr("chemclaw.core.config.settings.service_max_request_bytes", 1024)
 
-    def _chunks() -> object:
+    def _chunks() -> Iterable[bytes]:
         for _ in range(10):
             yield b"x" * 512
 
