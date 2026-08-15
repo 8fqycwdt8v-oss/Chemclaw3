@@ -36,28 +36,53 @@ dependencies = [
     # response types — so they are declared rather than relied on through the `langchain-*` wrappers
     # that happen to pull them today.
     "anthropic>=0.40",
-    "openai>=1.60",
+    # `>=3`, not the old `>=1.60`: the floor is where the decision lives. 3.0 is the release that
+    # switches the SDK's default transport to httpx2, and leaving the floor under it would let an
+    # unrelated `uv lock --upgrade` resolve back to 2.x — quietly undoing a major this repository
+    # chose, and leaving the `httpx2` line below it declared for nobody
+    # (`docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`).
+    "openai>=3.1",
     "drfp>=0.3.7",
-    "fastapi>=0.139.2",
+    "fastapi>=0.141.1",
     # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp).
     "httpx>=0.28",
+    # **The second HTTP stack, declared rather than left transitive** (see
+    # `docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`). `openai` 3
+    # makes httpx2 its default client and stops installing `httpx`; `starlette` 1.6's test client
+    # says the same thing in a deprecation warning. httpx2 is Pydantic's stewardship of httpx under
+    # a new name — same design, maintained — so this is a rename with support behind it.
+    #
+    # `httpx` stays above it, and the pair is the recorded cost of taking those two majors: `mcp` 1.x
+    # and the `langchain-*` packages require `httpx` regardless of what this repository imports, so
+    # the closure carries both until the `mcp` 2.x migration (`docs/planning/DEFERRED.md`) removes
+    # the last first-party reason for the older one. Rewriting every transport now would buy a
+    # smaller image at the moment the thing that would *complete* the migration is deliberately not
+    # being taken.
+    "httpx2>=2.10",
     # Declared, not left transitive, for the reason stated above `httpx`: eight first-party modules
     # import it directly — including `agent/session_store.py`, which uses `message_to_dict` /
     # `messages_from_dict` for the *durable* `session_messages` column. Its floor would otherwise be
     # whichever transitive constraint happened to be tightest, so dropping an unrelated `langchain-*`
     # package could silently relax the pin on the library that owns a durably-retained serialization.
     "langchain-core>=1.5.3",
-    # `>=1.3.14`, not the `>=1.0` this was. The floor is a claim about what the code needs, and
-    # `>=1.0` was false in two places that would have failed at import or, worse, silently: the v3
-    # stream-transformer seam (`AgentMiddleware.transformers`, which `create_agent` merges at compile
-    # time) and `InterruptOnConfig.when`, which arrived in 1.3.3. `tests/test_upstream_surface.py`
-    # asserts the same floor from the other side, against the installed distribution.
+    # `>=1.3.14`, not the `>=1.0` this was. A floor is a claim, and this one's claim is narrow and
+    # true: **it is the version every assertion in `tests/test_upstream_surface.py` was measured
+    # against**, and raising it is the moment to re-run `make upstream-check` and re-read that file.
+    #
+    # It is deliberately *not* justified by a feature. An earlier version of this comment named the
+    # v3 stream-transformer seam and `InterruptOnConfig.when` as the two things `>=1.0` was false
+    # for — and neither is imported anywhere in `src/`, because the v3 front door was reverted and
+    # `HumanInTheLoopMiddleware` was never adopted. A pin justified by code that does not exist is
+    # the failure this tree's own rule names: prose is evidence about what its author believed.
     "langchain>=1.3.14",
     "langchain-anthropic>=1.5.1",
     "langchain-mcp-adapters>=0.3.2",
-    "langchain-openai>=1.4.2",
+    # `>=1.5.1` because that is the release whose own requirement is `openai<4`; 1.4.2 pins
+    # `openai<3` and silently holds the major above at 2.x. A floor that contradicts another floor
+    # resolves to the older one and reports success, which is the shape this pair was found in.
+    "langchain-openai>=1.5.1",
     "langgraph>=1.2.10",
     "langgraph-checkpoint-postgres>=3.1.2",
     # Capped on the `deepagents` argument above, transposed: this repository reaches into `mcp` for
@@ -167,9 +192,44 @@ line-length = 100
 [tool.ruff.lint]
 # Pragmatic-but-strict: correctness, bugs, imports, comprehensions, pyupgrade,
 # plus mandatory docstrings (D) — CLAUDE.md requires a docstring on every module/function.
-select = ["E", "F", "W", "I", "B", "C4", "UP", "D"]
+#
+# **Four families were added on 2026-08-14, and the rule for adding one is that its findings get
+# fixed rather than suppressed.** Each was run against the tree first and its hits read:
+#
+# - `ASYNC` — this service's whole shape is one event loop serving concurrent turns, and
+#   `tests/test_event_loop_offload.py` exists to police exactly this by hand. It found a busy-wait
+#   poll in the worker's HTTP surface and a stat call on the retrieval request path.
+# - `G` — four logging calls, three of them `logger.error(..., exc_info=True)` where
+#   `logger.exception` is the same thing said once. In a codebase where `degraded()` is a
+#   chokepoint for "we continued with less", how the exception is attached is not cosmetic.
+# - `PIE` — one `endswith` pair.
+# - `RUF100` — 72 `# noqa` directives that suppressed nothing. A dead suppression is worse than
+#   none: it reads as a considered exception and it hides the next real finding on that line.
+#
+# **What was measured and deliberately not adopted**, so the next sweep does not re-litigate it:
+# `TRY003` (528 hits, every one a message string in a `raise` — this repository's errors are written
+# to be read by an operator); `RUF002`/`RUF003` (89, all the em-dashes and arrows the prose here is
+# written with); `S608` (37, all parameterized SQL whose only interpolation is a closed module
+# constant); `T201` (74, all CLI `print`, which is a CLI's output); `DTZ011` (6 `date.today()` calls
+# — a note's `valid_from` is a chemist's calendar date, and forcing UTC there would be a behaviour
+# change dressed as a lint fix); `RET` and `ERA` (10, all style or prose that reads like code).
+select = ["ASYNC", "E", "F", "W", "I", "B", "C4", "G", "PIE", "UP", "D", "RUF100"]
 # D203/D213 conflict with D211/D212; pick the modern (no blank line, summary-first) style.
-ignore = ["D203", "D213"]
+#
+# ASYNC109 flags an `async def` taking a `timeout` argument, on the trio-shaped argument that a
+# deadline belongs to a cancel scope. Every hit here is a `timeout: timedelta` handed to
+# `workflow.execute_activity` — Temporal's budget for a durable step, which is neither an asyncio
+# deadline nor something a caller could express any other way.
+ignore = ["D203", "D213", "ASYNC109"]
+
+[tool.ruff.format]
+# ruff 0.16 formats fenced code blocks inside Markdown as well as `.py` files. That is right for
+# code and wrong for this repository's documents: `docs/archive/` and the ADR series are *records* —
+# a merged decision is never edited (CLAUDE.md), and a session finding is what somebody observed —
+# so a formatter rewriting the snippets inside them would be editing history to satisfy a style
+# rule, and every such edit would show up as a diff against a document nobody changed. The snippets
+# are illustrations, not code that runs; `make lint` still formats every `.py` in the tree.
+exclude = ["**/*.md"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -181,7 +241,14 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests document behavior in their names; module/function docstrings are not required there.
-"tests/*" = ["D100", "D103"]
+# ASYNC110 (poll in a loop) is what a test waiting for a server to bind or a task to settle does;
+# the rule's answer — an `asyncio.Event` — requires the code under test to signal one.
+"tests/*" = ["D100", "D103", "ASYNC110"]
+# The batch entry points, where "blocking the event loop" has no one to block: a CLI's loop serves
+# one operator at a terminal (`input()` is the REPL), and an eval harness's serves its own run.
+# ASYNC is selected for the server, which is where a stalled loop is somebody else's stalled turn.
+"src/chemclaw/cli/*" = ["ASYNC240", "ASYNC250"]
+"src/chemclaw/evals/*" = ["ASYNC240"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -216,7 +283,27 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# `--strict-markers` because this suite registers **no** custom markers at all: every
+# `@pytest.mark.*` in it is a builtin (`parametrize`, `skipif`, `timeout`, `usefixtures`), so any
+# name pytest does not know is a typo, and without this a typo'd marker is silently a no-op — a
+# `@pytest.mark.skipif` misspelt one letter runs the test it was meant to skip, and a misspelt
+# `timeout` leaves it on the global cap. There is nothing to register and nothing to migrate; the
+# flag simply makes the empty set enforced.
+addopts = "-ra --strict-markers"
+# Deprecations aimed at *first-party* code are errors; everybody else's are left alone.
+#
+# The suite emits third-party deprecations today (torch's `jit.script`, bofire's class-based
+# pydantic config, shap's colormap calls, starlette's httpx test client) and none of them are
+# actionable here — turning those into errors would make an upgrade of a dependency's dependency
+# fail this repository's build for something it cannot fix. What *is* actionable is a library
+# telling `chemclaw.*` that the call it is making is going away, which is precisely the signal that
+# was invisible until the upgrade that removed it. `pandas>=2.2`, `numpy>=2.0` and a pinned-major
+# `mcp`/`deepagents` policy are what make that a live risk rather than a hypothetical one.
+filterwarnings = [
+    "default",
+    "error::DeprecationWarning:chemclaw.*",
+    "error::PendingDeprecationWarning:chemclaw.*",
+]
 # Per-test wall-clock cap. A stuck test once ran for the full 6h Actions job timeout with zero
 # diagnostic output — "cancelled", no test name, no traceback, a day's runner budget on one commit.
 # The job-level `timeout-minutes` in the root workflow is the outer backstop; this is the inner one

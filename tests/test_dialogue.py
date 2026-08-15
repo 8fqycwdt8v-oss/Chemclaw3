@@ -31,7 +31,7 @@ from tests.middleware import run_middleware, tool_request
 class _AskingAgent(ScriptedTurn):
     """An agent whose turn asks the chemist to disambiguate."""
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         await ask_clarifying_question("Which campaign?", ["proj-x", "proj-y"])
         yield ""
 
@@ -89,9 +89,7 @@ def test_the_runner_binds_and_clears_the_flag() -> None:
     class _Probe(ScriptedTurn):
         """A turn that records whether the dry-run flag was ambient while it ran."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             seen.append(is_dry_run())
             yield "ok"
 

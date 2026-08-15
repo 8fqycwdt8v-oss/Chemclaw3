@@ -158,11 +158,10 @@ class ShareDocumentRetriever:
             logger.debug("%s: search failure detail", self.name, exc_info=True)
             return []
         except DocumentShareError:
-            logger.error(
+            logger.exception(
                 "%s: misconfigured, returning no evidence — every query will do this until it is "
                 "fixed",
                 self.name,
-                exc_info=True,
             )
             return []
         except Exception:

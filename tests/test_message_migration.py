@@ -384,7 +384,7 @@ async def _checkpoint_rows(thread_id: str) -> int:
         for table in CHECKPOINT_TABLES:
             await cur.execute(
                 f"SELECT count(*) FROM {table} WHERE thread_id = %s",
-                (thread_id,),  # noqa: S608
+                (thread_id,),
             )
             row = await cur.fetchone()
             total += int(row[0])  # type: ignore[index]

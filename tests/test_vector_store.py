@@ -577,7 +577,7 @@ class _StubModule:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] = {}
 
-    def AsyncQdrantClient(self, **kwargs: Any) -> Any:  # noqa: N802 - mirrors the vendor name
+    def AsyncQdrantClient(self, **kwargs: Any) -> Any:
         self.kwargs = kwargs
         return _FakeClient()
 

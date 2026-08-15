@@ -84,7 +84,7 @@ async def _latest_checkpoint(session_id: str, saver: Any | None) -> dict[str, An
 
         try:
             saver = await checkpointer()
-        except Exception:  # noqa: BLE001 - a plan read must never fail the request it serves
+        except Exception:
             logger.warning(
                 "could not reach the checkpointer to read session %s's plan; it will render as "
                 "having none, which is indistinguishable from a session that has proposed nothing",
@@ -94,7 +94,7 @@ async def _latest_checkpoint(session_id: str, saver: Any | None) -> dict[str, An
             return None
     try:
         tuple_ = await saver.aget_tuple({"configurable": {"thread_id": session_id}})
-    except Exception:  # noqa: BLE001 - same rule
+    except Exception:
         logger.warning("could not read session %s's plan checkpoint", session_id, exc_info=True)
         return None
     return dict(tuple_.checkpoint) if tuple_ is not None else None

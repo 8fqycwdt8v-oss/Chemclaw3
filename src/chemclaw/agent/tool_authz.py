@@ -331,8 +331,12 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
 async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Tell the chemist's stream a tool failed, then let it continue (`announce_tool_failures`).
 
-    Innermost, closest to the tool body, so it sees the raw exception before either converter turns
-    it into a result — whether the *model* got a readable explanation is a separate question from
+    Outermost of the governance middleware and inside both converters, so it sees every failure —
+    a tool body raising, *and* a refusal raised by a gate below it — before either converter turns
+    one into a result. (It sat innermost once, on the reasoning that the tool body is what fails;
+    measured, that is where a plan-gate refusal became invisible, because the gate raises before
+    calling the handler it wraps. `agent/langgraph_agent.tool_governance_middleware` has the
+    numbers.) Whether the *model* got a readable explanation is a separate question from
     whether the step worked, and the transcript answers the second.
 
     **Two ways to fail, and only one of them raises.** A connector tool reaches this through

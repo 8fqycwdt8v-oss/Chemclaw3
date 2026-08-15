@@ -34,6 +34,7 @@ that wants it must read the file.
 
 import logging
 from collections.abc import Iterable
+from functools import cache
 from pathlib import Path
 
 import frontmatter
@@ -81,9 +82,19 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
     """Each discovered skill's declared tool dependencies, by skill name.
 
     The run-time reader of the `tools:` declaration, for `chemclaw.agent.skill_access.
-    ToolScopedSkills`. Built once when the agent is built, not per turn: the skills tree does
-    not change while the process runs, and re-reading every `SKILL.md` on every turn would trade the
-    whole point of progressive disclosure for a filter.
+    ToolScopedSkills`. Read once per process, not per turn: the skills tree does not change
+    while the process runs, and re-reading every `SKILL.md` on every turn would trade the whole
+    point of progressive disclosure for a filter.
+
+    **That sentence used to be a claim rather than a property, and the claim had gone false.** It
+    was true when an agent was built once and lived in the process. A graph is now compiled *per
+    turn* (`agent/langgraph_agent.py`, M7 — LangGraph binds tools at construction), and this
+    function sat on that path uncached: measured at **2.6 ms of synchronous `open()` + YAML parse
+    across 28 skills, on the event loop, per turn** — and doubled again by `agent/subagents.py`,
+    which compiles a second graph through the same builder for the helper behind `task`. That is
+    the hazard `tests/test_event_loop_offload.py` exists for, in the layer above the one it watches.
+    `@cache` on `_declared_tools` restores the property the paragraph describes, so the docstring is
+    now enforced rather than asserted.
 
     **Tolerant where `chemclaw.cli.validate_skills` is strict, and deliberately so.** An unreadable
     or invalid `SKILL.md` is reported there, loudly, before deploy; here it is simply absent from
@@ -105,6 +116,20 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
         `Skill` object carries and therefore what the filter can match on. A duplicate name across
         two directories keeps the first, matching the precedence `langgraph_agent._labelled` gives
         the routed trees.
+    """
+    return _declared_tools(tuple(skills_dirs))
+
+
+@cache
+def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
+    """`declared_tools` over a hashable key — the cached half; see it for the why.
+
+    Split rather than decorating the public function because callers pass a list (and a `dict_keys`,
+    and a generator), none of which `@cache` can key on. The returned mapping is shared by every
+    caller and must be treated as read-only; every caller today only reads it.
+
+    `_declared_tools.cache_clear()` is the seam a test uses after writing a skills tree, the same
+    one `connectors.registry.discovered` offers for the same reason.
     """
     declared: dict[str, frozenset[str]] = {}
     for directory in skills_dirs:

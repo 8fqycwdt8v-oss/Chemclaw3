@@ -622,7 +622,7 @@ async def _connector_tools() -> AsyncIterator[dict[str, Any]]:
 
     # `_mcp_server` is the low-level server `FastMCP` wraps; the in-memory transport takes that
     # rather than the FastAPI app `connectors/server.py` builds around it for a deployment.
-    async with create_connected_server_and_client_session(server._mcp_server) as session:  # noqa: SLF001
+    async with create_connected_server_and_client_session(server._mcp_server) as session:
         yield {tool.name: tool for tool in await load_mcp_tools(session)}
 
 

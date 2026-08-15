@@ -43,14 +43,10 @@ from chemclaw.science.calc import xtb_cli
 from chemclaw.science.calc.artifacts import ArtifactRef, ArtifactStore, put_all
 from chemclaw.science.calc.store import CalculationKey, ResultStore, StoredResult
 from chemclaw.science.calc.structure import Structure
-from chemclaw.science.calc.xtb_engine import evaluate_point, make_calculator
+from chemclaw.science.calc.xtb_engine import AU_TO_DEBYE, evaluate_point, make_calculator
 from chemclaw.science.calc.xtb_spec import XtbSpec
 
 logger = logging.getLogger(__name__)
-
-# (Debye/Angstrom) per atomic unit — the dipole-derivative conversion the finite-difference loop
-# applies as it collects them.
-_AU_TO_DEBYE = 2.5417464519
 
 # Artifact names. The `.npy` suffix is load-bearing: it is what `calc.artifacts` maps to the numpy
 # media type, and what tells a human reading a `calculation_artifacts` row how to open the blob.
@@ -126,13 +122,22 @@ def _unpack(data: bytes) -> np.ndarray:
     return np.asarray(np.load(io.BytesIO(data), allow_pickle=False))
 
 
-def _finite_difference(spec: HessianSpec, structure: Structure) -> tuple[np.ndarray, np.ndarray]:
+def _finite_difference(
+    spec: HessianSpec, structure: Structure
+) -> tuple[np.ndarray, np.ndarray, float]:
     """Central-difference Hessian and dipole derivatives at `structure`'s geometry.
 
-    Returns `(hessian, dipole_derivatives)` with the Hessian in Hartree/Angstrom^2, shape (3N, 3N),
-    and the dipole derivatives in Debye/Angstrom, shape (3N, 3).
+    Returns `(hessian, dipole_derivatives, energy)` — the Hessian in Hartree/Angstrom^2, shape
+    (3N, 3N), the dipole derivatives in Debye/Angstrom, shape (3N, 3), and the electronic energy at
+    the undisplaced geometry.
 
-    Cost is 6N single points: the gradient is analytic, so only *first* derivatives need
+    **The energy comes back from here because this function already holds the calculator.** The
+    caller used to build a *second* calculator over the same system to get it — a second Hamiltonian
+    assembly, measured at 2 per Hessian against 1 now. The single point itself is not saved and was
+    never duplicated: one runs either way, here instead of there. Naming that precisely matters,
+    because "a second SCF" would be the interesting claim and it is not the true one.
+
+    Cost is 6N + 1 single points: the gradient is analytic, so only *first* derivatives need
     differencing. The Hessian is symmetrized afterwards — central differences of an exact gradient
     give a nearly symmetric matrix, and forcing the symmetry removes the small asymmetry that would
     otherwise put a spurious imaginary component into the eigenvalues.
@@ -150,6 +155,7 @@ def _finite_difference(spec: HessianSpec, structure: Structure) -> tuple[np.ndar
     hessian = np.zeros((size, size))
     dipole_derivatives = np.zeros((size, 3))
     step = spec.displacement_angstrom
+    energy, _, _ = evaluate_point(calc, positions)
     for index in range(size):
         shifted = positions.copy().ravel()
         shifted[index] += step
@@ -157,8 +163,8 @@ def _finite_difference(spec: HessianSpec, structure: Structure) -> tuple[np.ndar
         shifted[index] -= 2 * step
         _, gradient_minus, dipole_minus = evaluate_point(calc, shifted.reshape(-1, 3))
         hessian[index] = (gradient_plus.ravel() - gradient_minus.ravel()) / (2 * step)
-        dipole_derivatives[index] = (dipole_plus - dipole_minus) * _AU_TO_DEBYE / (2 * step)
-    return 0.5 * (hessian + hessian.T), dipole_derivatives
+        dipole_derivatives[index] = (dipole_plus - dipole_minus) * AU_TO_DEBYE / (2 * step)
+    return 0.5 * (hessian + hessian.T), dipole_derivatives, energy
 
 
 def compute_hessian(spec: HessianSpec, structure: Structure) -> tuple[Hessian, dict[str, bytes]]:
@@ -194,16 +200,7 @@ def compute_hessian(spec: HessianSpec, structure: Structure) -> tuple[Hessian, d
         # few kilobytes and saves a conversion nobody has written.
         return hessian, {**outcome.artifacts, HESSIAN_ARTIFACT: _pack(matrix)}
 
-    matrix, dipole_derivatives = _finite_difference(spec, structure)
-    calc = make_calculator(
-        spec.method,
-        *structure.arrays(),
-        charge=structure.charge,
-        uhf=structure.uhf,
-        solvent=spec.solvent,
-    )
-    _, positions = structure.arrays()
-    energy, _, _ = evaluate_point(calc, positions)
+    matrix, dipole_derivatives, energy = _finite_difference(spec, structure)
     hessian = Hessian(
         matrix=matrix,
         electronic_energy_hartree=energy,
@@ -272,7 +269,7 @@ async def _persist(
     """
     try:
         stored = await put_all(artifacts, key.as_str(), files, compute_seconds=compute_seconds)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Same contract as `calc.store.run_cached_with_artifacts`: losing a by-product costs a
         # future recomputation, never the calculation in hand, which this function's caller
         # already holds.

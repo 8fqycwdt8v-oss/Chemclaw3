@@ -58,15 +58,17 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     experiment was run (D-162). "What have I tried on this step in the last two weeks" was
     unanswerable without it: the dates were on the notes and no filter could reach them.
     """
-    if not directory.exists():
-        return {}
     want_type = filters.get("type")
     want_tag = filters.get("tag")
     since = filters.get("since")
     until = filters.get("until")
     today = date.today()
     notes: dict[str, Note] = {}
-    for note in await asyncio.to_thread(load_notes, directory):
+    # The directory check goes into the worker thread with the load, rather than being a `stat` on
+    # the event loop before it. It is a small syscall, but this runs per retriever per query on the
+    # loop that serves every other concurrent turn, and the reason the load below is offloaded
+    # applies to it unchanged.
+    for note in await asyncio.to_thread(_load_if_present, directory):
         if not note.is_current(today):
             continue
         if want_type is not None and note.type != want_type:
@@ -77,6 +79,11 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
             continue
         notes[note.id] = note
     return notes
+
+
+def _load_if_present(directory: Path) -> list[Note]:
+    """Every note under `directory`, or none when it does not exist — both off the event loop."""
+    return load_notes(directory) if directory.exists() else []
 
 
 def _in_window(note: Note, since: date | None, until: date | None) -> bool:

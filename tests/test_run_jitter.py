@@ -139,7 +139,7 @@ _JITTERS = _collect()
 def _values(jitter: _Jitter, stamps: range) -> set[float]:
     """Evaluate one jitter expression at each clock value, with `time.time` stubbed to it."""
     return {
-        eval(  # noqa: S307 - the expression comes from this repository's own source, not input
+        eval(
             jitter.code,
             {"time": SimpleNamespace(time=lambda s=stamp: float(s))},
         )

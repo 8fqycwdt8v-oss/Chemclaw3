@@ -496,7 +496,7 @@ async def _thread_row_counts(thread_id: str) -> dict[str, int]:
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
         for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
             await cur.execute(
-                f"SELECT count(*) FROM {table} WHERE thread_id = %s",  # noqa: S608
+                f"SELECT count(*) FROM {table} WHERE thread_id = %s",
                 (thread_id,),
             )
             row = await cur.fetchone()

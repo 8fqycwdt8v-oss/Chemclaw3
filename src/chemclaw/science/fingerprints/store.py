@@ -44,7 +44,22 @@ def tanimoto(bits_a: str, bits_b: str) -> float:
     """
     if len(bits_a) != len(bits_b):
         raise FingerprintError("cannot compare fingerprints of different widths")
-    a, b = int(bits_a, 2), int(bits_b, 2)
+    return tanimoto_bits(int(bits_a, 2), int(bits_b, 2))
+
+
+def tanimoto_bits(a: int, b: int) -> float:
+    """Tanimoto of two fingerprints already parsed into ints — the scoring half of `tanimoto`.
+
+    **Split out because the parse, not the popcount, is what a pairwise sweep repeats.** Each
+    bitstring is 2,048 characters, and `int(bits, 2)` over one costs more than the two `bit_count`s
+    that follow it — so a clustering pass over n fingerprints parsed n² strings to make n²/2
+    comparisons of n distinct values (`memory/similarity.cluster_by_similarity`), and a query over a
+    store re-parsed the *query* once per stored record. Callers that hold many comparisons parse
+    once and call this; `tanimoto` stays the two-string form for everyone else.
+
+    No width check here: an int has no width, so the only place that check can be made is where the
+    strings still are. Callers of this form are pre-parsing their own equal-width corpus.
+    """
     union = (a | b).bit_count()
     return (a & b).bit_count() / union if union else 0.0
 
@@ -260,11 +275,24 @@ class InMemoryFingerprintStore:
         their equal-width bits are not comparable. Ties break by id so the ordering is
         deterministic and matches the Postgres `ORDER BY similarity DESC, id COLLATE "C"`
         (code-point order — the locale-independent ordering both backends can share).
+
+        The query is parsed once rather than once per record, which is what `tanimoto`'s two-string
+        form would have done here — see `tanimoto_bits`. The width check moves with it: it is made
+        against each record's string before that record is scored, so a mismatched width still
+        raises, and still names the same failure.
         """
-        scored = [
-            Match(id=r.id, label=r.label, similarity=tanimoto(query_bits, r.bits))
-            for r in self._searchable()
-        ]
+        query = int(query_bits, 2)
+        scored = []
+        for record in self._searchable():
+            if len(record.bits) != len(query_bits):
+                raise FingerprintError("cannot compare fingerprints of different widths")
+            scored.append(
+                Match(
+                    id=record.id,
+                    label=record.label,
+                    similarity=tanimoto_bits(query, int(record.bits, 2)),
+                )
+            )
         hits = [m for m in scored if m.similarity >= threshold]
         hits.sort(key=lambda m: (-m.similarity, m.id))
         return hits[:top_k]

@@ -27,7 +27,7 @@ class _SilentAgent(ScriptedTurn):
         """Start with nothing observed."""
         self.seen: list[str | None] = []
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         self.seen.append(get_current_correlation_id())
         yield "ok"
 
@@ -83,9 +83,7 @@ def test_a_failed_turn_is_still_timed() -> None:
     class _BrokenAgent(ScriptedTurn):
         """An agent whose turn raises partway through."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             raise RuntimeError("boom")
             yield  # pragma: no cover - unreachable, makes this an async generator
 
@@ -136,9 +134,7 @@ def test_token_spend_is_counted_not_only_budgeted() -> None:
     class _MeteredAgent(ScriptedTurn):
         """An agent whose update reports usage the way a provider's does."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             yield Chunk("ok", input_tokens=30, output_tokens=12)
 
     before = METRICS.value("chemclaw_tokens_total")
@@ -179,9 +175,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
     class _MeteredAgent(ScriptedTurn):
         """The same shape as the agent above: one update carrying a split usage report."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             yield Chunk("ok", input_tokens=7, output_tokens=3)
 
     metered = _MeteredAgent()
@@ -216,9 +210,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
     class _BrokenAgent(ScriptedTurn):
         """A turn whose model call raises before it says anything."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             raise RuntimeError("boom")
             yield  # pragma: no cover - unreachable, makes this an async generator
 

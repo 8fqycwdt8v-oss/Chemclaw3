@@ -88,7 +88,34 @@ class ChemclawState(PlanningState):
     # turn as capped, marking complete answers partial forever. The cost is that
     # `get_state(config).values` does not carry it: the value lives only in what the run returns,
     # which is where every reader already looks.
+    # How many model calls *this turn* has made — the runaway guard's counter
+    # (`agent/loop_cap.py`). A field rather than a framework internal, and that survived an attempt
+    # to delegate it: `ModelCallLimitMiddleware` counts in `after_model`, which any middleware
+    # declaring `after_model` with a `jump_to` runs *before* and short-circuits — measured, the
+    # challenge gate's revision jump skipped the increment and the cap let one extra model call
+    # through per round. `before_model` cannot be skipped that way. See the module docstring.
+    #
+    # `UntrackedValue` is what makes "this turn" true of it: the channel is never written to a
+    # checkpoint, so a new run of the graph on the same `thread_id` starts it empty and
+    # `enforce_loop_cap`'s `state.get("model_calls", 0)` reads 0. It is also *not* private, which is
+    # what lets one budget span a whole team turn: `SubAgentMiddleware` strips private keys in both
+    # directions, so a private counter would give every specialist a fresh allowance.
+    model_calls: NotRequired[Annotated[int, UntrackedValue]]
+
     loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
+
+    # How many revision rounds the challenge panel has already forced this turn. Bounds the
+    # `jump_to: "model"` loop in `agent/challenge_gate.py` against `challenge_max_attempts`, and it
+    # is a counted field for exactly the reason the runaway cap's own record is: the alternative is
+    # inferring "have we been round this before" from the message list, which is the inference
+    # `agent/loop_cap.py` was written to delete.
+    #
+    # **This field was deleted once, by a merge, and nothing went red.** `challenge_gate` writes it
+    # and LangGraph silently drops a write to an undeclared channel, so `attempts` stayed 0, the
+    # `challenge_max_attempts` bound never fired, and the revision loop ran to the recursion limit —
+    # discarding the whole turn. `tests/test_state_channels.py` now drives a compiled graph for
+    # every channel here, because a unit test on the hook cannot see a channel that does not exist.
+    challenge_attempts: NotRequired[Annotated[int, UntrackedValue]]
 
 
 def turn_input(message: str) -> dict[str, Any]:

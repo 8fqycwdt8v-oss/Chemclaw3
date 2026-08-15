@@ -68,7 +68,6 @@ _LIGHT_CM = 2.99792458e10  # cm/s
 _HARTREE_J = 4.3597447222071e-18
 _AMU_KG = 1.66053906660e-27
 _J_PER_MOL_TO_KCAL = 1.0 / 4184.0
-_AU_TO_DEBYE = 2.5417464519
 
 # Grimme's free-rotor moment of inertia, the value that keeps the free-rotor entropy
 # finite as the frequency goes to zero (kg m^2).
@@ -466,7 +465,11 @@ def thermochemistry_from_hessian(
         for value in wavenumbers
         if value < -settings.xtb_imaginary_threshold_cm
     ]
-    # The softest imaginary mode is always the first, since modes are sorted.
+    # The *most negative* imaginary mode is the first, since modes are sorted ascending and an
+    # imaginary frequency is reported as negative — so index 0 is the steepest downhill direction,
+    # not the softest one. That is the direction to escape along, and the comment here said the
+    # opposite: a reader "fixing" the index to match it would have taken the shallowest mode and
+    # broken the saddle escape `relax_to_minimum` depends on.
     displacement = (
         (vectors[:, 0] / np.repeat(np.sqrt(masses), 3)).reshape(-1, 3).tolist()
         if imaginary

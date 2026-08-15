@@ -360,12 +360,7 @@ class Note(TemporalWindow):
         trailing `.`, and a `.lock` suffix — git rejects all three, so an id that
         passed the schema would otherwise only fail later at branch creation.
         """
-        if (
-            ".." in value
-            or value.endswith(".")
-            or value.endswith(".lock")
-            or not _SLUG.fullmatch(value)
-        ):
+        if ".." in value or value.endswith((".", ".lock")) or not _SLUG.fullmatch(value):
             raise ValueError(
                 f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
                 "no '..', trailing '.', or '.lock' suffix)"

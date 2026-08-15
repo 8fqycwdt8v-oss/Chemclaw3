@@ -156,16 +156,21 @@ class AgentSettings(BaseSettings):
     # **A superstep is not a model call, which is why this is a multiplier.** One model/tool round
     # trip is several graph nodes — the model node, the tools node, and one per hook-bearing
     # middleware. Measured by binary search on the minimal limit that completes N calls: `2N + 1`
-    # on a bare agent and with the harness off, `5N + 3` with the harness on. **Approximate on
+    # on a bare agent and with the harness off, `4N + 3` with the harness on. **Approximate on
     # purpose**: the constant is the middleware *count*, so adding a middleware moves it, and a
     # number with no headroom turns "we added a middleware" into "long turns started failing". 6 is
-    # the measured 5 with headroom, and still bounds a runaway to ~25 model calls at the
+    # the measured 4 with headroom, and still bounds a runaway to ~25 model calls at the
     # default cap rather than ~2,500.
     #
-    # The per-call figure was 4 while the runaway cap was a first-party `before_model` hook. It is 5
-    # since M14 put that cap on `ModelCallLimitMiddleware`, which also declares `after_model` — one
-    # more node in the loop. That is the whole cost of the swap, and it is why the ceiling's
-    # constant below is 3 rather than 1: re-measure both together, never one alone.
+    # **That sentence about headroom is not decoration — it was tested by accident.** M14 briefly
+    # put the runaway cap on `ModelCallLimitMiddleware`, which also declares `after_model`; that one
+    # extra node took the real cost to `5N + 3`, and the ceiling's constant was `+ 1` at the time,
+    # which granted exactly 7 where a one-iteration turn then needed 8. The multiplier's headroom
+    # absorbed it at every cap except the smallest. The cap swap is reverted, so the cost is `4N +
+    # 3`
+    # again — but the constant stays at 3 rather than going back to 1, because the whole lesson is
+    # that a ceiling sized to the exact requirement fails the first time anyone adds a node.
+    # Re-measure the multiplier and the constant together, never one alone.
     #
     # An earlier draft of this reasoning used 1.83, taken from counting streamed `updates` events.
     # Those are node updates, not supersteps; a ceiling derived from it would sit *below* what a
@@ -242,28 +247,44 @@ class AgentSettings(BaseSettings):
         follow it would either fire first — discarding an answer the cap would have let out — or
         never fire at all, which is what an inherited 9999 would do.
 
-        `+ 8` is measured, not decorative — it is the supersteps a turn spends *outside* the model
-        loop, and it has now been wrong twice in the same way, which is why the procedure matters
-        more than the number.
+        `+ 8` is a *bound with margin*, not the measured cost, and the distinction is the whole
+        lesson of this docstring. Both halves of the formula have been wrong, at different times,
+        for opposite reasons — and each time only the smallest cap noticed.
 
-        **Both times the constant went stale because something was added to the graph, and both
-        times only the smallest cap noticed.** It was `+ 1` until M14 moved the runaway cap onto
-        `ModelCallLimitMiddleware`, which declares `after_model` as well as `before_model`: a
-        one-iteration turn then needed 8 where the formula granted 7. It became `+ 3`, and stayed
-        right until `create_deep_agent` brought `SubAgentMiddleware`, `SummarizationMiddleware` and
-        `PatchToolCallsMiddleware` — five more supersteps of fixed overhead — at which point a
-        one-iteration turn needed 14 against the 9 the formula granted, and died with
-        `GraphRecursionError`. That is the failure this ceiling exists to *avoid*, since it discards
-        the partial answer the cap would have let out. Caps of 2 and up survived on both occasions.
+        **The history, because the procedure matters more than the number.** The constant was `+ 1`
+        until M14 moved the runaway cap onto `ModelCallLimitMiddleware`, which declares
+        `after_model` as well as `before_model`: a one-iteration turn then needed 8 where the
+        formula granted 7,
+        and died with `GraphRecursionError` — the failure this ceiling exists to *avoid*, since it
+        discards the partial answer the cap would have let out. It became `+ 3`, and stayed right
+        until `create_deep_agent` brought `SubAgentMiddleware`, `SummarizationMiddleware` and
+        `PatchToolCallsMiddleware`, at which point a one-iteration turn needed 14 against the 9 the
+        formula granted.
 
-        **Re-measured by binary search rather than by counting nodes**, on 2026-08-15, over the real
-        compiled graph: the minimal working `recursion_limit` for N tool calls came out 14, 20, 26,
-        38, 56 for N = 1, 2, 3, 5, 8 — a exact fit to `6*N + 8`. So the multiplier
-        (`agent_supersteps_per_model_call`, 6) is unchanged and only the fixed overhead moved. The
-        measurement is five points rather than one precisely because a single point cannot tell a
-        changed multiplier from a changed constant. Re-measure both together, never one alone.
+        **Then two branches each measured a graph the other did not have, and neither number
+        survived the merge.** `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
+        reverted the cap to a first-party `before_model` hook and measured `4*N + 3`; the
+        `create_deep_agent` swap measured `6*N + 8`. Merged, the graph has main's cheaper cap *and*
+        the swap's extra middleware, so it is neither.
 
-        At the shipped defaults this is `25 * 6 + 8 = 158`, against the 158 a 25-iteration harness
+        **Re-measured on the merged graph by binary search rather than by counting nodes**
+        (2026-08-15): the minimal working `recursion_limit` for N tool calls is 12, 17, 22, 32, 47
+        for N = 1, 2, 3, 5, 8 — an exact fit to **`5*N + 7`**. The multiplier fell from 6 to 5
+        because a `before_model` hook costs one superstep per model call less than a middleware
+        declaring both hooks; the constant rose from 3 to 7 because the harness brought fixed
+        overhead. Five points rather than one precisely because a single point cannot tell a changed
+        multiplier from a changed constant — which is how it went stale the first time. Re-measure
+        both together, never one alone.
+
+        **So why `6 * N + 8` and not `5 * N + 7`.** The formula grants
+        `agent_supersteps_per_model_call` (6) per call against a true cost of 5, plus 8 against a
+        true 7 — a margin of `N + 1`
+        supersteps that widens with the cap and is never below 2. That is deliberate: a ceiling that
+        fits exactly is one node away from being wrong, and every stale-constant incident above was
+        a graph gaining a node nobody re-measured for. The setting stays the knob a deployment can
+        raise; this constant is the floor under it.
+
+        At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
         turn actually needs — so the cap fires first, which is the intent. The ceiling should never
         be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
         is attached only when the harness is on.

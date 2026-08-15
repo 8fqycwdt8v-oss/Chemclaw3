@@ -296,8 +296,12 @@ def require_schema_vector_width() -> None:
         )
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
+def _cosine(a: list[float], b: list[float], *, a_norm: float | None = None) -> float:
     """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector.
+
+    `a_norm` lets a caller scanning many `b`s against one fixed `a` hand in the norm it already
+    computed, instead of this recomputing it per comparison (`search_dense`). Omitted, it is
+    computed here, so every other caller is unchanged.
 
     Clamped to [0, 1] like the Postgres backend does (`_run`), because floating-point rounding puts
     the *identical* vector's self-similarity above 1.0 about half the time — the denominator is two
@@ -307,7 +311,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
     `ValidationError` from inside the reference implementation every test validates against.
     """
     dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    left = a_norm if a_norm is not None else math.sqrt(sum(x * x for x in a))
+    norm = left * math.sqrt(sum(y * y for y in b))
     return min(1.0, max(0.0, dot / norm)) if norm else 0.0
 
 
@@ -455,12 +460,25 @@ class InMemoryDocumentIndex:
     def _rank(
         self, source: str, filters: DocumentFilter, scored: list[tuple[ChunkRecord, float]], k: int
     ) -> list[DocumentHit]:
-        """Resolve each scored chunk to a citation path, drop the unresolvable, take the best k."""
+        """Resolve each scored chunk to a citation path, drop the unresolvable, take the best k.
+
+        The citation is resolved once per *document cutting*, not once per chunk: `_citation` scans
+        and sorts every known file, and a document contributes many chunks that all resolve to the
+        same path — so this was O(chunks × files · log files) where it is O(cuttings × files ·
+        log files). The resolution has to happen before the sort rather than after `[:k]`, because a
+        chunk with no citable path is *dropped* and the next best hit takes its place.
+        """
         hits: list[DocumentHit] = []
+        resolved: dict[tuple[str, str], str] = {}
         for chunk, score in scored:
             if score <= 0.0:
                 continue
-            path = self._citation(chunk.doc_id, chunk.chunking_key, source, filters)
+            cutting = (chunk.doc_id, chunk.chunking_key)
+            if cutting not in resolved:
+                resolved[cutting] = self._citation(
+                    chunk.doc_id, chunk.chunking_key, source, filters
+                )
+            path = resolved[cutting]
             if not path:
                 continue
             hits.append(
@@ -479,8 +497,17 @@ class InMemoryDocumentIndex:
     async def search_dense(
         self, source: str, query_embedding: list[float], top_k: int, filters: DocumentFilter
     ) -> list[DocumentHit]:
-        """Rank chunks by cosine similarity to the query; drop zero similarity."""
-        scored = [(c, _cosine(query_embedding, c.embedding)) for c in self._chunks.values()]
+        """Rank chunks by cosine similarity to the query; drop zero similarity.
+
+        The query's norm is computed once here rather than inside `_cosine` per chunk — that is a
+        1,536-element pure-Python pass repeated for every chunk in the index, for a value that
+        cannot change during the scan.
+        """
+        query_norm = math.sqrt(sum(x * x for x in query_embedding))
+        scored = [
+            (c, _cosine(query_embedding, c.embedding, a_norm=query_norm))
+            for c in self._chunks.values()
+        ]
         return self._rank(source, filters, scored, top_k)
 
     async def search_lexical(

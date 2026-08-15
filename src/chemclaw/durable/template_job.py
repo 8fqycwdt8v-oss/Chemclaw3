@@ -242,5 +242,10 @@ class TemplateWorkflow:
                 # collide on an id, which is a template-authoring bug worth failing loudly on.
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                 retry_policy=BAD_DATA_RETRY,
+                # The same ceiling `ConnectorJobWorkflow` gives this child when it launches it
+                # directly (`durable/connector_job.py`), because it is the same child doing the same
+                # work — a template step must not be the one path on which a connector job runs
+                # unbounded. `BAD_DATA_RETRY` bounds failures, not a job that simply never returns.
+                execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
             ),
         )

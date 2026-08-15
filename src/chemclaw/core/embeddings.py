@@ -253,9 +253,13 @@ def _openai_client(
 
     http_client: Any | None = None
     if ca_bundle:
+        import ssl
+
         import httpx
 
-        http_client = httpx.Client(verify=ca_bundle)
+        # An `SSLContext` rather than the path, for the reason `agent/llm_provider._tls_http_client`
+        # gives: httpx deprecated `verify=<str>`, and the context names what the bundle is.
+        http_client = httpx.Client(verify=ssl.create_default_context(cafile=ca_bundle))
     return OpenAI(
         base_url=base_url,
         api_key=api_key or "not-required",

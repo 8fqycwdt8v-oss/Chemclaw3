@@ -176,6 +176,19 @@ class CalculatorSettings(BaseSettings):
     # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3):
     # model uncertainty attached to every prediction, config like `pka_uncertainty`.
     solubility_rmse_log: float = 0.75
+    # There were two `calibration_conformal_*` settings here, in the present tense, describing how
+    # split-conformal intervals "replace the reported constant above whenever there is enough
+    # evidence". Nothing read either of them — no module in `src/`, no test, no chart value — and
+    # `science/calc/uncertainty.conformal_uncertainty`, the function taking exactly those two
+    # parameters, has no caller. The paragraph described a mechanism the deployment did not have,
+    # while `.env.example` published the knobs for an operator to set and see nothing change.
+    #
+    # Deleted rather than left: a setting with no reader is configuration in appearance only, and
+    # this repository has fixed that class of defect often enough to name it. The *function* stays,
+    # tested and correct; wiring it to a predictor is a capability decision with its own backlog
+    # row, and these two come back with the caller that needs them (their values were argued for —
+    # 0.9 because the guarantee needs `ceil((n+1)·coverage) ≤ n` samples to exist at all, 20 because
+    # nine residuals give a valid interval one unusual compound sets — and that is in `git log`).
 
     # logD (calc.logd, D-092): the working pH used when a caller does not name one.
     # 7.4 (physiological pH) is the conventional analytical-chemistry default.

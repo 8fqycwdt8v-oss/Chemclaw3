@@ -242,7 +242,7 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
                     session_id,
                 )
                 return
-        except Exception:  # noqa: BLE001 - a dead heartbeat task is worse than a logged refresh
+        except Exception:
             # Widened for the reason the release below it was (D-130): this runs in a task the
             # turn only ever cancels, never awaits, so an exception the tuple did not name would
             # kill the heartbeat silently *and* surface later as an unretrieved-exception
@@ -288,7 +288,7 @@ async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
         """
         try:
             await claims.release(session_id, _WORKER_ID)
-        except Exception:  # noqa: BLE001 - see below; this task must not be able to fail
+        except Exception:
             # `Exception`, not a tuple of the connection errors. The narrow tuple was written when
             # a failure here could only propagate into a `finally` that was about to be discarded
             # anyway; shielding turned it into a task nobody awaits, where anything uncaught

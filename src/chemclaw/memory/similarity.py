@@ -11,7 +11,7 @@ import networkx as nx
 
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
-from chemclaw.science.fingerprints.store import FingerprintError, tanimoto
+from chemclaw.science.fingerprints.store import FingerprintError, tanimoto_bits
 
 
 def reaction_fingerprints(reactions: list[OrdReaction]) -> dict[str, str]:
@@ -42,13 +42,24 @@ def cluster_by_similarity(fingerprints: dict[str, str], threshold: float) -> lis
     and clusters are sorted by their first id — deterministic and order-independent. Pairwise
     comparison is O(n²); fine at today's scale, and the Postgres HNSW index (Phase 3) is the
     escape hatch past ~10^4 reactions.
+
+    **The n² is in the comparisons; it does not have to be in the parsing too.** Each bitstring is
+    2,048 characters and `tanimoto` parses both of its arguments, so this loop turned n distinct
+    fingerprints into n² string parses to make n²/2 comparisons. Parsing once up front leaves the
+    quadratic term as two `bit_count`s, which is what the O(n²) note above is actually claiming.
     """
     ids = list(fingerprints)
+    widths = {len(bits) for bits in fingerprints.values()}
+    if len(widths) > 1:
+        # The check `tanimoto` makes per pair, made once for the corpus — an int has no width, so
+        # after parsing there is nothing left to compare. Same error, same class, raised earlier.
+        raise FingerprintError("cannot compare fingerprints of different widths")
+    parsed = {key: int(bits, 2) for key, bits in fingerprints.items()}
     graph: nx.Graph = nx.Graph()
     graph.add_nodes_from(ids)
     for i, a in enumerate(ids):
         for b in ids[i + 1 :]:
-            if tanimoto(fingerprints[a], fingerprints[b]) >= threshold:
+            if tanimoto_bits(parsed[a], parsed[b]) >= threshold:
                 graph.add_edge(a, b)
     clusters = [sorted(component) for component in nx.connected_components(graph)]
     clusters.sort(key=lambda c: c[0])

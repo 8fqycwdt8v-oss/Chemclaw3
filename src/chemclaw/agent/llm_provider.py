@@ -17,6 +17,7 @@ TLS, timeout, retry budget) come from config so a firewalled internal endpoint w
 change.
 """
 
+from functools import cache
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
@@ -264,14 +265,32 @@ def _require_anthropic_key() -> None:
         )
 
 
+@cache
 def _tls_http_client() -> Any | None:
     """An httpx client pinned to the internal CA when one is configured, else None (system store).
 
     Returning None lets the OpenAI SDK build its own default client — the right behavior for a
     publicly-trusted endpoint; only a private-CA internal endpoint needs the explicit bundle.
+
+    **Cached, because this is per *process*, not per turn.** `build_chat_model` runs on every graph
+    build and a graph is compiled per turn (M7), so an uncached factory built a fresh
+    `AsyncClient` — a fresh connection pool, a fresh TLS context — for every question asked, and
+    nothing ever closed one: the sockets waited on the garbage collector. That is on the
+    `openai_compatible` + private-CA path, which is the documented production target. It is also
+    the cost `agent/verifier._default_client` and `agent/challenge._default_client` already pay
+    `@cache` to avoid, on colder paths than this one; the main agent's client was the only one
+    building per turn.
+
+    Process-scoped, so the pool binds to the first loop that uses it. Production runs one loop.
     """
     if not settings.llm_tls_ca_bundle:
         return None
+    import ssl
+
     import httpx
 
-    return httpx.AsyncClient(verify=settings.llm_tls_ca_bundle)
+    # An `SSLContext`, not `verify="<path>"`: httpx deprecated the string form ("`verify=<str>` is
+    # deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and building the context
+    # here is also the only form that says what the bundle *is* — a CA file to verify the peer
+    # against, rather than a path httpx has to guess the meaning of.
+    return httpx.AsyncClient(verify=ssl.create_default_context(cafile=settings.llm_tls_ca_bundle))

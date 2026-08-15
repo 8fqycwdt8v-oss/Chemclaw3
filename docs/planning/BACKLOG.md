@@ -70,12 +70,23 @@ topic).
       `agent/authz.py`'s `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained frozenset while every
       manifest already declares which of its tools change state. Two answers to one question, and
       the hand-maintained one is what runs.
-
 - [ ] **`WarehouseQueryError` embeds the driver's text in a message the model reads** — [S].
       `ingest/eln/warehouse/snowflake.py:88`. Driver errors quote the statement, so the query shape
       and column names reach the transcript.
 
 ## 2 — Answers that are wrong without saying so
+
+- [ ] **Split-conformal uncertainty is implemented and unwired** — [S].
+      `science/calc/uncertainty.conformal_uncertainty` is correct and tested and has no caller:
+      `solubility.py` reports the constant `solubility_rmse_log` instead, so no prediction has ever
+      carried an interval derived from this deployment's own residuals. Wiring it is a capability
+      decision — which predictors, over which reconciled measurements — not a cleanup.
+      *The configuration half is closed*: `calibration_conformal_coverage` and
+      `calibration_conformal_min_samples` were deleted (2026-08-14) rather than left as knobs an
+      operator could set with no effect; they come back with the caller. The row's weaker third was
+      **wrong** and is dropped: `service_uvicorn_workers` has three readers
+      (`core/config/__init__.py:195` refuses `>1`, and the fleet connection-budget arithmetic at
+      `:208`/`:214` reads it).
 
 - [ ] **Four hazard-screen rules miss a reagent a chemist would expect them to catch** — [M], one
       row because they are one defect class: a SMARTS arm written for the common spelling.

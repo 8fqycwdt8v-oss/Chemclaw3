@@ -138,7 +138,7 @@ def run_isolated(
     timeout still raises `subprocess.TimeoutExpired` — callers keep their existing `except
     subprocess.TimeoutExpired` handling unchanged.
     """
-    process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell, resolved path
+    process = subprocess.Popen(
         argv,
         cwd=cwd,
         env=env,
@@ -216,7 +216,7 @@ def binary_version() -> str:
     path = binary_path()
     if path is None:
         return "absent"
-    output = subprocess.run(  # noqa: S603 — fixed argv, no shell, resolved path
+    output = subprocess.run(
         [path, "--version"], capture_output=True, text=True, timeout=30, check=False
     ).stdout
     for line in output.splitlines():

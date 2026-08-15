@@ -88,4 +88,11 @@ def degraded(
         exc_info: attach the active exception, as these sites are inside `except` blocks.
     """
     record_metric(lambda m: m.increment(_DEGRADED_COUNTER, labels={"subsystem": subsystem}))
-    logger.log(level, "degraded[%s]: " + message, subsystem, *args, exc_info=exc_info)
+    # G003 (no `+` in a logging call) is right in general and wrong here, which is why the
+    # suppression carries a reason rather than a shrug. The rule's fix is to interpolate — `"%s",
+    # message % args` — and that formats *eagerly*, at the call site, inside an `except` block, in
+    # the one function whose contract is that it never endangers the caller: a caller whose format
+    # string and arguments disagree would get a `TypeError` raised over the failure it was
+    # reporting. Concatenating the prefix keeps one lazy format string, so a malformed pair is
+    # reported by logging's own error path, exactly as it is everywhere else in this codebase.
+    logger.log(level, "degraded[%s]: " + message, subsystem, *args, exc_info=exc_info)  # noqa: G003

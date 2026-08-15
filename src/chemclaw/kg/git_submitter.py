@@ -402,7 +402,7 @@ class GitNoteSubmitter:
         """
         try:
             await self._remove_worktree(workdir)
-        except BaseException as exc:  # noqa: BLE001 — see the docstring: nothing may escape here
+        except BaseException as exc:
             log.warning(
                 "could not remove submission worktree %s (%s); leaving it for the "
                 "next submission's sweep",

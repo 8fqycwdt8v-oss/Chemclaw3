@@ -239,7 +239,7 @@ def test_the_submit_lock_excludes_a_second_operating_system_process(tmp_path: Pa
     (repo / ".git").mkdir(parents=True)
 
     with _checkout_lock(str(repo)):
-        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, paths from tmp_path
+        completed = subprocess.run(
             [sys.executable, "-c", _SECOND_PROCESS, str(repo)],
             capture_output=True,
             text=True,
@@ -251,7 +251,7 @@ def test_the_submit_lock_excludes_a_second_operating_system_process(tmp_path: Pa
         )
 
     # And the lock is genuinely released, not merely held for the process's lifetime.
-    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, paths from tmp_path
+    completed = subprocess.run(
         [sys.executable, "-c", _SECOND_PROCESS, str(repo)],
         capture_output=True,
         text=True,

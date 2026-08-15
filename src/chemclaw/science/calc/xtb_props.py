@@ -24,12 +24,12 @@ from pydantic import BaseModel, Field
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure, structure_from_smiles
-from chemclaw.science.calc.xtb_engine import run_singlepoint
+from chemclaw.science.calc.xtb_engine import AU_TO_DEBYE, run_singlepoint
 from chemclaw.science.calc.xtb_spec import XtbSpec
 
-# Physical constants, in the direction this module converts.
+# Physical constants, in the direction this module converts. The Debye conversion is imported from
+# the unit boundary (`xtb_engine`) rather than restated here — it had three copies in this package.
 _HARTREE_TO_EV = 27.211386245988
-_AU_TO_DEBYE = 2.5417464519
 
 # An orbital counts as occupied above this occupation number. Fermi smearing at the
 # default electronic temperature leaves a gapped molecule's occupations at 2 and 0, so
@@ -168,7 +168,7 @@ def compute_properties(spec: XtbSpec, structure: Structure) -> ElectronicPropert
         homo_ev=homo * _HARTREE_TO_EV,
         lumo_ev=None if lumo is None else lumo * _HARTREE_TO_EV,
         gap_ev=None if lumo is None else (lumo - homo) * _HARTREE_TO_EV,
-        dipole_debye=float(np.linalg.norm(result["dipole"])) * _AU_TO_DEBYE,
+        dipole_debye=float(np.linalg.norm(result["dipole"])) * AU_TO_DEBYE,
         atom_charges=[
             AtomCharge(index=index, element=symbol, charge=round(float(charge), 4))
             for index, (symbol, charge) in enumerate(zip(symbols, result["charges"], strict=True))

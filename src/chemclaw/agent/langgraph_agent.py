@@ -71,13 +71,16 @@ from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
 from langchain.agents.middleware import TodoListMiddleware
+from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.channels.untracked_value import UntrackedValue
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
 # D-075, D-086 among them) and merged ADRs are never edited, so renaming it to mark this second
 # caller would break every one of those citations to buy nothing — the same argument that freezes
-# the `D-NNN` sequence. Three tests already import it across module boundaries; within one package
-# that is the established idiom here.
+# the `D-NNN` sequence. Several callers outside this module already import it — five test modules
+# and `durable/template_activities.py` — and within one package that is the established idiom here.
+# (Unnumbered deliberately: this said "three tests", and it was six importers including a
+# production one, which is what a count in a comment does.)
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
@@ -86,7 +89,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
-from chemclaw.agent.loop_cap import loop_cap_middleware
+from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
@@ -197,7 +200,15 @@ def build_langgraph_agent(
         actor=actor,
         sink=audit_sink,
     )
-    skills = skills_backend(prof, tools)
+    # One walk of the skills trees per build, shared by the backend that routes them and the
+    # middleware that labels them. They used to derive it independently — two `_skill_dirs()`
+    # fan-outs (each a `Path.is_dir()` per enabled bundle) and two `_labelled()` passes per turn —
+    # which also left "routes and sources cannot disagree" resting on the two calls happening to see
+    # the same filesystem. Passing one value makes that structural, which is what `_skill_dirs`'s
+    # own docstring says the single definition is for. It matters twice as much now: `_subagents`
+    # compiles a second graph through this same function, so an un-shared walk is four.
+    labelled = _labelled(_skill_dirs())
+    skills = skills_backend(prof, tools, labelled=labelled)
     # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
     # the filesystem tools must read the *same* backend object, or the role narrowing computed for
     # one would not apply to the other.
@@ -213,7 +224,7 @@ def build_langgraph_agent(
         "tools": bound,
         "system_prompt": instructions_for(prof),
         "state_schema": ChemclawState,
-        "middleware": _middleware(prof, backend, audit, chat_model),
+        "middleware": _middleware(prof, backend, audit, chat_model, labelled),
         "name": "chemclaw",
         "checkpointer": checkpointer,
         "response_format": response_format,
@@ -248,7 +259,11 @@ def build_langgraph_agent(
 
 
 def _middleware(
-    profile: AgentProfile, backend: CompositeBackend, audit: Any, model: Any
+    profile: AgentProfile,
+    backend: CompositeBackend,
+    audit: Any,
+    model: Any,
+    labelled: list[tuple[str, str]],
 ) -> list[Any]:
     """What this repository adds to — and takes over from — upstream's assembled stack.
 
@@ -282,6 +297,8 @@ def _middleware(
         audit: The audit middleware from `make_audit_middleware`.
         model: The resolved chat model, needed only to construct the summarizer this list switches
             off — upstream's constructor demands one for a code path that cannot run.
+        labelled: The one walk of the skills trees this build made, so the middleware labels exactly
+            what the backend routed rather than walking them again.
 
     Returns:
         The list to hand `create_deep_agent(middleware=…)`.
@@ -294,7 +311,7 @@ def _middleware(
         # deployment has declined one since D-025 on indirect-prompt-injection grounds that the
         # deepagents variant answers only half of. `agent/compaction.py` carries the whole argument.
         disabled_summarizer(model, backend),
-        _skills_middleware(backend),
+        _skills_middleware(backend, labelled),
         *tool_call_middleware(audit, profile),
         # Provider-specific, so which middleware this is — or that it is none — is decided in the F0
         # seam rather than here. When the provider is Anthropic this replaces upstream's own by
@@ -385,7 +402,7 @@ class ReloadingSkillsState(SkillsState):
     property of the channel, not of a caller who remembers to clear it.
     """
 
-    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue]]
+    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]
 
 
 class ReloadingSkillsMiddleware(SkillsMiddleware):
@@ -425,15 +442,17 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     no loop cap, so attaching either unconditionally would make this engine behave differently from
     the other while both are live — a safer difference, but a difference.
 
-    The cap is upstream's `ModelCallLimitMiddleware`, subclassed only to record that it fired —
-    see `agent/loop_cap.py` for why the observation half cannot come from upstream's own counters.
+    `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
+    record. One counter for one number — and it counts in `before_model` deliberately: see
+    `agent/loop_cap.py` for the four regressions that delegating it to `ModelCallLimitMiddleware`
+    produced, the first of which is that an `after_model` counter is skippable by a jump.
     """
     if not harness_enabled_for(profile):
         return []
-    return [TodoListMiddleware(), loop_cap_middleware()]
+    return [TodoListMiddleware(), enforce_loop_cap]
 
 
-def _skills_middleware(backend: CompositeBackend) -> Any:
+def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:
     """Wrap a narrowed backend in deepagents' provider — the plumbing around the decision.
 
     Private, and split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split
@@ -443,7 +462,8 @@ def _skills_middleware(backend: CompositeBackend) -> Any:
 
     Takes the backend rather than building one, because the caller has to hold it anyway — the
     skills read tool is bound to the same instance, and two backends built from one config would be
-    two objects that merely happen to agree.
+    two objects that merely happen to agree. `labelled` arrives for the same reason: the backend was
+    routed from it, and re-deriving it here is a second walk of the trees that could disagree.
 
     **`create_deep_agent(skills=…)` is deliberately not passed**, and this is the middleware that
     would have collided with it. Upstream composes its own `SkillsMiddleware` only when that
@@ -456,12 +476,13 @@ def _skills_middleware(backend: CompositeBackend) -> Any:
     upstream composes one unconditionally — which is why `_middleware` explains the rule there.
     """
     return ReloadingSkillsMiddleware(
-        backend=backend,
-        sources=[(f"/{label}", label) for label, _ in _labelled(_skill_dirs())],
+        backend=backend, sources=[(f"/{label}", label) for label, _ in labelled]
     )
 
 
-def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
+def skills_backend(
+    profile: AgentProfile, tools: list[Any], *, labelled: list[tuple[str, str]] | None = None
+) -> CompositeBackend:
     """The skills backend for one profile — a backend that can only reach what it may.
 
     The LangGraph twin of `chemclaw_agent.skills_source`, narrowed by the *same* three predicates
@@ -484,8 +505,12 @@ def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
     a single directory. So each tree gets a virtual prefix routed to its own narrowed backend, and
     an unrouted path reaches `StateBackend` — which is empty, holds no filesystem, and is therefore
     the right thing for a path that matches no skills tree to find.
+
+    `labelled` is the caller's already-walked `(label, directory)` list, so one build walks the
+    trees once; omitting it walks them here, which is what a test building a backend alone wants.
     """
-    dirs = _skill_dirs()
+    labelled = labelled if labelled is not None else _labelled(_skill_dirs())
+    dirs = [directory for _label, directory in labelled]
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
         declared=declared_tools(dirs),
@@ -495,8 +520,7 @@ def skills_backend(profile: AgentProfile, tools: list[Any]) -> CompositeBackend:
     return CompositeBackend(
         default=StateBackend(),
         routes={
-            f"/{label}/": NarrowedSkillsBackend(directory, permits)
-            for label, directory in _labelled(dirs)
+            f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
         },
     )
 
@@ -544,10 +568,14 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     - audit outermost, so a denied or refused attempt is a recorded attempt;
     - authorization inside audit, then the dry-run and repeat gates beside it, for the same reason:
       each is a decision worth recording;
-    - `announce_tool_failures` innermost, closest to the tool body, because it is the only one that
-      must see the raw exception from *every* failure — including the ones the converters above
-      this list turn into results — so the chemist's transcript shows the step that did not work
-      (D-138).
+    - `announce_tool_failures` **first in this list — outermost within the group, inside both
+      converters** — because it is the only one that must see *every* failure, including a refusal
+      raised by a gate below it, so the chemist's transcript shows the step that did not work
+      (D-138). This bullet used to say "innermost, closest to the tool body", which is where the
+      announcer sat when a plan-gate refusal was measured reaching nobody: `enforce_plan_approval`
+      raises *before* calling its handler, so an announcer it wrapped never ran. The inline comment
+      on the entry below carries the measurement; a reader following the old bullet would restore
+      the defect.
 
     All of them are no-ops on the dev path: the sink is log-only, authz is open until
     `entra_required`, `is_dry_run()` is False off the request path, and the repeat counter is

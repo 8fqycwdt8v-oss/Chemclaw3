@@ -51,7 +51,7 @@ class _ResumingAgent(ScriptedTurn):
         self._tokens = (first_tokens, second_tokens)
         self.calls = 0
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         from chemclaw.core.turn_signals import record_job_started
 
         self.calls += 1
@@ -111,7 +111,7 @@ class _FailingHandle:
     def __init__(self, reason: str) -> None:
         self._reason = reason
 
-    async def result(self) -> Any:  # noqa: D102 - the handle protocol
+    async def result(self) -> Any:
         inner = _child_failure()
         inner.__cause__ = RuntimeError(self._reason)
         outer = WorkflowFailureError(cause=inner)

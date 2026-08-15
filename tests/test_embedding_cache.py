@@ -117,7 +117,7 @@ def test_the_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for index in range(10):
         embed_texts([f"text-{index}"])
-    assert len(embeddings._CACHE) <= 4  # noqa: SLF001 — the bound is the property under test
+    assert len(embeddings._CACHE) <= 4
 
 
 def test_a_size_of_zero_disables_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,7 +133,7 @@ def test_a_size_of_zero_disables_it(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_the_real_hash_embedder_still_round_trips_through_the_cache() -> None:
     """No provider stub: the cached value must be the value the provider would have returned."""
-    direct = embeddings._hash_embedding("acetonitrile")  # noqa: SLF001
+    direct = embeddings._hash_embedding("acetonitrile")
     assert embed_texts(["acetonitrile"])[0] == direct
     assert embed_texts(["acetonitrile"])[0] == direct
 

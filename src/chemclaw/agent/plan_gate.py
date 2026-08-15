@@ -229,7 +229,7 @@ async def consume_turn_approval(session_id: str) -> None:
             # for a session whose every state-changing call would now be refused — the same
             # disagreement between the displayed state and the enforced one that let DARK-1 go
             # unnoticed. The mode is gone; the route derives what it displays from this row.
-    except Exception:  # noqa: BLE001 - a turn must not fail on its way out
+    except Exception:
         degraded(
             logger,
             "plan_approval",

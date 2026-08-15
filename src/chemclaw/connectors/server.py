@@ -25,6 +25,7 @@ import os
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from hmac import compare_digest
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
@@ -75,6 +76,31 @@ def _declared_bearer_env(name: str) -> str | None:
 
     A control whose absence is decided by a file being unreadable is not a control. Failing closed
     makes the same event loud: the connector answers 401 until an operator fixes the manifest.
+
+    **A manifest that ships and is not discovered fails closed too, and that half was missing.**
+    Only `discovered()` *raising* failed closed. `discovered()` succeeding without this bundle in
+    its result fell through to `return None` — "no credential required", whole surface anonymous —
+    which is the identical outcome the paragraph above refuses, reached by the likelier route: a
+    `connectors_dir` pointing somewhere else, or an operator's prepended override directory
+    shadowing the tree. Neither raises, because a directory with no bundles parses perfectly well,
+    and the deployment goes on recording the pod as credential-gated.
+
+    **Undiscovered is not the same as undeclared, and the packaged tree is what separates them.**
+    `connector_app` also serves apps no bundle backs at all — every transport and identity test
+    builds one, and that is a supported construction, not a misconfiguration: nothing was declared,
+    so there is no promise to betray and no token anyone could present. What distinguishes the two
+    is whether a `connector.yaml` for this name ships *beside this module* — `_ships_a_manifest`.
+    If one does and discovery did not find it, this process is looking at the wrong tree and must
+    refuse; if none does, the app is synthetic and stays open. That check resolves against
+    `__file__` rather than through the registry or `settings`, because the configured roots are
+    exactly what the first case has wrong.
+
+    **What that does not cover, stated rather than implied:** a bundle an operator ships *outside*
+    this package — the documented PATH-like override — has no manifest beside this module, so a
+    misconfigured registry makes it indistinguishable from a synthetic app and it stays open. There
+    is no second source of truth to consult for one: its manifest lives in the same configured roots
+    that are under suspicion. The shipped bundles are the ones this can speak for, and it speaks for
+    them; a private bundle that wants the same guarantee has to assert its own credential.
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
     from chemclaw.connectors.registry import discovered
@@ -82,18 +108,39 @@ def _declared_bearer_env(name: str) -> str | None:
     try:
         found = discovered()
     except Exception:
-        logger.error(
+        logger.exception(
             "connector_auth_unresolved: connector %s could not read its manifests, so it cannot "
             "tell whether it requires a bearer token; refusing every MCP request until it can",
             name,
-            exc_info=True,
         )
         return _UNRESOLVED_AUTH
     for _bundle, manifest in found.values():
         if manifest.name == name and isinstance(manifest.endpoint, HttpEndpoint):
             auth = manifest.endpoint.auth
             return auth.token_env if isinstance(auth, BearerAuth) else None
+    if _ships_a_manifest(name):
+        logger.error(
+            "connector_auth_unresolved: connector %s ships a manifest that this process did not "
+            "discover, so it cannot tell whether it requires a bearer token; check connectors_dir "
+            "(currently %s). Refusing every MCP request until it resolves",
+            name,
+            settings.connectors_dir,
+        )
+        return _UNRESOLVED_AUTH
     return None
+
+
+def _ships_a_manifest(name: str) -> bool:
+    """Whether a `connector.yaml` for `name` ships inside this package.
+
+    The one question that separates "this deployment is pointed at the wrong tree" from "this app
+    was built without a bundle behind it" — see `_declared_bearer_env`. Resolved against `__file__`
+    (this module lives in the bundle root, one level above every bundle) rather than through
+    `settings.connectors_dirs`, because those roots are exactly what the first case has wrong.
+    """
+    from chemclaw.connectors.registry import MANIFEST_FILENAME
+
+    return (Path(__file__).parent / name / MANIFEST_FILENAME).is_file()
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -136,10 +183,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         `tests/test_connector_safety_rubric.py`'s fixture does, and what any late configuration
         would do) found the registry serving stale contents. Building an app is not a moment that
         should have side effects on shared state; the first request is.
+
+        **The fail-closed answer is not cached, and that is what makes the other promise true.**
+        `_declared_bearer_env`'s docstring says the connector "answers 401 until an operator fixes
+        the manifest"; latching `_resolved` on the sentinel made that "until an operator fixes the
+        manifest *and* restarts the pod", because nothing would ever ask again. `discovered()` is
+        cached but does not cache exceptions, so re-asking after a fix is cheap and can succeed.
+        Only a *resolved* answer is worth keeping — a real env var name, or `None` for `mode: none`.
         """
         if not self._resolved:
             self._token_env = _declared_bearer_env(self._connector)
-            self._resolved = True
+            self._resolved = self._token_env != _UNRESOLVED_AUTH
         return self._token_env
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -249,7 +303,7 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
     Wrapped around `_sanitize_tool_errors`'s interception of the same method rather than merged
     into it: two concerns, two functions, one patch point each.
     """
-    manager = server._tool_manager  # noqa: SLF001 - the only interception point this mcp version offers
+    manager = server._tool_manager
     wrapped_call_tool = manager.call_tool
 
     async def _call_tool(
@@ -302,7 +356,7 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
     passes through before `Tool.run` composes the leaking message. Patched once here, the one
     shared choke point every connector's app is built through, rather than once per bundle.
     """
-    manager = server._tool_manager  # noqa: SLF001 - the only interception point this mcp version offers
+    manager = server._tool_manager
     original_call_tool = manager.call_tool
 
     async def _call_tool(

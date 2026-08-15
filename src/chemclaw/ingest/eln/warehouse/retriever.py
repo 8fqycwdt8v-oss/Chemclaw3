@@ -107,11 +107,10 @@ class WarehouseVectorRetriever:
             # (`suppress_ingested`), which is one more way this leg can fail on a bad day.
             return self._chunks(await self._search(query, filters))
         except BindingError:
-            logger.error(
+            logger.exception(
                 "%s: misconfigured, returning no evidence — every query will do this until it is "
                 "fixed",
                 self.name,
-                exc_info=True,
             )
             return []
         except (WarehouseQueryError, ConnectionError, OSError):

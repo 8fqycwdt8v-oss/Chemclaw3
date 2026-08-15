@@ -6,13 +6,13 @@ resolve them by name straight away. Public surface: the metric interface + regis
 """
 
 from chemclaw.evals import (
-    autonomy as _autonomy,  # noqa: F401 — registers the F9-T3 autonomy metrics
+    autonomy as _autonomy,
 )
 from chemclaw.evals import (
-    metrics as _metrics,  # noqa: F401 — imported for its registration side effect
+    metrics as _metrics,
 )
 from chemclaw.evals import (
-    retrieval as _retrieval,  # noqa: F401 — registers the KM-13 retrieval metrics
+    retrieval as _retrieval,
 )
 
 __all__ = ["_autonomy", "_metrics", "_retrieval"]
