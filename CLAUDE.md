@@ -112,11 +112,22 @@ first-party code but the number of places reading a shape upstream never promise
 `tests/test_upstream_surface.py` now asserts every one in a single file, each naming the module that
 would break, two of them asserting an *absence* so that upstream fixing something turns the
 workaround red instead of letting it outlive its reason. The same pass moved the runaway cap onto
-`ModelCallLimitMiddleware` (which costs one superstep per model call — the step-ceiling constant was
-re-measured with it) and reduced `ReloadingSkillsMiddleware` to a single `UntrackedValue` channel,
-deleting a dependency on the *arity* LangChain invokes a hook with. It also declined three adoptions
+`ModelCallLimitMiddleware` and **that half was reverted a day later**
+(`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`): upstream counts in
+`after_model`, which any middleware jumping from `after_model` runs *before* and short-circuits —
+measured, the challenge gate's revision jump let a cap of 2 run 4 model calls — and its
+`exit_behavior="end"` fabricates an assistant message the CLI, the specialist report and the
+persisted thread all read. The general rule left behind: **`ModelCallLimitMiddleware` is unsafe to
+compose with any middleware that jumps from `after_model`.** What survived is the reduction of
+`ReloadingSkillsMiddleware` to a single `UntrackedValue` channel, deleting a dependency on the
+*arity* LangChain invokes a hook with — with upstream's `PrivateStateAttr` kept, because dropping it
+put the role-narrowed skills listing into the graph's *input* schema where a caller could replace it.
+`tests/test_state_channels.py` now drives a compiled graph for every channel `ChemclawState`
+declares, because all three of that week's defects were a hook writing a channel the graph did not
+have — which LangGraph drops in silence. It also declined three adoptions
 that looked obvious and are not: `ToolErrorMiddleware` and `ToolRetryMiddleware` both trigger on
-raised exceptions, and MCP tools never raise. The same pass **built and reverted** the front door's
+raised exceptions and MCP tools never raise, and `plan_state`'s `channel_values` read turned out to
+be public `Checkpoint` API rather than an internal. The same pass **built and reverted** the front door's
 move to `stream_events(version="v3")`: it retires the largest coupling of all — `astream`'s tuple
 arity — and the event contract survived unmodified, but v3 reports token usage only at
 `message-finish`, so a turn abandoned mid-message books **0** tokens where the current driver books

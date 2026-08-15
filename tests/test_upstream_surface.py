@@ -90,9 +90,36 @@ def test_the_skills_middleware_still_caches_under_skills_metadata() -> None:
     """
     from deepagents.middleware.skills import SkillsState
 
-    assert "skills_metadata" in get_type_hints(SkillsState, include_extras=True), (
+    hints = get_type_hints(SkillsState, include_extras=True)
+    assert "skills_metadata" in hints, (
         "SkillsMiddleware renamed its cache channel; "
         "agent/langgraph_agent.ReloadingSkillsState redeclares `skills_metadata` by name"
+    )
+    # The *annotation* as well as the name, because the redeclaration has to reproduce upstream's
+    # `PrivateStateAttr` and once did not — which put the role-narrowed listing into the graph's
+    # input schema, where a caller could replace it. `tests/test_state_channels.py` asserts our
+    # side.
+    assert "OmitFromSchema" in repr(hints["skills_metadata"]), (
+        "SkillsMiddleware no longer marks `skills_metadata` private; "
+        "agent/langgraph_agent.ReloadingSkillsState copies that marker and should stop"
+    )
+
+
+def test_private_state_attr_is_still_where_the_skills_state_reaches_for_it() -> None:
+    """`ReloadingSkillsState` must import `PrivateStateAttr`, and there is only one place to get it.
+
+    It is **not** in `langchain.agents.middleware.__all__` — unlike `ModelCallLimitMiddleware`,
+    `hook_config` and `Runtime`, which are — so `agent/langgraph_agent.py` reaches into
+    `langchain.agents.middleware.types` for it. That is a real coupling to a non-exported name,
+    accepted because the alternative is dropping the marker, which is a security property
+    (see `tests/test_state_channels.py`). Pinned here so a move is a red build rather than a silent
+    loss of the marker.
+    """
+    from langchain.agents.middleware import types
+
+    assert hasattr(types, "PrivateStateAttr"), (
+        "PrivateStateAttr moved; agent/langgraph_agent.ReloadingSkillsState imports it from "
+        "langchain.agents.middleware.types because it is not re-exported by the package"
     )
 
 
@@ -125,14 +152,27 @@ def test_create_agent_still_bakes_a_recursion_limit_this_repo_overrides() -> Non
     which discards the partial answer `agent/loop_cap.py` deliberately lets out. If upstream ever
     picks a sane default this override stays anyway — but the docstring claiming 9999 must not be
     allowed to rot.
+
+    **This assertion was vacuous and is the reason the file's own rule is stated so firmly.** It
+    used
+    to be `"recursion_limit" in inspect.getsource(factory)` — one identifier in an 81 KB module.
+    Mutation-tested: it still passed with the default changed to 25, and still passed with the
+    baking
+    deleted entirely as long as the word survived in a comment, while its failure message claimed
+    "create_agent no longer sets a recursion_limit". A source-text grep is a *behaviour* assertion
+    in
+    disguise, which the module docstring above says does not belong here. The value is on the
+    compiled graph, so read it.
     """
-    import inspect
+    from langchain.agents import create_agent
 
-    from langchain.agents import factory
+    from tests.fakes_langgraph import ScriptedChatModel
 
-    assert "recursion_limit" in inspect.getsource(factory), (
-        "create_agent no longer sets a recursion_limit; agent/state.turn_config's docstring "
-        "describes displacing a baked 9999"
+    baked = create_agent(model=ScriptedChatModel(["x"]), tools=[]).config
+    assert baked is not None and baked.get("recursion_limit") == 9_999, (
+        f"create_agent's baked recursion_limit is {baked and baked.get('recursion_limit')}, not "
+        "9999 — agent/state.turn_config's docstring describes displacing that number, and "
+        "core/config/agent.agent_recursion_limit is sized against it"
     )
 
 
@@ -157,12 +197,18 @@ def test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout() -> None:
 
 
 def test_the_v3_stream_transformer_extension_point_is_present() -> None:
-    """The seam `api/graph_stream.py` is migrating onto.
+    """The **restart condition** for the deferred v3 migration — not a live dependency.
 
-    `stream_events(version="v3")` builds its stream modes from the union of registered
-    transformers' `required_stream_modes` and owns `subgraphs` itself, which is what replaces the
-    hand-parsed 3-tuple and its dependency on `langgraph.pregel.main._output`'s arity. Asserted
-    because the migration is staged: this must not disappear underneath a half-migrated front door.
+    Nothing in `src/` imports any of this: the v3 front door was built, measured and reverted,
+    because v3 reports token usage only at `message-finish` and a turn abandoned mid-message booked
+    0 tokens where the current driver books ~30 — making "drop the connection just before the
+    answer" a free bypass of the token budget.
+
+    It is asserted anyway because the rest of that migration is known-good and cheap to restart:
+    `stream_events(version="v3")` owns `stream_mode`/`subgraphs` and so retires `astream`'s tuple
+    arity, the largest unpromised-shape read left in this tree. If this seam disappears, the restart
+    condition is gone too and the deferred backlog row should be closed rather than left implying
+    work that is no longer possible.
     """
     from langchain.agents.middleware import AgentMiddleware
     from langgraph.stream._types import StreamTransformer

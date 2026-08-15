@@ -59,6 +59,7 @@ from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
+from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.channels.untracked_value import UntrackedValue
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -76,7 +77,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.compaction import context_compaction_middleware
 from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
-from chemclaw.agent.loop_cap import loop_cap_middleware
+from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
@@ -240,7 +241,7 @@ class ReloadingSkillsState(SkillsState):
     property of the channel, not of a caller who remembers to clear it.
     """
 
-    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue]]
+    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]
 
 
 class ReloadingSkillsMiddleware(SkillsMiddleware):
@@ -280,12 +281,14 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     no loop cap, so attaching either unconditionally would make this engine behave differently from
     the other while both are live — a safer difference, but a difference.
 
-    The cap is upstream's `ModelCallLimitMiddleware`, subclassed only to record that it fired —
-    see `agent/loop_cap.py` for why the observation half cannot come from upstream's own counters.
+    `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
+    record. One counter for one number — and it counts in `before_model` deliberately: see
+    `agent/loop_cap.py` for the four regressions that delegating it to `ModelCallLimitMiddleware`
+    produced, the first of which is that an `after_model` counter is skippable by a jump.
     """
     if not harness_enabled_for(profile):
         return []
-    return [TodoListMiddleware(), loop_cap_middleware()]
+    return [TodoListMiddleware(), enforce_loop_cap]
 
 
 def _team_middleware(
