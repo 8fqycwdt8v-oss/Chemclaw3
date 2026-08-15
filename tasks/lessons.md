@@ -193,3 +193,14 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
     anything you did not stage yourself, or use `git stash --keep-index`. Parallel agents make this
     routine rather than exotic: file ownership partitions the *working tree*, and the index is
     shared.
+
+29. **Never pipe a test run through `tail` — the output *is* the diagnostic.** A full suite came
+    back "2 failed" and the two names, and nothing else, because the command was
+    `make test 2>&1 | tail -6`. No traceback, no assertion text, no timeout marker, so the failure
+    could not be attributed at all and the only way forward was a second twenty-six-minute run.
+    Redirect to a file and `tail` the *file* (`make test > run.log 2>&1`), which costs nothing and
+    keeps the whole thing. The same mistake makes a *green* run untrustworthy for a different
+    reason: skip counts and warnings are where a suite tells you it did less than you think.
+    Related: do not run two suites at once. Two of the three failures seen this session were in
+    xTB-backed tests under a 180s per-test cap while three pytest processes competed for CPU —
+    which is indistinguishable, from a truncated log, from a real regression.
