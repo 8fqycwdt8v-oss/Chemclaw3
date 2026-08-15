@@ -19,6 +19,8 @@ change.
 
 from typing import Any
 
+from langchain.agents.middleware import AgentMiddleware
+
 from chemclaw.core.config import settings
 
 # A non-empty placeholder for endpoints that accept any bearer (some internal OpenAI-compatible
@@ -54,6 +56,27 @@ def build_chat_model(task: str = "agent") -> Any:
     if settings.llm_provider == "openai_compatible":
         return _openai_compatible_model(model)
     return _anthropic_model(model)
+
+
+class _CachingDisabled(AgentMiddleware):
+    """A middleware that does nothing, under the name of the one it keeps out.
+
+    `AnthropicPromptCachingMiddleware` has no "off" constructor argument — `min_messages_to_cache`
+    gates only the message-tail breakpoint, and the ones that actually appeared in the payload were
+    on the system prompt and the tool definitions. So refusing it means occupying its slot rather
+    than configuring it, and a bare `AgentMiddleware` overrides no hook and registers no tool: it is
+    inert by construction rather than by a body that happens to be empty.
+
+    Named for what it displaces rather than for itself: `_apply_custom_middleware` matches on
+    `.name`, so a placeholder under its own class name would land *beside* upstream's and change
+    nothing. `tests/test_prompt_caching.py` asserts the payload, which is the only place the
+    difference is visible.
+    """
+
+    @property
+    def name(self) -> str:
+        """Upstream's name, so this replaces its middleware instead of joining it."""
+        return "AnthropicPromptCachingMiddleware"
 
 
 def prompt_caching_middleware() -> list[Any]:
@@ -115,13 +138,29 @@ def prompt_caching_middleware() -> list[Any]:
     `build_langgraph_agent(model=fake)`), where upstream's default would emit a `UserWarning` per
     model call for a situation that is entirely expected.
 
+    **Off has to be spelled, because `create_deep_agent` turns it on.** Upstream's
+    `append_prompt_caching_middleware` composes an `AnthropicPromptCachingMiddleware` whenever the
+    model is an Anthropic one, so returning `[]` no longer means "no caching" — it means "whatever
+    upstream decided". That was measured rather than reasoned about: with `llm_prompt_caching=False`
+    the request payload still carried `cache_control` breakpoints, and the test asserting their
+    absence is what caught it. So the disabled path now returns a *named placeholder* that occupies
+    upstream's slot and does nothing, on the same argument and by the same `.name` splice as
+    `compaction.disabled_summarizer`. This is the second default the harness supplies that this seam
+    must actively refuse; the rule is that a decision belonging to `settings` may not be made by an
+    upstream default, in either direction.
+
+    The empty list is still right when the provider is not Anthropic: upstream composes nothing
+    there either, so there is no slot to occupy and no `langchain_anthropic` import to make.
+
     Returns:
-        A one-element middleware list on the Anthropic path with caching enabled, else `[]`. The
-        list shape is what `build_langgraph_agent` splices, matching its three other middleware
-        groups.
+        A one-element list on the Anthropic path — the real middleware when caching is on, an inert
+        placeholder holding its name when it is off — and `[]` on every other provider. The list
+        shape is what `build_langgraph_agent` splices, matching its three other middleware groups.
     """
-    if not settings.llm_prompt_caching or settings.llm_provider != "anthropic":
+    if settings.llm_provider != "anthropic":
         return []
+    if not settings.llm_prompt_caching:
+        return [_CachingDisabled()]
     from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 
     # `ttl` is left at upstream's 5-minute default deliberately. The 1-hour cache doubles the write

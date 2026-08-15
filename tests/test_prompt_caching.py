@@ -136,9 +136,34 @@ def test_openai_compatible_path_supplies_nothing(monkeypatch: pytest.MonkeyPatch
 
 
 def test_the_setting_turns_it_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A deployment that has measured caching to be a loss can switch it off from config."""
+    """A deployment that has measured caching to be a loss can switch it off from config.
+
+    **"Off" stopped being an empty list, and the payload test below is what found out.**
+    `create_deep_agent` composes an `AnthropicPromptCachingMiddleware` whenever the model is an
+    Anthropic one, so returning nothing here no longer means "no caching" — it means "upstream's
+    default". Off is now a *named placeholder* that occupies that slot and overrides no hook.
+
+    Asserted on the name rather than on the type, because the name is the whole mechanism: it is
+    what `_apply_custom_middleware` matches to replace upstream's entry instead of landing beside
+    it. `test_payload_carries_no_breakpoints_when_caching_is_off` is the one that proves the effect.
+    """
     _use_settings(monkeypatch, llm_provider="anthropic", llm_prompt_caching=False)
-    assert provider.prompt_caching_middleware() == []
+    middleware = provider.prompt_caching_middleware()
+    assert [m.name for m in middleware] == ["AnthropicPromptCachingMiddleware"]
+    assert not isinstance(middleware[0], _real_caching_middleware()), (
+        "the disabled path returned the real caching middleware"
+    )
+
+
+def _real_caching_middleware() -> type:
+    """Upstream's caching middleware class, imported where the layering gate allows it.
+
+    Function-scope for the reason `prompt_caching_middleware` keeps its own import there:
+    `tests/test_third_party_layering.py` lists `langchain_anthropic` as a function-scope row.
+    """
+    from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+
+    return AnthropicPromptCachingMiddleware
 
 
 def test_an_injected_non_anthropic_model_is_ignored_silently() -> None:

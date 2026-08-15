@@ -146,7 +146,7 @@ class AgentSettings(BaseSettings):
     #
     # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999`, and
     # `create_deep_agent` bakes a second onto the graph it returns; a config passed at invoke time
-    # displaces both (measured — a looping model reports "Recursion limit of 153"), and
+    # displaces both (measured — a looping model reports "Recursion limit of 158"), and
     # nothing here ever chose otherwise, so a turn's real bound was thousands of model calls — and
     # it fails by raising `GraphRecursionError`, which discards whatever the turn had produced.
     # That is the opposite of the position `agent.loop_cap` takes deliberately: end the run, let the
@@ -242,21 +242,30 @@ class AgentSettings(BaseSettings):
         follow it would either fire first — discarding an answer the cap would have let out — or
         never fire at all, which is what an inherited 9999 would do.
 
-        `+ 3` is measured, not decorative: the minimal working limit is `5*N + 3` on the real graph,
-        the supersteps outside the loop — `before_agent` (the skills listing), the entry, and the
-        one the cap's own jump to `end` costs.
+        `+ 8` is measured, not decorative — it is the supersteps a turn spends *outside* the model
+        loop, and it has now been wrong twice in the same way, which is why the procedure matters
+        more than the number.
 
-        **The constant was `+ 1` and that was short by exactly one turn's worth at a cap of 1.**
-        Measured on the real graph after M14 put the runaway cap on `ModelCallLimitMiddleware`: a
-        one-iteration harness turn needs 8 and the old formula granted 7, so it died with
-        `GraphRecursionError` — the failure mode this ceiling exists to *avoid*, since it discards
-        the partial answer the cap would have let out. Caps of 2 and up were unaffected, which is
-        why only the smallest configuration caught it. Re-measure this with
-        `agent_supersteps_per_model_call`, never on its own.
+        **Both times the constant went stale because something was added to the graph, and both
+        times only the smallest cap noticed.** It was `+ 1` until M14 moved the runaway cap onto
+        `ModelCallLimitMiddleware`, which declares `after_model` as well as `before_model`: a
+        one-iteration turn then needed 8 where the formula granted 7. It became `+ 3`, and stayed
+        right until `create_deep_agent` brought `SubAgentMiddleware`, `SummarizationMiddleware` and
+        `PatchToolCallsMiddleware` — five more supersteps of fixed overhead — at which point a
+        one-iteration turn needed 14 against the 9 the formula granted, and died with
+        `GraphRecursionError`. That is the failure this ceiling exists to *avoid*, since it discards
+        the partial answer the cap would have let out. Caps of 2 and up survived on both occasions.
 
-        At the shipped defaults this is `25 * 6 + 3 = 153`, against the 128 a 25-iteration harness
-        turn actually needs — so the cap fires first with headroom to spare, which is the intent.
-        The ceiling should never be what stops a harness turn; it is what stops a turn that has no
-        cap, because the loop cap is attached only when the harness is on.
+        **Re-measured by binary search rather than by counting nodes**, on 2026-08-15, over the real
+        compiled graph: the minimal working `recursion_limit` for N tool calls came out 14, 20, 26,
+        38, 56 for N = 1, 2, 3, 5, 8 — a exact fit to `6*N + 8`. So the multiplier
+        (`agent_supersteps_per_model_call`, 6) is unchanged and only the fixed overhead moved. The
+        measurement is five points rather than one precisely because a single point cannot tell a
+        changed multiplier from a changed constant. Re-measure both together, never one alone.
+
+        At the shipped defaults this is `25 * 6 + 8 = 158`, against the 158 a 25-iteration harness
+        turn actually needs — so the cap fires first, which is the intent. The ceiling should never
+        be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
+        is attached only when the harness is on.
         """
-        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 3
+        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8

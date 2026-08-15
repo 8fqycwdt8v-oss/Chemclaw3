@@ -758,7 +758,7 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
     `.with_config` — `build_langgraph_agent`'s result carries it in `.config`. Neither is reached,
     and that was measured rather than reasoned: a model scripted to call one tool forever, driven
     through the compiled graph with `turn_config`, raised `GraphRecursionError` reporting
-    "Recursion limit of 153", so the config passed at `ainvoke` wins over the graph's own. The test
+    "Recursion limit of 158", so the config passed at `ainvoke` wins over the graph's own. The test
     below asserts the derivation; the run is what established that the derivation is the one that
     binds.
 
@@ -768,23 +768,26 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
     turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial
     answer still goes out. So the cap is the graceful stop and this is the backstop under it.
 
-    Asserted against the derivation rather than a literal, so the test says *why* 153 is the number
+    Asserted against the derivation rather than a literal, so the test says *why* 158 is the number
     and follows the two settings it comes from. `9999` is named explicitly because that is the value
     this exists to displace.
 
-    **The `+ 3` is the part that has actually been wrong.** It was `+ 1`, and when M14 moved the
-    runaway cap onto `ModelCallLimitMiddleware` — which declares `after_model` as well as
-    `before_model`, one more node per iteration — a one-iteration harness turn needed 8 supersteps
-    against the 7 the formula granted, and died with the `GraphRecursionError` this ceiling exists
-    to avoid. Only the smallest cap was affected, which is why it took the whole-turn test at
-    `harness_max_loop_iterations=1` to find it. Re-measure the constant and the multiplier together.
+    **The constant is the part that has actually been wrong, twice.** It was `+ 1` until M14 moved
+    the runaway cap onto `ModelCallLimitMiddleware` (which declares `after_model` as well as
+    `before_model`), and `+ 3` until `create_deep_agent` brought three more middlewares with it —
+    a one-iteration turn then needed 14 supersteps against the 9 the formula granted, dying with the
+    `GraphRecursionError` this ceiling exists to avoid. Only the smallest cap was affected on both
+    occasions, which is why it takes the whole-turn test at `harness_max_loop_iterations=1` to find
+    it. Re-measured 2026-08-15 by binary search over five values of N — 14, 20, 26, 38, 56 for
+    N = 1, 2, 3, 5, 8 — an exact fit to `6*N + 8`. Five points rather than one, because a single
+    point cannot tell a changed multiplier from a changed constant. Re-measure them together.
     """
     config = turn_config("session-1")
 
     assert config["recursion_limit"] == settings.agent_recursion_limit
     assert config["recursion_limit"] != 9999
     assert config["recursion_limit"] == (
-        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 3
+        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 8
     )
     assert config["configurable"] == {"thread_id": "session-1"}
 
