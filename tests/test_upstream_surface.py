@@ -368,20 +368,78 @@ def test_a_checkpointer_can_delete_a_thread_without_naming_its_tables() -> None:
     )
 
 
-def test_the_harness_profile_can_withhold_a_tool_and_a_middleware() -> None:
-    """How `execute` and `delete` are kept off the surface without forking the harness.
+def test_custom_middleware_still_replaces_an_upstream_entry_by_name() -> None:
+    """The splice rule the whole composition rests on, and the reason `execute` stays off.
 
-    `execute` is withheld because deepagents 0.7 ships exactly one concrete sandbox (LangSmith,
-    which this repository declines on egress grounds) and `LocalShellBackend` is documented as
-    unrestricted; `delete` is withheld on D-2026-08-12's argument. Both are exclusions rather than
-    absences, so the mechanism that carries them has to exist.
+    `create_deep_agent` composes a `FilesystemMiddleware` registering all eight verbs whether or not
+    a caller wants them. This repository withholds `execute` (a shell — deepagents 0.7 ships one
+    concrete sandbox, declined here on egress grounds, and `LocalShellBackend` is documented as
+    unrestricted) and `delete` (D-2026-08-12's argument) by passing its own instance under the
+    *same* `.name`, which `_apply_custom_middleware` swaps in place of upstream's.
+
+    A private function, asserted here for exactly that reason. If the rule changed to "append", the
+    two middlewares would coexist and upstream's would put the withheld verbs back — with every
+    other test still green, because the narrowed one is still present and still narrow.
+
+    The alternative mechanism, `HarnessProfile.excluded_tools`, is *not* used and this is why: a
+    profile is resolved by the model's self-reported `provider:identifier` and is silently skipped
+    on a key miss (measured during the swap — a registration under `"anthropic"` never reached a
+    model whose resolved provider differed, logging one warning). A narrowing that fails open on a
+    model swap is not a narrowing.
     """
-    from deepagents import HarnessProfile
+    from typing import Any
 
-    fields = set(getattr(HarnessProfile, "__dataclass_fields__", {}))
-    assert {"excluded_tools", "excluded_middleware"} <= fields, (
-        "HarnessProfile can no longer withhold tools or middleware; agent/langgraph_agent "
-        "registers a profile that withholds `execute` and `delete`"
+    from deepagents.graph import _apply_custom_middleware
+    from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
+
+    class Impostor(TodoListMiddleware):
+        """A stand-in for `FilesystemMiddleware`, sharing a name it does not own by class."""
+
+        @property
+        def name(self) -> str:
+            return "TodoListMiddleware"
+
+    base: list[AgentMiddleware[Any, Any, Any]] = [TodoListMiddleware()]
+    mine = Impostor()
+    assert _apply_custom_middleware(base, [mine]) == [mine], (
+        "custom middleware no longer replaces a same-named upstream entry in place; "
+        "agent/langgraph_agent._middleware relies on this to withhold `execute` and `delete`"
+    )
+
+
+def test_the_subagent_middleware_still_cannot_be_excluded() -> None:
+    """Why `agent/subagents.py` exists at all, pinned as the constraint rather than the workaround.
+
+    `SubAgentMiddleware` is in `create_deep_agent`'s required-scaffolding set, and
+    `_apply_excluded_middleware` *raises* rather than let a `HarnessProfile` strip it. So the `task`
+    tool ships on every agent this deployment builds and "no subagents" was never on the menu — the
+    only decision available is whether what `task` reaches is governed.
+
+    Asserted as a *presence* in the required set rather than by provoking the raise, because the
+    property that matters is the membership: if this middleware ever became strippable, the honest
+    move would be to reconsider whether the roster should exist, not to keep the workaround.
+    """
+    from deepagents.graph import _REQUIRED_MIDDLEWARE_NAMES
+
+    assert "SubAgentMiddleware" in _REQUIRED_MIDDLEWARE_NAMES
+
+
+def test_the_general_purpose_subagent_is_still_displaced_by_claiming_its_name() -> None:
+    """The suppression this repository relies on, pinned as the exact string it turns on.
+
+    Left alone, `create_deep_agent` inserts a `general-purpose` subagent holding every tool the
+    parent holds and none of this repository's middleware. It skips that insertion when a supplied
+    spec already claims `GENERAL_PURPOSE_SUBAGENT["name"]` — a plain comparison with nothing to
+    mismatch, unlike the harness-profile route. `agent/subagents.py` hard-codes the winning string,
+    so an upstream rename would silently restore the ungoverned subagent beside ours.
+    """
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from chemclaw.agent.subagents import general_purpose_helper
+
+    assert general_purpose_helper(runnable=None)["name"] == GENERAL_PURPOSE_SUBAGENT["name"], (
+        "upstream renamed its default general-purpose subagent, so the spec in agent/subagents.py "
+        "no longer displaces it — the `task` roster now carries an ungoverned copy of the surface"
     )
 
 
@@ -398,16 +456,17 @@ def test_the_harness_profile_can_withhold_a_tool_and_a_middleware() -> None:
         ("deepagents.backends", "StateBackend", "agent/langgraph_agent.skills_backend"),
     ],
 )
-def test_the_deepagents_middleware_this_repo_composes_are_importable(
+def test_the_deepagents_symbols_this_repo_names_are_importable(
     module: str, name: str, reader: str
 ) -> None:
-    """`create_deep_agent` is deliberately not called; these are imported one at a time.
+    """Every deepagents name `src/` spells, asserted rather than assumed, on a 0.x dependency.
 
-    D-2026-08-11 declines the bundled harness because its default stack always registers
-    `FilesystemMiddleware` — a write/edit/glob/grep surface acquired as a side effect of wanting to
-    read a `SKILL.md`. The cost of picking middleware individually is that a 0.x reshuffle can move
-    one without moving the others, so each import this repository makes is asserted rather than
-    assumed.
+    This docstring used to say `create_deep_agent` was deliberately not called. It is called now
+    (`D-2026-08-15-the-harness-is-adopted-whole-or-its-defaults-are-inherited-silently`), and the
+    list below is no longer "middleware picked one at a time" — half of these are reached *through*
+    `create_deep_agent` rather than composed beside it. What has not changed is the reason to assert
+    them: a 0.x minor can move a symbol between modules without a deprecation, and an import that
+    breaks at construction time breaks every turn at once.
     """
     import importlib
 

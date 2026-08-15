@@ -1,23 +1,26 @@
-"""The compiled middleware sequence, pinned — the instrument the `create_deep_agent` swap needs.
+"""The compiled middleware sequence, pinned — the instrument the `create_deep_agent` swap needed.
 
-**Why this exists before the swap rather than after it.** Every other change in this workstream
-fails loudly: delete a module and the prose gate reddens, add a filesystem tool and the cache-floor
-ratchet reddens, break the audit ordering and the MCP tests redden. `create_deep_agent` is the one
-remaining change whose failure modes are *silent*, and three of them are:
+**Written before the swap, and it earned its place during it.** Every other change in this
+workstream fails loudly: delete a module and the prose gate reddens, add a filesystem tool and the
+cache-floor ratchet reddens, break the audit ordering and the MCP tests redden. The swap is the one
+change whose failure modes are *silent*, and it produced one — the first version compiled a helper
+through `create_deep_agent` with an empty roster, which is not what "no helpers" means to upstream:
+with no spec claiming the general-purpose name it inserts its own, so the recursion guard grew an
+ungoverned `task` surface one level down. Reading the compiled list is what found it.
+`tests/test_subagents.py` is where that property now lives.
 
-- **`_apply_custom_middleware` splices by `.name`.** Upstream's is `"SkillsMiddleware"`;
-  `ReloadingSkillsMiddleware` reports its own class name, so it would be *appended beside*
-  upstream's rather than replacing it. Two skills middlewares, one of which caches a role-narrowed
-  listing — and the symptom is a chemist occasionally offered a skill their role no longer holds.
-- **`create_deep_agent` inserts a general-purpose subagent by default.** It holds every tool the
-  parent holds and none of this repository's middleware, because `create_sub_agent` builds a bare
-  `SubAgent` from *only* `spec["middleware"]`. That is a `task` tool with no audit trail, no
-  per-tool authorization, no dry-run gate and no plan gate;
-  `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` recorded that "nothing
-  would fail while it did".
-- **It returns a `RunnableBinding`,** not a `CompiledStateGraph` — it ends
-  `.with_config({"recursion_limit": 9_999, …})` — so `aget_state` is absent and the baked ceiling
-  sits outside `turn_config`'s.
+The hazards this file exists for, all three still live:
+
+- **`_apply_custom_middleware` splices by `.name`.** An entry whose name matches one upstream
+  already composed replaces it *in place*; a new name lands after the last core member. So this is
+  the difference between `FilesystemMiddleware` withholding `execute`/`delete` and a second one
+  sitting beside upstream's offering them anyway.
+- **The governance wrappers must stay inside every middleware that registers a tool.** They arrive
+  as new names, so their position is decided by upstream's splice rule rather than by this
+  repository's list order — an arrangement that is correct today and is not promised.
+- **Two skills middlewares.** Upstream composes one only when `skills=` is passed, which is why it
+  is not; the failure mode if that changes is a cached role-narrowed listing shadowing a re-narrowed
+  one, whose only symptom is a chemist occasionally offered a skill their role no longer holds.
 
 None of those turns a test red on its own. This file is what makes them reviewable: the order is
 asserted at construction, and the *effect* of the order is asserted by running a tool through the
@@ -33,21 +36,31 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
 from chemclaw.agent.audit import AuditEvent, AuditSink
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
 from tests.fakes import scripted
 
 # The sequence as it compiles today, outermost first. `create_agent` nests `wrap_tool_call` in list
 # order, so position here *is* nesting depth: entry 0 sees a tool call before entry 1 does.
 #
-# Recorded rather than derived, and the point is that changing it must be deliberate. Two positions
-# carry an argument that is not obvious from the name:
+# Recorded rather than derived, and the point is that changing it must be deliberate. Entries 0–3
+# are upstream's own core stack, in upstream's order; 4 onwards are this repository's, and they land
+# where `_apply_custom_middleware` puts a new name — immediately after the last core member. Three
+# positions carry an argument that is not obvious from the name:
 #
-# - `FilesystemMiddleware` precedes `SkillsMiddleware` because the skills prompt tells the model to
-#   read a `SKILL.md` with `read_file`, and the filesystem middleware is what registers it.
-# - the seven `wrap_tool_call` wrappers sit *inside* both, so a filesystem write and a skill read
-#   cross the audit row and the authorization gate exactly like any other tool call.
+# - `FilesystemMiddleware` is *this repository's*, occupying upstream's slot by sharing its name.
+#   That is what withholds `execute` and `delete`.
+# - the seven `wrap_tool_call` wrappers sit inside it and inside `SubAgentMiddleware`, so a
+#   scratchpad write and a `task` spawn cross the audit row and the authorization gate exactly like
+#   any other tool call.
+# - `AnthropicPromptCachingMiddleware` is last because it too replaces an upstream entry in place,
+#   and upstream's sits in the tail after the compaction group. The two do not contend: caching
+#   marks the system prompt and tool schemas, which compaction never touches.
 _EXPECTED_ORDER = (
     "FilesystemMiddleware",
+    "SubAgentMiddleware",
+    "SummarizationMiddleware",
+    "PatchToolCallsMiddleware",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",
@@ -56,28 +69,29 @@ _EXPECTED_ORDER = (
     "enforce_tool_authz",
     "refuse_writes_on_dry_run",
     "refuse_repeated_calls",
-    "AnthropicPromptCachingMiddleware",
     "ContextEditingMiddleware",
     "RecordContextCompaction",
+    "AnthropicPromptCachingMiddleware",
 )
 
 
 def _middleware_names(**kwargs: Any) -> list[str]:
-    """Build an agent and report the middleware `create_agent` was handed, in order.
+    """Build an agent and report the middleware `create_agent` was finally handed, in order.
 
     Captured at the call rather than read off the compiled graph, because a `CompiledStateGraph`
     exposes its nodes and not the middleware that produced them — so the list is only observable
     where it is passed.
-    """
-    # The real function is taken from `langchain.agents`, not from `langgraph_agent`, and patched
-    # by dotted name. Both are for mypy rather than taste: `langgraph_agent` *imports*
-    # `create_agent` rather than defining it, so reading it back off that module is an
-    # `attr-defined` error under
-    # `--strict`. It is the same object either way — which is exactly why taking it from the source
-    # is not a workaround but the more honest reference.
-    from langchain.agents import create_agent as real
 
-    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    **Patched inside `deepagents.graph`, which is the whole point of the file.** The list this
+    repository passes to `create_deep_agent` is not the list that compiles: upstream splices it into
+    a stack of its own by `.name`. Spying on `build_langgraph_agent`'s own argument would assert
+    what this repository *asked for*, which is exactly the half that has never been in doubt.
+
+    The helper compiled for the `task` tool goes through `langchain.agents.create_agent` directly,
+    so it does not pass this spy — `tests/test_subagents.py` covers it, and keeping it out of this
+    capture is why one build yields one list.
+    """
+    from langchain.agents import create_agent as real
 
     captured: list[str] = []
 
@@ -88,7 +102,7 @@ def _middleware_names(**kwargs: Any) -> list[str]:
         return real(*args, **call_kwargs)
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr("chemclaw.agent.langgraph_agent.create_agent", spy)
+        patch.setattr("deepagents.graph.create_agent", spy)
         build_langgraph_agent(
             model=GenericFakeChatModel(messages=iter([AIMessage(content="ok")])), **kwargs
         )
@@ -140,15 +154,33 @@ def test_the_skills_middleware_appears_exactly_once() -> None:
     )
 
 
-def test_no_subagent_middleware_is_attached_today() -> None:
-    """Pinned as an *absence*, so adding one is a decision this file records.
+def test_the_filesystem_middleware_is_the_one_that_withholds_the_shell() -> None:
+    """The name-splice, asserted on the artifact rather than on the intent.
 
-    The specialist team was deleted in D-2026-08-15 and nothing spawns a helper today. When
-    subagents return they must be `CompiledSubAgent`s built through `build_langgraph_agent` — a
-    bare `SubAgent` dict gets only `spec["middleware"]`, which is none of the above. This assertion
-    is what makes that arrival visible instead of ambient.
+    This assertion replaces one that pinned `SubAgentMiddleware` as an *absence*, which was true
+    while nothing spawned a helper and stopped being true the moment `create_deep_agent` arrived:
+    it composes that middleware unconditionally and `_apply_excluded_middleware` raises rather than
+    let a profile strip it. What is worth pinning now is the entry that *replaced* an upstream one.
+
+    Exactly one `FilesystemMiddleware`, and its tool set is the narrowed one. Two would mean this
+    repository's landed beside upstream's instead of in its slot, and upstream's registers all eight
+    verbs — so `execute` (a shell) and `delete` (which decides what judgment the next turn can load)
+    would both be reachable while every other test stayed green.
     """
-    assert not [n for n in _middleware_names() if "SubAgent" in n]
+    from chemclaw.agent.scratchpad import scratchpad_tools
+
+    names = _middleware_names()
+    assert names.count("FilesystemMiddleware") == 1
+    graph = build_langgraph_agent(
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="ok")]))
+    )
+    bound = set(graph.nodes["tools"].bound.tools_by_name)
+    assert not {"execute", "delete"} & bound, (
+        "upstream's filesystem middleware is registering its full verb set: this deployment "
+        "withholds the shell and the delete verb, and the narrowing is carried by replacing that "
+        "middleware by name"
+    )
+    assert set(scratchpad_tools()) <= bound
 
 
 class _Recording(AuditSink):
@@ -170,7 +202,6 @@ def test_a_filesystem_write_crosses_the_audit_trail() -> None:
     side effect with no record that it happened.
     """
     sink = _Recording()
-    from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
     graph = build_langgraph_agent(
         model=scripted("write_file", {"file_path": "/scratch/notes.md", "content": "hello"}),

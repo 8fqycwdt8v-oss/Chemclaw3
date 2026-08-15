@@ -113,7 +113,8 @@ def turn_input(message: str) -> dict[str, Any]:
 def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     """The invocation config one turn runs under: its thread, and the graph's step ceiling.
 
-    **The ceiling is the point.** `create_agent` bakes `recursion_limit=9999` and nothing in this
+    **The ceiling is the point.** `create_agent` bakes `recursion_limit=9999`, `create_deep_agent`
+    bakes a second one onto the graph it returns, and nothing in this
     repo had ever chosen otherwise, so the only bound on a turn was thousands of model calls —
     measured at 2 supersteps per call on the classic path and 4 with the harness, i.e. roughly 5,000
     and 2,500. Worse, reaching it raises `GraphRecursionError`, which discards whatever the turn had

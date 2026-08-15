@@ -11,15 +11,17 @@ question about a YAML file.
 Tools come from the capability-tool registry, populated as a side effect of the imports below, so
 adding a tool is a `@tool` at its definition site rather than an edit here. Skills are not in this
 list at all — they reach the model through `skill_backend`, narrowed by the same predicates
-(`skill_access`) — which is why `available_tool_names` unions four name spaces rather than reading
+(`skill_access`) — which is why `available_tool_names` unions six name spaces rather than reading
 one (D-117 records what an omitted name space costs).
 
 **Every narrowing here attenuates and none widens.** A profile selects a subset of what the
 deployment enabled, and `_reject_unknown_tool_names` fails the build on a name nothing provides, so
 a typo is a startup error rather than a capability that silently vanishes from the surface. That
-property is what would make a subagent safe to define as a profile — its tool set an attenuation of
-its caller's, never a widening (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`). No
-subagent exists today (D-2026-08-15); the rule binds whoever adds one.
+property is what makes a subagent safe to define as a profile — its tool set an attenuation of its
+caller's, never a widening (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`). One
+subagent does exist: `agent/subagents.py` builds it from the *caller's* profile, so the rule holds
+by construction rather than by discipline, and `tests/test_subagents.py` proves it against the two
+graphs that compile rather than against the two declarations.
 """
 
 from dataclasses import replace
@@ -361,22 +363,52 @@ def harness_tool_names() -> set[str]:
     return {tool.name for tool in TodoListMiddleware().tools}
 
 
-def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all five name spaces.
+def subagent_tool_names() -> set[str]:
+    """The tool that spawns a helper — `task`, and it is not optional.
 
-    The five are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    Its own name space because it appears under conditions none of the others share.
+    `SubAgentMiddleware` is in `create_deep_agent`'s `_REQUIRED_MIDDLEWARE`, which
+    `_apply_excluded_middleware` refuses to strip, so this name is present on *every* agent this
+    deployment builds — unlike `write_todos`, which the plan/execute harness attaches conditionally,
+    and unlike the filesystem verbs, which are a backend's. `agent/subagents.py` records what the
+    tool reaches and why that had to be decided rather than inherited.
+
+    **Derived rather than spelled, and the trivial runnable is the price of deriving it.** Upstream
+    writes `name="task"` as a literal inside `_build_task_tool` and exports no constant, so the only
+    way to read the real name is to build the middleware — which refuses an empty roster and
+    `.with_config`s each runnable it is given. A `RunnableLambda` identity satisfies both without
+    compiling anything. The alternative is a string in this file that an upstream rename would leave
+    silently stale, which is exactly what `skill_tool_names` and `harness_tool_names` avoid;
+    `tests/test_upstream_surface.py` pins the shape this depends on.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from langchain_core.runnables import RunnableLambda
+
+    probe = SubAgentMiddleware(
+        backend=StateBackend(),
+        subagents=[{"name": "probe", "description": "", "runnable": RunnableLambda(lambda s: s)}],
+    )
+    return {tool.name for tool in probe.tools}
+
+
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all six name spaces.
+
+    The six are genuinely separate — in-process `@tool` functions this process holds as symbols,
     connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
-    generated from step templates, the harness's own, and the skill read tool — and only the union
-    is meaningful. Exposed rather than inlined because four other places need exactly this set: the
-    skill validator, the template validator, the prose-contract validator, and the test that checks
-    the instructions against it. Three of those unioned only the first two name spaces, so a skill
-    or template step naming a template launcher failed validation although the tool exists (D-117).
-    One definition, one answer.
+    generated from step templates, the harness's own, the backend's filesystem verbs, and the
+    subagent spawner — and only the union is meaningful. Exposed rather than inlined because four
+    other places need exactly this set: the skill validator, the template validator, the
+    prose-contract validator, and the test that checks the instructions against it. Three of those
+    unioned only the first two name spaces, so a skill or template step naming a template launcher
+    failed validation although the tool exists (D-117). One definition, one answer.
 
     The skill name space was the same omission a second time. Skills are attached
     unconditionally, and a live run recorded skill tools on five turns while this function reported
     them absent — so every validator built on it would have rejected a correct reference to a tool
-    the agent had just called.
+    the agent had just called. `task` is the same shape a third time and was added with the
+    middleware that registers it, rather than after a validator rejected a correct reference to it.
     """
     return {
         *registered_tool_names(),
@@ -384,6 +416,7 @@ def available_tool_names() -> set[str]:
         *template_tool_names(),
         *skill_tool_names(),
         *harness_tool_names(),
+        *subagent_tool_names(),
     }
 
 

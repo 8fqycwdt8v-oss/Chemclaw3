@@ -144,7 +144,9 @@ class AgentSettings(BaseSettings):
 
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
     #
-    # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999` and
+    # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999`, and
+    # `create_deep_agent` bakes a second onto the graph it returns; a config passed at invoke time
+    # displaces both (measured — a looping model reports "Recursion limit of 153"), and
     # nothing here ever chose otherwise, so a turn's real bound was thousands of model calls — and
     # it fails by raising `GraphRecursionError`, which discards whatever the turn had produced.
     # That is the opposite of the position `agent.loop_cap` takes deliberately: end the run, let the
@@ -238,7 +240,7 @@ class AgentSettings(BaseSettings):
         Derived from `harness_max_loop_iterations` rather than set directly, because the two are one
         decision: the cap is what a deployment says a turn may cost, and a step ceiling that did not
         follow it would either fire first — discarding an answer the cap would have let out — or
-        never fire at all, which is what `create_agent`'s baked 9999 does today.
+        never fire at all, which is what an inherited 9999 would do.
 
         `+ 3` is measured, not decorative: the minimal working limit is `5*N + 3` on the real graph,
         the supersteps outside the loop — `before_agent` (the skills listing), the entry, and the

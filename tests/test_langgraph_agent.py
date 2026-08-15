@@ -37,6 +37,7 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     available_tool_names,
     harness_tool_names,
+    subagent_tool_names,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
@@ -145,10 +146,14 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
 
     advertised = _advertised(graph)
-    # `read_file` only: the harness (and with it `write_todos`) is off by default, which the
-    # test below asserts separately rather than folding into this one.
-    assert advertised == {tool.__name__ for tool in _capability_tools()} | set(scratchpad_tools())
-    assert advertised == set(registered_tool_names()) | set(scratchpad_tools())
+    # The registry plus the two surfaces a backend and a subagent middleware bring with them. The
+    # harness (and with it `write_todos`) is off by default, which the test below asserts separately
+    # rather than folding into this one. `task` is *not* conditional — `SubAgentMiddleware` is in
+    # `create_deep_agent`'s required set and `_apply_excluded_middleware` raises rather than let a
+    # profile strip it — so it is unioned in from the same reader the validators use.
+    ambient = set(scratchpad_tools()) | subagent_tool_names()
+    assert advertised == {tool.__name__ for tool in _capability_tools()} | ambient
+    assert advertised == set(registered_tool_names()) | ambient
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:
@@ -173,7 +178,16 @@ def test_a_profile_narrows_the_graph_surface() -> None:
     # `read_file` survives every profile, and it must: it carries no authority of its own — every
     # read goes through the backend the three narrowings already bound — so taking it away would
     # not attenuate anything, it would only make the profile's remaining skills unreadable.
-    assert _advertised(narrowed) == {kept, *scratchpad_tools()}
+    #
+    # **`task` survives for the same reason, and that is the part worth stating rather than
+    # accepting.** A tool that spawns an agent looks like it should be narrowed away, and it is not:
+    # `_subagents` builds the helper from *this* profile, so the helper is attenuated by the same
+    # `tool_names` set the caller was. The surface a `task` call can reach is therefore a subset of
+    # the surface the caller already holds — proven against the two compiled graphs in
+    # `tests/test_subagents.py`, not asserted here — which leaves `task` conferring no authority of
+    # its own, exactly like `read_file`. If that ever stopped being true, narrowing would have to
+    # remove it, and the test that would notice is the attenuation one over there.
+    assert _advertised(narrowed) == {kept, *scratchpad_tools(), *subagent_tool_names()}
     assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 
@@ -739,8 +753,16 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
 def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> None:
     """The graph's runaway backstop is this deployment's number, not one inherited from upstream.
 
-    `create_agent` bakes `recursion_limit=9999` (verified: a built agent's `.config` carries it) and
-    nothing here had ever chosen otherwise, so the only bound on a turn was thousands of model calls
+    **Two 9999s now, and only invoke-time config displaces them.** `create_agent` bakes
+    `recursion_limit=9999`, and `create_deep_agent` bakes a second one onto the returned graph via
+    `.with_config` — `build_langgraph_agent`'s result carries it in `.config`. Neither is reached,
+    and that was measured rather than reasoned: a model scripted to call one tool forever, driven
+    through the compiled graph with `turn_config`, raised `GraphRecursionError` reporting
+    "Recursion limit of 153", so the config passed at `ainvoke` wins over the graph's own. The test
+    below asserts the derivation; the run is what established that the derivation is the one that
+    binds.
+
+    Before either was chosen the only bound on a turn was thousands of model calls
     — measured by binary search at 2 supersteps per call with the harness off and 5 with it on, i.e.
     roughly 5,000 and 2,000. Reaching it raises `GraphRecursionError`, which discards the work the
     turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial

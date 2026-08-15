@@ -14,14 +14,23 @@ unrelated
 `build_graph`s one import apart, in a tree whose `ARCHITECTURE.md` exists largely to explain the
 name pairs that look like duplicates and are not. The engine's name is the unambiguous half.
 
-**Why `create_agent` rather than a hand-built `StateGraph`.** The decision to rebuild rather than
-port was about using the framework's own machinery instead of re-implementing it, and
-`create_agent` *is* a `StateGraph` — it returns a compiled graph with the model/tool loop already
-wired and, more importantly, with the middleware system (`wrap_tool_call`, `wrap_model_call`,
-`before_model`) that phases M3–M5 need for the audit trail, the authorization gate and the plan
-approval. Assembling those nodes by hand would reproduce that loop and lose the hooks, which is the
-opposite of the decision. Where Chemclaw genuinely adds a step of its own, it becomes a node in a
-graph that wraps this one; it does not become a reason to build this one twice.
+**Why `create_deep_agent` rather than a hand-built `StateGraph`, or a hand-assembled middleware
+list.** The decision to rebuild rather than port was about using the framework's own machinery
+instead of re-implementing it, and `create_deep_agent` is that machinery two layers up: it wraps
+`create_agent`, which *is* a `StateGraph` with the model/tool loop already wired and with the
+middleware system (`wrap_tool_call`, `wrap_model_call`, `before_model`) that the audit trail, the
+authorization gate and the plan approval hang off. Assembling those nodes by hand would reproduce
+that loop and lose the hooks, which is the opposite of the decision.
+
+The middle position — calling `create_agent` and composing deepagents' middleware by hand — is the
+one this module held until the scratchpad arrived, and it is the one that stopped paying. Two of the
+three capabilities the harness now wants are reachable *only* through `create_deep_agent`:
+`permissions=` has no public seam on `FilesystemMiddleware`, and `subagents=` is what makes the
+`task` tool's roster something this repository decides rather than inherits. Hand-assembly bought
+control of the middleware order; `_apply_custom_middleware` gives that back by splicing on `.name`,
+which is what `_middleware` below is arranged around and what `tests/test_middleware_order.py`
+pins. Where Chemclaw genuinely adds a step of its own, it becomes a node in a graph that wraps this
+one; it does not become a reason to build this one twice.
 
 **Tools cross unchanged.** `core/tool_registry` stores plain callables — its `@tool` decorator is
 identity, and the registry imports nothing but `typing` and `collections.abc`. LangChain derives a
@@ -57,10 +66,10 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any, NotRequired
 
+from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
-from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langgraph.channels.untracked_value import UntrackedValue
 
@@ -81,11 +90,16 @@ from chemclaw.agent.loop_cap import loop_cap_middleware
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
-from chemclaw.agent.scratchpad import scratchpad_backend, scratchpad_tools
+from chemclaw.agent.scratchpad import (
+    filesystem_permissions,
+    scratchpad_backend,
+    scratchpad_tools,
+)
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import ChemclawState
+from chemclaw.agent.subagents import general_purpose_helper
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -109,6 +123,7 @@ def build_langgraph_agent(
     connectors: list[Any] | None = None,
     response_format: Any | None = None,
     store: Any | None = None,
+    helper: bool = False,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -146,8 +161,15 @@ def build_langgraph_agent(
             structured answer" (handled) instead of "prose that almost parses" — the same reason
             `verify_answer` uses `with_structured_output` rather than reading a judge's free text.
             It has no caller today, and is kept because it is a passthrough to
-            `create_agent` and deliberately not a profile field: which shape an answer must take is
-            a property of the *call*, not of the agent's capability.
+            `create_deep_agent` and deliberately not a profile field: which shape an answer must
+            take is a property of the *call*, not of the agent's capability.
+        helper: Whether this graph *is* a helper rather than the agent a chemist talks to. The one
+            thing it changes is that a helper gets no helpers of its own, which is the recursion
+            guard: `_subagents` builds its spec by calling this function, so a graph that handed its
+            helper a helper would not terminate. It is a parameter rather than a depth counter
+            because one level is the whole design — `agent/subagents.py` says why the roster is one
+            name and why a helper holds no connector tools — so a counter would be a knob for a
+            depth nobody has asked for.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -180,47 +202,161 @@ def build_langgraph_agent(
     # the filesystem tools must read the *same* backend object, or the role narrowing computed for
     # one would not apply to the other.
     backend = scratchpad_backend(skills, store)
-    return create_agent(
-        model=model if model is not None else build_chat_model(),
-        # The skills read tool is agent-scoped rather than a `@tool` in the process registry,
-        # because it is bound to *this* profile's narrowed backend — a registry entry would have
-        # to be bound to none, which is the one thing it must not be.
+    chat_model = model if model is not None else build_chat_model()
+    # The connectors are already narrowed by the profile and already open: `connector_specs` applies
+    # `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
+    # `open_connector_specs` returns only what a reachable server actually advertised. An
+    # unreachable one contributes nothing here, which is the degradation the turn survives.
+    bound = [*tools, *(connectors or [])]
+    shared: dict[str, Any] = {
+        "model": chat_model,
+        "tools": bound,
+        "system_prompt": instructions_for(prof),
+        "state_schema": ChemclawState,
+        "middleware": _middleware(prof, backend, audit),
+        "name": "chemclaw",
+        "checkpointer": checkpointer,
+        "response_format": response_format,
+    }
+    if helper:
+        # **A helper is built by `create_agent`, and this branch is a correction the measurement
+        # forced.** The first version routed both through `create_deep_agent` and let `_subagents`
+        # return `[]` for a helper. That is not what "no helpers" means to upstream: with no spec
+        # claiming the name, `create_deep_agent` auto-inserts its *own* general-purpose subagent —
+        # so the recursion guard produced, one level down, exactly the ungoverned `task` surface it
+        # exists to prevent. Compiling the helper on `create_agent` removes `SubAgentMiddleware`
+        # outright, which is the only arrangement in which the absence is structural rather than
+        # arranged.
         #
-        # The connectors are already narrowed by the profile and already open: `connector_specs`
-        # applies `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
-        # `open_connector_specs` returns only what a reachable server actually advertised. An
-        # unreachable one contributes nothing here, which is the degradation the turn survives.
-        tools=[*tools, *(connectors or [])],
-        system_prompt=instructions_for(prof),
-        state_schema=ChemclawState,
-        middleware=[
-            *_harness_middleware(prof),
-            # Ahead of the skills middleware because the skills prompt tells the model to read a
-            # `SKILL.md` with `read_file`, and this is what registers it. It also brings the
-            # scratchpad verbs and — the part that matters for a research turn — the eviction of
-            # oversized tool results to the backend, which is strictly better than compaction's
-            # placeholder because the evidence stays readable at a path instead of being dropped.
-            FilesystemMiddleware(backend=backend, tools=list(scratchpad_tools())),
-            _skills_middleware(backend),
-            *tool_call_middleware(audit, prof),
-            # Above the compaction group so that group keeps the innermost position its own
-            # docstring argues for. The two do not contend: caching marks the *system prompt and
-            # tool schemas*, which compaction never touches, and the message-tail breakpoint is
-            # placed by the provider at request time — on whatever list compaction hands it.
-            # Provider-specific, so which middleware this is (or that it is none) is decided in the
-            # F0 seam rather than here.
-            *prompt_caching_middleware(),
-            # Unconditional, unlike the harness middleware above it: an unbounded thread is a
-            # property of a session, not of the plan/execute mode, and the single-turn agent
-            # accumulates one just as fast. Last in the list, so the reduction is the last thing
-            # between the assembled request and the model and it sees everything the middleware
-            # above added.
-            *context_compaction_middleware(),
-        ],
-        name="chemclaw",
-        checkpointer=checkpointer,
-        response_format=response_format,
+        # The two arguments it loses are the two `create_deep_agent` was adopted for, and a helper
+        # wants neither. `subagents=` is the thing being denied. `permissions=` bounds where a write
+        # may point, and a helper's backend has nowhere out of bounds to point at: it is built with
+        # `store=None`, so there is no `/memories/` route, and what is left is the skills tree —
+        # which `NarrowedSkillsBackend` refuses writes to on every call — over a `StateBackend` that
+        # is this helper's own graph state. The bound is the same bound, arrived at by construction.
+        from langchain.agents import create_agent
+
+        return create_agent(**shared)
+    return create_deep_agent(
+        backend=backend,
+        # `skills=` is deliberately absent: it is what would make upstream compose a second skills
+        # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
+        permissions=filesystem_permissions(),
+        subagents=_subagents(prof, chat_model, audit_sink, correlation_id, actor),
+        **shared,
     )
+
+
+def _middleware(profile: AgentProfile, backend: CompositeBackend, audit: Any) -> list[Any]:
+    """What this repository adds to — and takes over from — upstream's assembled stack.
+
+    **`_apply_custom_middleware` splices this list by `.name`, and both halves of that are used.**
+    An entry whose name matches one upstream already composed *replaces it in place*, keeping
+    upstream's position; an entry whose name is new lands immediately after the last core member,
+    which is to say inside every middleware that registers a tool and outside the profile and
+    prompt-caching tail. So this list is not a stack in itself — it is two instructions, and reading
+    it as a sequence is the mistake `tests/test_middleware_order.py` exists to catch.
+
+    Exactly one entry is a replacement, and it is the security-critical one.
+    **`FilesystemMiddleware` is composed by upstream unconditionally**, over the same backend,
+    registering all eight verbs —
+    `execute` and `delete` included. The instance here carries `tools=scratchpad_tools()`, which is
+    where those two are withheld, and sharing upstream's name is what makes it take upstream's place
+    rather than sit beside it offering the withheld pair anyway. The other route to the same
+    narrowing is `HarnessProfile.excluded_tools`, and it was rejected on measurement: a profile is
+    resolved by the model's self-reported `provider:identifier`, and on a key miss it is *silently*
+    not applied. A narrowing that fails open on a model swap is not a narrowing.
+
+    Everything else is new, and lands as a block after the last tool-registering middleware. That
+    position is the invariant, not the order within the block: `create_agent` nests `wrap_tool_call`
+    in list order, so being *after* `FilesystemMiddleware` and `SubAgentMiddleware` is what makes a
+    scratchpad write and a `task` spawn cross the audit row and the authorization gate. Being after
+    them was previously arranged by putting them first in a hand-built list; it is now arranged by
+    upstream's splice rule, which is why the rule is asserted rather than assumed.
+
+    Args:
+        profile: The profile this agent was narrowed by.
+        backend: The turn's composite backend — the *same* object the skills gate was computed for.
+        audit: The audit middleware from `make_audit_middleware`.
+
+    Returns:
+        The list to hand `create_deep_agent(middleware=…)`.
+    """
+    return [
+        *_harness_middleware(profile),
+        FilesystemMiddleware(backend=backend, tools=list(scratchpad_tools())),
+        _skills_middleware(backend),
+        *tool_call_middleware(audit, profile),
+        # Provider-specific, so which middleware this is — or that it is none — is decided in the F0
+        # seam rather than here. When the provider is Anthropic this replaces upstream's own by
+        # name; when it is not, upstream composed none and this contributes none, which is the same
+        # answer arrived at from both directions.
+        *prompt_caching_middleware(),
+        # Unconditional, unlike the harness middleware above it: an unbounded thread is a property
+        # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
+        # as fast. Last, so the reduction sees everything the middleware above it added.
+        *context_compaction_middleware(),
+    ]
+
+
+def _subagents(
+    profile: AgentProfile,
+    model: Any,
+    audit_sink: AuditSink | None,
+    correlation_id: str | None,
+    actor: str,
+) -> list[Any]:
+    """The helpers this agent may spawn — one, compiled here so it carries this chain.
+
+    **Not optional, and that is the reason this function exists.** `SubAgentMiddleware` is in
+    upstream's `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` raises rather than let a
+    profile strip it, so the `task` tool ships regardless. What is decidable is *what it reaches*:
+    left alone, upstream inserts a `general-purpose` helper holding every tool this agent holds and
+    none of this repository's middleware. Returning a spec that claims that name is what displaces
+    it, and `agent/subagents.py` records why the name is the reliable suppression and the harness
+    profile is not.
+
+    Three things the helper does *not* inherit, each for its own reason:
+
+    - **No connector tools**, which is a concurrency bound rather than a narrowing. A helper is
+      concurrent with its caller by construction, and two concurrent turns over one MCP tool object
+      deadlock — the measurement this module's own docstring gives as the reason a graph is compiled
+      per turn at all. It is expressed by omitting `connectors=` below, and asserted against the two
+      *compiled* graphs in `tests/test_subagents.py`, because under a one-name roster any build-time
+      comparison of the caller's profile with the helper's would compare a value with itself.
+    - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
+      returns one report; a thread to resume would be a second conversation nobody addresses.
+    - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no
+      `/memories/` route. A helper's scratch work lives in its own graph state and dies with it,
+      which is what "returns one report" means when written down as a data path.
+    - **No helpers.** The guard is that `build_langgraph_agent(helper=True)` compiles on
+      `create_agent`, so `SubAgentMiddleware` is absent rather than merely unpopulated — see the
+      branch there for why returning an empty roster was not enough.
+
+    Args:
+        profile: The caller's profile — the helper is built from the same one, so the tool
+            narrowing, the skills gate and the plan gate are the caller's.
+        model: The already-resolved chat model, shared rather than rebuilt: resolving it twice would
+            double a provider handshake to produce the same object.
+        audit_sink: The caller's trail, so a helper's tool calls land in the same place.
+        correlation_id: The caller's correlation id, so the two halves of one turn are joinable.
+        actor: The caller's fallback audit actor.
+
+    Returns:
+        The single-entry list to hand `create_deep_agent(subagents=…)`.
+    """
+    return [
+        general_purpose_helper(
+            build_langgraph_agent(
+                model=model,
+                profile=profile,
+                actor=actor,
+                correlation_id=correlation_id,
+                audit_sink=audit_sink,
+                helper=True,
+            )
+        )
+    ]
 
 
 class ReloadingSkillsState(SkillsState):
@@ -299,6 +435,16 @@ def _skills_middleware(backend: CompositeBackend) -> Any:
     Takes the backend rather than building one, because the caller has to hold it anyway — the
     skills read tool is bound to the same instance, and two backends built from one config would be
     two objects that merely happen to agree.
+
+    **`create_deep_agent(skills=…)` is deliberately not passed**, and this is the middleware that
+    would have collided with it. Upstream composes its own `SkillsMiddleware` only when that
+    argument is given, so withholding it leaves exactly one skills middleware — this one — with no
+    name-splice to arrange and no second listing to keep in step. The alternative (pass the sources,
+    override `.name` to `"SkillsMiddleware"`, let `_apply_custom_middleware` replace upstream's in
+    place) also works and was written first; it buys only a different index in the list, at the cost
+    of declaring the source trees twice and depending on a splice rule for a middleware that
+    registers no tools. `FilesystemMiddleware` is the opposite case and does need the splice —
+    upstream composes one unconditionally — which is why `_middleware` explains the rule there.
     """
     return ReloadingSkillsMiddleware(
         backend=backend,

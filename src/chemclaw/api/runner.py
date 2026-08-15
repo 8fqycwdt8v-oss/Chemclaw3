@@ -283,7 +283,7 @@ async def run_turn(
                 store=await _turn_store(),
             )
             # `turn_config`, not a bare `configurable`: it also carries the graph's step ceiling,
-            # which nothing here had ever chosen — `create_agent` bakes 9999, and reaching it raises
+            # which nothing here had ever chosen — the framework bakes 9999, and reaching it raises
             # rather than degrading. The mid-turn resume below reuses this same config, so the
             # continuation runs under the same bound as the run it continues.
             graph_config = turn_config(session.session_id)
