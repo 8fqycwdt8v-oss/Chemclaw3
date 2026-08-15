@@ -359,10 +359,11 @@ def test_the_validator_catches_arguments_the_named_tool_does_not_take(
 def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
     """The argument check's blind spot is reported by name, not left to be inferred from silence.
 
-    A bundle this release declares but does not run has no `server/tools.py` here, so its tools'
-    signatures are unresolvable and `_step_problems` skips them — silently, by design, because an
-    unresolvable tool must not produce invented failures. `hazard-briefing` calls `screen_hazards`,
-    which makes the shipped template the first one that is name-checked and *not* argument-checked.
+    A bundle this release declares but does not run has no `connectors/<name>/server/tools.py`
+    here, so its signatures are unresolvable and `_step_problems` skips them — silently, by
+    design, because an unresolvable tool must not produce invented failures. `hazard-briefing`
+    calls `screen_hazards`, which makes it the first shipped template that is name-checked and
+    *not* argument-checked.
 
     The assertion is deliberately on the real shipped template rather than a fixture: what would
     go wrong is not the reporting mechanism, it is somebody moving another bundle out and not

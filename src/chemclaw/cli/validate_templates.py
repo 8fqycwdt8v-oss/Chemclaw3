@@ -34,7 +34,7 @@ leaves the argument check silent, which is what keeps it from inventing failures
 that only exist at run time. They fall in three groups: every job-launcher and template-launcher,
 whose `params` model is generated; upstream's filesystem and todo tools; and — this is the new
 one — **every tool of a bundle we declare but do not run**, because there is no local
-`server/tools.py` to read a signature from.
+`connectors/<name>/server/tools.py` to read a signature from.
 
 **That third group broke a claim this docstring used to make.** It said the check "covers every
 tool the shipped templates call". It no longer does: `hazard-briefing` calls `screen_hazards`,
@@ -156,9 +156,9 @@ def unchecked_arguments() -> dict[str, list[str]]:
 
     The gap this reports is new and was introduced by the capability migration
     (`D-2026-08-15-capability-moves-judgment-and-declaration-stay`): the argument check resolves a
-    signature from a bundle's own `server/tools.py`, and a bundle we declare but do not run has no
-    such module here. `screen_hazards` is the first tool a shipped template names that fell into
-    it, so the shipped `hazard-briefing` template is name-checked and **not** argument-checked.
+    signature from a bundle's own `connectors/<name>/server/tools.py`, and a bundle we declare but
+    do not run has no such module here. `screen_hazards` is the first tool a shipped template names
+    that fell into it, so `hazard-briefing` is name-checked and **not** argument-checked.
 
     Reported rather than raised, and reported rather than left silent. Not raised, because the
     template is correct — nothing here can prove it, which is a different thing from it being
