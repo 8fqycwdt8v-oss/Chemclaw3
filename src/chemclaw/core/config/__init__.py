@@ -71,7 +71,6 @@ from chemclaw.core.config.retrieval import (
     SCHEMA_VECTOR_DIM,
     RetrievalSettings,
 )
-from chemclaw.core.config.safety import SafetySettings
 from chemclaw.core.config.service import ServiceSettings
 from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
@@ -100,7 +99,6 @@ __all__ = [
     "ObservabilitySettings",
     "ReportSettings",
     "RetrievalSettings",
-    "SafetySettings",
     "ServiceSettings",
     "Settings",
     "SourcesSettings",
@@ -130,7 +128,6 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
-    SafetySettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 

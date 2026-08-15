@@ -321,10 +321,6 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
-    # `safety-validate` compiles the hazard and genotoxicity tables through the public screen, so
-    # a bad SMARTS or a bad row fails at CI rather than on the first live hazard question. Same
-    # shape as every other `*-validate` entrypoint reaching its own domain (kg, templates, eln).
-    ("chemclaw.cli", "chemclaw.science"),
     ("chemclaw.cli", "chemclaw.templates"),
     ("chemclaw.connectors", "chemclaw.agent"),
     ("chemclaw.connectors", "chemclaw.core"),

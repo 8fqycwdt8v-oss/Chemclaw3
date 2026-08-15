@@ -108,9 +108,9 @@ def test_the_three_strict_helpers_share_one_definition_of_parses(bad: str) -> No
 def test_require_molecule_returns_the_molecule_the_canonical_form_is_taken_from() -> None:
     """The reason it exists: a caller needing the molecule gets the gate without a second parse.
 
-    `science/safety/screen.py` matches SMARTS against the molecule and then echoes
-    `Chem.MolToSmiles` of it as `ScreenResult.screened`, so the two must be the same object's two
-    faces rather than two parses of one string.
+    A SMARTS matcher works on the molecule and then echoes `Chem.MolToSmiles` of it back as the
+    structure it looked at, so the two must be the same object's two faces rather than two parses
+    of one string.
     """
     from rdkit import Chem
 

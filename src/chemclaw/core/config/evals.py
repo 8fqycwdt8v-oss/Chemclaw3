@@ -105,11 +105,6 @@ class EvalSettings(BaseSettings):
     # re-publishing the same probe set under the same name is what makes two runs comparable.
     # A second name would produce two datasets that cannot be diffed, which is the whole ask.
     phoenix_dataset_name: str = "chemclaw-live-probes"
-    # Minimum share of the pinned hazard rules that must still fire on their reference molecules
-    # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
-    # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports
-    # as "nothing matched" — exactly the failure the metric exists to catch.
-    eval_hazard_recall_min: float = Field(default=1.0, ge=0.0, le=1.0)
     # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
     # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
     # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor

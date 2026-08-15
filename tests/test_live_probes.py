@@ -214,11 +214,11 @@ def test_a_citation_past_the_preview_budget_is_still_grounded() -> None:
 def test_the_figures_a_live_judge_called_invented_are_verified_against_the_real_tool_result() -> (
     None
 ):
-    """gr-26, rebuilt from the real tool and the real answer: the six PDEs are quotations.
+    """gr-26, rebuilt from the real tool result and the real answer: the six PDEs are quotations.
 
-    The tool result is produced by calling `ich_impurity_limit`'s own implementation, not copied
-    into a fixture — a transcribed table can drift, and a check that passes against a stale copy
-    of the evidence proves nothing about the live one.
+    The tool result is `ich_impurity_limit`'s own output, recorded rather than hand-written —
+    `tests/recorded_tool_results.py` says why it is a recording now that the ICH tables are
+    `Chemclaw3-mcp`'s. What is under test is the citation scorer, not the guideline.
 
     This is the defect that survived the `note_ids` fix. On the re-run with untruncated ids in
     place the judge still wrote "the answer invents specific PDE numbers (Pd: 100/10/1 µg/day; Cu:
@@ -226,9 +226,9 @@ def test_the_figures_a_live_judge_called_invented_are_verified_against_the_real_
     numerical limits" — and it was right about the previews, which is why the assertion below on
     where character 200 falls is part of the test rather than a comment.
     """
-    from chemclaw.science.safety.ich import impurity_limit
+    from tests.recorded_tool_results import RECORDED_ICH_LIMITS
 
-    results = [impurity_limit(name).model_dump_json(indent=2) for name in ("palladium", "copper")]
+    results = [RECORDED_ICH_LIMITS[name] for name in ("palladium", "copper")]
     answer = (
         "## **Palladium** — *Class 2B*\n"
         "- **Oral:** 100 µg/day\n- **Parenteral:** 10 µg/day\n- **Inhalation:** 1 µg/day\n"

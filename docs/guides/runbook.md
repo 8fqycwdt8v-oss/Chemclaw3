@@ -413,10 +413,12 @@ costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQ
 startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 
-**What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `safety` (the
-hazard screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the
-calibration ledger), `bo` (Bayesian optimization) and `qm` (the durable QM/DFT run behind the
-Nextflow launcher).
+**What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `calc` (the fast
+calculators and the calibration ledger), `bo` (Bayesian optimization) and `qm` (the durable QM/DFT
+run behind the Nextflow launcher) — plus `chem` (bench chemistry over RDKit) and `safety` (the
+hazard screen), which this release **declares but does not run**: both are served by
+`Chemclaw3-mcp`, so each needs its host in `networkPolicy.egressDestinations` and its bearer
+(`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`) provided, or every call to them is refused.
 
 **`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
 `servers/chem` on port 8858, so this release renders no Deployment and no Service for it and dials
@@ -549,7 +551,7 @@ Start the sync with `since` set before those entries' timestamps to pull them in
 
 **A steady ingest count is not proof anything landed.** `IngestSummary.ingested` counts entries
 whose note this run *proposed* — the PR-gate is where a human merges it — so an entry whose branch
-is blocked (the `kg-validate` hazard gate refuses it) or simply unreviewed is proposed again on
+is simply unreviewed is proposed again on
 every run, indefinitely. Those entries are listed in `IngestSummary.awaiting_merge` (a subset of
 `ingested`) and logged as `eln sync proposed N entry/entries whose notes are still unmerged`. A
 count that does not fall between runs is a review queue nobody is working, not a source producing
@@ -1087,18 +1089,14 @@ will be deleted rather than a second query's guess at it.
 
 ## (xvi) The other commands with no section of their own
 
-Three operations exist as `make` targets and had no entry here. Two of them are yours to run;
-the third is automated and listed so nobody runs it by hand wondering why.
+Two operations exist as `make` targets and had no entry here. One is yours to run; the other is
+automated and listed so nobody runs it by hand wondering why.
 
 **`make share-sync SHARE=<source>` — crawl a mounted document share now.** The scheduled job is the
 production path (every six hours by default); this is for the first crawl after attaching a share,
 and for re-crawling after a bulk change nobody wants to wait six hours for. Run
 `make share-estimate SHARE=<source>` first — it walks the share, reads nothing, and tells you what
 the crawl would cost.
-
-**`make safety-validate` — force-compile the hazard and genotoxicity tables.** Run it after editing
-a rule table. CI runs it too; the point is that a bad SMARTS fails at deploy rather than on the
-first live hazard question.
 
 **`make schedules-apply` — do not run this by hand.** The chart runs it as a post-rollout Job, so
 the Schedules follow the deployment automatically. It is here only so that finding it in

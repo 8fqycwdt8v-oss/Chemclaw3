@@ -105,8 +105,9 @@ class CampaignProgress(BaseModel):
         """The reading in words, including the limit a plateau verdict may never exceed.
 
         A `computed_field` rather than a bare property for the reason
-        `chemclaw.science.safety.screen.ScreenResult.verdict` is one: a plain property is not
-        serialized, so the caveat would never reach the model composing the answer. The tool
+        `chemclaw.science.fingerprints.store.FingerprintSearch.verdict`
+        is one: a plain property is not serialized, so the caveat would never reach the model
+        composing the answer. The tool
         docstring is read once when the tool is defined; this sentence is in the context window at
         the moment the answer is written, and only one of those two is load-bearing.
         """

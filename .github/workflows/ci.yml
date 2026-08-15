@@ -124,12 +124,6 @@ jobs:
       - name: Validate the agent's prose contract
         run: make prose-validate
 
-      # Both safety tables are lazy (@lru_cache, first-request compile) so a malformed YAML or an
-      # unparseable SMARTS would otherwise surface on the first live hazard question rather than
-      # here (Science-5). Forcing the compile in CI turns that into a build failure instead.
-      - name: Validate the safety tables
-        run: make safety-validate
-
       # The supply-chain gate, and the reason it is *here* rather than only in `image.yml`: that
       # workflow triggers on `push: main` and `pull_request`, so a branch push — the thing a
       # developer does dozens of times before opening a PR — audited nothing. Neither did `make

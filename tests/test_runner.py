@@ -471,13 +471,14 @@ def test_a_call_delivered_whole_is_reported_without_waiting_for_the_next_update(
 def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
     """The trace reads ids *and* figures off the whole result, and only the preview is truncated.
 
-    Built from what `ich_impurity_limit` really returns rather than from a shaped string: the six
+    Built from what `ich_impurity_limit` really returned rather than from a shaped string: the six
     ICH PDEs sit past character 200 of that result, and a live judge with only the preview called
-    every one of them invented. `numbers` is what lets a scorer disagree with it.
+    every one of them invented. `numbers` is what lets a scorer disagree with it. The payload is a
+    recording — see `tests/recorded_tool_results.py` for why that is now the honest form.
     """
-    from chemclaw.science.safety.ich import impurity_limit
+    from tests.recorded_tool_results import RECORDED_ICH_LIMITS
 
-    result = impurity_limit("palladium").model_dump_json(indent=2)
+    result = RECORDED_ICH_LIMITS["palladium"]
     assert len(result) > settings.agent_audit_max_arg_chars
 
     trace = runner_trace.ToolCallTrace()

@@ -618,8 +618,9 @@ class ScreeningDesign(BaseModel):
         """What this design is, in one sentence the model cannot answer around.
 
         A `computed_field` rather than a plain property for the reason
-        `chemclaw.science.safety.screen.ScreenResult.verdict` is one: a bare property is not
-        serialized, so the caveat would never reach the model that has to write the answer. The
+        `chemclaw.science.fingerprints.store.FingerprintSearch.verdict`
+        is one: a bare property is not serialized, so the caveat would never reach the model
+        that has to write the answer. The
         tool docstring is read once when the tool is defined; this sentence is in the context
         window at the moment the answer is composed, and only one of those two is load-bearing.
         """

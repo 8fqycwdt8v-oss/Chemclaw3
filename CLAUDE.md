@@ -168,9 +168,12 @@ knowledge graph, retrieval, memory, ingestion, identity and durable execution. S
 as a server. The boundary within science is by *runtime*, not by subject: a request/response
 computation is a stateless MCP server there, while long-running orchestration (an HPC/Nextflow run,
 a multi-round campaign) stays a durable job here, because that repo's no-state promise is enforced
-rather than requested. `science/fingerprints` and `science/safety` stay here despite the name —
-retrieval, memory, ELN ingest and the knowledge-graph validator import them, which makes them
-infrastructure by this rule rather than exceptions to it.
+rather than requested. `science/fingerprints` stays here despite the name — retrieval, memory and
+ELN ingest import it in-process, which makes it infrastructure by this rule rather than an
+exception to it. `science/safety` used to be listed beside it on the same grounds; that argument
+died when the `kg-validate` hazard gate that made the claim true was retired
+(`D-2026-08-15-safety-is-a-tool-not-a-gate`), and the screen is now an ordinary MCP server with no
+in-process caller left.
 
 If a task requires changing or fixing code that lives in a companion repo (not this one), add that
 repo to the session (`add_repo`) and open a PR directly against it — do not proxy the change through
