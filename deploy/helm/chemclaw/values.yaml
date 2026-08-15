@@ -321,7 +321,6 @@ config:
   CHEMCLAW_HPC_PIPELINE_NAME: "chemclaw-qm"
   CHEMCLAW_HPC_PIPELINE_VERSION: "1.0.0"
   CHEMCLAW_HPC_ARTIFACT_STORE_URL: "https://artifacts.internal/chemclaw"
-  CHEMCLAW_HPC_BRIDGE_IDENTITY: "chemclaw-hpc"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"

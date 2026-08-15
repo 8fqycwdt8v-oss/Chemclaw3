@@ -331,12 +331,24 @@ def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
 # cheaper the model, the lower the minimum" is wrong here.
 _MEASURED_FLOORS = {"claude-sonnet-5": 1024, "claude-haiku-4-5-20251001": 4096}
 
-# Profiles known to sit below the haiku floor, and therefore never to cache on it. Recorded rather
-# than fixed: enlarging a prompt to clear a cache floor would pay tokens to save tokens, and the
-# provider's boundary is not a defect in a narrow profile. What this pins is that the *set* does
-# not grow silently — a prompt edit that pushes `design` (5,625) or `evidence` (5,803) under 4,096
-# is a cost regression nobody would otherwise see, because it has no symptom except a bill.
-_BELOW_HAIKU_FLOOR = {"property-lookup", "safety"}
+# Profiles known to sit below the haiku floor, and therefore never to cache on it. What this pins is
+# that the set does not *grow* silently — a prompt edit that pushes a profile under 4,096 is a cost
+# regression with no symptom except a bill.
+#
+# **It is now empty, and the reason is a side effect rather than an improvement.** It held
+# `property-lookup` and `safety` until the scratchpad landed (D-2026-08-15): registering the six
+# filesystem tools added their schemas to every profile's prefix, worth roughly 1,800 tokens, and
+# that carried both over the floor. Re-measured live against `count_tokens` on the day:
+# `safety` 2,958 -> 4,751 and `property-lookup` -> 4,842, against `design` 7,286, `evidence` 7,749,
+# `computation` 10,542, `reporting` 9,240 and `default` 23,309.
+#
+# Adjudicated rather than updated, because the direction is not obviously good. Both profiles now
+# cache, which is a real saving on a narrow agent that used to pay full price on *every* call. But
+# the same 1,800 tokens are added to the five profiles that already cleared the floor, where they
+# buy nothing after the first call and cost a larger cache write. The set is the thing worth
+# ratcheting; the prefix growth is recorded here so that a future reading of "0 below the floor"
+# is not mistaken for a prompt that got leaner.
+_BELOW_HAIKU_FLOOR: set[str] = set()
 
 
 @pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")
