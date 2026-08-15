@@ -214,7 +214,7 @@ class AgentSettings(BaseSettings):
     def skills_dirs(self) -> list[str]:
         """The skills directories, split on the OS path separator (like PATH), empties dropped.
 
-        `FileSkillsSource` takes a list of directories; keeping the config a single delimited
+        The skills backend takes a list of directories; keeping the config a single delimited
         string (rather than a JSON list) means an admin sets `CHEMCLAW_SKILLS_DIR=skills:/opt/
         team-skills` the same way they set `PATH`, no JSON quoting.
         """

@@ -2,9 +2,10 @@
 
 `build_langgraph_agent` builds the compiled graph a turn runs on: the instructions, the in-process
 capability tools, the per-task model route, the middleware chain, the skills and the human gates.
-It was written as the twin of `chemclaw_agent.build_agent` and lived behind a config switch until
-it carried the whole suite; the switch and the other engine are gone (M13 Step 3), so this is what
-a deployment gets.
+It was written as the twin of the previous framework's builder and lived behind a config switch
+until it carried the whole suite; the switch and the other engine are gone (M13 Step 3), so this is
+what a deployment gets. That builder is deliberately not named here: it no longer exists, and a
+backticked pointer to a deleted symbol reads as a place to go and look.
 
 **Named for the engine, not for "graph", and that is not fussiness.** In this codebase *the graph*
 is the Markdown knowledge graph — layer 4, `kg/graph.py`, whose own `build_graph` builds a NetworkX
@@ -112,16 +113,16 @@ def build_langgraph_agent(
 
     Args:
         model: The LangChain chat model to run on. Injectable for the same reason
-            `build_agent(chat_client=...)` is: the wiring must be assemblable and testable without
-            live credentials. `None` builds the config-selected provider
+            `build_langgraph_agent(chat_client=...)` is: the wiring must be assemblable and testable
+            without live credentials. `None` builds the config-selected provider
             (`llm_provider.build_chat_model`).
         profile: The profile to narrow by (a name, an `AgentProfile`, or `None` for the default,
             which advertises the full in-process surface). Narrowing is attenuation only — the
             audit trail and the per-tool authorization gate are attached *after* it, so a profile
             attenuates capability and can never bypass either.
         actor: Fallback audit actor, used only when a turn stamps no ambient identity. Same
-            precedence and same reason as `build_agent`: an agent outlives a turn, so anything
-            bound here would be shared by every user on the pod.
+            precedence and same reason as `build_langgraph_agent`: an agent outlives a turn, so
+            anything bound here would be shared by every user on the pod.
         correlation_id: Fallback correlation id, same precedence.
         audit_sink: The durable trail. `None` means `default_audit_sink()`; pass `NullAuditSink()`
             to opt out explicitly, never by forgetting.
@@ -129,7 +130,7 @@ def build_langgraph_agent(
             invocation. The durable one is `chemclaw.agent.checkpointer.checkpointer()`, which the
             caller supplies rather than this function building: it is an async factory that
             migrates on first use, and `build_langgraph_agent` is synchronous and resource-free by
-            the same promise `build_agent` makes.
+            the same promise `build_langgraph_agent` makes.
         connectors: This turn's already-open connector tools
             (`chemclaw.connectors.registry.open_connector_specs`), or `None` for an agent with no
             out-of-process capability.
@@ -145,7 +146,7 @@ def build_langgraph_agent(
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
-        `build_agent` promises.
+        `build_langgraph_agent` promises.
 
     **Compiled per turn, because LangGraph binds tools at construction.** MAF appends run-scoped
     tools with `agent.run(tools=…)`, so one process-lived `Agent` served every turn and took that
@@ -447,8 +448,8 @@ def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
     keeps the function total rather than correct-until-someone-nests-two-trees-alike.
 
     Order follows `dirs`, so precedence is unchanged: `SkillsMiddleware` loads sources in order and
-    a later one wins, matching `FileSkillsSource`'s own first-wins rule once the list is read the
-    way each library reads it.
+    a later one wins, matching the first-wins rule the previous framework's file source applied once
+    the list is read the way each library reads it.
     """
     seen: dict[str, int] = {}
     labelled: list[tuple[str, str]] = []

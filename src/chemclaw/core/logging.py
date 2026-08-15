@@ -872,7 +872,7 @@ class SecretRedactingFilter(logging.Filter):
         # `TypeError: 'bool' object is not subscriptable`, which reached production code through
         # `metrics_bridge.degraded(..., exc_info=False)`: the one site passing it is
         # `skill_manifest`, inside the `except` whose whole purpose is to skip a malformed
-        # `SKILL.md` and continue, so a single bad manifest made `build_agent` raise.
+        # `SKILL.md` and continue, so a single bad manifest made `build_langgraph_agent` raise.
         # `logging`'s own `Formatter.format` has always tested truthiness here; matching it is both
         # the fix and the reason no other formatter had this problem. Still load-bearing now that
         # `filter` catches: `exc_info=False` is a *well-formed* call, and letting it raise into that

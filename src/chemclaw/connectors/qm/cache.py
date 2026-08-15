@@ -9,11 +9,11 @@ while Temporal retains that execution, so after retention rolled over the byte-i
 re-ran the whole cluster job. The economics were exactly inverted.
 
 **Why the key is built here and not in `specs.py`.** That module is a leaf by contract — the chat
-service imports it on every `build_agent` to resolve `connector.yaml`'s `params_model`, so it may
-not reach a compiled library or a database (`tests/test_connector_isolation.py` asserts it in a
-fresh interpreter, D-118). `CalculationKey` lives in `chemclaw.science.calc.store`, which is on the
-wrong side of that line. This module is imported only by the bundle's own activity, which already
-runs on the bundle's own worker.
+service imports it on every `build_langgraph_agent` to resolve `connector.yaml`'s `params_model`, so
+it may not reach a compiled library or a database (`tests/test_connector_isolation.py` asserts it in
+a fresh interpreter, D-118). `CalculationKey` lives in `chemclaw.science.calc.store`, which is on
+the wrong side of that line. This module is imported only by the bundle's own activity, which
+already runs on the bundle's own worker.
 
 **What goes where in the key, and why it is not `qm_job_key`.** `qm_job_key` is a bare 16-character
 digest — it is not a `calc_refs`-valid reference (`chemclaw.kg.note._CALC_REF` wants the four-part

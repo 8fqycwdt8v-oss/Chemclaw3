@@ -175,7 +175,7 @@ against them.
 6. **Rule of Three.** No abstraction until the second real caller. This is why the backends are
    staged rather than all built behind a protocol on day one (§12).
 7. **One extension seam per capability kind.** A tool registers itself with `@tool`; nothing in
-   `build_agent` is edited.
+   `build_langgraph_agent` is edited.
 
 ---
 

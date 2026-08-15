@@ -2,9 +2,9 @@
 
 Why this exists: the production ingress is Teams/Copilot Studio with native Entra-ID SSO
 (architektur.md §7), so day-to-day there is no way to actually *talk* to the wired agent from a
-checkout. This CLI is that seam for development and testing: it builds the same `build_agent` the
-production host builds, opens the MCP capability subprocesses for the session, and runs a
-turn-taking chat (or a single scripted question) against a live model.
+checkout. This CLI is that seam for development and testing: it builds the same
+`build_langgraph_agent` the production host builds, opens the MCP capability subprocesses for the
+session, and runs a turn-taking chat (or a single scripted question) against a live model.
 
 Identity is the one thing that differs from production. Entra-ID auth (F4, D-043) is a front-door
 OIDC flow — it validates a browser-obtained token — and this is a terminal tool with no such token

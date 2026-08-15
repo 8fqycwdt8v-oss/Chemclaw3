@@ -24,7 +24,7 @@ access to it — tools are advertised by the agent's own registry/profile and ga
 input, so this module cannot widen what a skill's reader may do (audit doc 10 §7).
 
 It is, since D-2026-08-05, read at run time too — by `chemclaw.agent.skill_access.
-ToolScopedSkillsSource`, which *hides* a skill whose whole declared capability is absent from the
+ToolScopedSkills`, which *hides* a skill whose whole declared capability is absent from the
 agent's surface. That is the same one-way direction: the declaration can only cost a skill its
 visibility, never buy it a tool. `declared_tools` below is the reader, and it exists here rather
 than in the source because a skill loader keeps only the Agent Skills spec's own fields
@@ -81,7 +81,7 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
     """Each discovered skill's declared tool dependencies, by skill name.
 
     The run-time reader of the `tools:` declaration, for `chemclaw.agent.skill_access.
-    ToolScopedSkillsSource`. Built once when the agent is built, not per turn: the skills tree does
+    ToolScopedSkills`. Built once when the agent is built, not per turn: the skills tree does
     not change while the process runs, and re-reading every `SKILL.md` on every turn would trade the
     whole point of progressive disclosure for a filter.
 
@@ -97,12 +97,14 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
 
     Args:
         skills_dirs: The directories to walk — the configured tree plus each enabled connector
-            bundle's own `skills/` (the same list `build_agent` hands `FileSkillsSource`).
+            bundle's own `skills/` (the same list `build_langgraph_agent` routes through
+            `langgraph_agent.skills_backend`).
 
     Returns:
         `{skill name: declared tool names}`, keyed by the frontmatter `name` because that is what a
         `Skill` object carries and therefore what the filter can match on. A duplicate name across
-        two directories keeps the first, matching `FileSkillsSource`'s own precedence.
+        two directories keeps the first, matching the precedence `langgraph_agent._labelled` gives
+        the routed trees.
     """
     declared: dict[str, frozenset[str]] = {}
     for directory in skills_dirs:

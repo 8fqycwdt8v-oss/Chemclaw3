@@ -6,8 +6,8 @@ docstring — so it gates the harness around the model and never the model's jud
 `docs/planning/DEFERRED.md` names the gap exactly: a faithful behaviour eval has to run against a
 real LLM, because a mock LLM tests only the mock. This module is that runner.
 
-**Why the HTTP/SSE front door and not `build_agent()` in-process.** The in-process agent skips
-identity, authorization, budget admission, the audit sink, the durable session store and the
+**Why the HTTP/SSE front door and not `build_langgraph_agent()` in-process.** The in-process agent
+skips identity, authorization, budget admission, the audit sink, the durable session store and the
 streaming assembler that reconstructs tool calls from name-first fragments. Three of the five
 defects the fifty-question live pass found lived in exactly that layer
 (`docs/archive/vibe-test-2026-07.md`): tool-call events that carried no arguments, a failing tool

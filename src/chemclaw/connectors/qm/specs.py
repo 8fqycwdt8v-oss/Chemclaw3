@@ -2,8 +2,8 @@
 
 **A leaf module, and that is the whole point.** `QmJobSpec` is named by `connector.yaml`'s
 `params_model`, and `connectors/jobs.py` resolves that name by *importing* it — on every
-`build_agent`, in the chat service's own process, and again in `make connector-validate`. So
-whatever this module imports, the chat service imports too, which is why the split here follows
+`build_langgraph_agent`, in the chat service's own process, and again in `make connector-validate`.
+So whatever this module imports, the chat service imports too, which is why the split here follows
 `connectors/calc/specs.py`: pydantic, `chemclaw.core.config`, `chemclaw.core.chem` and
 `chemclaw.core.ids` only,
 and nothing that reaches the HPC launcher, the knowledge graph or a compiled chemistry library

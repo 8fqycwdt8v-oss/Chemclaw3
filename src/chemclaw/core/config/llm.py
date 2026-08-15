@@ -57,8 +57,8 @@ class LlmSettings(BaseSettings):
     # always sent one failed *every* turn on the default Anthropic path. No test caught it
     # because every test injects a fake chat client, so the parameter never reached a real API.
     # `None` means "send no temperature and let the model use its own default"; a deployment on a
-    # model that still accepts one sets it explicitly. Threaded into the agent by `build_agent`,
-    # which omits the key entirely when this is None (F0.3).
+    # model that still accepts one sets it explicitly. Threaded into the agent by
+    # `build_langgraph_agent`, which omits the key entirely when this is None (F0.3).
     llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
     # Anthropic prompt caching: mark the static prefix — the tool schemas and the system prompt —

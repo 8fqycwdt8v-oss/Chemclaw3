@@ -14,7 +14,7 @@ Beyond that shape check, this gate closes the loop between a skill's *judgment* 
 - **Taught ⇒ declared.** Every tool a skill's *body* names must appear in `tools:`. This half was
   missing, and it is what makes the declaration mean anything: an incomplete `tools:` list is
   indistinguishable from an honest one, and since D-2026-08-05 the list decides whether the skill
-  is advertised at all (`chemclaw.agent.skill_access.ToolScopedSkillsSource`) — an under-declared
+  is advertised at all (`chemclaw.agent.skill_access.ToolScopedSkills`) — an under-declared
   skill would be hidden from an agent that can do exactly what it teaches. The body is read with
   `chemclaw.cli.validate_prose_contract.referenced_tool_names`, the same extractor the prose gate
   uses, so the two cannot disagree about what a skill says.
@@ -24,7 +24,7 @@ run time:
 
 - `settings.skills_enabled` — an unknown name silently advertises nothing.
 - `settings.skill_role_gates` — an unknown name silently gates **nothing**, which is the direction
-  that matters: `RoleScopedSkillsSource` reads "absent from the map" as "ungated", so a typo'd key
+  that matters: `RoleScopedSkills` reads "absent from the map" as "ungated", so a typo'd key
   leaves the skill it was meant to restrict visible to every caller. A gate that fails open is
   worth a CI failure.
 
@@ -38,7 +38,8 @@ import frontmatter
 from pydantic import ValidationError
 
 # Importing the agent package's tool modules is what populates the tool registry (the same
-# registration side effect `build_agent` relies on), so the declared-tool check sees the real set.
+# registration side effect `build_langgraph_agent` relies on), so the declared-tool check sees the
+# real set.
 from chemclaw.agent import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.agent.skill_manifest import SKILL_FILENAME, SkillManifest
@@ -133,7 +134,7 @@ def _undeclared_problems(skill_file: Path, manifest: SkillManifest, body: str) -
     declared?", and without it the declaration means very little: an incomplete `tools:` list looks
     exactly like an honest one. That was tolerable while the list was documentation. It stopped
     being tolerable when the list started deciding whether the skill is advertised at all
-    (`chemclaw.agent.skill_access.ToolScopedSkillsSource`, D-2026-08-05) — an under-declared skill
+    (`chemclaw.agent.skill_access.ToolScopedSkills`, D-2026-08-05) — an under-declared skill
     is hidden from precisely the agent that can do what it teaches, which is the failure mode of
     the fix rather than of the defect.
 
@@ -160,7 +161,7 @@ def _undeclared_problems(skill_file: Path, manifest: SkillManifest, body: str) -
 def _enable_list_problems(found_names: set[str]) -> list[str]:
     """Every name in `settings.skills_enabled` must be a skill some configured directory provides.
 
-    An unknown name silently advertises nothing at run time (`EnabledSkillsSource` narrows rather
+    An unknown name silently advertises nothing at run time (`EnabledSkills` narrows rather
     than raising, so one typo cannot break every live turn) — so the loud failure belongs here.
     """
     unknown = sorted(set(settings.skills_enabled_list) - found_names)
@@ -175,7 +176,7 @@ def _role_gate_problems(found_names: set[str]) -> list[str]:
 
     **The two config maps fail in opposite directions, and this is the one that fails open.** A
     typo in `skills_enabled` advertises *nothing* under that name — loud, and the operator notices
-    the missing skill. A typo in `skill_role_gates` gates *nothing*: `RoleScopedSkillsSource`
+    the missing skill. A typo in `skill_role_gates` gates *nothing*: `RoleScopedSkills`
     treats a skill absent from the map as ungated, so the restriction an operator wrote is simply
     not applied and the skill stays visible to every caller. Nothing at run time can report that,
     because from the source's point of view nothing happened.
@@ -195,8 +196,8 @@ def _role_gate_problems(found_names: set[str]) -> list[str]:
 
 def main() -> int:
     """Validate every skill; print problems and exit non-zero if any (the CI gate)."""
-    # The same dirs `build_agent` discovers from: the configured tree plus every enabled connector
-    # bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
+    # The same dirs `build_langgraph_agent` discovers from: the configured tree plus every enabled
+    # connector bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
     problems = validate_skills([*settings.skills_dirs, *connector_skills_dirs()])
     if problems:
         print("SKILL.md validation failed:")

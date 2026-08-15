@@ -5,14 +5,15 @@ Why this exists: adding an agent tool used to mean editing a hardcoded list insi
 orchestration code. Every other capability declares itself at its definition site and is
 discovered by name (skills by folder, MCP servers + data sources by config token, metrics by
 `@metric`). This module gives function tools the same locality: a tool decorates itself with
-`@tool` where it is defined, and `build_agent` assembles the advertised set from the registry.
+`@tool` where it is defined, and `build_langgraph_agent` assembles the advertised set from the
+registry.
 
 The shape deliberately mirrors `chemclaw.evals.metric` (`_REGISTRY` + decorator + duplicate-name
 guard),
 so no new pattern is introduced. It holds only the in-process function tools; the MCP capability
 capability lives behind a connector bundle (`connectors/`), and the two shared middlewares (audit +
-per-tool authz) still wrap every tool uniformly in `build_agent`. The registry changes *how tools
-are collected*, never how they are gated — the safety rubric is untouched.
+per-tool authz) still wrap every tool uniformly in `build_langgraph_agent`. The registry changes
+*how tools are collected*, never how they are gated — the safety rubric is untouched.
 
 Registration happens on import, so the caller that assembles the toolset imports the tool-bearing
 modules for their side effect (exactly as `evals/__init__.py` seeds the metric registry).

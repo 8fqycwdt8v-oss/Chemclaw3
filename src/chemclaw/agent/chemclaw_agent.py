@@ -311,8 +311,8 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     """
     prof = profile if profile is not None else get_profile(None)
     # Job tools are ordinary registry tools: registering them here (once per process, guarded
-    # against a re-registration when `build_agent` is called for a second profile) is what makes
-    # the audit middleware, `tool_role_gates` and the prose-contract validator address them by
+    # against a re-registration when `build_langgraph_agent` is called for a second profile) is what
+    # makes the audit middleware, `tool_role_gates` and the prose-contract validator address them by
     # name.
     _register_generated_tools()
     inprocess = registered_tools()
@@ -455,8 +455,8 @@ def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> l
 def _register_generated_tools() -> None:
     """Register the generated launchers — connector jobs and templates — exactly once per process.
 
-    `build_agent` may run several times (one agent per profile, and once per test), while the
-    registry is module state keyed by tool name and rejects a duplicate registration as the
+    `build_langgraph_agent` may run several times (one agent per profile, and once per test), while
+    the registry is module state keyed by tool name and rejects a duplicate registration as the
     programming error it usually is. The already-registered check makes repeat builds idempotent
     without weakening that guard for hand-written tools.
     """

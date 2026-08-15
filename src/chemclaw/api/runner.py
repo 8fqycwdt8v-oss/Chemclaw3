@@ -165,9 +165,9 @@ async def run_turn(
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
     turn_started = time.perf_counter()
-    # Whether this turn's approval is spendable, asked exactly as `build_agent` asks whether to
-    # attach the gate — one predicate, so the two cannot disagree about a profile that overrides
-    # the deployment's autonomy.
+    # Whether this turn's approval is spendable, asked exactly as `build_langgraph_agent` asks
+    # whether to attach the gate — one predicate, so the two cannot disagree about a profile that
+    # overrides the deployment's autonomy.
     plan_gated = gate_applies(get_profile(profile))
     # Whether this turn produced its answer — the cost ledger's question ("did the user get an
     # answer for the money"), and only that. It is deliberately *not* the rollback predicate:
@@ -192,10 +192,10 @@ async def run_turn(
     session_token = set_current_session_id(session.session_id)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
-    # One correlation id per *turn*, stamped here rather than bound inside `build_agent`: agents
-    # are cached per profile for the process's lifetime, so a build-time id was shared by every
-    # turn from every user on the pod — the audit trail could not tell two conversations apart,
-    # which is the one thing a correlation id exists to do.
+    # One correlation id per *turn*, stamped here rather than bound inside `build_langgraph_agent`:
+    # agents are cached per profile for the process's lifetime, so a build-time id was shared by
+    # every turn from every user on the pod — the audit trail could not tell two conversations
+    # apart, which is the one thing a correlation id exists to do.
     correlation_id = uuid.uuid4().hex
     correlation_token = set_current_correlation_id(correlation_id)
     # Count this turn's tool calls, so the identical question asked a third time is refused rather

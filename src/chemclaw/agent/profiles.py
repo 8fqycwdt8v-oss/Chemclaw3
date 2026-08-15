@@ -2,22 +2,23 @@
 
 Why this exists: today there is exactly one global agent. Every dimension a use case would
 vary — the instructions, the advertised tool subset, the MCP subset, whether the harness runs
-and in which mode — is already an input `build_agent` draws from module constants or global
-config, but there is no way to bind those into a named, selectable bundle. This module adds that
-bundle without a new execution engine: a profile is an *override set* over `build_agent`'s
-existing dimensions, and the sole `"default"` profile reproduces today's agent byte-for-byte.
+and in which mode — is already an input `build_langgraph_agent` draws from module constants or
+global config, but there is no way to bind those into a named, selectable bundle. This module adds
+that bundle without a new execution engine: a profile is an *override set* over
+`build_langgraph_agent`'s existing dimensions, and the sole `"default"` profile reproduces today's
+agent byte-for-byte.
 
 Design (see `docs/archive/audit/10-config-extensibility.md` §6):
 
 - **`None` means "use the global default."** Every override field defaults to `None`, and
-  `build_agent` resolves `None` against the module instructions / `settings` — so this module
-  imports neither `chemclaw_agent` nor `settings` (no cycle, no second config source), and the
-  default profile is simply `AgentProfile(name="default")` with every field unset.
+  `build_langgraph_agent` resolves `None` against the module instructions / `settings` — so this
+  module imports neither `chemclaw_agent` nor `settings` (no cycle, no second config source), and
+  the default profile is simply `AgentProfile(name="default")` with every field unset.
 - **A profile *attenuates*, it never *authorizes*.** The tool/MCP subsets can only *narrow* the
   advertised surface. The audit + per-tool authz middleware and the skill role-gates run in
-  `build_agent` *after* this narrowing, so a profile that names a tool the caller may not use is
-  still denied at call time, and a profile that omits the PR-gate tools merely removes capability.
-  A profile is a narrowing seam layered *under* RBAC, never a bypass.
+  `build_langgraph_agent` *after* this narrowing, so a profile that names a tool the caller may not
+  use is still denied at call time, and a profile that omits the PR-gate tools merely removes
+  capability. A profile is a narrowing seam layered *under* RBAC, never a bypass.
 - **Files, not code.** A profile is a YAML file discovered from `data/profiles/` or from a connector
   bundle (`chemclaw.agent.profile_discovery`, D-112), selected per session by name. This module
   holds the
@@ -33,14 +34,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class AgentProfile(BaseModel):
-    """A named override-bundle over `build_agent`'s dimensions; unset fields fall back to global.
+    """Override-bundle over `build_langgraph_agent`'s dimensions; unset fields fall back to global.
 
     `instructions` swaps the system prompt; `tool_names` / `mcp_server_names` *narrow* the
     advertised in-process tools / MCP capability servers to the named subset (a name absent from
-    the built surface is a loud error in `build_agent`, not a silent drop); `harness_enabled` /
-    `harness_autonomy` override the harness dimension. Every field is `None` by default, so
-    `AgentProfile(name="default")` reproduces today's agent exactly. `extra="forbid"` rejects a
-    misspelled override rather than silently ignoring it (the same fail-fast the config models use).
+    the built surface is a loud error in `build_langgraph_agent`, not a silent drop);
+    `harness_enabled` / `harness_autonomy` override the harness dimension. Every field is `None` by
+    default, so `AgentProfile(name="default")` reproduces today's agent exactly. `extra="forbid"`
+    rejects a misspelled override rather than silently ignoring it (the same fail-fast the config
+    models use).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

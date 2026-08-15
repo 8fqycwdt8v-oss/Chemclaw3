@@ -8,9 +8,9 @@ here. A `contextvar` is the right carrier — task-local, so concurrent turns ne
 where the static audit actor and the dev-mode allowances apply.
 
 The turn's **correlation id** rides here for the same reason and with the same consumer. It used
-to be bound once inside `build_agent`, and agents are cached per profile for the process's whole
-life — so every turn from every user on a pod shared one id, which is precisely the opposite of
-what a correlation id is for: the audit trail could not separate two chemists' tool calls, and
+to be bound once inside `build_langgraph_agent`, and agents are cached per profile for the process's
+whole life — so every turn from every user on a pod shared one id, which is precisely the opposite
+of what a correlation id is for: the audit trail could not separate two chemists' tool calls, and
 "show me everything that happened in this conversation" returned the pod's entire history. It is
 per-turn state, so it belongs in a task-local like the actor, not on a cached object.
 
