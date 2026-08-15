@@ -94,6 +94,13 @@ def _declared_bearer_env(name: str) -> str | None:
     refuse; if none does, the app is synthetic and stays open. That check resolves against
     `__file__` rather than through the registry or `settings`, because the configured roots are
     exactly what the first case has wrong.
+
+    **What that does not cover, stated rather than implied:** a bundle an operator ships *outside*
+    this package — the documented PATH-like override — has no manifest beside this module, so a
+    misconfigured registry makes it indistinguishable from a synthetic app and it stays open. There
+    is no second source of truth to consult for one: its manifest lives in the same configured roots
+    that are under suspicion. The shipped bundles are the ones this can speak for, and it speaks for
+    them; a private bundle that wants the same guarantee has to assert its own credential.
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
     from chemclaw.connectors.registry import discovered

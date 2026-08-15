@@ -192,6 +192,15 @@ select = ["ASYNC", "E", "F", "W", "I", "B", "C4", "G", "PIE", "UP", "D", "RUF100
 # deadline nor something a caller could express any other way.
 ignore = ["D203", "D213", "ASYNC109"]
 
+[tool.ruff.format]
+# ruff 0.16 formats fenced code blocks inside Markdown as well as `.py` files. That is right for
+# code and wrong for this repository's documents: `docs/archive/` and the ADR series are *records* —
+# a merged decision is never edited (CLAUDE.md), and a session finding is what somebody observed —
+# so a formatter rewriting the snippets inside them would be editing history to satisfy a style
+# rule, and every such edit would show up as a diff against a document nobody changed. The snippets
+# are illustrations, not code that runs; `make lint` still formats every `.py` in the tree.
+exclude = ["**/*.md"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
