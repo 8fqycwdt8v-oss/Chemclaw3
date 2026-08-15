@@ -201,6 +201,13 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
     Redirect to a file and `tail` the *file* (`make test > run.log 2>&1`), which costs nothing and
     keeps the whole thing. The same mistake makes a *green* run untrustworthy for a different
     reason: skip counts and warnings are where a suite tells you it did less than you think.
-    Related: do not run two suites at once. Two of the three failures seen this session were in
-    xTB-backed tests under a 180s per-test cap while three pytest processes competed for CPU —
-    which is indistinguishable, from a truncated log, from a real regression.
+    Related: do not run two suites at once. Two failures this session were xTB-backed tests under
+    the 180s per-test cap while three pytest processes competed for CPU. **Resolved by
+    reproduction, not by re-running until green**, which is the part worth copying: the two tests
+    are deterministic (seeded embedding, no conformer search, GFN2) and collection order is fixed
+    (no `pytest-randomly`), so both a numerical regression and order-dependent pollution would have
+    failed *every* run. Saturating all four cores then reproduced the exact failure —
+    `Failed: Timeout (>180.0s)` inside `tblite/library.py` — on exactly those two tests. Unloaded
+    they take 12s against the 180s cap, so the suite is not marginal: 15x headroom, and it took
+    full saturation to break it. There was no defect to file, which is why the elimination had to
+    come before the instinct to file one.
