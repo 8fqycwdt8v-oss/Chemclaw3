@@ -28,14 +28,20 @@ its implementation is a function in this tree: the in-process `@tool` registry, 
 bundle's own server tools module (the declared endpoint tool names are that module's function
 names — the same convention `cli/connectors_dev.py` and `connectors/server_entry.py` resolve by).
 
-That resolves 50 of the 61 tools a template could name. It covers every tool the shipped templates
-call — a claim worth less than it sounds, since exactly one template ships and it has two steps.
-The eleven it cannot resolve are the interesting ones: they include every job-launcher, which are
-the most expensive things to discover broken at run time. It does *not* cover a template launcher's
-generated `params` model or a skill tool, and those are skipped rather than guessed at — an
-unresolvable tool leaves the argument check silent, which is what keeps it from inventing failures
-about surfaces that only exist at run time. `job` steps are left to the launch itself: a connector
-job's payload is validated against its declared params model in `prepare_job_launch`.
+That resolves 43 of the 66 tools a template could name (re-measured; it was 50 of 61 before the
+capability migration). The 23 it cannot are skipped rather than guessed at — an unresolvable tool
+leaves the argument check silent, which is what keeps it from inventing failures about surfaces
+that only exist at run time. They fall in three groups: every job-launcher and template-launcher,
+whose `params` model is generated; upstream's filesystem and todo tools; and — this is the new
+one — **every tool of a bundle we declare but do not run**, because there is no local
+`server/tools.py` to read a signature from.
+
+**That third group broke a claim this docstring used to make.** It said the check "covers every
+tool the shipped templates call". It no longer does: `hazard-briefing` calls `screen_hazards`,
+which is now `Chemclaw3-mcp`'s. Since the skip is silent by design, the loss would have been
+invisible — so `unchecked_arguments` reports it by name and `main` prints it on the passing path
+too. `job` steps stay left to the launch itself: a connector job's payload is validated against its
+declared params model in `prepare_job_launch`.
 
 Read-only; touches nothing.
 """
@@ -143,6 +149,38 @@ def _argument_problems(
             f"of {step.tool!r}"
         )
     return problems
+
+
+def unchecked_arguments() -> dict[str, list[str]]:
+    """Tools a *shipped template* names whose arguments this tree cannot check, by template.
+
+    The gap this reports is new and was introduced by the capability migration
+    (`D-2026-08-15-capability-moves-judgment-and-declaration-stay`): the argument check resolves a
+    signature from a bundle's own `server/tools.py`, and a bundle we declare but do not run has no
+    such module here. `screen_hazards` is the first tool a shipped template names that fell into
+    it, so the shipped `hazard-briefing` template is name-checked and **not** argument-checked.
+
+    Reported rather than raised, and reported rather than left silent. Not raised, because the
+    template is correct — nothing here can prove it, which is a different thing from it being
+    wrong, and failing would force deleting a good template to make a validator pass. Not silent,
+    because "template validation passed" would otherwise mean less than it did the day before,
+    with nothing in the output saying so. This module's own docstring warns against exactly that
+    shape ("an unresolvable tool leaves the argument check silent"); the warning was written about
+    job launchers, which no template names, and the migration made it true of one that does.
+    """
+    signatures = _resolvable_signatures()
+    unchecked: dict[str, list[str]] = {}
+    for template in discovered().values():
+        names = sorted(
+            {
+                step.tool
+                for step in template.steps
+                if isinstance(step, ToolStep) and step.tool not in signatures
+            }
+        )
+        if names:
+            unchecked[template.name] = names
+    return unchecked
 
 
 def _step_problems(template: Template) -> list[str]:
@@ -253,8 +291,17 @@ def validate_templates() -> list[str]:
 
 
 def main() -> int:
-    """Validate every template; print problems and exit non-zero if any (the CI gate)."""
+    """Validate every template; print problems and exit non-zero if any (the CI gate).
+
+    The unchecked-argument note prints on both paths, because it qualifies a pass just as much as
+    it qualifies a failure — and a reader who only ever sees the green line is the one it is for.
+    """
     problems = validate_templates()
+    for name, tools in sorted(unchecked_arguments().items()):
+        print(
+            f"note: template {name!r} names {tools}, whose bundle is declared but not run here — "
+            "name-checked, arguments unchecked"
+        )
     if problems:
         print("template validation failed:")
         for problem in problems:

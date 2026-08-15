@@ -274,10 +274,6 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.agent"): (
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
-    ("chemclaw.kg", "chemclaw.science"): (
-        "the D-080 hazard gate (kg.validate) screens a note using science's hazard-screening logic"
-    ),
-    ("chemclaw.science", "chemclaw.kg"): ("the hazard-note helper parses kg's own Note type"),
 }
 
 # The full declared graph: every module-scope edge the codebase is allowed to have. `core` has no
@@ -348,7 +344,6 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.ingest", "chemclaw.retrieval"),
     ("chemclaw.ingest", "chemclaw.science"),
     ("chemclaw.kg", "chemclaw.core"),
-    ("chemclaw.kg", "chemclaw.science"),
     ("chemclaw.memory", "chemclaw.core"),
     ("chemclaw.memory", "chemclaw.ingest"),
     ("chemclaw.memory", "chemclaw.kg"),
@@ -357,7 +352,6 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.retrieval", "chemclaw.kg"),
     ("chemclaw.retrieval", "chemclaw.science"),
     ("chemclaw.science", "chemclaw.core"),
-    ("chemclaw.science", "chemclaw.kg"),
     ("chemclaw.templates", "chemclaw.agent"),
     ("chemclaw.templates", "chemclaw.core"),
     ("chemclaw.templates", "chemclaw.durable"),

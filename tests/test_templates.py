@@ -326,10 +326,16 @@ def test_the_validator_catches_arguments_the_named_tool_does_not_take(
 ) -> None:
     """Checking the tool's *name* is half a reference; the arguments are the other half.
 
-    Measured on the unfixed validator, this exact file — `screen_hazards` with `smiles` misspelt
-    and a stray key beside it — printed "template validation passed." A pinned procedure that
-    validates and then fails at the first live step, inside an activity after the launch, is the
-    failure the gate exists to prevent, and the gate had it.
+    Measured on the unfixed validator, this file — with `smiles` misspelt and a stray key beside
+    it — printed "template validation passed." A pinned procedure that validates and then fails at
+    the first live step, inside an activity after the launch, is the failure the gate exists to
+    prevent, and the gate had it.
+
+    It used to be written on `screen_hazards`, which is exactly the tool that can no longer be
+    argument-checked at all — its bundle is declared here and served by `Chemclaw3-mcp`, so there
+    is no local signature to read. Rewriting it onto `predict_pka`, a tool whose implementation is
+    still in this tree, keeps this test about the check rather than about the gap; the gap has its
+    own test below, because swapping the tool and saying nothing is how a gate quietly shrinks.
     """
     from chemclaw.cli.validate_templates import validate_templates
 
@@ -337,9 +343,9 @@ def test_the_validator_catches_arguments_the_named_tool_does_not_take(
         "summary: x\nsteps:\n"
         "  - id: one\n"
         "    kind: tool\n"
-        "    tool: screen_hazards\n"
+        "    tool: predict_pka\n"
         "    arguments:\n"
-        "      smilez: ['CCO']\n"
+        "      smilez: CCO\n"
         "      nonexistent_arg: 42\n",
         encoding="utf-8",
     )
@@ -348,6 +354,24 @@ def test_the_validator_catches_arguments_the_named_tool_does_not_take(
     assert any("does not take" in p and "nonexistent_arg" in p for p in problems), problems
     # And the other direction: dropping a required argument is the same class of run-time failure.
     assert any("omits required argument(s) ['smiles']" in p for p in problems), problems
+
+
+def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
+    """The argument check's blind spot is reported by name, not left to be inferred from silence.
+
+    A bundle this release declares but does not run has no `server/tools.py` here, so its tools'
+    signatures are unresolvable and `_step_problems` skips them — silently, by design, because an
+    unresolvable tool must not produce invented failures. `hazard-briefing` calls `screen_hazards`,
+    which makes the shipped template the first one that is name-checked and *not* argument-checked.
+
+    The assertion is deliberately on the real shipped template rather than a fixture: what would
+    go wrong is not the reporting mechanism, it is somebody moving another bundle out and not
+    noticing that a pinned procedure lost its argument check. This fails the moment that happens
+    and the note stops matching what ships.
+    """
+    from chemclaw.cli.validate_templates import unchecked_arguments
+
+    assert unchecked_arguments() == {"hazard-briefing": ["screen_hazards"]}
 
 
 def test_the_validator_accepts_a_correct_tool_step(
