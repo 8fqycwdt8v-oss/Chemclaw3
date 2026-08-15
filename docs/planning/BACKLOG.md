@@ -202,12 +202,22 @@ topic).
 
 ## 5 — Upstream capability this stack already has
 
-- [ ] **Approvals on `HumanInTheLoopMiddleware`** — [L]. `InterruptOnConfig` in the pinned
-      `langchain 1.3.14` carries a `ToolCallRequest` predicate, `allowed_decisions`, a description
-      factory and the four decision types, resumed by `Command(resume={"decisions": […]})`. The
-      predicate is the shape `gate_applies` already has. Cross-turn durability moves from the
-      `plan_approvals` table to the checkpointer, removing the second, disagreeing answer to "may
-      this session act".
+- [ ] **`PlanEvent` carries no `plan_hash`** — [S], 2026-08-15. A client watching the stream sees the
+      todo list but cannot post `POST /sessions/{id}/plan/decision` without a separate `GET /plan`
+      round-trip for the hash it must echo — which is what `evals/live.py` does. Adding the field is
+      additive to the SSE union, so it needs a `Chemclaw3_ui` change only to *use* it.
+
+- [ ] **A plan refusal is distinguishable only by substring** — [M], 2026-08-15. It reaches the wire
+      as a `ToolFailedEvent`, and every consumer tells it apart by matching the refusal sentence
+      (`evals/live.py`'s `PLAN_GATE_MARKER`). The sentence is pinned by a test, which is what keeps
+      this working and also what makes it a coupling: a reworded refusal is a silently miscounted
+      eval. Wants its own event type or a discriminator field.
+
+- [ ] **`graph_stream._from_update` silently drops `__interrupt__`** — [S], 2026-08-15. It skips any
+      update whose payload is not a `dict`, and an interrupt arrives as a tuple — so a turn that
+      suspended would end with no answer text and be classified `empty_answer`. Nothing emits one
+      today (see the ADR below), so this is latent rather than live, and fixing it without a producer
+      is a branch no test can reach. The row exists so whoever adds the first interrupt finds it.
 
 - [ ] **`RubricMiddleware` in the turn loop** — [M]. `agent/verifier.py`'s own docstring says a
       low-confidence answer is "marked, not blocked", and nothing routes a `review_required` answer
