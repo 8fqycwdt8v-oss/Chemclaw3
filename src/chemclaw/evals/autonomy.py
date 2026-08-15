@@ -134,7 +134,7 @@ def runaway_rate(case: EvalCase) -> MetricResult:
     runaway and, at the 0.0 gate, as a failure. The evidence that would separate the two is not in
     the transcript at all — `PlanEvent.todos` carries only rendered display strings — so no prefix
     filter could have fixed it. The fix was to stop proxying: the loop no longer stops silently
-    (`chemclaw.agent.loop_cap.CappedModelCallLimit` records the cap), the runner emits
+    (`chemclaw.agent.loop_cap.enforce_loop_cap` records the cap), the runner emits
     `loop_cap_reached`, and this reads that. A metric
     that measures less and means it beats one that gates at 0.0 on evidence it cannot interpret.
 

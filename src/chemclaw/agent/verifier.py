@@ -523,7 +523,7 @@ async def verify_turn_answer(
     holds a section's evidence already) and the chat path (which must derive it from the turn's tool
     results) share the one scoring core without either re-deriving the other's input.
 
-    `evidence` is that same argument one caller further out: `agent/challenge_gate.py` needs the
+    `evidence` is that same argument one caller further out: the challenge panel needed the
     turn's evidence for its briefs *and* scores the answer, so without this it built the identical
     value twice — measured at 14 ms per build on the ~20 kB / 40-citation shape `turn_evidence`
     documents, on the answer hot path. Omitted, it is derived here as before.

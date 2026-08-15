@@ -104,19 +104,6 @@ class ChemclawState(PlanningState):
 
     loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
 
-    # How many revision rounds the challenge panel has already forced this turn. Bounds the
-    # `jump_to: "model"` loop in `agent/challenge_gate.py` against `challenge_max_attempts`, and it
-    # is a counted field for exactly the reason the runaway cap's own record is: the alternative is
-    # inferring "have we been round this before" from the message list, which is the inference
-    # `agent/loop_cap.py` was written to delete.
-    #
-    # **This field was deleted once, by a merge, and nothing went red.** `challenge_gate` writes it
-    # and LangGraph silently drops a write to an undeclared channel, so `attempts` stayed 0, the
-    # `challenge_max_attempts` bound never fired, and the revision loop ran to the recursion limit —
-    # discarding the whole turn. `tests/test_state_channels.py` now drives a compiled graph for
-    # every channel here, because a unit test on the hook cannot see a channel that does not exist.
-    challenge_attempts: NotRequired[Annotated[int, UntrackedValue]]
-
 
 def turn_input(message: str) -> dict[str, Any]:
     """The graph input that starts one turn: the user's message.

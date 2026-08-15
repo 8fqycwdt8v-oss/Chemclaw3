@@ -9,11 +9,14 @@ so the unit test passed, the suite was green, and the feature was inert.
 - `agent/loop_cap.py` records that it fired in `loop_capped`; the first version of its own test
   called the hook and asserted the returned dict, and the docstring it left behind says what that
   proved: nothing. "Only a compiled graph proves the decision is connected to anything."
-- `challenge_attempts` was deleted from `ChemclawState` by a merge while `agent/challenge_gate.py`
-  went on reading and writing it. `attempts` stayed 0 for ever, so `challenge_max_attempts` never
-  bound and the revision loop ran to the recursion limit — discarding the whole turn.
-  `tests/test_challenge_gate.py` did not notice, because it hands the hook a state dict it built
-  itself, including the key.
+- `challenge_attempts` was deleted from `ChemclawState` by a merge while the challenge panel's gate
+  went on reading and writing it. `attempts` stayed 0 for ever, so its bound never fired and the
+  revision loop ran to the recursion limit — discarding the whole turn. That gate's own test did not
+  notice, because it handed the hook a state dict it built itself, including the key. The panel and
+  the field are both gone now (`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, and
+  the field followed it here) — the incident is kept because it is the clearest instance of what
+  this file exists to prevent, and because the field outliving its feature by one merge is the same
+  defect wearing the other face.
 - The same shape is available to every future field, which is why this is a file rather than a test.
 
 So the assertion here is deliberately *not* about behaviour. It is: **for each channel this
@@ -62,7 +65,7 @@ def test_the_derivation_finds_the_channels_this_repository_declares() -> None:
     names = {name for name, _ in _declared_channels()}
     assert names, "no first-party channels found; every case below would be vacuous"
     # Named explicitly, because these two are the ones that have actually been lost.
-    assert {"loop_capped", "challenge_attempts"} <= names, (
+    assert {"loop_capped"} <= names, (
         f"a channel this repository relies on is no longer declared: {sorted(names)}"
     )
 
