@@ -103,7 +103,6 @@ def test_harness_runs_over_versioned_case_set_and_gates() -> None:
     chemistry = {
         "bo-regret-reizman",
         "green-esterification",
-        "hazard-rule-recall",
         "pharma-solvent-heavy",
         "solubility-benzene",
     }

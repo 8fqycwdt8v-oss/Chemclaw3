@@ -1,11 +1,17 @@
 """Knowledge-graph validation, usable as a CLI in CI (plan step 2.4).
 
 Checks a notes directory for the failure modes that would corrupt the graph:
-unparseable/invalid notes, duplicate ids, and links to unknown notes — plus the
-hazard gate (D-080), which refuses an agent-proposed procedure that does not
-document the hazard flags its structures raise. Run as
+unparseable/invalid notes, duplicate ids, links to unknown notes, and note types or
+relations outside the declared vocabulary. Run as
 `python -m chemclaw.kg.validate [notes_dir]`; it exits non-zero if any problem is found,
 so it gates the PR that adds or edits notes (D-005).
+
+**What it no longer checks is the hazard content of a procedure.** D-080's per-note gate
+screened an agent-authored `## Procedure` and refused it if the flags its structures raised
+were not documented. Safety became an ordinary MCP capability
+(`D-2026-08-15-safety-is-a-tool-not-a-gate`), so the screen that gate called no longer lives
+in this repository and CI no longer runs one on a reviewer's behalf. The corpus is still
+gated — by the human who reviews the PR, which is what a PR-gate always meant.
 """
 
 import sys
@@ -17,7 +23,6 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
 from chemclaw.kg.note import Note, NoteError, known_note_types, read_note
 from chemclaw.kg.relations import known_relations
-from chemclaw.science.safety.notes import hazard_problems
 
 
 def validate(notes_dir: Path) -> list[str]:
@@ -65,10 +70,6 @@ def validate(notes_dir: Path) -> list[str]:
         f"note {source!r} links to unknown note {target!r}"
         for source, target in dangling_links(notes)
     )
-    # Per-note hazard gate (D-080, from main): an agent-authored procedure whose components
-    # trip the rule table must carry a `## Hazards` section before it can merge.
-    for note in notes:
-        problems.extend(hazard_problems(note))
     # Whole-corpus vocabulary checks (gap KNW-6, STO-8). Both are checked here rather than in the
     # `Note` schema so the agent can *propose* a genuinely new type or relation and a human sees it
     # at the PR-gate — while a typo, which would make the note or the edge unfindable by every

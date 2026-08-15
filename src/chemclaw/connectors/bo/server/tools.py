@@ -157,8 +157,9 @@ class ExperimentSuggestion(BaseModel):
         """Each candidate's posterior sd read against the observed spread, in one sentence each.
 
         A `computed_field` rather than a bare property, for the reason
-        `chemclaw.science.safety.screen.ScreenResult.verdict` is one: a plain property is not
-        serialized, so the reading would never reach the model composing the answer. The skill can
+        `chemclaw.science.fingerprints.store.FingerprintSearch.verdict`
+        is one: a plain property is not serialized, so the reading would never reach the model
+        composing the answer. The skill can
         say "compare the sd to the spread"; only this is in the context window at the moment the
         comparison has to be made.
         """

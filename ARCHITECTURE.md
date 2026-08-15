@@ -35,8 +35,8 @@ generates enters the graph through a **PR-gate**, so a human decides before it b
 | `agent/` | 1 (LangGraph) | Conversation orchestration: the compiled graph (`agent/langgraph_agent.py`), its tool surface, the Postgres turn-state checkpointer, sessions, identity, authorization, the plan/execute harness and the specialist team. |
 | `api/` | 1 (LangGraph) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. `create_app` (`api/app.py`) is the sole composition root; the routes themselves live one level down in `api/routes/`, one module per resource (R3.2 split of a ~1100-line closure — see `api/routes/README.md`). |
 | `durable/` | 2 (Temporal) | Workflows, activities, and the `background-jobs` worker that hosts them. |
-| `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its Temporal worker, its own `skills/`, and — for the ones this release still runs — its MCP tool server. Adding a capability is adding a directory here — no core edit. **A bundle without a `server/` is a declaration we do not run**: `chem`'s capability is `Chemclaw3-mcp`'s, and what stays here is the manifest four validators resolve tool names through, plus the chart's `connectors.chem.url` saying where to dial it (D-2026-08-09). |
-| `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `safety` (hazard screening), `fingerprints` (ECFP4/DRFP + Tanimoto). No Temporal, no MCP. |
+| `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its Temporal worker, its own `skills/`, and — for the ones this release still runs — its MCP tool server. Adding a capability is adding a directory here — no core edit. **A bundle without a `server/` is a declaration we do not run**: `chem`'s and `safety`'s capabilities are `Chemclaw3-mcp`'s, and what stays here is the manifest four validators resolve tool names through — plus, for `safety`, its `skills/` tree, because judgment is layer 3 and does not follow the engine — and the chart's `connectors.<name>.url` saying where to dial it (D-2026-08-09). |
+| `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `fingerprints` (ECFP4/DRFP + Tanimoto). No Temporal, no MCP. |
 | `kg/` | 4 (Graph) | The graph indexer, the schema and link validators, the PR-gate that writes notes. |
 | `ingest/` | — | Getting records in: `sources` is the generic `DataSource` seam, `eln` the ELN adapters hosted behind it, `documents` a mounted file share read as cited evidence (and the one home of this system's document parsers, which `agent/attachments.py` reuses). |
 | `retrieval/` | — | Reading back out: the retrievers, hybrid search, the vector index, the report harness, and `vectors/` — the seam that lets dense embeddings live outside Postgres (`pgvector` by default, Qdrant behind a late-bound client). |
@@ -74,7 +74,7 @@ is never swallowed by the more general connector-server pattern that shares its 
 
 ## Names that look like duplicates and are not
 
-**`science/calc/` vs `connectors/calc/`** (and `bo`, `safety`, `fingerprints` likewise). The first
+**`science/calc/` vs `connectors/calc/`** (and `bo`, `fingerprints` likewise). The first
 is the engine: pure computation, importable and testable with no orchestration stack. The second is
 the wrapper: the durable job definition and the MCP tool surface that expose that engine to the
 agent. Keeping them apart is the layering rule; merging them would put Temporal imports inside the
@@ -108,10 +108,12 @@ what says so. Folding them in would buy an exceptionless sentence at the cost of
 
 ## Where declarations live
 
-Three defaults resolve against the installed package rather than the working directory, because
-what they name ships inside it: `connectors_dir`, `data_sources_dir` and `safety_rules_path`
-(D-148). Each remains overridable, and the two directory ones remain `PATH`-style lists, so
-pointing a deployment at an *additional* private bundle directory works as before.
+Two defaults resolve against the installed package rather than the working directory, because
+what they name ships inside it: `connectors_dir` and `data_sources_dir` (D-148). Both remain
+overridable and remain `PATH`-style lists, so pointing a deployment at an *additional* private
+bundle directory works as before. `safety_rules_path` was the third until the hazard screen became
+`Chemclaw3-mcp`'s, where the table is baked into the server's image rather than configured
+(`D-2026-08-15-safety-is-a-tool-not-a-gate`).
 
 ## Related repositories
 

@@ -112,17 +112,16 @@ def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
     label. Only the second needs RDKit, and only to answer "is this label a structure at all" — a
     heuristic over label spellings would be a second, weaker answer to a question RDKit answers.
 
-    **A bare, lenient `Chem.MolFromSmiles`, and deliberately not the hazard screen's strict gate**
+    **A bare, lenient `Chem.MolFromSmiles`, and deliberately not the strict gate**
     (`core.chem.require_molecule`, which refuses a string RDKit reads only a prefix of). The two
     predicates are not the same one and must not be, because they err in opposite directions and
-    only one of these two errors is safe. A `True` here wraps the value in backticks
-    (`_condition`), and a backticked value is precisely what the hazard gate reads out of a note
-    body (`science.safety.notes.structures_in`). So a level a campaign chose to name
-    `CN=[N+]=[N-] (2 equiv)` — free-form category labels being what they are — would, under the
-    strict gate, be written into the note as plain prose and never screened at all, while under
-    this one it is backticked, tokenized by `structures_in`, and its azide flagged. Erring towards
-    "this is a structure" costs a pair of backticks around something that is not one; erring the
-    other way costs the screen.
+    only one of these two errors is safe here. A `True` wraps the value in backticks (`_condition`),
+    which is how a molecule stays machine-readable in a merged note. So a level a campaign chose to
+    name `CN=[N+]=[N-] (2 equiv)` — free-form category labels being what they are — would, under
+    the strict predicate, be written into the note as plain prose and be invisible to every reader
+    that looks for structures, while under this one it is backticked and legible as the azide it
+    is. Erring towards "this is a structure" costs a pair of backticks around something that is not
+    one; erring the other way costs the structure.
 
     `parameter` is optional because the caller looks it up by name from the recommended point: a
     result whose params do not line up with the problem still has to yield a readable note rather
@@ -140,14 +139,15 @@ def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
 def _condition(parameter: Parameter | None, name: str, value: ParamValue) -> str:
     """One recommended parameter value, written so any molecule in it stays machine-readable.
 
-    The backticks are load-bearing rather than styling. The hazard gate reads a note's structures
-    out of `compound_smiles` and the body's inline code spans
-    (`science/safety/notes.py::structures_in`), and this line is where a `bo-candidate` names the
-    molecules it is asking a human to put in a flask. Emitted as plain prose — `- molecule:
-    CCN=[N+]=[N-]`, which is what this wrote — the gate found *no* structures in any machine-minted
-    candidate and passed every one of them unscreened, organic azides included. That is the exact
-    inversion of the gate's purpose: `bo-candidate` is the note type proposing work nobody has run,
-    so it is the one type with no chemist who has already formed a judgment about the mixture.
+    The backticks are load-bearing rather than styling. This line is where a `bo-candidate` names
+    the molecules it is asking a human to put in a flask, and a merged note is read by people and
+    by extractors that look for structures in `compound_smiles` and in inline code spans. Emitted
+    as plain prose — `- molecule: CCN=[N+]=[N-]`, which is what this wrote — a machine-minted
+    candidate named *no* structures at all, organic azides included, and `bo-candidate` is the note
+    type proposing work nobody has run: the one type with no chemist who has already formed a
+    judgment about the mixture. (It was a hazard gate in `kg-validate` that found this, when that
+    gate still existed; it was retired with `D-2026-08-15-safety-is-a-tool-not-a-gate`, and the
+    defect it exposed here is a defect either way.)
 
     A label that is not a SMILES yields nothing downstream (RDKit arbitrates), so it is left as
     plain text; a label that *is* one is backticked; and a label with a declared structure behind

@@ -115,11 +115,15 @@ def test_the_note_carries_the_molecules_it_recommends() -> None:
     """A recommendation has to name its structures *as* structures, or nothing downstream sees them.
 
     This note used to write `- molecule: CCN=[N+]=[N-]` as plain markdown and set no
-    `compound_smiles`, so `science.safety.notes.structures_in` — which reads that field and the
-    body's inline code spans — returned `[]` for every machine-minted `bo-candidate`. The hazard
-    gate therefore passed all of them, including this one, while `screen_reaction` on the same
-    SMILES returns a high-severity organic-azide flag. `bo-candidate` is the note type that
-    proposes an experiment nobody has run, which is exactly the type that must not go unscreened.
+    `compound_smiles`, so a machine-minted `bo-candidate` named no machine-readable structure at
+    all — while the molecule in question is an organic azide. `bo-candidate` is the note type that
+    proposes an experiment nobody has run, which is exactly the type whose molecules a reviewer
+    must be able to find and paste into a screen.
+
+    The assertion is the markdown itself, which is what a reviewer and every extractor read. It
+    used to also call the `kg-validate` hazard gate, which is how the defect was found; that gate
+    was retired with `D-2026-08-15-safety-is-a-tool-not-a-gate` and the property it happened to
+    expose is unchanged by its removal.
 
     Both routes a campaign has to name a molecule are covered: `molecule` is a library-style
     categorical whose levels are SMILES (`bo.objectives.molecule_library_problem`), `ligand` is a
@@ -127,13 +131,9 @@ def test_the_note_carries_the_molecules_it_recommends() -> None:
     without the writer putting it there — a categorical's `structures` are not printed at all by
     the searched-space listing, so no extractor change could have recovered them.
     """
-    from chemclaw.science.safety.notes import hazard_problems, structures_in
-
     note = note_from_campaign_result("azide_yield", _MOLECULE_PROBLEM, _MOLECULE_RESULT)
     assert "- molecule: `CCCN=[N+]=[N-]`" in note.body  # the level is itself a SMILES
     assert "- ligand: L1 (`CCO`)" in note.body  # the label alone resolves to nothing
-    assert set(structures_in(note)) >= {"CCCN=[N+]=[N-]", "CCO"}
-    assert hazard_problems(note), "the gate must now see the azide it is being asked to run"
 
 
 def test_a_label_that_names_no_molecule_is_left_as_prose() -> None:

@@ -1,12 +1,13 @@
-# The `safety` specialist: hazard, genotoxicity and impurity-limit screening.
+# The `safety` profile: hazard, genotoxicity and impurity-limit screening.
 #
-# **This one is not attenuable away.** A team may narrow any other specialist out of a turn's
-# surface; dropping safety is refused at build time (`chemclaw.agent.team`), because it is a gate
-# rather than a capability — the check a chemist wants *before* deciding whether to approve work,
-# not one of several equivalent tools to pick between.
+# This file used to claim safety "is not attenuable away … refused at build time
+# (`chemclaw.agent.team`)". That module was deleted with the specialist team (D-2026-08-15) and
+# there is no such refusal, so the claim went with it: a sentence asserting a control that does not
+# run is worse than no sentence. The three tools it names are served by `Chemclaw3-mcp`'s
+# `servers/safety` and are ordinary tools (`D-2026-08-15-safety-is-a-tool-not-a-gate`).
 #
-# All three tools are deliberately read-only, which is what keeps them callable under an
-# unapproved plan: a hazard screen that the plan gate refuses is a hazard screen nobody runs.
+# All three are deliberately read-only, which is what keeps them callable under an unapproved plan:
+# a hazard screen that the plan gate refuses is a hazard screen nobody runs.
 instructions: >-
   You are Chemclaw's safety specialist. You screen structures and whole reactions for structural
   hazards, DNA-reactive genotoxicity alerts, and ICH Q3C/Q3D impurity limits, and you return every

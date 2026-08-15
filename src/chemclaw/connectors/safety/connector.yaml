@@ -1,8 +1,26 @@
-# The cited-reference-table bundle. Its own bundle rather than part of a broader chemistry
-# connector because it is separately governed: every one of its three tables is a curated,
-# literature- or guideline-cited artifact, the `safety-screening` skill (bundled here) is the
-# judgment about what each answer means and does not mean, and an auditor asking "what did the
-# system say and on whose authority" should find one deployable unit to point at.
+# The cited-reference-table bundle: structural hazard screening, DNA-reactive genotoxicity alerts,
+# and ICH Q3C/Q3D impurity limits.
+#
+# **This bundle is a declaration, not a server — we do not run it.** The capability lives in
+# `Chemclaw3-mcp` as `servers/safety/`; what stays here is this manifest and the `safety-screening`
+# skill beside it, per `D-2026-08-15-capability-moves-judgment-and-declaration-stay`. The manifest
+# stays because `data/profiles/safety.yaml`, the eval probes, the skill and the agent's own prose
+# name these three tools *by string*, and `chemclaw_agent.available_tool_names` builds the set four
+# validators check against by reading manifests out of `connectors_dirs` — delete this file and
+# `make skill-validate`, `prose-validate` and `template-validate` fail on references to tools that
+# exist (the D-117 defect). The skill stays because a skill is layer 3: judgment about what an
+# alert means, which is this repository's business and not a server's.
+#
+# **Its three tools are no longer privileged, and that is the point of the move**
+# (`D-2026-08-15-safety-is-a-tool-not-a-gate`). Safety used to hold machinery no other capability
+# had — a `kg-validate` gate, an eval metric with a 1.0 floor, its own CI validator, four settings.
+# All of it is gone. What survives is the capability and the invariant its docstrings carry: the
+# system flags, it never certifies.
+#
+# **The tool list below now exists in two repositories** — here and in that server's own
+# `connector.yaml` — and nothing structurally forces them to agree. The server's copy is
+# authoritative, because it is what actually answers; this one is what this repository validates
+# against. `make connector-validate` against a running server is the check that catches a drift.
 name: safety
 description: >-
   Cited safety and impurity reference tables, three separate questions kept separate: structural
@@ -12,12 +30,18 @@ description: >-
 
 endpoint:
   transport: http
-  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
-  url: http://127.0.0.1:8813/mcp
-  health_url: http://127.0.0.1:8813/healthz
+  # `Chemclaw3-mcp`'s `servers/safety`, port 8859. A loopback dev default; a cluster address is set
+  # per deployment via CHEMCLAW_CONNECTOR_URLS, and `connectors.safety.url` in the chart.
+  url: http://127.0.0.1:8859/mcp
+  health_url: http://127.0.0.1:8859/healthz
   request_timeout: 30
   auth:
-    mode: none
+    # **Bearer, because the server on the other side enforces one.** `Chemclaw3-mcp`'s
+    # `connector_app` checks the credential on `/mcp` itself, so `mode: none` here would not mean
+    # "no auth needed" — it would mean every call is refused. The variable is named rather than
+    # carried, read per request, and it is the same name the server reads.
+    mode: bearer
+    token_env: CHEMCLAW_SAFETY_TOKEN
   tools:
     - screen_hazards
     - screen_genotoxic_alerts

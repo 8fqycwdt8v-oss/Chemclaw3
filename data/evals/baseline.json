@@ -7,7 +7,6 @@
     "bo_regret": 3.4000000000000057,
     "e_factor": 35.37689393939394,
     "pmi": 36.37689393939394,
-    "hazard_flag_recall": 1.0,
     "retrieval_recall": 0.9,
     "retrieval_precision": 1.0,
     "precision": 0.6666666666666666,

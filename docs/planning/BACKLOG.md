@@ -32,10 +32,15 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **Every shipped connector that serves an endpoint is unauthenticated** — [M]. Six of the seven
-      bundles ship `auth: mode: none` (`bo`, `calc`, `chem`, `molfp`, `rxnfp`, `safety`). The
-      NetworkPolicy is the only thing between a pod in the namespace and a tool that starts durable
-      work. `connectors/manifest.py` already carries a `bearer` mode nobody sets.
+- [ ] **Four of the six endpoint-serving connectors are unauthenticated** — [M]. `bo`, `calc`,
+      `molfp` and `rxnfp` ship `auth: mode: none`. The NetworkPolicy is the only thing between a pod
+      in the namespace and a tool that starts durable work. This row used to read "six of seven, and
+      `connectors/manifest.py` carries a `bearer` mode nobody sets" — the capability migration
+      closed two of them as a side effect rather than on purpose: `chem` and `safety` are served by
+      `Chemclaw3-mcp`, whose `connector_app` enforces a bearer on `/mcp` itself, so their manifests
+      had to set `mode: bearer` or every call would be refused. That makes the mode no longer
+      theoretical: `CHEMCLAW_CHEM_TOKEN` and `CHEMCLAW_SAFETY_TOKEN` are read per request today, and
+      the four remaining are the ones we host.
       *Design direction:* MCP's OAuth 2.1 / ID-JAG token exchange, and `entra_workload` for the
       federated case.
 
@@ -134,6 +139,15 @@ topic).
 - [ ] **A template workflow's failure is invisible to the chemist** — [S]. `TemplateWorkflow.run`
       has no `try/except` and reaches `notify_session_best_effort(…, "job_completed", …)` only on
       the success path.
+
+- [ ] **A pinned template's arguments go unchecked once its bundle stops being ours** — [S].
+      `cli/validate_templates.py::_resolvable_signatures` reads a signature from
+      `connectors/<name>/server/tools.py`, so a bundle we declare but do not run has none —
+      `hazard-briefing` calls `screen_hazards` and is name-checked only. The loss is now *reported*
+      rather than silent (`unchecked_arguments`, printed on the passing path), which is what makes
+      this a queued row instead of a defect. The fix is to check argument names against the running
+      server in `make connector-validate`, where a live session already exists and MCP tool specs
+      carry input schemas; `make template-validate` must stay offline, so it keeps the note.
 
 - [ ] **A decided approval hold can be reopened, and the obvious fix is worse** — [M].
       `agent/interaction_tools.py::start_approval` passes no `id_reuse_policy`, so temporalio's

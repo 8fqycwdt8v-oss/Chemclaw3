@@ -22,9 +22,9 @@ make db-migrate         # apply infra/sql migrations
 make check              # fast inner loop: lint + mypy --strict + tests
 ```
 
-`make check` is the inner loop, not the gate: it skips coverage and the nine validators
+`make check` is the inner loop, not the gate: it skips coverage and the eight validators
 (`kg-validate`, `eln-validate`, `skill-validate`, `connector-validate`, `datasource-validate`,
-`template-validate`, `prose-validate`, `safety-validate`, `helm-validate`). Run `make ci` before
+`template-validate`, `prose-validate`, `helm-validate`). Run `make ci` before
 pushing — it is exactly what CI runs and is what `pre-commit` does not cover.
 
 `make up` binds Postgres on `5432`, the Temporal frontend gRPC on `7233`, and the Temporal Web UI

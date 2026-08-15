@@ -234,11 +234,11 @@ def require_molecule(smiles: str) -> Chem.Mol:
 
     This is the one definition of "RDKit accepts this string, all of it", and the two strict
     helpers below are both written on top of it. It is separate from them because a caller that
-    needs the *molecule* rather than a key — `science/safety/screen.py`, which then matches SMARTS
-    against it — otherwise writes its own, weaker acceptance test, and that is exactly what
-    happened: the hazard screens parsed with a bare `Chem.MolFromSmiles`, so
-    `screen_hazards("CCO junk")` returned a clean screen **of ethanol** and echoed `CCO` as the
-    structure it had looked at.
+    needs the *molecule* rather than a key — a SMARTS matcher, say — otherwise writes its own,
+    weaker acceptance test, and that is exactly what happened: the hazard screens (since moved to
+    `Chemclaw3-mcp:servers/safety/src/chemclaw_mcp_safety/engine/screen.py`) parsed with a bare
+    `Chem.MolFromSmiles`, so `screen_hazards("CCO junk")` returned a clean screen **of ethanol**
+    and echoed `CCO` as the structure it had looked at.
 
     Three inputs RDKit accepts and this rejects, each measured against this build:
 
@@ -253,11 +253,9 @@ def require_molecule(smiles: str) -> Chem.Mol:
       one between two atoms: `"°C"` is methane, `"CC°"` and `"°CC°"` are ethane, `"C°C"` is a parse
       error. That is the whitespace truncation wearing a different character, and prose is what
       produces it: a note body's code span reading `` `80 °C` `` offers `°C` as a candidate
-      structure, and a bare parse calls it methane. `science/safety/notes.py` cuts a span on the
-      same character class before it asks anything, so the rule is one statement made twice — a
-      refusal here, a separator there. Tested on the string rather than on the parsed molecule
-      because that is where the evidence is: once RDKit has skipped the character, nothing about
-      the molecule says it was ever there.
+      structure, and a bare parse calls it methane. Tested on the string rather than on the
+      parsed molecule because that is where the evidence is: once RDKit has skipped the
+      character, nothing about the molecule says it was ever there.
 
     Surrounding whitespace is stripped rather than refused: a leading newline is a copy-paste
     artifact, not a second molecule. The message quotes the caller's own string, not the stripped
