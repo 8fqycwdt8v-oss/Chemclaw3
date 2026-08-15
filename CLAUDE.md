@@ -288,7 +288,12 @@ after each cluster of steps before moving on.
 
 ## Persistent knowledge (read at session start, update at session end)
 
-- `docs/planning/BACKLOG.md` — prioritized open action items.
+- `docs/planning/BACKLOG.md` — prioritized open action items, with rationale. It does **not** track
+  who is currently working an item. When someone actually starts one, open a GitHub Issue linking
+  back to the row (or the ADR behind it) and mark the row `(issue #NNN)` — the issue's assignee is
+  the claim (atomic; a row edit is not) and its label/linked PR is the status. Delete the `BACKLOG.md`
+  row in the same commit that merges the PR, same rule as `DEFERRED.md` below. Not test-enforced —
+  see `docs/decisions/D-2026-08-15-a-claim-is-a-mutex-not-a-line-edit.md`.
 - `docs/planning/DEFERRED.md` — consciously postponed items **with the reason they are not now**.
   It is a register of what is *pending*, never a log of what was decided. **When an ADR closes a
   deferral, delete its row in the same commit** — do not strike it through, and do not append a
