@@ -26,6 +26,7 @@ from chemclaw.connectors.registry import (
     enabled,
     health_url,
     job_tools,
+    server_tools_module,
     skills_dirs,
 )
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, known_note_types
@@ -354,3 +355,59 @@ def test_a_malformed_vocabulary_name_is_refused_at_load(
     _use(monkeypatch, tmp_path)
     with pytest.raises(ConnectorError, match="lowercase hyphenated"):
         discovered()
+
+
+def test_a_bundle_with_no_server_package_has_no_server_module() -> None:
+    """`server_tools_module` returns `None` for a bundle this repository declares and does not run.
+
+    **This is the case that used to raise, and CI is the only place it showed.** The function
+    distinguishes "no server module" from "the server module is broken underneath" by comparing
+    `exc.name` against the module it asked for — which was complete while every endpoint-bearing
+    bundle shipped a `server/` directory. `chem`'s capability moved to `Chemclaw3-mcp` and the
+    directory went with it, so the *parent package* is what is missing and `exc.name` is the
+    package. The function raised where its own docstring says it returns `None`, and every caller —
+    `make connector-validate`, `make template-validate`, and the transport tests' parametrization —
+    died at import.
+
+    It passed locally throughout, off the same commit, and the reason is worth a sentence because it
+    will recur: a deleted `server/` leaves its `__pycache__` behind, so the directory survives as a
+    PEP 420 namespace package, the import gets one level further, and the error names the module
+    after all. There was no test at all before this one, which is what let a documented three-way
+    contract be checked by nothing.
+    """
+    assert server_tools_module("chem") is None
+
+
+def test_a_jobs_only_bundle_has_no_server_module() -> None:
+    """The other `None`: `qm` declares no endpoint and ships no server, and never has."""
+    assert server_tools_module("qm") is None
+
+
+def test_a_bundle_that_serves_tools_returns_its_module() -> None:
+    """The positive case, so the two above cannot pass by the function returning `None` always."""
+    module = server_tools_module("calc")
+    assert module is not None and hasattr(module, "server")
+
+
+def test_a_broken_dependency_underneath_a_server_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that must *not* be swallowed, and the reason the predicate is a set of two names.
+
+    A missing or renamed dependency underneath a real server means the bundle is broken. Swallowing
+    it leaves a validator checking less and still reporting success — measured once already, where
+    `validate_templates` resolved 46 signatures instead of 50 and printed "template validation
+    passed" for a bundle that could not be imported at all.
+    """
+    import importlib
+
+    real = importlib.import_module
+
+    def _missing_dep(name: str, *args: object, **kwargs: object) -> object:
+        if name.endswith(".server.tools"):
+            raise ModuleNotFoundError("No module named 'absent_dep'", name="absent_dep")
+        return real(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(importlib, "import_module", _missing_dep)
+    with pytest.raises(ModuleNotFoundError, match="absent_dep"):
+        server_tools_module("calc")
