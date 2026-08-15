@@ -190,9 +190,200 @@ def test_the_v3_stream_transformer_extension_point_is_present() -> None:
         )
 
 
+def test_create_deep_agent_still_takes_the_parameters_the_harness_is_assembled_from() -> None:
+    """`build_langgraph_agent` passes every one of these by keyword.
+
+    The harness swap (D-2026-08-15) stopped hand-assembling a middleware list and handed the
+    assembly to `create_deep_agent`, which means this signature *is* the seam. A parameter that
+    disappears upstream is a build error here rather than a silent behaviour change, but a
+    parameter that is silently *renamed* would be neither — `**kwargs` does not exist on this
+    function today and this assertion is what notices if it ever does.
+    """
+    import inspect
+
+    from deepagents import create_deep_agent
+
+    parameters = set(inspect.signature(create_deep_agent).parameters)
+    required = {
+        "model",
+        "tools",
+        "system_prompt",
+        "middleware",
+        "subagents",
+        "skills",
+        "permissions",
+        "backend",
+        "interrupt_on",
+        "state_schema",
+        "checkpointer",
+        "store",
+    }
+    assert required <= parameters, (
+        f"create_deep_agent no longer accepts {sorted(required - parameters)}; "
+        "agent/langgraph_agent.build_langgraph_agent passes each of these by keyword"
+    )
+
+
+def test_the_filesystem_tool_surface_is_still_the_eight_names_the_gate_answers_for() -> None:
+    """Every filesystem verb has to be answered for, so a new one must not arrive quietly.
+
+    `FilesystemMiddleware` is the scratchpad, and each name it registers is gated by
+    `tool_role_gates`, validated by `make prose-validate` and listed by
+    `chemclaw_agent.available_tool_names`. Upstream adding a ninth verb would hand the model a
+    capability no gate names — which is exactly what happened once already when deepagents 0.7 added
+    `delete` and `agent/skill_backend.py` had no refusal for it
+    (`docs/decisions/D-2026-08-12-the-cap-was-right-and-what-it-was-holding-back.md`).
+
+    Asserted as equality rather than containment for that reason: a superset is the failure mode.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    surface = {tool.name for tool in FilesystemMiddleware(backend=StateBackend()).tools}
+    assert surface == {
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delete",
+        "glob",
+        "grep",
+        "execute",
+    }, (
+        "the filesystem tool surface changed; agent/langgraph_agent._filesystem_middleware "
+        "allow-lists it by name and chemclaw_agent.available_tool_names must answer for every verb"
+    )
+
+
+def test_the_filesystem_middleware_still_offloads_oversized_tool_results() -> None:
+    """The capability the scratchpad exists for, and the reason `compaction.py` shrank.
+
+    `FilesystemMiddleware.wrap_tool_call` writes a result past `tool_token_limit_before_evict` to
+    the backend and leaves the model a path plus a preview. That is strictly better than
+    `ClearToolUsesEdit`'s placeholder — the evidence stays *readable* instead of being dropped —
+    and it is what makes a multi-source research turn possible at all. If the parameter goes, the
+    offloading goes with it and the context policy is back to discarding.
+    """
+    import inspect
+
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    parameters = inspect.signature(FilesystemMiddleware.__init__).parameters
+    assert "tool_token_limit_before_evict" in parameters, (
+        "FilesystemMiddleware no longer offloads oversized tool results; agent/compaction.py "
+        "was narrowed on the assumption that it does"
+    )
+    assert "tools" in parameters, (
+        "FilesystemMiddleware lost its tool allow-list; agent/langgraph_agent uses it to withhold "
+        "`execute` and `delete`, which is a security narrowing rather than a preference"
+    )
+
+
+def test_a_filesystem_permission_still_has_the_three_modes_the_rules_use() -> None:
+    """`deny` is what keeps the scratchpad out of the skills tree.
+
+    The permission rules are the second half of the narrowing the allow-list starts: the model may
+    write, but not under `/skills/`, because a turn that can rewrite judgment decides what the next
+    turn is able to load. `interrupt` is the third mode and is what Phase 4's approvals ride on.
+    """
+    from deepagents import FilesystemPermission
+
+    mode = FilesystemPermission.__annotations__["mode"]
+    for expected in ("allow", "deny", "interrupt"):
+        assert expected in repr(mode), (
+            f"FilesystemPermission no longer supports mode={expected!r}; "
+            "agent/langgraph_agent._filesystem_permissions declares rules in all three"
+        )
+
+
+def test_the_interrupt_config_still_carries_a_when_predicate() -> None:
+    """The shape the plan gate became.
+
+    `enforce_plan_approval` was a first-party `wrap_tool_call` that asked "does this call need an
+    approved plan, and is the plan behind it the one that was approved". `InterruptOnConfig.when`
+    is that question as an upstream predicate, which is why the gate could stop being first-party.
+    Lose it and the approval either fires on every tool or on none.
+    """
+    from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
+
+    assert "when" in InterruptOnConfig.__annotations__, (
+        "InterruptOnConfig lost its `when` predicate; the plan approval gate is expressed as one"
+    )
+
+
+def test_the_rubric_middleware_still_bounds_its_revision_loop() -> None:
+    """An unbounded critic is a runaway turn, and the bound has to be upstream's.
+
+    `RubricMiddleware` re-enters the *same* run to revise, so its iterations are counted by
+    `CappedModelCallLimit`'s `run_limit` — the cap and the critic share a budget. `max_iterations`
+    is what keeps the critic's share of it finite; without it the two guards fight and the cap wins
+    by truncating an answer mid-revision.
+    """
+    import inspect
+
+    from deepagents import RubricMiddleware
+
+    assert "max_iterations" in inspect.signature(RubricMiddleware.__init__).parameters, (
+        "RubricMiddleware no longer bounds its revision loop; agent/verifier.py delegates to it "
+        "and agent/loop_cap.py counts its iterations against the turn"
+    )
+
+
+def test_the_store_backend_still_takes_a_namespace_factory() -> None:
+    """The namespace is the erasure key, which is why this parameter is load-bearing.
+
+    `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` rejected `BaseStore` partly
+    because `store` has no actor column, so `tests/test_leaver.py`'s derived check would report a
+    departing person's memories as absent while they remained — a safety net returning a false
+    green. The answer is to put the actor *in the namespace*, so erasure is a `list_namespaces` and
+    a `delete`. That only works while the namespace is ours to choose.
+    """
+    import inspect
+
+    from deepagents.backends import StoreBackend
+
+    assert "namespace" in inspect.signature(StoreBackend.__init__).parameters, (
+        "StoreBackend no longer takes a namespace factory; agent/scratchpad.py keys it by actor "
+        "oid so that erasure can find a departing person's memories"
+    )
+
+
+def test_a_checkpointer_can_delete_a_thread_without_naming_its_tables() -> None:
+    """What replaced the hand-maintained table tuple in retention and erasure.
+
+    `CHECKPOINT_TABLES` was the sole route to the checkpoint rows for both `durable/retention.py`
+    and `agent/leaver.py`, and it is hand-maintained against tables `AsyncPostgresSaver.setup()`
+    creates — so a library upgrade adding a fourth table was invisible to every gate that reads it.
+    """
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
+    assert hasattr(BaseCheckpointSaver, "adelete_thread"), (
+        "BaseCheckpointSaver lost adelete_thread; durable/retention.py and agent/leaver.py would "
+        "have to go back to naming the checkpoint tables by hand"
+    )
+
+
+def test_the_harness_profile_can_withhold_a_tool_and_a_middleware() -> None:
+    """How `execute` and `delete` are kept off the surface without forking the harness.
+
+    `execute` is withheld because deepagents 0.7 ships exactly one concrete sandbox (LangSmith,
+    which this repository declines on egress grounds) and `LocalShellBackend` is documented as
+    unrestricted; `delete` is withheld on D-2026-08-12's argument. Both are exclusions rather than
+    absences, so the mechanism that carries them has to exist.
+    """
+    from deepagents import HarnessProfile
+
+    fields = set(getattr(HarnessProfile, "__dataclass_fields__", {}))
+    assert {"excluded_tools", "excluded_middleware"} <= fields, (
+        "HarnessProfile can no longer withhold tools or middleware; agent/langgraph_agent "
+        "registers a profile that withholds `execute` and `delete`"
+    )
+
+
 @pytest.mark.parametrize(
     ("module", "name", "reader"),
     [
+        ("deepagents", "create_deep_agent", "agent/langgraph_agent.build_langgraph_agent"),
         ("deepagents", "RubricMiddleware", "the in-loop answer critic"),
         ("deepagents.middleware.subagents", "SubAgentMiddleware", "agent/team.py"),
         ("deepagents.middleware.subagents", "CompiledSubAgent", "agent/team.py"),
