@@ -109,6 +109,34 @@ from, so the payload is recorded verbatim in `tests/recorded_tool_results.py` an
 why that is now the honest form. Neither test is about ICH: they assert that the trace reads figures
 past the audit preview, and that an answer quoting them scores as grounded.
 
+## What the removal found
+
+Two things the full suite caught that the change itself did not predict, and they point opposite ways.
+
+**A real circular dependency between two layers is gone.** `kg` imported `science` and `science`
+imported `kg` — `kg/validate.py` reached for `science.safety.notes`, and that module parsed `kg`'s
+own `Note` type. Both directions were declared cycle edges in `tests/test_layering.py`, and that
+test asserts every declared edge is *still observed*, so it failed on their absence. A declared edge
+that is no longer real is a claim about the architecture that is no longer true; both rows are
+deleted. Nothing was designed to achieve this — it fell out of the gate leaving.
+
+**`template-validate` quietly stopped argument-checking a shipped template**, and this is the third
+instance of the shape the preceding ADR named: *true only by circumstance, and the migration removed
+the circumstance.* The check resolves a signature from the bundle's own `server/tools.py`, so a
+bundle we declare but do not run has none. `hazard-briefing` calls `screen_hazards`. The validator's
+own docstring already warned that "an unresolvable tool leaves the argument check silent" — written
+about job launchers, which no template names, and this made it true of one that does. It was
+introduced by **tranche 2**, for `chem`'s four tools, where no shipped template happened to name one
+and so nothing failed.
+
+The fix is to make the blind spot visible rather than to hide it: `unchecked_arguments()` names the
+tools per template, and `main` prints the note on the *passing* path, because the reader who only
+ever sees the green line is who it is for. Reported rather than raised — the template is correct and
+nothing here can prove it, which is different from it being wrong, and failing would force deleting
+a good template to satisfy a validator. The test that proves the check works moved onto a tool whose
+implementation is still local, and a second test pins the gap against the real shipped template:
+swapping the tool and saying nothing is exactly how a gate shrinks unnoticed.
+
 ## Consequences
 
 - An operator gains two obligations the chart cannot discharge, the same pair `chem` introduced: the
