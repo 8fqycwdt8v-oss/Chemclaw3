@@ -133,11 +133,11 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         "index_empty": true}` and the sentence explaining what that means would never leave this
         process. **This is the in-tree statement of that lesson, and three other `summary` fields
         cite it.** It was learned on the hazard screen — `ScreenResult.verdict`, now
-        `Chemclaw3-mcp:servers/safety/src/chemclaw_mcp_safety/engine/screen.py` — which carried its "this
-        is not a safety assessment" disclaimer as a bare property for exactly this reason and had
-        **zero** production callers, until a live run showed a chemist being told "no hazards
-        detected" six times. The tool docstring is read once when the tool is defined; the result
-        payload is what sits in the context window when the answer is written.
+        `Chemclaw3-mcp:servers/safety/src/chemclaw_mcp_safety/engine/screen.py` — which carried
+        its "this is not a safety assessment" disclaimer as a bare property for exactly this
+        reason and had **zero** production callers, until a live run showed a chemist being told
+        "no hazards detected" six times. The tool docstring is read once when the tool is defined;
+        the result payload is what sits in the context window when the answer is written.
 
         Truncation is answered here for the same reason emptiness is: a scan the record cap cut
         short returned `hits: []`, `index_empty: false` and the sentence "this is a genuine
