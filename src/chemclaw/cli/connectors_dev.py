@@ -38,7 +38,7 @@ DEV_PORT = 8810
 
 
 def _local_app(name: str) -> FastAPI | None:
-    """Import a bundle's `server/app.py::app`, or `None` when the bundle ships no local server."""
+    """The `app` from a bundle's `connectors/<name>/server/app.py`, or `None` if it ships none."""
     try:
         module = importlib.import_module(f"chemclaw.connectors.{name}.server.app")
     except ModuleNotFoundError:

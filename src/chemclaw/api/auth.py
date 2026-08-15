@@ -195,7 +195,7 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
                 oid,
             )
         # **Namespaced, not merged flat.** This same role set gates privileged tools
-        # (`agent/authz.py::entra_privileged_roles`, `tool_role_gates`) and skills
+        # (`entra_privileged_roles`, `tool_role_gates`) and skills
         # (`agent/skill_access.py`), so an unprefixed group value is a role value. The comment that
         # used to sit here asserted these are group *object-ids* — but that is a tenant setting,
         # not a guarantee: `groupMembershipClaims` can emit `sam_account_name` or

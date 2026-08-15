@@ -9,7 +9,8 @@ backticked pointer to a deleted symbol reads as a place to go and look.
 
 **Named for the engine, not for "graph", and that is not fussiness.** In this codebase *the graph*
 is the Markdown knowledge graph — layer 4, `kg/graph.py`, whose own `build_graph` builds a NetworkX
-index of the notes. A `agent/graph.py::build_graph` beside it would put two unrelated
+index of the notes. A second `build_graph`, in a module named for the graph, would put two
+unrelated
 `build_graph`s one import apart, in a tree whose `ARCHITECTURE.md` exists largely to explain the
 name pairs that look like duplicates and are not. The engine's name is the unambiguous half.
 

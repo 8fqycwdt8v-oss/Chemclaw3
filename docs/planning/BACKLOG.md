@@ -228,16 +228,19 @@ topic).
       of the token budget. *Restart when v3 emits usage per content block, or exposes the raw
       `(chunk, metadata)` stream alongside the content-block one.* Full measurement in the archive.
 
-- [ ] **Nothing checks that a symbol named in prose still exists** — [M], and this row now carries
-      the corrected count that two earlier rows disagreed about (42 vs 32/10/75). **Re-measured
-      2026-08-15: `build_agent` is `0` in `src/`, 10 in `tests/`, 75 in `docs/`; `SkillsSource` is
-      `2` in `src/`, both past-tense prose in `agent/skill_access.py`; `ToolScopedSkillsSource` and
-      `FileSkillsSource` are `0` everywhere.** The rename passes ran (`25fa325`, `4af0dcb`); what
-      survives is stale *premises* — `core/session_context.py:18-20` explains a module split by a
-      dependency that is gone, `core/logging.py:143` and `tests/test_service.py:45-50` still
-      describe MAF behaviour, and `tests/test_cli.py:122` carries `"requires an TurnSession"` left
-      by a rename editing text inside a quoted string. `make prose-validate` already resolves metric
-      and tool names against live registries; extend it to code identifiers.
+- [x] **Nothing checks that a symbol named in prose still exists — closed 2026-08-15.**
+      `tests/test_docstring_paths.py` now checks two forms: a path with an optional `::symbol`
+      suffix, and a fully-qualified `chemclaw.*` name. It found **19 stale pointers on the first
+      run, with no false positives** — including `chemclaw.durable.py`, the blind-substitution
+      artifact the gate's own docstring had described since D-149 but could not catch, and
+      `chemclaw.agent.session_context`/`identity_context`, which moved to `core/` and were still
+      cited in `agent/turn_flags.py`. The `::symbol` half closed a hole that had let two pointers to
+      a deleted module survive the commit whose subject was deleting it.
+      **Scope was measured, not chosen**: checking every backticked bare identifier flags 1,077 of
+      3,351 (`None`, `ValueError`, `await`, SQL table names, upstream types), and `module.symbol`
+      flags 426 of 528 because the same shape spells attribute access, a filename and a subpackage.
+      The qualified form flags 30 of 764, which is small enough to read one by one. Non-vacuity
+      proven by mutation on four classes of dangling reference.
 
 - [ ] **`logging.handleError` prints a malformed record's raw `msg`/`args` to stderr, unredacted** —
       [S]. The deliberate design is that `SecretRedactingFilter.filter` never raises and lets

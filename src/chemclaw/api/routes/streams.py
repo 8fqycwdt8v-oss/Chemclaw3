@@ -106,7 +106,8 @@ async def session_events(
         # does not run when a client vanishes before the first advance.
         #
         # Through the front-door module so the suite's patch seam
-        # (`chemclaw.api.app.stream_new_events`) keeps reaching the tailer this route runs.
+        # (`chemclaw.agent.session_events.stream_new_events`) keeps reaching the tailer this
+        # route runs.
         async for pushed in front_door.stream_new_events(
             session_id, kinds=("job_completed", "job_failed")
         ):

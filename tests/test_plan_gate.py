@@ -479,7 +479,7 @@ def test_a_spent_approval_stays_spent_across_a_rehydrate(
     """An eviction must not re-arm an authorization a turn already used.
 
     The two halves of the composition, in order. The consumed marker lives in `session.state`,
-    which `chemclaw.api.app._rehydrate_session` drops when the live LRU evicts a session or the pod
+    which `chemclaw.api.deps._rehydrate_session` drops when the live LRU evicts a session or the pod
     rolls — it rebuilds the handle over the durable history alone, so the todo state goes with it.
     The `plan_approvals` row does not go: it is durable. A rehydrated session therefore proposes
     the empty plan, and while that constant was an approvable identity a spent approval of it came

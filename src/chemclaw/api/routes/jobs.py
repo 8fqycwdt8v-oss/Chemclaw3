@@ -3,7 +3,7 @@
 Reads answer from the same functions the agent's own tools call (`job_status`,
 `search_job_records`), so a chemist polling in chat and one refreshing a page cannot disagree
 about a run. All three collaborators are read through the front-door module at call time because
-the suite patches them there (`chemclaw.api.app.job_status` and friends) — see
+the suite patches them there (`chemclaw.agent.durable_tools.job_status` and friends) — see
 `chemclaw/api/routes/README.md`.
 """
 

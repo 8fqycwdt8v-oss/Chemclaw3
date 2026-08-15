@@ -70,7 +70,8 @@ class StoreSettings(BaseSettings):
     # applied. Bounded all the same, so a migrator that died holding a session lock cannot wedge
     # the next release forever.
     pg_migration_lock_wait_seconds: float = Field(default=300.0, gt=0)
-    # Per-process connection pool (`chemclaw.db.pooling`). Connect-per-call was measured at ~2.7
+    # Per-process connection pool (`chemclaw.core.db.pooling`). Connect-per-call was measured at
+    # ~2.7
     # TCP+auth handshakes per chat turn, and the cost lands on the event loop rather than on the
     # database — a connect that cannot be scheduled inside `pg_connect_timeout_seconds` fails,
     # which is how a non-fatal correctness guard got silently disarmed under load.

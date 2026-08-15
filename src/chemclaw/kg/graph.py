@@ -107,7 +107,8 @@ def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
 
     Same stat-only scan `_dir_fingerprint` does for the whole-tree cache (KM-14), but keyed per note
     id (the file's stem — `note.type/note.id.md` is the one filename shape a note is written under,
-    `chemclaw.kg.pr_gate.NoteFile`) rather than folded into one aggregate. A single fingerprint can
+    `chemclaw.kg.submission.NoteFile`) rather than folded into one aggregate. A single fingerprint
+    can
     only answer "did anything change"; this answers "which ones", which is what an incremental
     rebuild needs — `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its
     entry here differs from what was stored at the last index run, instead of the whole corpus on

@@ -94,7 +94,7 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
 
     `deploy/helm/chemclaw/values.yaml` sets `CHEMCLAW_OTEL_ENABLED: "true"`, and
     `configure_telemetry` is called unconditionally at process start by the front door
-    (`service/app.py::_lifespan`), the background worker and every connector worker. The OTel
+    (`api/app.py::_lifespan`), the background worker and every connector worker. The OTel
     SDK and OTLP exporter were not declared dependencies, so that call raised and *every* Python
     component CrashLoopBackOff'd on first deploy.
 

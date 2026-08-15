@@ -1,6 +1,6 @@
 """The `bo` connector's FastAPI app — the one-shot experiment-design tool behind its own server.
 
-The bundle's *durable* half is not here: `chemclaw.durable.py` is served by
+The bundle's *durable* half is not here: `chemclaw.durable` is served by
 `chemclaw.connectors.bo.worker` on its
 own Temporal queue. This app serves only the inline `suggest_next_experiment`.
 
