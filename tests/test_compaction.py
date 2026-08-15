@@ -364,8 +364,9 @@ def test_the_observer_does_not_narrow_the_engine_it_reports_on() -> None:
     the base class raises `NotImplementedError` for the half it did not declare — so an observer
     with only `awrap_model_call` makes every `invoke()`/`stream()` fail while every async test
     passes. Measured before the fix: this call raised "Synchronous implementation of
-    wrap_model_call is not available", and the same graph without the observer answered.
-    `agent/team.py::_AttributedSpecialist.invoke` is the reachable caller.
+    wrap_model_call is not available", and the same graph without the observer answered. Nothing
+    in the tree calls the sync path today; deepagents' `task` tool carries a sync `func` beside its
+    coroutine, so a subagent reaches it the moment one exists.
     """
     # `_Recording` rather than patching `GenericFakeChatModel.bind_tools` onto the class: that
     # mutation outlives the test, and `pytest-randomly` means whichever test runs next with a bare

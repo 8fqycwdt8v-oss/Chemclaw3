@@ -212,10 +212,9 @@ das *nach* der Wissensproduktion greift (§6).
   bewertet u. a. die Runaway-Rate; seit der Deckel ein gelesener Zähler statt einer Schlussfolgerung
   ist, kann diese Metrik „abgebrochener Schritt" von „korrekt an einen durable Job übergeben"
   unterscheiden, was sie aus Residuen allein nie konnte.
-- **Spezialisten-Team (`agent/team.py`).** Ein Supervisor mit fünf Spezialisten ist gebaut und per
-  Default **aus**, bis Routing-Genauigkeit und Token-Kosten gegen den Einzelagenten gemessen sind:
-  ein Supervisor, der falsch routet, ist schlechter als gar kein Team. Für den Harness ändert das
-  nichts an den Regeln — ein Spezialist ist ein Profil plus ein kompilierter Subgraph, seine
+- **Spezialisten-Team — entfernt (D-2026-08-15).** Ein Supervisor mit fünf Spezialisten war gebaut
+  und blieb per Default aus; die Messung, die über das Default entscheiden sollte, war mit diesem
+  Korpus nicht durchführbar. Die Regel überlebt den Code und bindet jeden künftigen Subagenten: seine
   Werkzeugmenge ist eine *Abschwächung* der des Aufrufers, und `safety` lässt sich nicht
   wegnarrowen.
 - **Gedächtnis.** Ein abgeschlossener, vom Chemiker bestätigter Plan ist selbst eine episodische

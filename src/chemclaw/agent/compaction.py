@@ -274,8 +274,9 @@ class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):
     `graph.invoke()`/`stream()` fail, and a sync one fails every real turn. Measured: with only the
     async half, `build_langgraph_agent(model=fake).invoke(...)` raised "Synchronous implementation
     of wrap_model_call is not available", while the same graph without this middleware answered.
-    `agent/team.py::_AttributedSpecialist.invoke` is the reachable caller — deepagents' `task` tool
-    carries a sync `func` beside its coroutine — so the sync half is not hypothetical.
+    The sync half is not hypothetical even with no synchronous caller in the tree today: deepagents'
+    `task` tool carries a sync `func` beside its coroutine, so any subagent path reaches it, and the
+    failure mode is a hard `NotImplementedError` rather than a degradation.
     `ContextEditingMiddleware` above declares both for the same reason; an observer that narrowed
     the engine its editor runs on would be reporting on a policy it had just disabled.
 

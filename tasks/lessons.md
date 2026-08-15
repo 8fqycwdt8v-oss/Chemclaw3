@@ -1914,3 +1914,24 @@ it is two questions, not one.**
 
 The reviewer being external, thorough and specific is what makes this necessary rather than what
 makes it unnecessary — a vague recommendation invites a check, a precise one invites compliance.
+
+## A deletion is not verified by the type checker (2026-08-15)
+
+Deleted five modules, grepped for every removed *symbol* before committing, got `make lint` and
+`mypy --strict` over 635 files green, committed — and the suite came back with **five failures**, all
+in `test_docstring_paths.py` and `test_prose_contract.py`. Four docstrings and one guide still
+pointed at `agent/team.py`, `agent/challenge_gate.py` and `tests/test_agent_team.py`.
+
+The grep was the mistake, not the commit timing. I searched for identifiers — `team_enabled`,
+`challenge_enabled`, `SPECIALISTS` — and a backticked **file path** is neither an identifier nor
+something a type checker can see. In this tree that gap is not cosmetic: sessions hand off through
+these docstrings, so a pointer to a deleted file sends the next reader somewhere empty.
+
+**Rule: after deleting a file, grep for its path as well as its symbols** — `grep -rn "agent/team\.py"`
+alongside `grep -rn "\bteam_enabled\b"` — and treat the prose gates as part of the definition of
+done for a deletion, not as a formality the fast gates stand in for.
+
+Worth recording that the gates worked exactly as designed. `test_docstring_paths.py` is 108 lines
+with one regex and a self-check against its own rot, and it caught a class `mypy` structurally
+cannot. It is the shape to copy, and `BACKLOG:441` — extending it from module paths to code
+*identifiers* — would have caught the other half of this same class.

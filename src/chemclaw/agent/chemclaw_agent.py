@@ -17,8 +17,9 @@ one (D-117 records what an omitted name space costs).
 **Every narrowing here attenuates and none widens.** A profile selects a subset of what the
 deployment enabled, and `_reject_unknown_tool_names` fails the build on a name nothing provides, so
 a typo is a startup error rather than a capability that silently vanishes from the surface. That
-property is what makes a specialist safe to define as a profile (`agent/team.py`): a subagent
-cannot be handed a tool its caller does not have.
+property is what would make a subagent safe to define as a profile — its tool set an attenuation of
+its caller's, never a widening (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`). No
+subagent exists today (D-2026-08-15); the rule binds whoever adds one.
 """
 
 from dataclasses import replace

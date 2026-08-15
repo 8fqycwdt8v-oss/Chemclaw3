@@ -385,8 +385,8 @@ def test_the_harness_profile_can_withhold_a_tool_and_a_middleware() -> None:
     [
         ("deepagents", "create_deep_agent", "agent/langgraph_agent.build_langgraph_agent"),
         ("deepagents", "RubricMiddleware", "the in-loop answer critic"),
-        ("deepagents.middleware.subagents", "SubAgentMiddleware", "agent/team.py"),
-        ("deepagents.middleware.subagents", "CompiledSubAgent", "agent/team.py"),
+        ("deepagents.middleware.subagents", "SubAgentMiddleware", "the subagent seam"),
+        ("deepagents.middleware.subagents", "CompiledSubAgent", "the subagent seam"),
         ("deepagents.middleware.skills", "SkillsMiddleware", "agent/langgraph_agent.py"),
         ("deepagents.backends", "FilesystemBackend", "agent/skill_backend.py"),
         ("deepagents.backends", "CompositeBackend", "agent/langgraph_agent.skills_backend"),
