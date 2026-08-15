@@ -195,17 +195,29 @@ def server_tools_module(connector: str) -> ModuleType | None:
     never reaches here), so `None` means the narrower thing: a bundle that declares an endpoint and
     has no module behind it.
 
-    A *transitive* import failure propagates. Only `ModuleNotFoundError` naming this exact module
-    means "no server module"; a missing or renamed dependency underneath it means the bundle is
-    broken, and swallowing that leaves a validator checking less and still reporting success —
-    measured, `validate_templates` resolved 46 signatures instead of 50 and printed "template
-    validation passed" for a bundle that could not be imported at all.
+    A *transitive* import failure propagates. Only a `ModuleNotFoundError` naming this bundle's own
+    server package or the module inside it means "no server module"; a missing or renamed dependency
+    underneath it means the bundle is broken, and swallowing that leaves a validator checking less
+    and still reporting success — measured, `validate_templates` resolved 46 signatures instead of
+    50 and printed "template validation passed" for a bundle that could not be imported at all.
+
+    **The package name is in that set because a bundle can now be declared and not run.** This used
+    to check the module alone, which was complete while every endpoint-bearing bundle shipped a
+    `server/` directory. `chem`'s capability moved out and its directory went with it, so the
+    *parent* is what is missing and `exc.name` is the package — and this function raised where its
+    own docstring says it should return `None`.
+
+    That it survived a local run is worth recording: a deleted `server/` leaves its `__pycache__`
+    behind, so the directory persists as a PEP 420 namespace package, the import gets one level
+    further, and the error names the module after all. Locally it returned `None` and CI raised, off
+    the same commit.
     """
-    target = f"chemclaw.connectors.{connector}.server.tools"
+    package = f"chemclaw.connectors.{connector}.server"
+    target = f"{package}.tools"
     try:
         return importlib.import_module(target)
     except ModuleNotFoundError as exc:
-        if exc.name == target:
+        if exc.name in {target, package}:
             return None
         raise
 

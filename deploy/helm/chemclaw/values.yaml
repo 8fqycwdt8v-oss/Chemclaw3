@@ -151,7 +151,9 @@ knowledge:
 #   * give it a credential. A bundle reached across the network with `auth: mode: none` in its
 #     manifest is refused at load — see `chemclaw/connectors/manifest.py`.
 #
-# No shipped bundle sets it: every one below is ours, served from this release's own image.
+# **`chem` is the first bundle to set it**, and the pattern the rest of the migration follows:
+# the capability is `Chemclaw3-mcp`'s `servers/chem`, this release declares it and dials it.
+# Every other bundle below is still ours, served from this release's own image.
 connectors:
   molfp:
     enabled: true
@@ -167,8 +169,24 @@ connectors:
     replicas: 1
   chem:
     enabled: true
+    # **`server: true` *and* a `url:`** — the shape D-2026-08-09 built for a connector this release
+    # does not run. The two fields answer different questions and the pairing is not obvious:
+    # `server:` mirrors whether the *manifest* declares an `endpoint:`, which `chem`'s still does,
+    # while `url:` is what says somebody else hosts it. The templates read
+    # `if and $cfg.server (not $cfg.url)`, so the url is what suppresses the Deployment and the
+    # Service; and `chemclaw.connectorUrls` visits only `enabled && server` entries, so
+    # `server: false` would make the address below **ignored** and leave the front door dialling
+    # the manifest's loopback default. `test_a_connector_url_is_only_declared_beside_a_server`
+    # exists for exactly that mistake, and caught it here.
+    #
+    # The capability moved to `Chemclaw3-mcp`; the manifest stayed, because four validators resolve
+    # tool names through it (`connectors/chem/connector.yaml` says why).
+    #
+    # Two things an operator must still do, per the note above: add this host to
+    # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CHEM_TOKEN` — the server enforces a
+    # bearer on `/mcp` itself, so a missing credential is a refused call rather than an open one.
     server: true
-    replicas: 1
+    url: http://chemclaw3-mcp-chem:8858/mcp
   calc:
     enabled: true
     server: true

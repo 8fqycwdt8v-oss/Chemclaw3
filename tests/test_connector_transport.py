@@ -48,6 +48,7 @@ from chemclaw.connectors.registry import (
     discovered,
     open_connector_specs,
     request_timeout_seconds,
+    server_tools_module,
 )
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import ConnectorSpec
@@ -56,12 +57,19 @@ from chemclaw.core.session_context import reset_current_session_id, set_current_
 from tests.conftest import _free_port
 
 # Every discovered bundle that ships a local HTTP server, as `(name, manifest)`. Parametrizing
-# over discovery rather than a hardcoded list means a new bundle is covered on the day it is
-# added.
+# over discovery rather than a hardcoded list means a new bundle is covered on the day it is added.
+#
+# **`server_tools_module` is the second half of the predicate, and it stopped being redundant.**
+# An `HttpEndpoint` used to imply we run the server, so the endpoint type alone was the whole
+# filter. It no longer does: a bundle whose capability lives in `Chemclaw3-mcp` still declares an
+# endpoint here — that declaration is what four validators resolve tool names through — while
+# shipping no `server/` package. Without this half, these tests start a dev composite that does not
+# contain the bundle and then assert against it, which is what `chem` did the day it moved: a 404
+# from a route nobody serves, reported as a broken health probe.
 _LOCAL_HTTP = [
     (name, manifest)
     for name, (_dir, manifest) in sorted(discovered().items())
-    if isinstance(manifest.endpoint, HttpEndpoint)
+    if isinstance(manifest.endpoint, HttpEndpoint) and server_tools_module(name) is not None
 ]
 
 

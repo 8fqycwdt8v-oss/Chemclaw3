@@ -412,7 +412,7 @@ def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
 
     `_resolvable_signatures` caught every `ImportError`, so a bundle whose dependency stack is
     missing or renamed was indistinguishable from `qm`, which legitimately has no server module.
-    Measured on this tree with one missing import injected into `connectors/chem/server/tools.py`:
+    Measured on this tree with one missing import injected into a connector's server tools module:
     50 signatures became 46 and `make template-validate` printed "template validation passed" and
     exited 0, while `make connector-validate` named the same bundle as broken. Two gates, one
     situation, opposite answers — so the import is now one shared function that raises, and this

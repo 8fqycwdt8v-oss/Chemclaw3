@@ -335,24 +335,33 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     milliseconds. The measured figure is printed so a reader sees the real number, not only the
     bound.
 
-    **The bound was 270 ms and the `create_deep_agent` swap ate the headroom**, which showed up as
-    this test failing inside a full-suite run and passing alone — the shape that is usually
-    contention and this time was only half contention. Re-measured 2026-08-15:
+    **The bound was 270 ms, the `create_deep_agent` swap ate the headroom, and the merge with `main`
+    gave most of it back.** The swap showed up as this test failing inside a full-suite run and
+    passing alone — the shape that is usually contention and that time was only half contention. It
+    measured 160 ms unloaded, 205 ms contended, 59 ms of it a *second compiled graph* for the helper
+    behind `task`. Then `main` landed two changes on exactly that path: `labelled` computed once per
+    build and passed to both the backend and the middleware, and `@cache` on
+    `skill_manifest._declared_tools`. Re-measured on the merged tree:
 
-    - **160 ms** unloaded, against the ~90 ms baseline.
-    - **205 ms** with four cores saturated, which is what a full suite run looks like.
-    - **59 ms** of that 160 is a *second compiled graph*: `_subagents` builds the helper behind the
-      `task` tool through this same function, and it re-derives the profile's tools and walks the
-      skills trees again.
+    - **130 ms** unloaded, from 160.
+    - **140 ms** with four cores saturated, from 205 — the contended figure improved most, which is
+      what caching a synchronous `open()` + YAML parse across 28 skills would predict.
+    - **61 ms** of that 130 is still the helper.
 
-    So the main graph is ~101 ms — essentially the old cost — and the helper is the new 59 ms. That
-    is not free and it is not negotiable: `SubAgentMiddleware` cannot be excluded, so the choice is
-    a helper this repository compiled or upstream's ungoverned one, and 59 ms against a median turn
-    of 17-142 s is ~0.3%. Sharing the parent's skills backend would recover most of it and is not
-    worth threading a parameter through for that.
+    So the parent graph is now **~69 ms — below the ~90 ms baseline this test was written against**,
+    while carrying more middleware than the agent that set it. The helper is unchanged, and the
+    reason is worth stating because it is the remaining lever: `@cache` is process-wide so the
+    helper pays nothing for skill manifests, but `labelled` is shared only *within* one build, and
+    `_subagents` calls this function again — so `_labelled(_skill_dirs())` runs twice per turn.
+    Passing the parent's value down would remove the second walk. That is left undone deliberately:
+    61 ms against a median turn of 17-142 s is ~0.3%, and the helper is not negotiable anyway —
+    `SubAgentMiddleware` cannot be excluded, so the choice is a helper this repository compiled or
+    upstream's ungoverned one.
 
-    The new bound is 400 ms: ~2.5x the unloaded figure and ~2x the contended one, still an order of
-    magnitude under a compile that started doing I/O per turn.
+    The bound stays 400 ms: ~3x the unloaded figure and ~2.9x the contended one, which is the same
+    ratio the original 270 held against its ~90 ms baseline. Tightening it to match the improvement
+    would buy nothing this test is for and would spend the margin that made the last regression show
+    up as a *failure* rather than as a flake.
     """
     model = ScriptedChatModel(["ok"])
     build_langgraph_agent(model, audit_sink=NullAuditSink())  # warm discovery, as a live pod is
@@ -365,6 +374,6 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
 
     assert per_compile_ms < 400, f"per-turn graph compile took {per_compile_ms:.0f} ms"
     print(
-        f"\nper-turn graph compile: {per_compile_ms:.0f} ms (~160 ms unloaded, of which ~59 ms "
+        f"\nper-turn graph compile: {per_compile_ms:.0f} ms (~130 ms unloaded, of which ~61 ms "
         "is the helper graph; prior agent build baseline ~90 ms)"
     )

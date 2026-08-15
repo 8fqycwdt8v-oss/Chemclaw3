@@ -1,6 +1,24 @@
 # Bench chemistry: the pure, synchronous tools that answer "what do I weigh out, what is this
-# compound, what does it look like, how green is this route". Its own bundle because `rdkit` is its
-# dependency and nothing else in the chat service needs one.
+# compound, what does it look like, how green is this route".
+#
+# **This bundle is a declaration, not a server — we do not run it.** The capability lives in
+# `Chemclaw3-mcp` as `servers/chem/`, because scientific capability belongs there and infrastructure
+# belongs here (`CLAUDE.md`, "Where a capability belongs"). What stays is this manifest, and it
+# stays for a concrete reason rather than tidiness: two profiles, five eval probe files, two
+# `SKILL.md`s and the agent's own prose name these four tools by string, and
+# `chemclaw_agent.available_tool_names` builds the set four validators check against by reading
+# manifests out of `connectors_dirs`. Delete this file and `make skill-validate`, `prose-validate`,
+# `template-validate` and the profile check all fail on references to tools that exist — the D-117
+# defect, which this repository has now hit twice.
+#
+# `D-2026-08-09-a-connector-we-do-not-run` built the shape: setting `connectors.chem.url` in the
+# chart's values says the server is hosted outside this release, so no Deployment and no Service are
+# rendered and the given address is used instead of a computed one.
+#
+# **The tool list below now exists in two repositories** — here and in that server's own
+# `connector.yaml` — and nothing structurally forces them to agree. The server's copy is
+# authoritative, because it is what actually answers; this one is what this repository validates
+# against. `make connector-validate` against a running server is the check that catches a drift.
 name: chem
 description: >-
   Bench chemistry over RDKit: resolve a compound name to a structure, build a stoichiometry/charge
@@ -9,12 +27,24 @@ description: >-
 
 endpoint:
   transport: http
-  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
-  url: http://127.0.0.1:8814/mcp
-  health_url: http://127.0.0.1:8814/healthz
+  # `Chemclaw3-mcp`'s `servers/chem`, port 8858. A loopback dev default; a cluster address is set
+  # per deployment via CHEMCLAW_CONNECTOR_URLS, and `connectors.chem.url` in the chart.
+  url: http://127.0.0.1:8858/mcp
+  health_url: http://127.0.0.1:8858/healthz
   request_timeout: 30
   auth:
-    mode: none
+    # **Bearer, because the server on the other side enforces one.** `Chemclaw3-mcp`'s
+    # `connector_app` checks the credential on `/mcp` itself, so `mode: none` here would not mean
+    # "no auth needed" — it would mean every call is refused. The variable is named rather than
+    # carried, read per request, and it is the same name the server reads.
+    #
+    # This is also what `D-2026-08-09` requires of an out-of-release connector: a bundle reached
+    # across the network with `mode: none` is refused at load (`manifest.py`
+    # `_a_networked_endpoint_carries_a_credential`). That check reads the *declared* url, which is
+    # loopback here, so it would not have fired on this file — the reason to set bearer is the
+    # server, not the validator.
+    mode: bearer
+    token_env: CHEMCLAW_CHEM_TOKEN
   tools:
     - resolve_compound
     - stoichiometry_table
