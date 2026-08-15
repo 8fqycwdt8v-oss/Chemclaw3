@@ -34,6 +34,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
 
 
 class FakeUpdate:
@@ -90,3 +92,42 @@ def fed(trace: Any, update: Any) -> list[Any]:
     around a coroutine that never suspends.
     """
     return asyncio.run(trace.feed(update))
+
+
+class ScriptedModel(GenericFakeChatModel):
+    """A model that replays a fixed script, and accepts tool binding without honouring it.
+
+    Subclassed because `create_agent`'s model node calls `.bind_tools(...)` on every request and
+    `GenericFakeChatModel.bind_tools` raises `NotImplementedError` — measured, not assumed. Binding
+    returns `self` here: the script already contains the tool call under test, so the point of the
+    override is that the graph gets a model it can bind, not that the fake reasons about tools.
+
+    What that costs is worth naming. This proves the *loop* — that a tool call is dispatched, run
+    and fed back — and cannot prove that the tool schemas Chemclaw hands over are ones a real model
+    can call. `test_every_in_process_tool_reaches_the_graph_unchanged` covers the surface, and only
+    a live run covers the schemas; M12's re-validation is where that happens.
+    """
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Accept the binding and keep replaying the script."""
+        return self
+
+
+def scripted(tool_name: str, tool_args: dict[str, Any]) -> ScriptedModel:
+    """A model that calls `tool_name` once and then produces a final answer.
+
+    Shared rather than copied. `BACKLOG` records nine definitions of one fake agent across the
+    suite and this class was on its way to being the tenth: `test_middleware_order.py` needed the
+    same "bind_tools must not raise" override that `test_langgraph_agent.py` already carried.
+    """
+    return ScriptedModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": tool_name, "args": tool_args, "id": "call-1"}],
+                ),
+                AIMessage(content="done"),
+            ]
+        )
+    )

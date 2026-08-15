@@ -27,7 +27,6 @@ import re
 from typing import Any
 
 import pytest
-from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -58,25 +57,7 @@ from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import Signal
 from chemclaw.kg.note import NoteError
-
-
-class _ScriptedModel(GenericFakeChatModel):
-    """A model that replays a fixed script, and accepts tool binding without honouring it.
-
-    Subclassed because `create_agent`'s model node calls `.bind_tools(...)` on every request and
-    `GenericFakeChatModel.bind_tools` raises `NotImplementedError` — measured, not assumed. Binding
-    returns `self` here: the script already contains the tool call under test, so the point of the
-    override is that the graph gets a model it can bind, not that the fake reasons about tools.
-
-    What that costs is worth naming. This proves the *loop* — that a tool call is dispatched, run
-    and fed back — and cannot prove that the tool schemas Chemclaw hands over are ones a real model
-    can call. `test_every_in_process_tool_reaches_the_graph_unchanged` covers the surface, and only
-    a live run covers the schemas; M12's re-validation is where that happens.
-    """
-
-    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        """Accept the binding and keep replaying the script."""
-        return self
+from tests.fakes import ScriptedModel
 
 
 def _listed_skills(prompt: str) -> set[str]:
@@ -92,7 +73,7 @@ def _listed_skills(prompt: str) -> set[str]:
     return names
 
 
-class _Recording(_ScriptedModel):
+class _Recording(ScriptedModel):
     """A scripted model that also records the system prompt each call was given.
 
     The skills listing reaches the model in its system prompt, and `create_agent`'s *output* schema
@@ -114,7 +95,7 @@ def _advertised(graph: Any) -> set[str]:
 
 def _scripted(tool_name: str, tool_args: dict[str, Any]) -> Any:
     """A fake model that calls `tool_name` once and then produces a final answer."""
-    return _ScriptedModel(
+    return ScriptedModel(
         messages=iter(
             [
                 AIMessage(
@@ -321,7 +302,7 @@ def test_a_repeated_call_is_refused_on_this_engine(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(settings, "max_identical_tool_calls", 1)
     args = {"question": "which solvent?"}
     graph = build_langgraph_agent(
-        model=_ScriptedModel(
+        model=ScriptedModel(
             messages=iter(
                 [
                     AIMessage(
@@ -671,7 +652,7 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
 
     def _graph(script: list[AIMessage]) -> Any:
         return build_langgraph_agent(
-            model=_ScriptedModel(messages=iter(script)),
+            model=ScriptedModel(messages=iter(script)),
             audit_sink=NullAuditSink(),
             checkpointer=InMemorySaver(),
         )
@@ -735,7 +716,7 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
         answers: list[str] = []
         for turn in range(4):
             graph = build_langgraph_agent(
-                model=_ScriptedModel(messages=iter([AIMessage(content=f"answer {turn}")])),
+                model=ScriptedModel(messages=iter([AIMessage(content=f"answer {turn}")])),
                 audit_sink=NullAuditSink(),
                 checkpointer=saver,
             )
