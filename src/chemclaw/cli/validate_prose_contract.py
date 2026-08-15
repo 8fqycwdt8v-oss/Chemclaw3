@@ -380,11 +380,40 @@ def _path_resolves(candidate: str) -> bool:
     )
 
 
+def _connector_token_envs() -> set[str]:
+    """The credential variable names connector manifests declare, lowercased like a Settings field.
+
+    **Derived rather than allow-listed, which is the difference between this and
+    `_NON_SETTINGS_ENV`.** A bundle reached over the network names its bearer with `token_env`
+    (`connectors/manifest.py::BearerAuth`), and that variable is real, operator-set and genuinely
+    not a `Settings` field — the transport reads it from the environment per request. As capability
+    moves out of this tree, every externally-hosted server brings one, so a hand-maintained list
+    would grow by one per migration and be wrong the first time somebody forgot.
+
+    Reading them off the manifests keeps the gate's actual property: a name in operator prose must
+    resolve to something. A typo'd variable still fails, because no manifest declares it.
+
+    Returns:
+        The declared names, prefix-stripped and lowercased to match how the caller compares.
+    """
+    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
+    from chemclaw.connectors.registry import discovered
+
+    # `HttpEndpoint` narrowly, not "has an endpoint": a `StdioEndpoint` carries no `auth` at all,
+    # because a subprocess is reached across no network and has nothing to authenticate to.
+    return {
+        endpoint.auth.token_env.removeprefix("CHEMCLAW_").lower()
+        for _, manifest in discovered().values()
+        for endpoint in (manifest.endpoint,)
+        if isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
+    }
+
+
 def check_operator_prose() -> list[str]:
     """Rules 5-7 over the operator documents: paths, ADR ids and config keys must resolve."""
     stems = {path.stem for path in _decision_files()}
     labels = _sub_decision_labels()
-    fields = set(Settings.model_fields)
+    fields = set(Settings.model_fields) | _connector_token_envs()
     problems: list[str] = []
     for origin, text in _operator_sources().items():
         for candidate in sorted(set(_PATH.findall(text))):

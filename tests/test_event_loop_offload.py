@@ -3,8 +3,16 @@
 A 50-user load test measured throughput flat at ~1.18 turns/s from 10 users to 50 — five times
 the load for 1.7% more work — which is the signature of a single serialization point rather than
 a resource limit. The front door and each connector are one uvicorn process on one event loop,
-and the RDKit calls behind the chat tools are synchronous C++: while one turn depicts a molecule
-or embeds a conformer, every other turn on that process is stopped.
+and the RDKit calls behind the chat tools are synchronous C++: while one turn embeds a conformer,
+every other turn on that process is stopped.
+
+**Three of these tests left with the `chem` server.** They covered `render_structure`,
+`stoichiometry_table` and `resolve_compound`, which this repository no longer runs — the capability
+is an MCP server in `Chemclaw3-mcp` now. The guard went with it rather than being deleted: that
+repository's `Chemclaw3-mcp:servers/chem/tests/test_event_loop_offload.py` asserts the same
+property against the
+same tools, because a `to_thread` hop whose test stayed behind is one nobody would notice losing.
+What remains here is what this process still runs on its own loop.
 
 These tests assert the property directly — the blocking call happens on a *different thread* than
 the coroutine that awaited it — rather than measuring wall-clock, which would be flaky and would
@@ -17,10 +25,7 @@ import threading
 from typing import Any
 
 import pytest
-from rdkit.Chem.Draw import rdMolDraw2D
 
-from chemclaw.connectors.chem.server import tools as chem_tools
-from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.science.calc.store import InMemoryStore
 from chemclaw.science.calc.xtb_spec import XtbSpec
 
@@ -33,52 +38,6 @@ def _thread_recording(target: Any, seen: list[int]) -> Any:
         return target(*args, **kwargs)
 
     return _spy
-
-
-def test_render_structure_draws_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Depiction (2D coordinates + SVG rasterisation) is the heaviest RDKit call in `chem`."""
-    seen: list[int] = []
-    monkeypatch.setattr(
-        rdMolDraw2D, "MolDraw2DSVG", _thread_recording(rdMolDraw2D.MolDraw2DSVG, seen)
-    )
-
-    async def _run() -> tuple[int, str]:
-        return threading.get_ident(), await chem_tools.render_structure("CCO")
-
-    loop_thread, svg = asyncio.run(_run())
-    assert "<svg" in svg
-    assert seen and all(thread != loop_thread for thread in seen)
-
-
-def test_stoichiometry_table_weighs_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A charge table is one RDKit parse plus a descriptor call per species."""
-    seen: list[int] = []
-    monkeypatch.setattr(
-        chem_tools, "_molecular_weight", _thread_recording(chem_tools._molecular_weight, seen)
-    )
-
-    async def _run() -> tuple[int, chem_tools.ChargeTable]:
-        table = await chem_tools.stoichiometry_table("CCO", 46.0, ["water"], [1.0])
-        return threading.get_ident(), table
-
-    loop_thread, table = asyncio.run(_run())
-    assert [row.smiles for row in table.rows] == ["CCO", "O"]
-    assert seen and all(thread != loop_thread for thread in seen)
-
-
-def test_resolve_compound_canonicalises_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unrecognised name falls through to an RDKit canonicalisation, not a dict lookup."""
-    seen: list[int] = []
-    monkeypatch.setattr(
-        chem_tools, "resolve_compound_name", _thread_recording(resolve_compound_name, seen)
-    )
-
-    async def _run() -> int:
-        assert await chem_tools.resolve_compound("c1ccccc1") is not None
-        return threading.get_ident()
-
-    loop_thread = asyncio.run(_run())
-    assert seen and all(thread != loop_thread for thread in seen)
 
 
 def test_electronic_properties_embed_and_key_off_the_event_loop(

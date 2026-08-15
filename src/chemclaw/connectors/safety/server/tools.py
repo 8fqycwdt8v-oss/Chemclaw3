@@ -23,7 +23,8 @@ server whose only job is to answer questions about SMARTS and lookup tables.
 
 **The screens run in a worker thread, and their input is bounded.** SMARTS matching is CPU-bound
 C++ that holds the GIL, and this server answers every connected chat turn on one event loop — the
-same reasoning `connectors/chem/server/tools.py` records, which this bundle was the last not to
+same reasoning `Chemclaw3-mcp:servers/chem/src/chemclaw_mcp_chem/tools.py` records, which this
+bundle was the last not to
 follow. It matters more here than there: both screens check their pair rules as a cross-product,
 so results grow with the *square* of a caller-supplied list while the request stays tiny (13 KiB
 of SMILES measured at 251,000 flags and 2.48 s of blocked loop). `safety_max_components` bounds

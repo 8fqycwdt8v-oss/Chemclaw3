@@ -70,6 +70,22 @@ _POINTER = re.compile(
     r"`([A-Za-z_][A-Za-z0-9_.]*(?:/[A-Za-z0-9_.-]+)+\.py)(?:::([A-Za-z_][A-Za-z0-9_.]*))?`"
 )
 
+# A path in a *sibling repository*, written `Chemclaw3-mcp:servers/chem/tools.py`. Skipped, because
+# this gate can only resolve what is in this checkout and a cross-repo citation is not a broken one.
+#
+# **The prefix is required rather than optional, and that is the point.** The alternative — letting
+# any unresolvable path off when it "looks external" — would reopen exactly the hole this file
+# closes. A reader following `Chemclaw3-mcp:...` knows which checkout to open; a reader following a
+# bare path that silently resolves to nothing does not. The migration of scientific capability out
+# of this tree (`CLAUDE.md`, "Where a capability belongs") makes these common enough to need a form,
+# and one that is greppable per repository.
+# Any other `prefix:path.py`. Rewritten to the bare path so the local check below sees it.
+_PREFIXED = re.compile(r"`[A-Za-z0-9_-]+:([A-Za-z0-9_./-]+\.py(?:::[A-Za-z_][A-Za-z0-9_.]*)?)`")
+
+_CROSS_REPO = re.compile(
+    r"`(Chemclaw3[A-Za-z0-9_-]*):([A-Za-z0-9_./-]+\.py)(?:::[A-Za-z_][A-Za-z0-9_.]*)?`"
+)
+
 # A fully-qualified first-party name: `chemclaw.agent.scratchpad.memory_prefix`, or the module
 # alone. **Scoped to the qualified form deliberately, and the scope was measured rather than
 # chosen.** Two wider rules were tried against the tree first:
@@ -198,6 +214,19 @@ def _dangling(path: Path) -> list[str]:
     naming a symbol inside it, and a fully-qualified dotted name.
     """
     text = path.read_text()
+    # Blank the cross-repo citations before the local patterns run, so a `<repo>:path.py` is never
+    # also read as a local `path.py` by the pattern below.
+    #
+    # **Then re-admit every *other* colon-prefixed path, because `_POINTER` never matched a colon
+    # and so has always let them through.** That hole predates the cross-repo form and was found by
+    # probing this function with a made-up repo prefix on a deleted path, which it skipped. (The
+    # example is spelled out in prose rather than backticked, because backticking it here would
+    # make this comment a broken pointer — which this gate then caught, on itself.) Introducing a
+    # meaningful colon prefix is exactly when it stops being theoretical: an unrecognised prefix now
+    # gets checked as the local path it is, so a typo'd repo name fails loudly instead of buying
+    # silence.
+    text = _CROSS_REPO.sub("`<cross-repo>`", text)
+    text = _PREFIXED.sub(r"`\1`", text)
     bad: list[str] = []
     for pointer, symbol in _POINTER.findall(text):
         if pointer in _REMOVED:

@@ -383,7 +383,8 @@ def test_the_screens_do_not_run_on_the_event_loop() -> None:
     """SMARTS matching is CPU-bound C++ holding the GIL; this server runs every turn on one loop.
 
     The bound above caps the work, but a bounded screen still must not be done *on* the loop —
-    the reasoning `connectors/chem/server/tools.py` records, and which this bundle was the last
+    the reasoning `Chemclaw3-mcp:servers/chem/src/chemclaw_mcp_chem/tools.py` records, and which
+    this bundle was the last
     not to follow. Asserts the work happens off the loop rather than timing it, because a timing
     assertion on a shared runner is a flake.
     """

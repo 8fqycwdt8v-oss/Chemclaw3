@@ -416,7 +416,14 @@ startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<n
 **What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `safety` (the
 hazard screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the
 calibration ledger), `bo` (Bayesian optimization) and `qm` (the durable QM/DFT run behind the
-Nextflow launcher). `calc`, `bo` and `qm` each declare `jobs:` and therefore own durable work, so
+Nextflow launcher).
+
+**`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
+`servers/chem` on port 8858, so this release renders no Deployment and no Service for it and dials
+the address in `connectors.chem.url` instead (D-2026-08-09). Two things that are the operator's,
+because the chart cannot do them: add the host to `networkPolicy.egressDestinations`, and provide
+`CHEMCLAW_CHEM_TOKEN` — that server enforces a bearer on `/mcp` itself, so a missing credential is
+a refused call rather than an open one. `calc`, `bo` and `qm` each declare `jobs:` and therefore own durable work, so
 each runs a second Deployment for its own Temporal worker; set `worker: true` on a bundle in the
 chart to get one. `tests/test_repo_map.py` derives both sets from the `connector.yaml` files on
 disk, so this paragraph is checked rather than remembered.
