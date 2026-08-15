@@ -44,8 +44,9 @@ from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
+from chemclaw.agent.skill_backend import REFUSED
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
@@ -165,8 +166,8 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     advertised = _advertised(graph)
     # `read_file` only: the harness (and with it `write_todos`) is off by default, which the
     # test below asserts separately rather than folding into this one.
-    assert advertised == {tool.__name__ for tool in _capability_tools()} | {SKILL_READ_TOOL}
-    assert advertised == set(registered_tool_names()) | {SKILL_READ_TOOL}
+    assert advertised == {tool.__name__ for tool in _capability_tools()} | set(scratchpad_tools())
+    assert advertised == set(registered_tool_names()) | set(scratchpad_tools())
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:
@@ -191,7 +192,7 @@ def test_a_profile_narrows_the_graph_surface() -> None:
     # `read_file` survives every profile, and it must: it carries no authority of its own — every
     # read goes through the backend the three narrowings already bound — so taking it away would
     # not attenuate anything, it would only make the profile's remaining skills unreadable.
-    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL}
+    assert _advertised(narrowed) == {kept, *scratchpad_tools()}
     assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 

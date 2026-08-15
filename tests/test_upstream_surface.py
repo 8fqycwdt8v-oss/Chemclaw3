@@ -137,13 +137,18 @@ def test_create_agent_still_bakes_a_recursion_limit_this_repo_overrides() -> Non
 
 
 def test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout() -> None:
-    """The open backlog row, pinned so it closes itself when upstream fixes it.
+    """Why `connectors/registry.py` has to bound a tool call at the *session*, not the call.
 
-    `langchain_mcp_adapters` calls `session.call_tool` with no `read_timeout_seconds`, so a
-    connector that never answers blocks the turn forever — measured: a 4 s tool still blocked at
-    25 s. This asserts the *absence*, so the day upstream adds the parameter this test fails and
-    the first-party timeout wrapper can be deleted. A test that pins a bug is how a workaround gets
-    removed instead of outliving its reason.
+    `langchain_mcp_adapters` calls `session.call_tool` with no `read_timeout_seconds` of its own, so
+    a connector that never answers blocks the turn forever — measured: a 4 s tool still blocked at
+    25 s. The bound now exists, and it is the only shape available: `_session_kwargs` sets the
+    `ClientSession`'s default so `mcp.shared.session.send_request` has a deadline to expire, because
+    the adapter offers no per-call one to pass. **That is the absence this pins, and it is a
+    different mechanism from the session default — so the assertion is unchanged now that the row it
+    was written beside is closed.** The day upstream names a call timeout, this test fails and the
+    session-wide default should be re-examined: one number per connection is a coarser instrument
+    than one per call, and it was chosen only because it was the one on offer. A test that pins an
+    upstream absence is how a workaround gets revisited instead of outliving its reason.
     """
     import inspect
 
@@ -151,8 +156,8 @@ def test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout() -> None:
 
     source = inspect.getsource(tools)
     assert "read_timeout_seconds" not in source, (
-        "langchain-mcp-adapters now supports a call timeout — remove the first-party workaround "
-        "and close the BACKLOG row"
+        "langchain-mcp-adapters now names a call timeout — re-examine the session-wide default "
+        "`_session_kwargs` sets in `connectors/registry.py`, chosen for want of a per-call one"
     )
 
 

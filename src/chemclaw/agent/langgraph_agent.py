@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Annotated, Any, NotRequired
 
 from deepagents.backends import CompositeBackend, StateBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
@@ -79,8 +80,9 @@ from chemclaw.agent.loop_cap import loop_cap_middleware
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
+from chemclaw.agent.scratchpad import scratchpad_backend, scratchpad_tools
 from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_backend import NarrowedSkillsBackend, skill_read_tool
+from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.tool_authz import (
@@ -105,6 +107,7 @@ def build_langgraph_agent(
     checkpointer: Any | None = None,
     connectors: list[Any] | None = None,
     response_format: Any | None = None,
+    store: Any | None = None,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -131,6 +134,10 @@ def build_langgraph_agent(
         connectors: This turn's already-open connector tools
             (`chemclaw.connectors.registry.open_connector_specs`), or `None` for an agent with no
             out-of-process capability.
+        store: This process's memory store (`agent/scratchpad.memory_store`), or `None` for a turn
+            with no durable memory — which is every turn under the default configuration. A
+            parameter rather than something built here for the reason `checkpointer` is one:
+            creating it is `await`, and this builder is sync because all four of its callers are.
         response_format: A pydantic model the agent must finish by producing, surfaced on the
             returned state's `structured_response`. `None` — the conversational default — leaves the
             agent answering in prose. This exists for callers whose *whole* output is a datum rather
@@ -167,7 +174,11 @@ def build_langgraph_agent(
         actor=actor,
         sink=audit_sink,
     )
-    backend = skills_backend(prof, tools)
+    skills = skills_backend(prof, tools)
+    # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
+    # the filesystem tools must read the *same* backend object, or the role narrowing computed for
+    # one would not apply to the other.
+    backend = scratchpad_backend(skills, store)
     return create_agent(
         model=model if model is not None else build_chat_model(),
         # The skills read tool is agent-scoped rather than a `@tool` in the process registry,
@@ -178,11 +189,17 @@ def build_langgraph_agent(
         # applies `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
         # `open_connector_specs` returns only what a reachable server actually advertised. An
         # unreachable one contributes nothing here, which is the degradation the turn survives.
-        tools=[*tools, *(connectors or []), skill_read_tool(backend)],
+        tools=[*tools, *(connectors or [])],
         system_prompt=instructions_for(prof),
         state_schema=ChemclawState,
         middleware=[
             *_harness_middleware(prof),
+            # Ahead of the skills middleware because the skills prompt tells the model to read a
+            # `SKILL.md` with `read_file`, and this is what registers it. It also brings the
+            # scratchpad verbs and — the part that matters for a research turn — the eviction of
+            # oversized tool results to the backend, which is strictly better than compaction's
+            # placeholder because the evidence stays readable at a path instead of being dropped.
+            FilesystemMiddleware(backend=backend, tools=list(scratchpad_tools())),
             _skills_middleware(backend),
             *tool_call_middleware(audit, prof),
             # Above the compaction group so that group keeps the innermost position its own

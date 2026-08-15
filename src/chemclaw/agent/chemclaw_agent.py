@@ -42,7 +42,7 @@ from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.skill_backend import SKILL_READ_TOOL
+from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.connectors.registry import (
     connector_tool_names,
     endpoint_tool_names,
@@ -327,19 +327,21 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
 
 
 def skill_tool_names() -> set[str]:
-    """The tools an agent gains by having skills attached.
+    """The filesystem tools an agent gains from having a backend attached.
 
-    One name now. It was four while both engines were live — the previous framework's three
-    skills-provider constants unioned with this one — because the callers are validators asking a
-    deployment-wide question ("does anything provide this name?"), and branching would have made
-    `make prose-validate` pass or fail depending on which engine happened to be configured.
+    **This used to be one name and is now six**, because the hand-written `read_file` was replaced
+    by upstream's `FilesystemMiddleware` — which registers the whole scratchpad surface, not just
+    the verb the skills prompt asks for. Every one of those names has to be answered for here, since
+    four validators read this set to decide whether a reference in a `SKILL.md`, a step template, a
+    profile or the agent's own prose names a tool that exists.
 
-    Read off `skill_backend`'s own constant rather than spelled out here, so a rename becomes a
-    changed value instead of a silently stale allow-list. D-117 is why that is worth the care:
-    three validators once unioned only two of the four name spaces, so a correct reference to a
-    real tool failed validation.
+    Read off the middleware rather than spelled out, so an upstream rename becomes a changed value
+    instead of a silently stale allow-list. D-117 is why that is worth the care: three validators
+    once unioned only two of the then-four name spaces, so a correct reference to a real tool failed
+    validation. `scratchpad_tools` is also where `execute` and `delete` are withheld, so a verb this
+    deployment refuses never enters the set a validator will accept.
     """
-    return {SKILL_READ_TOOL}
+    return set(scratchpad_tools())
 
 
 def harness_tool_names() -> set[str]:

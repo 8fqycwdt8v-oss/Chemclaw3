@@ -86,6 +86,19 @@ class AgentSettings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
+    # and the default is about *data* rather than about the code being unproven: enabling it
+    # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a
+    # place that outlives the session. A deployment should decide that, not inherit it.
+    #
+    # With it off, a turn still gets `/scratch/` — the graph-state scratchpad that makes a
+    # multi-source research turn possible — and simply has no `/memories/` route. The two are
+    # separate capabilities and only the durable half needs a decision.
+    #
+    # It is also inert without an actor: no ambient identity means no namespace, and a memory
+    # written under a shared prefix would be one nobody can erase and everybody can read
+    # (`agent/scratchpad.memory_namespace`).
+    agent_memory_enabled: bool = False
     # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
     # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
     # (architektur.md §7), not this. Because Entra enforcement defaults off in dev

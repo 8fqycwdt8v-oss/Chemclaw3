@@ -38,6 +38,7 @@ from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_c
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
@@ -279,6 +280,7 @@ async def run_turn(
                 correlation_id=correlation_id,
                 connectors=turn_tools,
                 checkpointer=await _turn_checkpointer(),
+                store=await _turn_store(),
             )
             # `turn_config`, not a bare `configurable`: it also carries the graph's step ceiling,
             # which nothing here had ever chosen — `create_agent` bakes 9999, and reaching it raises
@@ -596,6 +598,28 @@ async def _turn_checkpointer() -> Any:
     if settings.session_store != "postgres":
         return None
     return await checkpointer()
+
+
+async def _turn_store() -> Any:
+    """This turn's durable memory store, or `None` where the deployment keeps none.
+
+    Two gates, both necessary and neither redundant. `agent_memory_enabled` is the deployment's
+    decision that agent-authored files may outlive a session at all; `session_store` is the same
+    condition `_turn_checkpointer` reads, because the store shares the checkpointer's pool and a
+    process on the in-memory store has no Postgres to put one in. Building it here rather than in
+    `build_langgraph_agent` is what keeps that builder synchronous — the same seam the checkpointer
+    already uses.
+
+    The *third* gate is not here and that is deliberate: whether the turn has an actor is decided by
+    `scratchpad_backend`, because that is where the namespace is computed and an actorless memory is
+    one nobody could erase.
+
+    Returns:
+        A ready `AsyncPostgresStore`, or `None` for a turn with a scratchpad but no memory.
+    """
+    if not settings.agent_memory_enabled or settings.session_store != "postgres":
+        return None
+    return await memory_store()
 
 
 async def _durable_subsystem_reachable() -> bool:

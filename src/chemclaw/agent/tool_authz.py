@@ -144,6 +144,45 @@ def returned_failure_detail(message: ToolMessage) -> str:
     return message.text[:_FAILURE_CHARS]
 
 
+def answered_failure(message: ToolMessage) -> ToolMessage:
+    """The same returned failure, minus the flag a provider reads as "retry this".
+
+    **The policy `_refusal_message` states held on two of the three tool kinds and was inverted on
+    the third.** An in-process tool and a job tool both fail by *raising*, so both converters answer
+    the model with `_refusal_message` — which is deliberately not `status="error"`, because that
+    reaches Anthropic as `is_error` on the tool_result block and invites exactly the retry a
+    deliberately-worded refusal exists to prevent. An MCP tool never raises: the adapter converts an
+    `isError=True` result inside `StructuredTool.ainvoke` and *returns*
+    `ToolMessage(status="error")` (see `agent/audit.returned_failure`). So the one kind that carries
+    most domain refusals — a connector is where a bad SMILES, a molecule outside a model's domain or
+    an offline instrument is diagnosed — was the one kind sending the retry flag.
+
+    The words are kept verbatim rather than re-worded. They are the server's own sentence about what
+    went wrong, already narrowed to a caller-safe family by `connectors/server.py`'s tool-error
+    sanitizer, and replacing them with a classification nobody made is the mistake
+    `returned_failure_detail` refuses for the same text on the way to the transcript.
+
+    **Only what the model reads changes, and that is the whole reason this sits where it does.**
+    Every reader that records the call as a failure is *inside* this converter and has already run
+    by the time it returns: the audit trail books `outcome="error"` (`agent/audit.py`) and the
+    chemist's transcript gets its failure signal (`announce_tool_failures`). Clearing the flag any
+    lower — at the MCP seam, where `langchain_mcp_adapters` offers a `ToolCallInterceptor` that
+    could rewrite the `CallToolResult` before it is ever converted — would hide the failure from
+    both of them and re-open the defect they were built to close. A refusal is an answer to the
+    model and still a failure in the record.
+
+    One reader downstream does change, and it is named here rather than left to be discovered:
+    `api/graph_stream.py` decides "this call is not a result, so it must not become evidence" from
+    the same `status` field, so a connector failure now reaches the trace the way an in-process
+    domain refusal already does — as a `tool_result` beside the `tool_failed`. That is the
+    inconsistency being removed rather than a new one: the exclusion never applied to the two kinds
+    that raise, because both of their converters answer with a `_refusal_message` whose status is
+    `"success"`. A status-independent test of "did this call fail" belongs in that module, which
+    already sees the turn's failure signals.
+    """
+    return message.model_copy(update={"status": "success"})
+
+
 def unexpected_error_result() -> str:
     """What the model is told when a tool raised something outside the two safe families.
 
@@ -264,9 +303,17 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
 
     `BaseException` is not caught: `CancelledError` is how a disconnect and the turn deadline
     arrive, and converting one into a tool result would swallow the cancellation.
+
+    **And a tool can fail without raising at all**, which is why this converter also inspects what
+    came back. A connector's failure arrives as a returned `ToolMessage(status="error")`, so
+    catching exceptions converted nothing for exactly the tools that run out of process — they were
+    the one kind still handing the provider the retry flag (`answered_failure`). Both ways to fail
+    end in the same place for the same reason: this is the one converter that answers the model
+    about a *failed tool call*, and which side of the call the failure was signalled on is a
+    property of the tool's transport, not of what the model should read.
     """
     try:
-        return await handler(request)
+        result = await handler(request)
     except (ChemclawError, SubsystemUnavailableError) as exc:
         return _refusal_message(request, domain_error_result(exc))
     except AuthorizationError:
@@ -276,6 +323,8 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
     except Exception:
         logger.exception("tool %s raised an unhandled error", request.tool_call["name"])
         return _refusal_message(request, unexpected_error_result())
+    failed = returned_failure(result)
+    return result if failed is None else answered_failure(failed)
 
 
 @wrap_tool_call
