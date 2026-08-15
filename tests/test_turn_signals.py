@@ -38,7 +38,7 @@ class _SignallingAgent(ScriptedTurn):
         self._jobs = jobs
         self._proposals = proposals
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         yield "thinking"
         for job_id, kind in self._jobs:
             record_job_started(job_id, kind)

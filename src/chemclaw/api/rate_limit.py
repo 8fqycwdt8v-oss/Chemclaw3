@@ -71,7 +71,17 @@ class RequestLimiter:
     """
 
     def __init__(self, *, per_minute: float, burst: float, max_principals: int) -> None:
-        """Configure the refill rate, the ceiling, and how many principals to remember."""
+        """Configure the refill rate, the ceiling, and how many principals to remember.
+
+        Raises:
+            ValueError: When `per_minute` is not positive. A zero rate makes the retry-after
+                arithmetic in `check` a division by zero — reached only after the bucket drains, so
+                it would surface as a 500 on the `burst`-th request rather than at construction.
+                "Unlimited" is the caller's decision not to build a limiter at all, which is what
+                `enforce_request_budget` already does; it is not a rate this class can express.
+        """
+        if per_minute <= 0:
+            raise ValueError(f"per_minute must be > 0, got {per_minute}; do not build a limiter")
         self._rate = per_minute / 60.0
         self._burst = burst
         self._buckets: BoundedLru[str, _Bucket] = BoundedLru(max_principals)

@@ -41,8 +41,8 @@ def test_the_queues_do_not_overlap() -> None:
     where the overlap could actually appear, because a bundle module that forgot `bundle_queue`
     and wrote `"background"` would silently ask core's worker to serve its heavy closure.
     """
-    import chemclaw.connectors.bo.worker  # noqa: F401 — registration
-    import chemclaw.connectors.calc.worker  # noqa: F401 — registration
+    import chemclaw.connectors.bo.worker
+    import chemclaw.connectors.calc.worker
     import chemclaw.connectors.qm.worker  # noqa: F401 — registration
     from chemclaw.connectors.queues import bundle_queue
     from chemclaw.connectors.registry import discovered

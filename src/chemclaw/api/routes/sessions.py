@@ -17,8 +17,7 @@ from chemclaw.agent.attachments import (
     AttachmentUnavailable,
     parse_attachment_off_loop,
 )
-from chemclaw.agent.profile_discovery import load_profiles
-from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.session import TurnSession
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
@@ -192,8 +191,23 @@ async def profiles(
     `POST /sessions` accepts a `profile` and 400s an unknown one, and nothing exposed the list —
     so a surface had to hardcode names that live in files it cannot see, and a deployment adding
     a profile had no way to make it discoverable.
+
+    **The registry, not `load_profiles()`, and that is the fix rather than a preference.** This
+    route used to return `sorted(p.name for p in load_profiles())`, and `load_profiles` returns
+    only what *it* newly registered — a profile already in the registry is skipped (see its own
+    docstring). `api/app._lifespan` registers every file profile before the front door serves its
+    first request, so by the time any caller reaches this route there is nothing left to register
+    and the answer was `[]`, in every deployment, on every call. Measured: first call seven names,
+    second call none. The route shipped doing exactly nothing it was written for, and the test that
+    should have caught it asserted only that the response was a sorted list — which `[]` is.
+
+    Reading the registry is also what makes this route safe to serve: `load_profiles()` does a
+    `glob` + `read_text` + `yaml.safe_load` per file, synchronously, and this is an `async def` on
+    a front door pinned to one uvicorn worker — the hazard the attachment route in this same module
+    was fixed for. The registry answer is in memory, already sorted, and includes `default`, which
+    is a real profile a caller may pass and which no file declares.
     """
-    return sorted(profile.name for profile in load_profiles())
+    return registered_profile_names()
 
 
 def register(app: FastAPI) -> None:

@@ -134,10 +134,30 @@ def test_profiles_are_discoverable(client: TestClient) -> None:
 
     So a surface had to hardcode names that live in files it cannot see, and a deployment adding a
     profile had no way to make it reachable.
+
+    **Asserting a *name*, because the shape assertion passed while the route was empty.** This test
+    used to check only `isinstance(names, list)` and `names == sorted(names)`, both of which are
+    true of `[]` — and `[]` is exactly what the route returned in every deployment, because it
+    called `load_profiles()`, which reports only what it newly registered, after the lifespan had
+    already registered everything. `default` is the one name that must always be there: it is a
+    profile a caller may pass, it is registered without a file, and no discovery order can drop it.
     """
     names = client.get("/profiles").json()
     assert isinstance(names, list)
     assert names == sorted(names)
+    assert "default" in names
+
+
+def test_profiles_answers_the_same_list_on_the_second_call(client: TestClient) -> None:
+    """The route is a read, so asking twice answers twice — the defect above, from the other side.
+
+    A registry read is idempotent; the discovery call it replaced was idempotent only in its
+    *effect*, not in its return value, which is the whole of the bug.
+    """
+    first = client.get("/profiles").json()
+    second = client.get("/profiles").json()
+    assert first == second
+    assert first, "the profile list is never empty — `default` is always registered"
 
 
 # --- the error taxonomy ---------------------------------------------------------------------

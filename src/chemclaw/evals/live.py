@@ -396,7 +396,7 @@ async def session_tokens(session_id: str) -> TurnTokens | None:
         # declared Postgres consumer (`tests/test_third_party_layering.py`) for an exception type,
         # which is a layering statement this harness has no business making — it reads one table
         # through `core.db`, the package that owns the pool.
-        except Exception as exc:  # noqa: BLE001 - a probe run must not die because the ledger is
+        except Exception as exc:
             logger.warning("cannot reach the cost ledger for session %s: %s", session_id, exc)
             return None
         if row is not None and int(row[0]):

@@ -76,6 +76,13 @@ from chemclaw.science.bo.problem import (
     point_in_domain,
 )
 
+# How many rejection-sampling rounds `initial_candidates` will spend per requested point before it
+# gives up. A sampler drawing from a feasible domain needs one round; the allowance is for a domain
+# whose exclusion constraints make feasible points rare. Not a setting: it is not a quantity a
+# deployment tunes, it is the difference between "slow" and "wedged forever" (the loop had no bound
+# at all, and the inline `suggest_next_experiment` path has no Temporal budget above it).
+_SEED_DRAW_ROUNDS = 8
+
 
 class SurrogateFitError(ChemclawError):
     """BoFire's Bayesian strategy could not fit or query its surrogate (Science-4).
@@ -348,14 +355,32 @@ def initial_candidates(
             )
         # Re-ask until `n` distinct points are collected; each ask advances the
         # strategy's RNG, and n <= space guarantees enough fresh points exist.
+        #
+        # **Bounded, because "they exist" is not "they arrive".** `n <= space` says the distinct
+        # points are *in* the domain; it says nothing about how many draws a rejection sampler needs
+        # to find them, and `_exclusion` puts `CategoricalExcludeConstraint`s on this domain, so the
+        # feasible region can be a small fraction of the enumerated space. An `ask` that returns
+        # nothing at all made this spin forever — and on the inline `suggest_next_experiment` path
+        # there is no Temporal budget above it to notice, only a wedged worker. The bound is
+        # generous (a well-behaved sampler needs one round) and the refusal names what it got, in
+        # the shape `_require_fresh_points_exist` uses one function below.
         candidates: list[Candidate] = []
         seen: set[tuple[tuple[str, ParamValue], ...]] = set()
-        while len(candidates) < n:
+        for _attempt in range(max(_SEED_DRAW_ROUNDS, _SEED_DRAW_ROUNDS * n)):
+            if len(candidates) >= n:
+                return candidates
             for candidate in _frame_to_candidates(problem, strategy.ask(n - len(candidates))):
                 key = params_key(candidate.params)
                 if key not in seen:
                     seen.add(key)
                     candidates.append(candidate)
+        if len(candidates) < n:
+            raise ValueError(
+                f"cannot seed {n} distinct points: the sampler returned only {len(candidates)} "
+                f"distinct of the {space} the discrete space enumerates, after "
+                f"{max(_SEED_DRAW_ROUNDS, _SEED_DRAW_ROUNDS * n)} rounds — the domain's exclusion "
+                "constraints may leave too few feasible points. Seed fewer points, or relax them."
+            )
         return candidates
 
 

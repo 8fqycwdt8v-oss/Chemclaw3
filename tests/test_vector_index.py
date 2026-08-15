@@ -383,7 +383,7 @@ def test_reindex_incremental_against_postgres_embeds_only_the_change(
         assert second == 0
         assert calls["texts"] == 0
 
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)  # let the mtime advance without blocking the loop
         _write_note(tmp_path, "pg-note-a", "alpha body, edited")
         calls["texts"] = 0
         third = await reindex_notes(index, notes_dir=str(tmp_path))

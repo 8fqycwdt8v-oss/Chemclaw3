@@ -345,4 +345,5 @@ and is kept only for reservations that were in flight when this changed.
 
 | [D-2026-08-14-the-coupling-is-the-cost-not-the-line-count](D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md) | What upstream already does, what it still does not, and the shapes this repository reads that it was never promised |
 | [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) | GxP framing and the audit hash chain are removed; the trail, the gates and the INSERT-only grant stay |
+| [D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major](D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md) | The dependency bump: openai 3 and starlette 1.6 taken with httpx2 beside httpx, and the `mcp<2` cap kept |
 | [D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped](D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped.md) | The runaway cap returns to a first-party `before_model` hook, and the four regressions delegating it produced |

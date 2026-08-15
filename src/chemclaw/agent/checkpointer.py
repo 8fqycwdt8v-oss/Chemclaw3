@@ -92,6 +92,7 @@ these checkpoints as unstamped rather than as a mismatch, and this build reads t
 checkpoints the same way.
 """
 
+import asyncio
 import logging
 from typing import Any, cast, get_origin, get_type_hints
 
@@ -116,6 +117,36 @@ logger = logging.getLogger(__name__)
 
 _saver: AsyncPostgresSaver | None = None
 _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
+
+# Guards the two lazy initializations below, which are each a check-then-*await*-then-act.
+#
+# **Publishing before the await is what made this a race rather than a style question.** Both
+# `checkpointer()` and `_checkpoint_pool()` assigned their global *before* awaiting the work that
+# makes the object usable — `setup()`'s ten migrations, and `pool.open()`. A second turn arriving
+# inside either await saw a non-`None` global and got a saver whose tables do not exist yet, or a
+# pool that is not open: `relation "checkpoints" does not exist` on a cold start with traffic,
+# which is every deploy of a two-replica chart, since `api/runner._turn_checkpointer()` is awaited
+# once per turn.
+#
+# Created lazily rather than at import, for the reason the saver itself is: `asyncio.Lock` binds to
+# the running loop, and this module is imported by processes (Temporal workers, the CLI) that build
+# their loop later or never. `close_checkpointer` drops it with the pool so the next loop gets its
+# own.
+_init_lock: asyncio.Lock | None = None
+
+
+def _initialization_lock() -> asyncio.Lock:
+    """The current loop's initialization lock, created on first use.
+
+    Not a race itself: this is called from coroutines, so it runs on the single thread of one event
+    loop and cannot be interleaved before the assignment — there is no `await` between the check
+    and the store.
+    """
+    global _init_lock
+    if _init_lock is None:
+        _init_lock = asyncio.Lock()
+    return _init_lock
+
 
 # The tables `AsyncPostgresSaver.setup()` creates. Named here because two other things need the
 # list and neither can derive it: the erasure sweep (`agent/leaver.py`) has to delete a departing
@@ -298,14 +329,23 @@ async def checkpointer() -> AsyncPostgresSaver:
     `process_checkpointer` falls back to cannot be resumed by a different schema at all, since it
     dies with the process that declared one.
 
+    **Published only once it is usable, under `_init_lock`.** The assignment used to happen before
+    `setup()` was awaited, so a concurrent second turn saw a non-`None` global and got a saver whose
+    migrations had not run — see the lock's own comment. A ready saver is returned without taking
+    the lock at all, so the steady-state cost is one `is None` check.
+
     Returns:
         A ready saver over this process's checkpointer pool.
     """
     global _saver
-    if _saver is None:
-        _saver = SchemaStampedSaver(await _checkpoint_pool())
-        await _saver.setup()
-        logger.info("checkpointer ready (%d tables)", len(CHECKPOINT_TABLES))
+    if _saver is not None:
+        return _saver
+    async with _initialization_lock():
+        if _saver is None:
+            saver = SchemaStampedSaver(await _checkpoint_pool())
+            await saver.setup()
+            _saver = saver
+            logger.info("checkpointer ready")
     return _saver
 
 
@@ -315,17 +355,24 @@ async def _checkpoint_pool() -> Any:
     `min_size=0` because a process that never takes a turn (a Temporal worker running calculations)
     should not hold connections open for a checkpointer it will not use, and the pool fills on
     demand.
+
+    **Called only from `checkpointer()`, which already holds `_init_lock` — so this takes no lock
+    of its own**, and must not: `asyncio.Lock` is not reentrant and a second acquire here would
+    deadlock the first turn of every process. The global is nevertheless published only after
+    `open()` returns, so the ordering is right on its own terms rather than by inheritance from
+    its one caller.
     """
     global _pool
     if _pool is None:
-        _pool = AsyncConnectionPool(
+        pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
             conninfo=_session_dsn(),
             kwargs={"autocommit": True, "connect_timeout": settings.pg_connect_timeout_seconds},
             min_size=0,
             max_size=settings.pg_pool_max_size,
             open=False,
         )
-        await _pool.open()
+        await pool.open()
+        _pool = pool
     return _pool
 
 
@@ -344,8 +391,12 @@ async def close_checkpointer() -> None:
     the alternative is every caller remembering which loop opened the pool. The connections are
     released with their dead loop either way, so there is nothing left to leak.
     """
-    global _saver, _pool
+    global _saver, _pool, _init_lock
     _saver = None
+    # Dropped with the pool for the same reason the saver is: an `asyncio.Lock` belongs to the loop
+    # it was created in, so a lock kept across `close_checkpointer` would be one the next loop's
+    # first caller waits on forever.
+    _init_lock = None
     pool, _pool = _pool, None
     if pool is None:
         return

@@ -197,7 +197,7 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
     class _Turn(ScriptedTurn):
         """One token, so the turn really runs and really finishes."""
 
-        async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             yield "ok"
 
     async def _drive() -> None:

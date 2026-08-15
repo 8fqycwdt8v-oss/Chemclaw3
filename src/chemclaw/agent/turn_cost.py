@@ -119,7 +119,7 @@ def record_turn_cost(cost: TurnCost) -> None:
     async def _write() -> None:
         try:
             await sink.record(cost)
-        except Exception:  # noqa: BLE001 - telemetry must never escalate into the turn's teardown
+        except Exception:
             degraded(
                 logger,
                 "cost_ledger",

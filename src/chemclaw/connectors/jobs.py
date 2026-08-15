@@ -401,7 +401,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             # the matching `job_completed` event, and the surface would show a row that stays
             # "running" forever.
             return workflow_id
-        except Exception as exc:  # noqa: BLE001 - any launch fault means the same thing here
+        except Exception as exc:
             # `connect()` above already frames the broker being unreachable; this is the
             # remaining gap the 2026-08-02 incident exposed one call later — a task queue with no
             # worker registered, a transient RPC timeout, a payload serialization error — all of

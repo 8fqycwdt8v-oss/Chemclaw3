@@ -39,6 +39,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
 from starlette.applications import Starlette
@@ -60,10 +61,24 @@ class _QuietServer(uvicorn.Server):
     `should_exit`, so a SIGTERM would tear down the probe surface and leave the worker polling —
     the pod would go unprobeable at exactly the moment Kubernetes had decided to drain it. The
     worker owns the shutdown; this server stops when its context manager exits.
+
+    It also carries `bound`, an event set the moment the port is accepting. uvicorn's own `started`
+    flag is set at the same point but is only a flag, so the caller had to poll it every 10 ms —
+    an approximation of the thing that had already happened. An event is the thing itself.
     """
+
+    def __init__(self, config: uvicorn.Config) -> None:
+        """Build the server and the event that says its socket is up."""
+        super().__init__(config)
+        self.bound = asyncio.Event()
 
     def install_signal_handlers(self) -> None:
         """Install none, deliberately (see the class docstring)."""
+
+    async def startup(self, sockets: list[Any] | None = None) -> None:
+        """Bind as uvicorn does, then announce it — this is where `started` is set."""
+        await super().startup(sockets=sockets)
+        self.bound.set()
 
 
 def _build_app(component: str, ready: Callable[[], bool]) -> Starlette:
@@ -138,8 +153,16 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
         # `serve()` binds before it starts accepting, and a probe arriving in that window would be
         # a connection refused that reads as a dead pod. Waiting for the flag is bounded by the
         # bind itself; if it fails, the task raises and the wait ends with it.
-        while not server.started and not serving.done():
-            await asyncio.sleep(0.01)
+        #
+        # Waited on as an *event* rather than polled every 10 ms: uvicorn's `Server` already sets
+        # `started` inside its startup, and `_QuietServer` signals `bound` at the same moment, so
+        # there is a thing to wait for and the poll was only ever an approximation of it. `wait` on
+        # both means a failed bind — where `bound` is never set — ends the wait through `serving`
+        # instead of hanging.
+        await asyncio.wait(
+            [asyncio.ensure_future(server.bound.wait()), serving],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
         if serving.done():  # the bind failed - surface it rather than run unobservable
             await serving
         logger.info(

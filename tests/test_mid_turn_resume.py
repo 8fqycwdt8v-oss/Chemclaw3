@@ -35,7 +35,7 @@ class _JobLaunchingAgent(ScriptedTurn):
         self._job_id = job_id
         self.messages: list[str] = []
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         self.messages.append(message)
         if len(self.messages) == 1:
             record_job_started(self._job_id, "qm")
@@ -150,9 +150,7 @@ def test_a_turn_that_starts_no_job_never_waits(
     class _PlainAgent(ScriptedTurn):
         """A turn that answers without launching anything."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             yield "an answer"
 
     _events(_PlainAgent())
@@ -220,9 +218,7 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
         def __init__(self) -> None:
             self.messages: list[str] = []
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             self.messages.append(message)
             index = len(self.messages)
             record_job_started(f"qm-{index}", "qm")

@@ -19,6 +19,7 @@ made MAF's own `header_provider` look usable (see `chemclaw.connectors.identity`
 """
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -39,6 +40,7 @@ from chemclaw.connectors.identity import (
     turn_identity_hook,
 )
 from chemclaw.connectors.manifest import BearerAuth, NoAuth
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -386,7 +388,67 @@ def test_a_mode_none_bundle_resolves_to_no_auth(monkeypatch: pytest.MonkeyPatch)
     from chemclaw.connectors.server import _declared_bearer_env
 
     assert _declared_bearer_env("molfp") is None
+
+
+def test_a_shipped_bundle_that_discovery_missed_is_unresolved_not_unguarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bundle that ships a manifest this process did not discover must refuse, not open.
+
+    The *likelier* half of what the unreadable-manifest test above closes. A raise failed closed;
+    a `discovered()` that simply comes back without this bundle in it fell through to "no
+    credential required" and served the whole `/mcp` surface anonymously. Nothing has to be corrupt
+    for that — a `connectors_dir` pointing elsewhere, or an operator's prepended override directory
+    shadowing the tree, both parse perfectly well — and the deployment goes on recording the pod as
+    credential-gated, which is what makes the open answer worse than an outage.
+
+    Driven by pointing `connectors_dir` at an empty directory, which is the misconfiguration
+    itself rather than a stand-in for it.
+    """
+    from chemclaw.connectors.registry import discovered
+    from chemclaw.connectors.server import _UNRESOLVED_AUTH, _declared_bearer_env
+
+    monkeypatch.setattr(settings, "connectors_dir", str(tmp_path))
+    discovered.cache_clear()
+    try:
+        assert _declared_bearer_env("molfp") == _UNRESOLVED_AUTH
+    finally:
+        discovered.cache_clear()
+
+
+def test_an_app_no_bundle_backs_is_not_refused() -> None:
+    """Undiscovered is not undeclared — a synthetic app stays open, and that is the boundary.
+
+    `connector_app` serves apps no bundle backs at all: every transport and identity test builds
+    one. Nothing was declared for those names, so there is no promise to betray and no token
+    anybody could present — failing closed there would only mean "fail closed always", which the
+    `mode: none` test above exists to prevent.
+    """
+    from chemclaw.connectors.server import _declared_bearer_env
+
     assert _declared_bearer_env("not-a-bundle") is None
+
+
+def test_an_unresolved_connector_recovers_without_a_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_declared` caches a resolved answer, never the fail-closed sentinel.
+
+    `_declared_bearer_env` promises the connector "answers 401 until an operator fixes the
+    manifest". Latching `_resolved` unconditionally made that "…and restarts the pod", because the
+    middleware never asked again — so the remedy the log line names did not work.
+    """
+    from chemclaw.connectors.server import _UNRESOLVED_AUTH, BearerAuthMiddleware
+
+    answers = iter([_UNRESOLVED_AUTH, None])
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env", lambda name: next(answers)
+    )
+    middleware = BearerAuthMiddleware(app=None, connector="probe")
+
+    assert middleware._declared() == _UNRESOLVED_AUTH, "the first read is unresolved"
+    assert middleware._declared() is None, "the fix is picked up without a restart"
+    assert middleware._declared() is None, "and the resolved answer is then kept"
 
 
 def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(

@@ -48,9 +48,26 @@ async def apply_grants(dsn: str | None = None) -> list[str]:
     Idempotent by construction — each file revokes what it is about to grant, so re-running
     converges rather than accumulating. Nothing is tracked in `schema_migrations`, deliberately:
     tracking would reintroduce exactly the run-once semantics this step exists to avoid.
+
+    **An empty directory is an error, not a successful no-op.** This step runs on every deploy and
+    its whole purpose is the reconciliation the module docstring describes; finding no files means
+    the directory is missing or `sql_migrations_dir` points somewhere else, and the deploy then
+    continued with a role holding whatever privileges it happened to have — the exact failure this
+    exists to prevent, reported as success and exiting 0. `chemclaw.core.migrate` cannot no-op
+    silently because it tracks by checksum; this one has nothing to compare against, so the count
+    is the only signal there is.
+
+    Raises:
+        RuntimeError: When no grant file was found, naming the directory that was searched.
     """
     target = dsn if dsn is not None else migration_dsn()
     paths = grant_files()
+    if not paths:
+        raise RuntimeError(
+            f"no grant files in {Path(settings.sql_migrations_dir) / GRANTS_SUBDIR} — the runtime "
+            "role's privileges were not reconciled. Check sql_migrations_dir and that the grants "
+            "directory ships in this image."
+        )
     sources = await asyncio.to_thread(lambda: [(p.name, p.read_text()) for p in paths])
     async with await connect(target) as conn:
         for _name, text in sources:
@@ -60,5 +77,7 @@ async def apply_grants(dsn: str | None = None) -> list[str]:
 
 
 if __name__ == "__main__":
-    names = asyncio.run(apply_grants())
-    print(f"applied grants: {', '.join(names) or '(none — no grant files)'}")
+    # No `or '(none)'` fallback any more: `apply_grants` raises rather than returning an empty list,
+    # so this line only ever prints files that were actually applied. The friendly parenthetical it
+    # used to print was the deploy's only sign that nothing had been reconciled, and it exited 0.
+    print(f"applied grants: {', '.join(asyncio.run(apply_grants()))}")

@@ -380,7 +380,11 @@ class TurnReview(BaseModel):
 
 
 async def score_answer(
-    answer: str, tool_outputs: Sequence[str], tools_called: Sequence[str] = ()
+    answer: str,
+    tool_outputs: Sequence[str],
+    tools_called: Sequence[str] = (),
+    *,
+    evidence: list[EvidenceChunk] | None = None,
 ) -> TurnReview:
     """Run whichever honesty checks this deployment enabled, and combine them into one verdict.
 
@@ -407,6 +411,9 @@ async def score_answer(
         answer: The finished answer text.
         tool_outputs: What this turn's tools returned, untruncated.
         tools_called: Every tool this turn invoked, for the promised-but-uncalled scan.
+        evidence: The turn's evidence, when the caller has already built it — passed through to
+            `verify_turn_answer` so a caller that needs it for its own purposes does not pay for
+            the same derivation twice. Derived here when omitted, which is the runner's case.
 
     Returns:
         The verdict. Never raises: a check that fails flags the answer rather than sinking the turn.
@@ -414,7 +421,7 @@ async def score_answer(
     review = TurnReview()
     if settings.verifier_enabled:
         try:
-            result = await verify_turn_answer(answer, tool_outputs)
+            result = await verify_turn_answer(answer, tool_outputs, evidence=evidence)
         except Exception:
             logger.exception("answer verification crashed; routing the turn to review")
             review.unsupported = ["verification did not run"]
@@ -509,15 +516,25 @@ def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChun
 
 
 async def verify_turn_answer(
-    answer: str, tool_outputs: Sequence[str], *, client: Any | None = None
+    answer: str,
+    tool_outputs: Sequence[str],
+    *,
+    client: Any | None = None,
+    evidence: list[EvidenceChunk] | None = None,
 ) -> VerificationResult:
     """Verify a conversational turn's final answer against what that turn's tools returned.
 
     The runner's entry point (F10-B2). Kept separate from `verify_answer` so the report path (which
     holds a section's evidence already) and the chat path (which must derive it from the turn's tool
     results) share the one scoring core without either re-deriving the other's input.
+
+    `evidence` is that same argument one caller further out: `agent/challenge_gate.py` needs the
+    turn's evidence for its briefs *and* scores the answer, so without this it built the identical
+    value twice — measured at 14 ms per build on the ~20 kB / 40-citation shape `turn_evidence`
+    documents, on the answer hot path. Omitted, it is derived here as before.
     """
-    return await verify_answer(answer, turn_evidence(answer, tool_outputs), client=client)
+    chunks = evidence if evidence is not None else turn_evidence(answer, tool_outputs)
+    return await verify_answer(answer, chunks, client=client)
 
 
 def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> list[str]:

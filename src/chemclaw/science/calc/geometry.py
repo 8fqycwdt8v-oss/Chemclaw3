@@ -212,5 +212,5 @@ async def record_optimization(
                 origin=origin.as_str(),
             ),
         )
-    except Exception:  # noqa: BLE001 — see the docstring
+    except Exception:
         logger.warning("could not record the best geometry for %s", subject.smiles, exc_info=True)

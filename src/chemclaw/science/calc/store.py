@@ -401,7 +401,7 @@ async def run_cached_with_artifacts(
     if not was_cached and captured:
         try:
             await put_all(artifacts, key.as_str(), captured, compute_seconds=elapsed)
-        except Exception:  # noqa: BLE001 — see below
+        except Exception:
             # An artifact is a by-product: losing it costs a future recomputation, while
             # propagating this would discard a calculation that already succeeded and is already
             # in the result store. The failure is logged loudly rather than raised, which is the

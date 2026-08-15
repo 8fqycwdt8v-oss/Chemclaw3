@@ -109,7 +109,7 @@ class _EchoSessionAgent(ScriptedTurn):
         """The one non-streaming method the front door calls on an agent."""
         return TurnSession(session_id=session_id)
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         yield get_current_session_id() or "NONE"
 
 

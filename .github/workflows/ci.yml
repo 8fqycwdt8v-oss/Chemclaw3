@@ -21,8 +21,15 @@ on:
 permissions:
   contents: read
 
+# Keyed on the *branch*, not on `github.ref`, and that is a cost fix rather than a style one. Both
+# triggers above fire for a branch with an open pull request, and their refs differ
+# (`refs/heads/x` versus `refs/pull/N/merge`), so every PR ran this whole gate twice — ~4m40s and a
+# Postgres service container, duplicated, on every push to every PR branch. `head_ref` is the branch
+# name on a `pull_request` event and empty otherwise, so this collapses both events onto one key and
+# `cancel-in-progress` drops the loser. The branch-push trigger stays, because a push before the PR
+# exists is exactly the case `deps-audit` was moved here to cover.
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
+  group: "${{ github.workflow }}-${{ github.head_ref || github.ref_name }}"
   cancel-in-progress: true
 
 jobs:
@@ -66,8 +73,12 @@ jobs:
           python-version: "3.11"
           enable-cache: true
 
+      # `--locked`, so a `pyproject.toml` edit that was never locked fails here instead of being
+      # silently re-resolved: CI would otherwise test a dependency set that exists nowhere else,
+      # and `uv.lock` — which is what the image and every developer install use — would go stale
+      # without any gate noticing.
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Apply database migrations
         run: make db-migrate

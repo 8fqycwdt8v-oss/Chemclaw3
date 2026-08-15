@@ -99,7 +99,7 @@ async def _cancel_mid_turn(
 class _EndlessAgent(ScriptedTurn):
     """An agent whose turn never finishes on its own — so only cancellation ends the stream."""
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         while True:
             yield Chunk("tok", output_tokens=10)
             # A suspension point per chunk, so the consumer is scheduled between them. Under MAF
@@ -123,7 +123,7 @@ class _StatePoisoningAgent(ScriptedTurn):
         """Poison `session`'s stored thread when the turn starts streaming."""
         self._session = session
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         messages = self._session.state.setdefault("messages", [])
         messages.append({"role": "assistant", "tool_use_id": "call_1"})
         while True:
@@ -140,7 +140,7 @@ class _AnsweringAgent(ScriptedTurn):
     tests drive the *real* write path rather than a hand-placed imitation of it.
     """
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         yield Chunk("the ", output_tokens=5)
         yield Chunk("answer", output_tokens=5)
 
@@ -180,7 +180,7 @@ class _StallingAgent(ScriptedTurn):
         self._updates = updates
         self._poison = poison
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         if self._poison:
             # The shape of the real failure (ISSUE-B-10): a `tool_use` block whose
             # `tool_result` never arrives, because the client left in between.
@@ -540,7 +540,7 @@ class _StateWritingAgent(ScriptedTurn):
         """Advance `session`'s state as the turn streams."""
         self._session = session
 
-    async def stream(self, message: str) -> AsyncIterator[Piece]:  # noqa: D102 - see the base class
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
         self._session.state["todos"] = ["done"]
         yield Chunk("the ", output_tokens=5)
         yield Chunk("answer", output_tokens=5)
@@ -610,9 +610,7 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
     class _JobAgent(_StateWritingAgent):
         """A state-writing agent whose turn also launched a durable job, so the wait runs."""
 
-        async def stream(  # noqa: D102 - see `ScriptedTurn`
-            self, message: str
-        ) -> AsyncIterator[Piece]:
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
             record_job_started("job-slow", "qm")
             async for piece in super().stream(message):
                 yield piece

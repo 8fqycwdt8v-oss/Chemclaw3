@@ -140,3 +140,44 @@ def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
 
     monkeypatch.setattr(settings, "llm_stream_usage", False)
     assert _openai_compatible_model("m").stream_usage is False
+
+
+def test_the_private_ca_client_is_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A graph is compiled per turn, so an uncached client factory is a per-turn socket leak.
+
+    `build_chat_model` runs on every graph build, and on the `openai_compatible` + private-CA
+    path — the documented production target — it reaches `_tls_http_client`. Uncached, that built a
+    fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing ever
+    closed one. The verifier and challenge clients already pay `@cache` for exactly this on colder
+    paths; this was the hot one.
+    """
+    import certifi
+
+    from chemclaw.agent.llm_provider import _tls_http_client
+
+    _tls_http_client.cache_clear()
+    # A real PEM, because httpx loads the bundle when the client is constructed — a made-up path
+    # would fail in `ssl` before reaching the property under test. Which trust store it is does not
+    # matter here; that it is a store the client accepts does.
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", certifi.where())
+    try:
+        first = _tls_http_client()
+        assert first is not None, "a configured bundle must produce a pinned client"
+        assert _tls_http_client() is first, "a second turn must reuse the process's client"
+    finally:
+        _tls_http_client.cache_clear()
+
+
+def test_no_bundle_leaves_the_sdk_its_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the cache: caching must not turn "no bundle" into a client.
+
+    A publicly-trusted endpoint wants the SDK's own default, which is what `None` asks for.
+    """
+    from chemclaw.agent.llm_provider import _tls_http_client
+
+    _tls_http_client.cache_clear()
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", "")
+    try:
+        assert _tls_http_client() is None
+    finally:
+        _tls_http_client.cache_clear()
