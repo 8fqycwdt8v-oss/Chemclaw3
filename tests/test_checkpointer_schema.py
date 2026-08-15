@@ -256,7 +256,7 @@ def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s
         f"the stamp covers upstream channels {sorted(declared & upstream)}, so a langchain bump "
         "that touches one of them would refuse every live thread"
     )
-    assert declared >= {"model_calls", "loop_capped"}, (
+    assert declared >= {"loop_capped"}, (
         "the stamp covers none of the channels this repository declares, so it refuses nothing"
     )
     assert declared < set(get_type_hints(ChemclawState, include_extras=True))
@@ -351,7 +351,7 @@ def test_a_thread_that_never_held_a_channel_this_build_declares_is_refused_by_na
     message = str(asyncio.run(_run()))
     assert "sess-channel-added" in message, "the refusal does not say which session is affected"
     assert "retrieved_notes" in message, "the refusal does not name the channel that is missing"
-    assert "model_calls" in message, "the refusal does not say what the thread does hold"
+    assert "loop_capped" in message, "the refusal does not say what the thread does hold"
     assert "Start a new session" in message, "the refusal names no remedy, so it is not actionable"
 
 

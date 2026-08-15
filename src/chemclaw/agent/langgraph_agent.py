@@ -53,13 +53,14 @@ advertising a mechanism after the mechanism is gone.
 
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, NotRequired
 
 from deepagents.backends import CompositeBackend, StateBackend
-from deepagents.middleware.skills import SkillsMiddleware
+from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
-from langchain_core.runnables import RunnableConfig
+from langchain.agents.middleware.types import PrivateStateAttr
+from langgraph.channels.untracked_value import UntrackedValue
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
 # D-075, D-086 among them) and merged ADRs are never edited, so renaming it to mark this second
@@ -232,6 +233,26 @@ def build_langgraph_agent(
     )
 
 
+class ReloadingSkillsState(SkillsState):
+    """`SkillsState` with its cached listing moved to a channel the checkpointer cannot restore.
+
+    One redeclared field, and it is the whole reloading mechanism. Upstream annotates
+    `skills_metadata` with `PrivateStateAttr` only, so it resolves to a checkpointed `LastValue`;
+    `UntrackedValue` is never written to a checkpoint (`checkpoint()` returns `MISSING`), so the
+    key is absent at the start of every run of the graph and upstream's own
+    `if "skills_metadata" in state: return None` short-circuit simply does not fire.
+
+    Measured over three turns on one thread, counting whether the key was already in state when
+    `before_agent` ran: `[False, True, True]` on upstream's channel and `[False, False, False]` on
+    this one.
+
+    The same mechanism `ChemclawState.loop_capped` uses, and for the same reason: "per turn" is a
+    property of the channel, not of a caller who remembers to clear it.
+    """
+
+    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]
+
+
 class ReloadingSkillsMiddleware(SkillsMiddleware):
     """`SkillsMiddleware` that re-narrows its listing every turn instead of caching it.
 
@@ -239,15 +260,19 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
     state — "from a prior turn or checkpointed session", as its own docstring says. That is a sound
     cache for a fixed skills tree and wrong for a narrowed one: the role gate reads the turn's
     ambient identity, so a listing computed for one caller would be served to the next, and a
-    mid-session role change would keep advertising skills the caller no longer holds. The MAF path
-    never had the problem — `RoleScopedSkillsSource._permits` is consulted on every `get_skills` —
-    so reloading is what makes the two engines agree, not an optimisation given up.
+    mid-session role change would keep advertising skills the caller no longer holds.
 
-    **Why a subclass and not a `before_agent` hook that clears the slot.** That was the first
-    attempt and it was worse than the bug: a state update of `{"skills_metadata": None}` leaves the
-    *key* present, so the upstream check still short-circuited and the prompt rendered an empty
-    list — measured, 28 skills on turn one and 0 on every turn after. Hiding the key from the
-    state this method reads is the only version that actually reaches the load.
+    **The whole subclass is one state field, and that is the point.** Two earlier versions were
+    hooks. The first cleared the slot from `before_agent` and was worse than the bug — a state
+    update of `{"skills_metadata": None}` leaves the *key* present, so the check still
+    short-circuited and the prompt rendered an empty list (measured: 28 skills on turn one, 0 on
+    every turn after). The second overrode `before_agent`/`abefore_agent` to hide the key from the
+    state upstream reads, which worked and bound this file to the *arity* LangChain invokes the
+    hook with — it had to default a third argument because the framework passed two where
+    deepagents' own signature declared three. That is a dependency on somebody else's calling
+    convention, and it is exactly the kind that breaks on a bump without failing loudly.
+    Redeclaring the channel depends only on the field's name, which `tests/test_upstream_surface.py`
+    pins.
 
     **This is a staleness fix, not the gate.** `NarrowedSkillsBackend` refuses the *read* on every
     call regardless, so a stale listing could at worst advertise a skill whose body then came back
@@ -255,34 +280,7 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
     your skills" is entitled to.
     """
 
-    def before_agent(self, state: Any, runtime: Any, config: RunnableConfig | None = None) -> Any:
-        """Reload against this turn's identity (sync path)."""
-        return super().before_agent(
-            _without_cached_skills(state), runtime, config or RunnableConfig()
-        )
-
-    async def abefore_agent(
-        self, state: Any, runtime: Any, config: RunnableConfig | None = None
-    ) -> Any:
-        """Reload against this turn's identity (async path — the one a turn actually takes).
-
-        `config` is defaulted because LangChain invokes the hook with two arguments, not the three
-        upstream's own signature declares — measured, from the `TypeError` the three-argument
-        override raised on the first run. Forwarding `{}` rather than `None` keeps the upstream
-        backend resolution on the path it expects.
-        """
-        return await super().abefore_agent(
-            _without_cached_skills(state), runtime, config or RunnableConfig()
-        )
-
-
-def _without_cached_skills(state: Any) -> Any:
-    """`state` minus its cached skill listing, so the upstream load is not skipped.
-
-    A copy rather than a mutation: the state belongs to the graph, and removing a key from it for
-    real would be a side effect on everything downstream rather than on one method's view.
-    """
-    return {key: value for key, value in state.items() if key != "skills_metadata"}
+    state_schema = ReloadingSkillsState
 
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
@@ -293,8 +291,9 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     the other while both are live — a safer difference, but a difference.
 
     `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
-    record. One counter for one number — see its docstring for why the framework's own
-    `ModelCallLimitMiddleware` could not supply the observation half.
+    record. One counter for one number — and it counts in `before_model` deliberately: see
+    `agent/loop_cap.py` for the four regressions that delegating it to `ModelCallLimitMiddleware`
+    produced, the first of which is that an `after_model` counter is skippable by a jump.
     """
     if not harness_enabled_for(profile):
         return []

@@ -177,7 +177,9 @@ not binding.**
   different reason.
 - **17.2** a boundary between autonomous and reviewed work — the PR-gate is real and binding for
   *knowledge notes*. Nothing gates a drafted document.
-- **17.3** an audit trail — genuinely hash-chained and verified by `make audit-verify`. But
+- **17.3** an audit trail — genuinely append-only, by a database grant that withholds UPDATE and
+  DELETE from the application. It is not tamper-*evident*: the hash chain that made alteration
+  detectable was removed (D-2026-08-14), so a database owner could still edit a row. And
   `AuditEvent.purpose` is deliberately unpopulated, so the trail records *what* and not *why*.
 - **17.4** role-based access — `authorize_tool` gates **tool names**, not data. `_eligible_notes`
   filters only on arguments the model itself supplies. There is one shared corpus (a recorded

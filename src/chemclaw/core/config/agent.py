@@ -152,11 +152,21 @@ class AgentSettings(BaseSettings):
     # **A superstep is not a model call, which is why this is a multiplier.** One model/tool round
     # trip is several graph nodes — the model node, the tools node, and one per hook-bearing
     # middleware. Measured by binary search on the minimal limit that completes N calls: `2N + 1`
-    # on a bare agent and with the harness off, `4N + 1` with the harness on. **Approximate on
+    # on a bare agent and with the harness off, `4N + 3` with the harness on. **Approximate on
     # purpose**: the constant is the middleware *count*, so adding a middleware moves it, and a
     # number with no headroom turns "we added a middleware" into "long turns started failing". 6 is
-    # the measured 4 with 50% headroom, and still bounds a runaway to ~25 model calls at the
+    # the measured 4 with headroom, and still bounds a runaway to ~25 model calls at the
     # default cap rather than ~2,500.
+    #
+    # **That sentence about headroom is not decoration — it was tested by accident.** M14 briefly
+    # put the runaway cap on `ModelCallLimitMiddleware`, which also declares `after_model`; that one
+    # extra node took the real cost to `5N + 3`, and the ceiling's constant was `+ 1` at the time,
+    # which granted exactly 7 where a one-iteration turn then needed 8. The multiplier's headroom
+    # absorbed it at every cap except the smallest. The cap swap is reverted, so the cost is `4N +
+    # 3`
+    # again — but the constant stays at 3 rather than going back to 1, because the whole lesson is
+    # that a ceiling sized to the exact requirement fails the first time anyone adds a node.
+    # Re-measure the multiplier and the constant together, never one alone.
     #
     # An earlier draft of this reasoning used 1.83, taken from counting streamed `updates` events.
     # Those are node updates, not supersteps; a ceiling derived from it would sit *below* what a
@@ -233,12 +243,24 @@ class AgentSettings(BaseSettings):
         follow it would either fire first — discarding an answer the cap would have let out — or
         never fire at all, which is what `create_agent`'s baked 9999 does today.
 
-        `+ 1` is measured, not decorative: the minimal working limit is `k*N + 1`, the one superstep
-        before the loop is entered.
+        `+ 3` is measured, not decorative: the minimal working limit is `4*N + 3` on the real graph
+        (measured cap 1 → 7, cap 2 → 11, cap 3 → 15), the 3 being the supersteps outside the loop —
+        `before_agent` (the skills listing), the entry, and the one the stopping jump costs.
 
-        At the shipped defaults this is `25 * 6 + 1 = 151`, against the 101 a 25-iteration harness
+        **The constant is 3 rather than the 1 it was, and the reason is a near miss.** At a cap of 1
+        the old formula granted `1 * 6 + 1 = 7` against a requirement of 7 — it fitted, with **zero
+        margin**. When M14 briefly
+        moved the cap onto `ModelCallLimitMiddleware` the requirement became `5N + 3 = 8` and a
+        one-iteration harness turn died with `GraphRecursionError` — the failure this ceiling exists
+        to avoid, since it discards the partial answer the cap would have let out. Only the smallest
+        cap was affected. The swap is reverted; the margin stays, because a ceiling that fits
+        exactly
+        is one node away from being wrong. Re-measure this with `agent_supersteps_per_model_call`,
+        never on its own.
+
+        At the shipped defaults this is `25 * 6 + 3 = 153`, against the 103 a 25-iteration harness
         turn actually needs — so the cap fires first with headroom to spare, which is the intent.
         The ceiling should never be what stops a harness turn; it is what stops a turn that has no
-        cap, because `enforce_loop_cap` is attached only when the harness is on.
+        cap, because the loop cap is attached only when the harness is on.
         """
-        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 1
+        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 3

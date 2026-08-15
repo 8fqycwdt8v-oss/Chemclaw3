@@ -265,19 +265,30 @@ def test_the_runner_serves_a_whole_turn_on_the_graph_engine(
     assert "token" in kinds
 
 
-def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
-    """Both records agree that the cap fired — the wiring that was missing.
+@pytest.mark.parametrize("cap", [1, 2, 3])
+@pytest.mark.parametrize("jumping_after_model", [False, True])
+def test_the_cap_stops_the_loop_at_exactly_its_limit(
+    cap: int, jumping_after_model: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model runs exactly `cap` times, and both records say the cap fired.
 
-    `chemclaw.api.runner` decides whether to emit `loop_cap_reached` and increment
-    `chemclaw_turn_loop_caps_total` by calling `loop_hit_cap()`, which reads the ambient watch.
-    Nothing wrote it: the graph kept its count in `model_calls`, which a streaming driver never
-    reads back. So a capped turn was externally identical to a finished one — the exact defect
-    `enforce_loop_cap` was written to fix, reintroduced one layer up.
+    **Asserted against a compiled graph, not against the hook.** That is the module's own lesson:
+    the hook counted correctly, decided correctly and returned `{"jump_to": "end"}` while the graph
+    looped on regardless, because `before_model`'s conditional edge is built from the hook's
+    `can_jump_to` declaration. A unit test on the hook passed throughout.
 
-    Driven at a cap of 1 because that is the value the inference this replaced was blind at, and
-    asserted on **both** records: the state count `loop_capped` reads, and the watch the runner
-    reads. Before the fix the first held and the second did not, which is precisely how it hid.
+    **`jumping_after_model` is the case that sent the delegation to upstream back.** M14 replaced
+    this hook with a `ModelCallLimitMiddleware` subclass, which counts in `after_model`; hooks there
+    run in reverse list order, so a gate jumping to `model` ran first and short-circuited the
+    increment — measured then at 2, 3, 4, 5 model calls for 0, 1, 2, 3 revision rounds against a cap
+    of 2. `agent/challenge_gate.py` is exactly such a gate. Counting in `before_model` is what makes
+    the count unskippable, and this parameter is what proves it: the version of this test that
+    attached no other `after_model` middleware could not see the defect at all.
     """
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import after_model, wrap_model_call
+    from langchain_core.tools import tool
+
     from chemclaw.agent.loop_cap import (
         begin_loop_watch,
         end_loop_watch,
@@ -285,35 +296,71 @@ def test_the_cap_marks_the_watch_the_runner_actually_reads() -> None:
         loop_capped,
         loop_hit_cap,
     )
+    from chemclaw.agent.state import ChemclawState
     from chemclaw.core.config import settings
 
-    original = settings.harness_max_loop_iterations
-    settings.harness_max_loop_iterations = 1
+    # The hook reads the limit from config rather than taking one, so the case has to set it.
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
+
+    calls = {"n": 0}
+    jumps = {"left": 2 if jumping_after_model else 0}
+
+    @wrap_model_call
+    def _count(request: Any, handler: Any) -> Any:
+        """Count the calls that actually reach the model — a jump to `end` skips this."""
+        calls["n"] += 1
+        return handler(request)
+
+    @after_model(can_jump_to=["model"])
+    def _revise(state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Stand in for the challenge gate: jump back to the model a bounded number of times."""
+        if jumps["left"] <= 0:
+            return None
+        jumps["left"] -= 1
+        return {"jump_to": "model"}
+
+    @tool
+    def spin() -> str:
+        """A tool that always invites another round, so only the cap can stop the loop."""
+        return "again"
+
+    middleware: list[Any] = [enforce_loop_cap, _count]
+    if jumping_after_model:
+        # *After* the cap in the list, which is where `build_langgraph_agent` puts the challenge
+        # gate — `_harness_middleware` first, `_challenge_middleware` after it. `after_model` hooks
+        # run in reverse list order, so this one runs *first* and its jump short-circuits everything
+        # behind it. That is the arrangement that skipped an `after_model` counter's increment;
+        # getting it the other way round reproduces nothing, which is worth knowing.
+        middleware.append(_revise)
+
+    graph = create_agent(
+        model=ScriptedChatModel(script=[{"name": "spin", "args": {}} for _ in range(cap + 20)]),
+        tools=[spin],
+        state_schema=ChemclawState,
+        middleware=cast(Any, middleware),
+    )
+
     token = begin_loop_watch()
     try:
         assert not loop_hit_cap(), "the watch starts unmarked"
-        # `@before_model` wraps it in a middleware object, so the hook is what runs per call.
-        first = enforce_loop_cap.before_model(cast(Any, {"model_calls": 0}), cast(Any, None))
-        assert first == {"model_calls": 1}, "the first model call is not a cap"
-        assert not loop_hit_cap(), "counting is not capping"
-
-        capped = enforce_loop_cap.before_model(cast(Any, {"model_calls": 1}), cast(Any, None))
-        assert capped == {"jump_to": "end", "loop_capped": True}, capped
-        # The *flag*, not the count. The stopping branch does not increment, so a capped turn and
-        # one that spent its last allowed call and finished both end at exactly the cap — a
-        # comparison on `model_calls` cannot tell them apart in either direction.
-        assert loop_capped(capped), "the state record missed the cap"
-        assert not loop_capped({"model_calls": 1}), "a finished turn at the cap read as capped"
+        final = graph.invoke(
+            cast(Any, {"messages": [("user", "go")]}), cast(Any, {"recursion_limit": 200})
+        )
+        assert calls["n"] == cap, (
+            f"the loop ran {calls['n']} model calls against a cap of {cap}"
+            + (" — an after_model jump skipped the count" if jumping_after_model else "")
+        )
+        assert loop_capped(final), "the state record missed the cap"
         assert loop_hit_cap(), "the cap fired but the runner's own reader never saw it"
+        assert not loop_capped({}), "an unmarked state read as capped"
     finally:
         end_loop_watch(token)
-        settings.harness_max_loop_iterations = original
 
 
 def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """**The test the unit test could not be.** A decision is not a guard until it is connected.
 
-    `enforce_loop_cap` counted correctly, decided correctly, and returned `{"jump_to": "end"}` on
+    The first-party cap counted correctly, decided correctly, and returned `{"jump_to": "end"}` on
     every call past the limit — and the loop kept going, because `before_model`'s conditional edge
     is built from the hook's `can_jump_to` declaration and there was none. Measured at a cap of 1:
     the hook fired five times, said "end" four times, and four further model/tool round-trips

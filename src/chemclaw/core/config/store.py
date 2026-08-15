@@ -28,7 +28,7 @@ class StoreSettings(BaseSettings):
     # Why it is worth splitting: `infra/sql/006` calls `audit_events` "append-only by contract",
     # and one DSN with full DDL and DML was mounted on every pod, so the credential running a chat
     # turn could rewrite the audit trail recording that turn. Only a privilege boundary prevents
-    # only a privilege boundary prevents it. This DSN belongs on the migration hook Job and
+    # that. This DSN belongs on the migration hook Job and
     # nowhere else — it is mounted for the seconds a release takes, not for the life of a pod.
     postgres_migration_dsn: str = ""
     # The ordered `.sql` migrations `chemclaw.core.migrate` applies. A setting rather than

@@ -182,7 +182,8 @@ def _run_against_recorder(monkeypatch: pytest.MonkeyPatch) -> _RecordingConnecti
 def test_migrators_are_serialized_by_an_advisory_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two migrators running at once had nothing stopping them from interleaving DDL.
 
-    `agent/audit_store.py` takes exactly this lock to keep two appends from forking the hash chain
+    `agent/audit_store.py` took exactly this lock to keep two appends from forking its hash chain
+    (both are gone as of D-2026-08-14; DDL still races, so this one stays)
     (`infra/sql/011`), which is what made the absence conspicuous: the audit writer serialized its
     *inserts* and the migrator did not serialize its *DDL*. Transaction-scoped, so the single commit
     at the end of the run releases it and there is no path that leaks it.

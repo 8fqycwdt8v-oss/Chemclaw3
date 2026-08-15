@@ -12,10 +12,10 @@ substitution into `…/chemclaw.durable.py`, a filename that never existed anywh
 cannot see prose and neither can `ruff`, so the tree was fully green while its own map pointed at
 nothing, which is the worst state for a document whose only job is to orient someone.
 
-Seven other declarations in this repository are guarded against the live surface — `kg-validate`,
-`skill-validate`, `connector-validate`, `template-validate`, `prose-validate`, `eln-validate`,
-`audit-verify`. This class had no guard, which is exactly why it drifted through a rename in
-silence. This is that guard (D-149).
+Six other declarations in this repository are guarded against the live surface — `kg-validate`,
+`skill-validate`, `connector-validate`, `template-validate`, `prose-validate`, `eln-validate`. This
+class had no guard, which is exactly why it drifted through a rename in silence. This is that guard
+(D-149).
 
 **Scope, and why it is drawn here.** Only backticked paths ending in `.py` are checked, and only
 under `src/` and `tests/`. A backtick is the repository's own marker for "this is a name, not

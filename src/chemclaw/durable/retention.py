@@ -106,7 +106,8 @@ logger = logging.getLogger(__name__)
 # that outran the retention window — a QM/HPC run, exactly what this channel exists for — lost its
 # completion, the session waited on it forever, and the harness "awaiting job" todo never flipped.
 # It also destroyed the `system-audit-integrity` and `system-eval-drift` alerts, which by
-# construction are never consumed, so retention silently deleted the tamper evidence.
+# construction are never consumed, so retention silently deleted the evidence. (The first channel
+# retired with the audit chain's verifier; the argument stands on the second.)
 #
 # `tool_result_blobs` carries the bare `TRUE` because there is nothing to qualify: every row is a
 # trace blob and every trace blob past its window may go. Its link rows are not listed separately

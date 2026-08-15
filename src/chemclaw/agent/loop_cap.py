@@ -92,12 +92,44 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     """Count this turn's model calls and end the run when it reaches the cap.
 
     **Why a counter here rather than `ModelCallLimitMiddleware`.** That middleware enforces exactly
-    this, and using it was the first attempt. It keeps two counts — `thread_model_call_count`, which
-    persists, and `run_model_call_count`, which does not — and the one that matches a *turn* is the
-    run count. Measured against a checkpointed session, the final state carries the thread count and
-    no run count at all, so "was this turn capped" was unanswerable from it. Enforcing with that
-    middleware and counting again here would have meant two counters for one number; enforcing here
-    means one number that is both the limit and the record.
+    this, and delegating to it has now been tried twice. The first reason was observability: it
+    keeps
+    `thread_model_call_count` (persisted) and `run_model_call_count` (not), and both carry
+    `PrivateStateAttr`, so neither is readable from what a finished run returns — "was this turn
+    capped" was unanswerable from it.
+
+    **The second attempt subclassed it to add that record, shipped, and was reverted for four
+    regressions no amount of recording fixes.** All four come from where upstream increments, or
+    from what its channels are:
+
+    1. **The increment is skippable.** Upstream counts in `after_model`. `after_model` hooks run in
+       reverse list order, so `challenge_gate.challenge_answer` — `@after_model(can_jump_to=[...])`
+       —
+       runs first, and its `jump_to: "model"` short-circuits the rest of the chain including the
+       increment. Measured at cap 2: 2, 3, 4, 5 model calls for 0, 1, 2, 3 revision rounds, with
+       `run_model_call_count` observed as `[0, 0, 0]` across three real calls. `before_model` runs
+       before the model regardless of what any later hook decides, so it cannot be skipped.
+    2. **`exit_behavior="end"` fabricates an assistant message.** Upstream returns
+       `{"jump_to": "end", "messages": [AIMessage("Model call limits exceeded: ...")]}`.
+       `cli/chat.py`
+       prints `messages[-1].content`, so a capped CLI turn printed the limit string *instead of* the
+       partial answer — the exact outcome this module's own docstring rejects. `SubAgentMiddleware`
+       builds a specialist's report from the last non-empty `AIMessage`, so a capped specialist
+       reported the limit string and dropped its work. And `messages` is checkpointed, so the
+       fabricated turn is replayed into the model's context forever. This hook emits no message.
+    3. **The team's budget silently became per-specialist.** `model_calls` is `UntrackedValue` and
+       *not* private, so it crosses into and out of a subagent and one budget spans the team.
+       Upstream's counter is `PrivateStateAttr`, which `SubAgentMiddleware` strips both ways, so
+       every specialist started at 0 — a five-specialist turn's ceiling went from ~N to ~6N.
+    4. **`thread_model_call_count` is a `LastValue`**, i.e. checkpointed. Subclassing put a
+       monotonically growing int nothing reads, resets or prunes into every session's checkpoint,
+       and shrank the first-party channel stamp — which makes an old pod refuse a thread a new pod
+       has written, during a rolling deploy.
+
+    The general finding, recorded so the third attempt does not have to rediscover it:
+    **`ModelCallLimitMiddleware` is unsafe to compose with any middleware that jumps from
+    `after_model`.** Reconsider only if upstream moves the increment to `before_model` or exposes a
+    non-message exit.
 
     That is the whole point. The cap this replaced fired inside the framework's own loop where
     nothing could observe it, so a capped turn was externally identical to a finished one and

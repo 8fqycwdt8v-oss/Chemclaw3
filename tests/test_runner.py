@@ -239,7 +239,7 @@ class _PlanClearingAgent(ScriptedTurn):
 class _CappedLoopAgent(ScriptedTurn):
     """An agent whose loop still wanted another iteration when it stopped — a capped turn.
 
-    Calls `record_loop_cap`, which is what `enforce_loop_cap` calls when it fires, rather than
+    Calls `record_loop_cap`, which is what the loop cap calls when it fires, rather than
     poking
     the contextvar: what the runner then reads is what a genuinely capped loop leaves behind. That
     the real cap calls it is pinned in `tests/test_langgraph_stream.py`; this is the front-door
