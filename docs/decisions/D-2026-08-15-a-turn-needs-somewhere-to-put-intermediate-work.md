@@ -67,16 +67,29 @@ walks the AST of every module under `src/chemclaw` and fails on a store write th
 call.
 
 **Not `create_deep_agent`, yet.** The middleware is composed by hand onto the existing
-`create_agent`, because `create_deep_agent` returns a `RunnableBinding` (it ends
-`.with_config({"recursion_limit": 9_999, …})`) whose `.bound` must be taken before anything can
-call `aget_state`, it does not install `TodoListMiddleware` for Anthropic models, its
-`_apply_custom_middleware` splices by `.name` — so `ReloadingSkillsMiddleware` would be appended
-beside upstream's rather than replacing it — and it auto-inserts a general-purpose subagent holding
-every tool with none of this repository's middleware. Each is answerable; none is answerable in the
-change that introduces the backend. The consequence recorded here is that `permissions=` is public
-API only through `create_deep_agent`, so `filesystem_permissions()` is written and **not yet
-enforced by upstream** — the write refusal on `/skills/` currently comes from
-`NarrowedSkillsBackend`, which is where D-2026-08-10 put it and where it is load-bearing anyway.
+`create_agent`, because `create_deep_agent` does not install `TodoListMiddleware` for Anthropic
+models, its `_apply_custom_middleware` splices by `.name` — so `ReloadingSkillsMiddleware` would be
+appended beside upstream's rather than replacing it — and it auto-inserts a general-purpose
+subagent holding every tool with none of this repository's middleware. Each is answerable; none is
+answerable in the change that introduces the backend.
+
+> **Correction (same day).** This paragraph first claimed `create_deep_agent` returns a
+> `RunnableBinding` whose `.bound` must be taken before `aget_state` is reachable. That is false.
+> It ends `.with_config(...)`, but `Pregel.with_config` returns `Self` — a *copy of the graph* —
+> so the return is a `CompiledStateGraph` and `aget_state` is present. The error was checking a
+> proxy for the claim (does the source call `.with_config`?) instead of the claim (what type comes
+> back?), which is the same shape as every other defect this tree has recorded from believing
+> prose over measurement.
+>
+> A fifth hazard was found in its place and is real: **`SubAgentMiddleware` cannot be excluded** —
+> `_apply_excluded_middleware` raises rather than let a `HarnessProfile` strip it — so adopting
+> `create_deep_agent` always registers the `task` tool, which makes the swap a decision about
+> subagents rather than only about middleware composition.
+
+The consequence recorded here is that `permissions=` is public API only through
+`create_deep_agent`, so `filesystem_permissions()` is written and **not yet enforced by upstream** —
+the write refusal on `/skills/` currently comes from `NarrowedSkillsBackend`, which is where
+D-2026-08-10 put it and where it is load-bearing anyway.
 
 ## Consequences
 
