@@ -311,7 +311,15 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
     entries = _values()["connectors"]
     for name in discovered():
         assert name in entries, f"connector bundle {name!r} has no entry in values.yaml connectors"
-        assert "enabled" in entries[name] and "replicas" in entries[name]
+        assert "enabled" in entries[name]
+        # `replicas` only for a bundle this release actually runs. A `url:` entry renders no
+        # Deployment and no Service by design (`deployment-connectors.yaml` gates on
+        # `and $cfg.server (not $cfg.url)`), so a replica count on one would declare a number of
+        # pods that never exist — the kind of value a reader would later try to tune. The half of
+        # this test that still applies to it is the half above: it must have an entry, because an
+        # entry is how the address reaches `chemclaw.connectorUrls`.
+        if not entries[name].get("url"):
+            assert "replicas" in entries[name]
 
 
 def test_an_externally_hosted_connector_gets_no_pods_and_no_service() -> None:
