@@ -202,6 +202,46 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         del messages[:cut]
 
 
+def disabled_summarizer(model: Any, backend: Any) -> Any:
+    """Upstream's summarizer, constructed switched off — it arrives whether or not we want it.
+
+    **This exists because the declination above stopped being free.** While the middleware list was
+    hand-assembled, "no summarizer" was expressed by not importing one. `create_deep_agent` composes
+    a `SummarizationMiddleware` unconditionally, so the same decision now has to be *made* rather
+    than merely not unmade — and an argument this repository has held since D-025 must not be
+    reversed by an upstream default nobody chose.
+
+    The argument is unchanged and the deepagents variant does not escape it. That variant genuinely
+    answers half of it: evicted messages are written to a path the summary embeds, so the evidence
+    stays readable instead of being dropped, and `state["messages"]` is left intact. What it cannot
+    answer is the other half. `agent/framing.py` wraps untrusted tool output in an envelope that
+    marks it as untrusted, and a summary is *new prose written by the model over that content* —
+    the envelope does not survive it. So retrieved text that arrived flagged as external comes back
+    as unflagged narration, and is then re-read on every subsequent turn. That is an
+    indirect-prompt-injection surface pointed straight at the thread, and it is the one thing the
+    two deterministic edits below cannot become.
+
+    **`trigger=None` is upstream's own off state, not a large number standing in for one.**
+    `_should_summarize` opens with `if not self._trigger_clauses: return False`, so no clause means
+    it never fires — asserted in `tests/test_compaction.py` rather than read off that source once.
+    Constructed here and passed through `middleware=` so `_apply_custom_middleware` swaps it into
+    upstream's slot by name, which is the same mechanism `FilesystemMiddleware` uses and for the
+    same reason: the alternative, `HarnessProfile.excluded_middleware`, is resolved by the model's
+    self-reported provider and is silently skipped on a key miss.
+
+    Args:
+        model: The turn's resolved chat model. Required by the constructor and never called, since
+            the only thing that would call it is the summarization this disables.
+        backend: The turn's backend. Same: held for the offload path that cannot run.
+
+    Returns:
+        The middleware to hand `create_deep_agent(middleware=…)` in upstream's slot.
+    """
+    from langchain.agents.middleware.summarization import SummarizationMiddleware
+
+    return SummarizationMiddleware(model=model, backend=backend, trigger=None)
+
+
 def context_compaction_middleware() -> list[Any]:
     """The context policy, as the middleware list `build_langgraph_agent` splices in.
 

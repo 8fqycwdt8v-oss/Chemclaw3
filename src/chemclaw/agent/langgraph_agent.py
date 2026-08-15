@@ -84,7 +84,7 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     instructions_for,
 )
-from chemclaw.agent.compaction import context_compaction_middleware
+from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
 from chemclaw.agent.loop_cap import loop_cap_middleware
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -213,7 +213,7 @@ def build_langgraph_agent(
         "tools": bound,
         "system_prompt": instructions_for(prof),
         "state_schema": ChemclawState,
-        "middleware": _middleware(prof, backend, audit),
+        "middleware": _middleware(prof, backend, audit, chat_model),
         "name": "chemclaw",
         "checkpointer": checkpointer,
         "response_format": response_format,
@@ -247,7 +247,9 @@ def build_langgraph_agent(
     )
 
 
-def _middleware(profile: AgentProfile, backend: CompositeBackend, audit: Any) -> list[Any]:
+def _middleware(
+    profile: AgentProfile, backend: CompositeBackend, audit: Any, model: Any
+) -> list[Any]:
     """What this repository adds to — and takes over from — upstream's assembled stack.
 
     **`_apply_custom_middleware` splices this list by `.name`, and both halves of that are used.**
@@ -278,6 +280,8 @@ def _middleware(profile: AgentProfile, backend: CompositeBackend, audit: Any) ->
         profile: The profile this agent was narrowed by.
         backend: The turn's composite backend — the *same* object the skills gate was computed for.
         audit: The audit middleware from `make_audit_middleware`.
+        model: The resolved chat model, needed only to construct the summarizer this list switches
+            off — upstream's constructor demands one for a code path that cannot run.
 
     Returns:
         The list to hand `create_deep_agent(middleware=…)`.
@@ -285,6 +289,11 @@ def _middleware(profile: AgentProfile, backend: CompositeBackend, audit: Any) ->
     return [
         *_harness_middleware(profile),
         FilesystemMiddleware(backend=backend, tools=list(scratchpad_tools())),
+        # The second replacement, and the one that would otherwise have arrived by default rather
+        # than by decision: `create_deep_agent` composes a summarizer unconditionally, and this
+        # deployment has declined one since D-025 on indirect-prompt-injection grounds that the
+        # deepagents variant answers only half of. `agent/compaction.py` carries the whole argument.
+        disabled_summarizer(model, backend),
         _skills_middleware(backend),
         *tool_call_middleware(audit, profile),
         # Provider-specific, so which middleware this is — or that it is none — is decided in the F0

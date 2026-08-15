@@ -137,20 +137,35 @@ READMEs and `docs/guides/runbook.md` for what is true today.
 
 ## Related repositories
 
-This repo is the backend/orchestration core. Two companion repos complete the system and are
-developed separately:
+This repo is the backend/orchestration core. **Three** companion repos complete the system and are
+developed separately. Work only within this family — `chemclaw` and `chemclaw2*` are earlier
+generations and are not in scope for any task here.
 
+- [`8fqycwdt8v-oss/Chemclaw3-mcp`](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp) — the MCP tool
+  fleet: one capability per server, one server per process, each with the `connector.yaml` this repo
+  picks up with no code change. Every server answers from data baked into its image and makes **no
+  outbound call at request time**.
 - [`8fqycwdt8v-oss/Chemclaw3_ui`](https://github.com/8fqycwdt8v-oss/Chemclaw3_ui) — the ChemClaw3
   frontend.
 - [`8fqycwdt8v-oss/Chemclaw3_mock`](https://github.com/8fqycwdt8v-oss/Chemclaw3_mock) — a mock
   server that stands in for external MCP tools and data sources, plus a mock HOC, so the system
   can be live-tested end-to-end without real integrations.
 
-If a task requires changing or fixing code that lives in `Chemclaw3_ui` or `Chemclaw3_mock`
-(not this repo), add that repo to the session (`add_repo`) and open a PR directly against it —
-do not proxy the change through this repo, and do not just describe the fix here and stop.
-Each repo gets its own branch/commit/PR, scoped to that repo's own conventions. Only pause to
-ask first if the required change is destructive, ambiguous, or outside what was asked.
+**Where a capability belongs.** This repo holds *infrastructure*: conversation orchestration, the
+knowledge graph, retrieval, memory, ingestion, identity and durable execution. Scientific capability
+— quantum chemistry, reaction prediction, property lookup, optimization — belongs in `Chemclaw3-mcp`
+as a server. The boundary within science is by *runtime*, not by subject: a request/response
+computation is a stateless MCP server there, while long-running orchestration (an HPC/Nextflow run,
+a multi-round campaign) stays a durable job here, because that repo's no-state promise is enforced
+rather than requested. `science/fingerprints` and `science/safety` stay here despite the name —
+retrieval, memory, ELN ingest and the knowledge-graph validator import them, which makes them
+infrastructure by this rule rather than exceptions to it.
+
+If a task requires changing or fixing code that lives in a companion repo (not this one), add that
+repo to the session (`add_repo`) and open a PR directly against it — do not proxy the change through
+this repo, and do not just describe the fix here and stop. Each repo gets its own branch/commit/PR,
+scoped to that repo's own conventions. Only pause to ask first if the required change is
+destructive, ambiguous, or outside what was asked.
 
 ## Architecture (the one thing to internalize)
 
