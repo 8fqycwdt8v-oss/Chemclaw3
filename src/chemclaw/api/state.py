@@ -364,7 +364,7 @@ class FrontDoorState:
         """Builds one turn's connectors for a profile — called per turn, never cached.
 
         What comes back is the engine's own representation rather than a fixed one: the choice is
-        made once, in `chemclaw.agent.chemclaw_agent.turn_connectors`, and `run_turn` opens
+        made once, in `chemclaw.agent.chemclaw_agent.connector_specs`, and `run_turn` opens
         whichever it is handed. This property is deliberately untyped beyond `list[Any]` for that
         reason — the two engines' connectors share no base class, and naming a union here would
         put a `maf` import in the front door's type surface.

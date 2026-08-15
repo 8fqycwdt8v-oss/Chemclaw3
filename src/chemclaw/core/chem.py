@@ -3,7 +3,7 @@
 `canonical_smiles` is the single structure-normalizing key used wherever two spellings of one
 molecule must collapse to one string — compound identity in the fingerprint index (ingestion),
 product↔reactant matching (chain detection), and every calculation cache / workflow-dedup key
-(D-011: compute once, never twice). It lived in `chemclaw.ingest.eln.chem` when only the ELN used
+(D-011: compute once, never twice). It lived in `chemclaw.core.chem` when only the ELN used
 it; it moved here once the compute cache and the QM workflow needed the same guarantee, so the
 canonicalization that decides "same molecule" exists in exactly one place (DRY).
 

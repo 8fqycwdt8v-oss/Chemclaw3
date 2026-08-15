@@ -71,9 +71,8 @@ def _drive(
 
     Only two things are substituted, and neither is on the path under test:
 
-    - `chemclaw.agent.langgraph_agent.build_chat_model`, the seam `tests/test_agent_team.py`
-      documents as the one to use precisely because patching it runs the *production* wiring rather
-      than a hand-assembled stand-in;
+    - `chemclaw.agent.llm_provider.build_chat_model`, the seam to patch precisely because doing
+      so runs the *production* wiring rather than a hand-assembled stand-in;
     - `open_connector_specs`, because no MCP server is running here — an unreachable connector
       contributes no tools at all, so a live-registry run would prove nothing about the connector
       half either way. The stand-in builds one tool per name each spec's allow-list *actually

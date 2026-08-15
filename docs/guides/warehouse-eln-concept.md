@@ -170,7 +170,8 @@ and the site's real binding are the whole remaining list.
 ## 8. What is still open
 
 **Per-user reads.** Everything here connects as a service identity, so warehouse-side row access
-control sees one principal. `src/chemclaw/agent/identity/obo.py` exists for exactly this and is
+control sees one principal. An on-behalf-of exchange is what that would need; it was built,
+never wired, and deleted in D-2026-08-15 — so this is
 dormant; wiring it needs a real tenant on both sides. Until then, the deployment's answer to "who may
 see which reactions" is the view named in the binding.
 

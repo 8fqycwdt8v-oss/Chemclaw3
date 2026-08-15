@@ -334,6 +334,25 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     compile that started dialing something, or rebuilt the skills tree per turn — not to police
     milliseconds. The measured figure is printed so a reader sees the real number, not only the
     bound.
+
+    **The bound was 270 ms and the `create_deep_agent` swap ate the headroom**, which showed up as
+    this test failing inside a full-suite run and passing alone — the shape that is usually
+    contention and this time was only half contention. Re-measured 2026-08-15:
+
+    - **160 ms** unloaded, against the ~90 ms baseline.
+    - **205 ms** with four cores saturated, which is what a full suite run looks like.
+    - **59 ms** of that 160 is a *second compiled graph*: `_subagents` builds the helper behind the
+      `task` tool through this same function, and it re-derives the profile's tools and walks the
+      skills trees again.
+
+    So the main graph is ~101 ms — essentially the old cost — and the helper is the new 59 ms. That
+    is not free and it is not negotiable: `SubAgentMiddleware` cannot be excluded, so the choice is
+    a helper this repository compiled or upstream's ungoverned one, and 59 ms against a median turn
+    of 17-142 s is ~0.3%. Sharing the parent's skills backend would recover most of it and is not
+    worth threading a parameter through for that.
+
+    The new bound is 400 ms: ~2.5x the unloaded figure and ~2x the contended one, still an order of
+    magnitude under a compile that started doing I/O per turn.
     """
     model = ScriptedChatModel(["ok"])
     build_langgraph_agent(model, audit_sink=NullAuditSink())  # warm discovery, as a live pod is
@@ -344,5 +363,8 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
         build_langgraph_agent(model, audit_sink=NullAuditSink())
     per_compile_ms = (time.perf_counter() - started) / rounds * 1000
 
-    assert per_compile_ms < 270, f"per-turn graph compile took {per_compile_ms:.0f} ms"
-    print(f"\nper-turn graph compile: {per_compile_ms:.0f} ms (prior agent build baseline ~90 ms)")
+    assert per_compile_ms < 400, f"per-turn graph compile took {per_compile_ms:.0f} ms"
+    print(
+        f"\nper-turn graph compile: {per_compile_ms:.0f} ms (~160 ms unloaded, of which ~59 ms "
+        "is the helper graph; prior agent build baseline ~90 ms)"
+    )

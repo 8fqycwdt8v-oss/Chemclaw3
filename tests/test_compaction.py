@@ -364,8 +364,9 @@ def test_the_observer_does_not_narrow_the_engine_it_reports_on() -> None:
     the base class raises `NotImplementedError` for the half it did not declare — so an observer
     with only `awrap_model_call` makes every `invoke()`/`stream()` fail while every async test
     passes. Measured before the fix: this call raised "Synchronous implementation of
-    wrap_model_call is not available", and the same graph without the observer answered.
-    `agent/team.py::_AttributedSpecialist.invoke` is the reachable caller.
+    wrap_model_call is not available", and the same graph without the observer answered. Nothing
+    in the tree calls the sync path today; deepagents' `task` tool carries a sync `func` beside its
+    coroutine, so a subagent reaches it the moment one exists.
     """
     # `_Recording` rather than patching `GenericFakeChatModel.bind_tools` onto the class: that
     # mutation outlives the test, and `pytest-randomly` means whichever test runs next with a bare
@@ -395,3 +396,41 @@ def test_the_prompt_names_the_placeholder_it_will_actually_see() -> None:
     quoted = "Earlier tool result dropped to stay inside this session's context budget"
     assert quoted in TOOL_RESULT_PLACEHOLDER, "the placeholder no longer contains the quoted phrase"
     assert quoted in _INSTRUCTIONS, "the instructions no longer quote the placeholder they license"
+
+
+def test_the_summarizer_in_the_compiled_stack_can_never_fire() -> None:
+    """The declination above, enforced against the stack that actually compiles.
+
+    **Why this test did not need to exist before.** While the middleware list was hand-assembled,
+    "no summarizer" was expressed by not importing one, and nothing could reintroduce it by
+    accident. `create_deep_agent` composes a `SummarizationMiddleware` unconditionally, so the
+    decision is now a *replacement* — `disabled_summarizer` occupies upstream's slot by sharing its
+    name — and a replacement that silently stopped replacing would restore a live summarizer with no
+    other symptom. The list in `tests/test_middleware_order.py` cannot see this: both instances
+    report the same `.name`, so only behaviour distinguishes them.
+
+    Asserted on the instance the compiled agent holds, reached the way that file reaches it, and on
+    `_should_summarize` rather than on the constructor argument: `trigger=None` is upstream's own
+    off state (`if not self._trigger_clauses: return False`), and reading the private list back
+    would assert the mechanism instead of the effect.
+    """
+    from langchain.agents import create_agent as real
+
+    captured: list[Any] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        captured.extend(kwargs.get("middleware", ()))
+        return real(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("deepagents.graph.create_agent", spy)
+        build_langgraph_agent(model=GenericFakeChatModel(messages=iter([AIMessage(content="ok")])))
+
+    summarizers = [m for m in captured if m.name == "SummarizationMiddleware"]
+    assert len(summarizers) == 1, f"expected one summarizer slot, found {len(summarizers)}"
+    huge = [HumanMessage(content="x" * 4_000) for _ in range(400)]
+    assert not summarizers[0]._should_summarize(huge, 1_000_000), (
+        "the compiled stack holds a live summarizer: upstream's default was not replaced, so "
+        "retrieved evidence will be rewritten as model prose and replayed as conversation with "
+        "agent/framing.py's untrusted-data envelope stripped off it"
+    )

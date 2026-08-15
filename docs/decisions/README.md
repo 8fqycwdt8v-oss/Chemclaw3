@@ -37,6 +37,152 @@ and is kept only for reservations that were in flight when this changed.
 
 `tests/test_decision_log.py` enforces all of the above.
 
+---
+
+## By topic — where the current decision on a subject is
+
+The table at the bottom is the *record*: every ADR, in the order it was written. It is not a way to
+find out what is true. With 300+ entries, "what does this system currently decide about retrieval?"
+was answerable only by reading every title and guessing, and a reader who guessed wrong landed on a
+decision two ADRs had since replaced.
+
+This table is the reader's entry point. One row per subject that has **more than one** ADR; the
+middle column is what to read now, the right column is what that decision absorbed, replaced or
+amended. A subject with exactly one ADR is not listed — the record's own table finds it.
+
+**A row here never overrides an ADR's own `Supersedes` line.** Where an ADR states its supersessions
+(D-2026-08-14 and D-2026-08-15 both do), that statement is authoritative and this table is a pointer
+to it. Where it does not, the right column records the reading a maintainer arrived at, and the
+older ADR is still *correct about the moment it was written* — that is the whole reason it is kept.
+
+| Topic | Read this now | Earlier ADRs it supersedes, absorbs or amends |
+|---|---|---|
+| Layer-1 orchestration framework | [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md), amended by [D-2026-08-14-the-coupling-is-the-cost-not-the-line-count](D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md) | D-002, D-007, D-013, D-038, D-040, D-123 (all MAF-era), D-2026-08-11-what-the-removal-found |
+| Delegation, subagents, challenge panel | [D-2026-08-15-a-capability-that-ships-off-is-not-a-capability](D-2026-08-15-a-capability-that-ships-off-is-not-a-capability.md) | D-064, D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate, D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks, D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared. **Not** D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor — its invariants still bind any future subagent |
+| Specialist observability | [D-2026-08-11-the-specialists-name-is-not-in-the-namespace](D-2026-08-11-the-specialists-name-is-not-in-the-namespace.md) | D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs; both are moot while no team ships (see the row above) |
+| The audit trail | [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) | D-027, D-034, D-055, D-061, D-122, D-2026-07-31-the-audit-chain-is-versioned, D-2026-08-01-a-restore-is-a-truncation-nobody-can-see. D-2026-08-05-append-only-by-grant-not-by-contract is explicitly **left standing** |
+| Context compaction | [D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has](D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has.md), corrected by [D-2026-08-11-what-the-review-found-in-the-compaction-change](D-2026-08-11-what-the-review-found-in-the-compaction-change.md) | D-025 (MAF compaction, mechanism removed with the framework), D-151 |
+| Capability seam (connectors) | [D-118](D-118-one-connector-seam-for-mcp-temporal-and-long-running.md), with [D-150](D-150-a-connector-jobs-task-queue-is-derived-not-declared.md) on queues | D-016, D-029, D-103, D-110, D-111, D-112, D-115 |
+| Data-source / ingestion seam | [D-120](D-120-a-data-source-becomes-a-manifest-the-second-config.md), extended by [D-2026-08-04-the-schema-is-a-file](D-2026-08-04-the-schema-is-a-file.md) and [D-2026-08-06-a-share-is-mounted-not-called](D-2026-08-06-a-share-is-mounted-not-called.md) | D-018, D-022, D-028, D-050, D-053, D-076 |
+| Retrieval | [D-062](D-062-f10-a-hybrid-retrieval-dense-lexical-entry-points.md) (hybrid) with [D-2026-08-13-both-lexical-backends-state-one-boolean-rule](D-2026-08-13-both-lexical-backends-state-one-boolean-rule.md) and [D-2026-08-01-a-cap-that-starves-a-source](D-2026-08-01-a-cap-that-starves-a-source.md) | D-008, D-020, D-055, D-056, D-057, D-160 |
+| Vector store & embedding identity | [D-2026-08-08-a-vector-store-is-not-a-catalogue](D-2026-08-08-a-vector-store-is-not-a-catalogue.md) with [D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it](D-2026-08-06-a-vector-is-only-good-for-the-model-that-made-it.md) and [D-2026-08-08-a-derived-index-must-record-what-derived-it](D-2026-08-08-a-derived-index-must-record-what-derived-it.md) | D-2026-08-13-analyze-first-and-the-recall-knobs-second is the tuning residual, not a replacement |
+| Bayesian optimization | [D-2026-08-04-what-bofire-does-when-you-actually-run-it](D-2026-08-04-what-bofire-does-when-you-actually-run-it.md) | D-012, D-096, D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate, D-2026-08-05-a-ceiling-that-does-not-hold, D-2026-08-08-a-category-has-no-outside, D-2026-07-31-a-campaign-is-an-entity-not-a-turn |
+| Chemical safety screen | [D-080](D-080-chemical-safety-a-deterministic-advisory-structural.md) with [D-2026-08-06-a-pair-rule-is-a-cross-product](D-2026-08-06-a-pair-rule-is-a-cross-product.md) and [D-2026-08-09-a-valid-prefix-is-not-a-molecule](D-2026-08-09-a-valid-prefix-is-not-a-molecule.md) | D-090 |
+| Molecular identity / canonical SMILES | [D-2026-07-31-two-spellings-of-one-molecule](D-2026-07-31-two-spellings-of-one-molecule.md) with [D-2026-08-01-a-reagent-is-not-its-largest-fragment](D-2026-08-01-a-reagent-is-not-its-largest-fragment.md) | D-033 |
+| Calculation cache & keys | [D-011](D-011-results-are-persisted-once-never-recomputed.md), keyed as [D-2026-08-01-a-key-names-what-ran](D-2026-08-01-a-key-names-what-ran.md) / [D-2026-08-01-a-key-that-cannot-see-our-own-fix](D-2026-08-01-a-key-that-cannot-see-our-own-fix.md) | D-015, D-158 |
+| Identity & authorization | [D-060](D-060-f10-c-per-tool-authorization-middleware-supersedes-d.md) with [D-2026-08-08-identity-must-travel-with-the-work](D-2026-08-08-identity-must-travel-with-the-work.md) and [D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim](D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md) | D-043, D-044 (scope superseded by D-060), D-045, D-046, D-047, D-052, D-068 |
+| Approvals / human-in-the-loop | [D-167](D-167-an-approval-authorizes-a-request-not-a-session.md) with [D-137](D-137-the-plan-the-model-could-approve-for-itself-a-pre.md) and [D-2026-07-31-one-gate-over-one-side-effecting-set](D-2026-07-31-one-gate-over-one-side-effecting-set.md) | D-005 (the principle), D-032, D-035 |
+| PR-gate & the note vocabulary | [D-161](D-161-the-human-gate-moves-from-every-observation-to.md) with [D-2026-08-08-a-bundle-may-extend-a-closed-vocabulary](D-2026-08-08-a-bundle-may-extend-a-closed-vocabulary.md), [D-133](D-133-a-submission-is-a-note-and-what-it-needs-so-a.md), [D-134](D-134-edges-carry-relations-and-their-own-validity-so-the.md) | D-004, D-005, D-021, D-074, D-164, D-2026-07-31-a-proposal-is-a-record-not-a-branch |
+| Durable execution & queues | [D-150](D-150-a-connector-jobs-task-queue-is-derived-not-declared.md) with [D-099](D-099-durable-capabilities-declare-their-own-queue.md) | D-006, D-002's durability half |
+| Durable job records | [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md) | D-2026-08-08-an-outage-is-not-a-missing-job refines its failure reporting |
+| HPC / QM execution | [D-048](D-048-f5-real-hpc-execution-via-a-nextflow-launcher-behind.md) with [D-098](D-098-x3-x4-geometries-free-energies-the-reaction.md), [D-101](D-101-x5-x6-x7-the-binaries-and-what-they-change.md), [D-2026-08-01-one-equilibrium-or-no-number](D-2026-08-01-one-equilibrium-or-no-number.md) | D-010, D-095, D-097, D-100, D-102, D-104, D-108, D-132 |
+| Uncertainty & trust in a number | [D-2026-08-01-unknown-is-not-fine](D-2026-08-01-unknown-is-not-fine.md) with [D-2026-08-01-trust-travels-on-the-value-line](D-2026-08-01-trust-travels-on-the-value-line.md) and [D-169](D-169-trust-is-a-distribution-not-a-number-the-residual.md) | D-170 applies the same rule to similarity hits |
+| Front door / SSE contract | [D-121](D-121-the-front-door-as-a-multi-process-service-pure-asgi.md) with [D-159](D-159-the-turn-stream-reports-a-tool-s-lifecycle-not.md) and [D-166](D-166-the-queue-is-reported-on-the-stream-not-as-a.md) | D-041, D-077, D-2026-08-01-a-turn-you-can-follow-across-a-process |
+| Sessions & turn state | [D-042](D-042-f3-durable-session-job-session-push-back-foundation.md) with [D-2026-08-13-a-checkpoint-says-which-schema-wrote-it](D-2026-08-13-a-checkpoint-says-which-schema-wrote-it.md) and [D-2026-08-11-what-the-removal-found](D-2026-08-11-what-the-removal-found.md) | D-145, D-2026-08-10-a-list-of-ids-is-not-a-conversation-list |
+| Observability / tracing | [D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment](D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment.md) with [D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape](D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape.md) | D-026, D-027's OTel half, D-152, D-2026-08-03-a-metric-must-declare-what-it-can-see |
+| Cost & token budget | [D-144](D-144-token-accounting-was-priced-blind-one-total-where.md) with [D-2026-08-01-spend-is-a-ledger-not-a-label](D-2026-08-01-spend-is-a-ledger-not-a-label.md) and [D-2026-08-12-the-prefix-is-static-so-stop-paying-for-it](D-2026-08-12-the-prefix-is-static-so-stop-paying-for-it.md) | D-025, D-066's budget half, D-2026-08-12-the-cache-floor-is-per-model-and-two-profiles-are-under-it |
+| Eval & metric layer | [D-009](D-009-evaluation-metrics-layer-is-first-class-phase-2b.md) with [D-063](D-063-f10-f-classification-metrics-p-r-f1-eval-drift.md), [D-2026-08-02-a-probe-is-a-question-you-have-not-asked-yet](D-2026-08-02-a-probe-is-a-question-you-have-not-asked-yet.md), [D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open](D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open.md) | D-014, D-056 |
+| Migrations & schema evolution | [D-2026-08-04-the-schema-only-goes-forward](D-2026-08-04-the-schema-only-goes-forward.md) with [D-2026-08-08-a-rollback-that-is-not-a-schema-step](D-2026-08-08-a-rollback-that-is-not-a-schema-step.md) and [D-2026-08-01-a-migration-waits-in-front-of-live-traffic](D-2026-08-01-a-migration-waits-in-front-of-live-traffic.md) | D-034's ledger half, D-149 |
+| Retention & erasure | [D-2026-08-08-the-conversation-is-erasable-the-record-is-not](D-2026-08-08-the-conversation-is-erasable-the-record-is-not.md) with [D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim](D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md) | D-145; the checkpoint tables joined it in D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has |
+| Deployment / OpenShift | [D-049](D-049-f6-openshift-delivery-one-image-one-config-source.md) with [D-2026-07-31-the-deployment-envelope](D-2026-07-31-the-deployment-envelope.md) and [D-2026-08-01-a-tag-is-a-pointer-not-a-build](D-2026-08-01-a-tag-is-a-pointer-not-a-build.md) | D-082's chart half, D-135 |
+| Secrets & log redaction | [D-2026-08-08-redaction-must-outlive-the-formatter](D-2026-08-08-redaction-must-outlive-the-formatter.md) with [D-2026-08-06-a-redactor-that-only-reads-the-message](D-2026-08-06-a-redactor-that-only-reads-the-message.md) and [D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not](D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not.md) | D-026's logging floor |
+| Templates (fixed procedures) | [D-113](D-113-stages-d-and-e-profiles-select-an-agent-templates.md) with [D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only](D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only.md), [D-140](D-140-a-template-s-job-step-resolved-off-the-workflow.md), [D-168](D-168-a-template-step-runs-as-its-requester.md) | — |
+| Skills (layer 3) | [D-003](D-003-agent-skills-skill-md-for-capability-integration.md) with [D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches](D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md) and [D-052](D-052-role-scoped-skill-visibility-salvaged-from-the.md) | the loading mechanism moved to `deepagents` in D-2026-08-10-langgraph-rebuild-of-the-conversation-layer |
+| Memory layers | [D-019](D-019-memory-layers-add-no-new-infrastructure-note-types.md) with [D-078](D-078-memory-notes-are-retired-when-their-cluster-merges.md) and [D-2026-08-10-basestore-is-not-where-this-systems-memory-lives](D-2026-08-10-basestore-is-not-where-this-systems-memory-lives.md) | — |
+| The ADR record itself | [D-2026-07-31-adr-ids-that-cannot-collide](D-2026-07-31-adr-ids-that-cannot-collide.md) | D-088, D-147 (detection, not allocation), D-109's ledger half |
+| Prose & declaration gates | [D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-can-check](D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-can-check.md) with [D-164](D-164-the-prose-gate-learns-note-types-and-the-two-dead.md), [D-149](D-149-what-two-finished-migrations-left-behind-and-a-guard.md), [D-2026-08-08-a-rule-with-no-test-is-a-claim](D-2026-08-08-a-rule-with-no-test-is-a-claim.md) | — |
+| Repository layout | [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md) with [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md) and [D-2026-08-02-the-seam-does-not-move](D-2026-08-02-the-seam-does-not-move.md) | D-091, D-117, D-146 |
+| Pools, connections, scale | [D-119](D-119-production-scale-the-event-loop-the-connection-pool.md) with [D-2026-08-05-the-connection-budget-is-a-fleet-number](D-2026-08-05-the-connection-budget-is-a-fleet-number.md), [D-2026-08-05-a-worker-may-not-outrun-its-pool](D-2026-08-05-a-worker-may-not-outrun-its-pool.md), [D-2026-08-08-a-borrowed-connection-is-bounded-by-default](D-2026-08-08-a-borrowed-connection-is-bounded-by-default.md) | D-066's clamp half |
+| LLM provider seam & model routing | [D-039](D-039-f0-config-selected-llm-provider-seam-foundation-plan.md) with [D-059](D-059-f10-e-b-per-task-model-routing-answer-verification.md) and [D-2026-08-12-the-cache-floor-is-per-model-and-two-profiles-are-under-it](D-2026-08-12-the-cache-floor-is-per-model-and-two-profiles-are-under-it.md) | — |
+| Fingerprint search | [D-017](D-017-one-generic-fingerprint-store-for-molecules-and.md) | D-029 (the MCP consumption half now runs through D-118), D-031 |
+| ELN entries & versioning | [D-2026-07-31-an-eln-entry-is-versioned-not-immutable](D-2026-07-31-an-eln-entry-is-versioned-not-immutable.md) with [D-2026-08-04-the-schema-is-a-file](D-2026-08-04-the-schema-is-a-file.md) | D-018, D-022, D-054, D-070 |
+| Scope of external data | [D-089](D-089-no-external-sources-pdf-pptx-docx-xlsx-are-in-scope.md), amended once by [D-135](D-135-a-dataset-may-be-vendored-into-the-image-at-build.md) | — |
+| Degradation & failure reporting | [D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed](D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed.md) with [D-2026-08-08-a-degraded-check-must-not-clear-the-gate](D-2026-08-08-a-degraded-check-must-not-clear-the-gate.md) and [D-2026-08-08-a-partial-answer-must-say-so](D-2026-08-08-a-partial-answer-must-say-so.md) | D-139 |
+
+## Where the record still says "GxP"
+
+**The regulatory framing is not a live constraint.** `D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks`
+removed it: `grep -r "GxP\|21 CFR\|ALCOA\|GAMP" src/ tests/` returns **zero** matches today. What it
+deliberately did *not* do is rewrite the record — "`docs/decisions/` and `docs/archive/` are not
+rewritten. A merged ADR is never edited (CLAUDE.md) and an archived document is a record of what was
+true then; this ADR is what supersedes them."
+
+That leaves **60 ADR files (~6,500 lines, a quarter of this corpus) whose prose still uses a
+vocabulary the system dropped**, with nothing inside them saying so. This section is the marker.
+It lives here rather than as a banner inside each file for the reason the superseding ADR gives: a
+merged ADR is never edited, and this index is the mechanism that decision itself names.
+
+**Read every "GxP" below as "the tool-audit trail", every "21 CFR Part 11" as an argument about why
+a record is worth keeping, and every claim of a validated posture as withdrawn.** The evals say so
+in the running system: `data/evals/probes/knowledge.yaml` kn-29 grades the agent on *refusing* to
+claim validated status, and `reporting.yaml` rp-13 forbids claiming 21 CFR Part 11 compliance.
+
+**Superseded in substance — the mechanism is gone, not just the wording.** D-2026-08-14 names each
+of these:
+
+- [D-027](D-027-gxp-tool-audit-middleware-opt-in-opentelemetry-maf.md) · [D-055](D-055-gxp-freshness-read-time-provenance-in-graph.md) · [D-122](D-122-the-gxp-audit-trail-defaults-to-durable-because.md) — framing superseded; the trail, the freshness filter and the durable default all still run.
+- [D-034](D-034-review-hardening-migration-ledger-durable-audit.md) · [D-061](D-061-f10-g-audit-hash-chain-bi-temporal-note-fields-d-a15.md) · [D-2026-07-31-the-audit-chain-is-versioned](D-2026-07-31-the-audit-chain-is-versioned.md) · [D-2026-08-01-a-restore-is-a-truncation-nobody-can-see](D-2026-08-01-a-restore-is-a-truncation-nobody-can-see.md) — the hash chain and its anchors these built are **deleted**. Everything they describe about verification, `make audit-verify`, `audit_anchor_secret` or a chain tip no longer exists.
+- [D-2026-08-05-append-only-by-grant-not-by-contract](D-2026-08-05-append-only-by-grant-not-by-contract.md) is the exception: D-2026-08-14 leaves it standing as **the whole** of the integrity claim.
+
+**Vocabulary only — the decision stands, one or two sentences in it use the dropped words.** These
+51 need no re-reading beyond the substitution above:
+
+[D-031](D-031-deep-review-deferred-items-worked-off-fp-definition.md) ·
+[D-032](D-032-durable-async-approval-hold-for-captured-user.md) ·
+[D-040](D-040-f1-maf-agent-harness-is-the-autonomous-plan-execute.md) ·
+[D-065](D-065-f10-post-implementation-review-cycle-verified-fixes.md) ·
+[D-082](D-082-graph-cache-ttl-da-5-decision-d-1-and-the-helm.md) ·
+[D-083](D-083-f11-waves-0-3-closing-the-capability-gaps-deployment.md) ·
+[D-109](D-109-four-fixes-from-the-live-e2e-pass-and-two-root.md) ·
+[D-112](D-112-bo-as-the-reference-connector-owned-durable.md) ·
+[D-118](D-118-one-connector-seam-for-mcp-temporal-and-long-running.md) ·
+[D-119](D-119-production-scale-the-event-loop-the-connection-pool.md) ·
+[D-131](D-131-the-connector-health-probe-follows-the-address.md) ·
+[D-133](D-133-a-submission-is-a-note-and-what-it-needs-so-a.md) ·
+[D-137](D-137-the-plan-the-model-could-approve-for-itself-a-pre.md) ·
+[D-140](D-140-a-template-s-job-step-resolved-off-the-workflow.md) ·
+[D-141](D-141-two-facts-that-stopped-at-a-process-boundary-a.md) ·
+[D-155](D-155-what-the-dark-half-of-the-system-does-the-first-time.md) ·
+[D-158](D-158-the-expensive-calculation-is-the-one-that-was-not.md) ·
+[D-167](D-167-an-approval-authorizes-a-request-not-a-session.md) ·
+[D-168](D-168-a-template-step-runs-as-its-requester.md) ·
+[D-2026-07-31-a-proposal-is-a-record-not-a-branch](D-2026-07-31-a-proposal-is-a-record-not-a-branch.md) ·
+[D-2026-07-31-the-deployment-envelope](D-2026-07-31-the-deployment-envelope.md) ·
+[D-2026-08-01-a-cap-that-starves-a-source](D-2026-08-01-a-cap-that-starves-a-source.md) ·
+[D-2026-08-01-a-declaration-that-authorizes-nothing](D-2026-08-01-a-declaration-that-authorizes-nothing.md) ·
+[D-2026-08-01-a-gate-that-leaks-on-the-failure-path](D-2026-08-01-a-gate-that-leaks-on-the-failure-path.md) ·
+[D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not](D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not.md) ·
+[D-2026-08-01-every-process-carries-its-own-witness](D-2026-08-01-every-process-carries-its-own-witness.md) ·
+[D-2026-08-01-spend-is-a-ledger-not-a-label](D-2026-08-01-spend-is-a-ledger-not-a-label.md) ·
+[D-2026-08-01-trust-travels-on-the-value-line](D-2026-08-01-trust-travels-on-the-value-line.md) ·
+[D-2026-08-01-unknown-is-not-fine](D-2026-08-01-unknown-is-not-fine.md) ·
+[D-2026-08-04-the-schema-only-goes-forward](D-2026-08-04-the-schema-only-goes-forward.md) ·
+[D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without](D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without.md) ·
+[D-2026-08-06-a-gate-that-names-nothing](D-2026-08-06-a-gate-that-names-nothing.md) ·
+[D-2026-08-06-a-redactor-that-only-reads-the-message](D-2026-08-06-a-redactor-that-only-reads-the-message.md) ·
+[D-2026-08-06-a-share-is-mounted-not-called](D-2026-08-06-a-share-is-mounted-not-called.md) ·
+[D-2026-08-08-a-rule-with-no-test-is-a-claim](D-2026-08-08-a-rule-with-no-test-is-a-claim.md) ·
+[D-2026-08-08-a-survivor-is-a-hypothesis](D-2026-08-08-a-survivor-is-a-hypothesis.md) ·
+[D-2026-08-08-an-outage-is-not-a-missing-job](D-2026-08-08-an-outage-is-not-a-missing-job.md) ·
+[D-2026-08-08-identity-must-travel-with-the-work](D-2026-08-08-identity-must-travel-with-the-work.md) ·
+[D-2026-08-08-the-conversation-is-erasable-the-record-is-not](D-2026-08-08-the-conversation-is-erasable-the-record-is-not.md) ·
+[D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one](D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one.md) ·
+[D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor](D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md) ·
+[D-2026-08-10-basestore-is-not-where-this-systems-memory-lives](D-2026-08-10-basestore-is-not-where-this-systems-memory-lives.md) ·
+[D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md) ·
+[D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs](D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs.md) ·
+[D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has](D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has.md) ·
+[D-2026-08-11-a-refusal-nobody-can-see-is-not-a-gate](D-2026-08-11-a-refusal-nobody-can-see-is-not-a-gate.md) ·
+[D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape](D-2026-08-11-the-observability-gap-is-real-and-langsmith-is-not-its-shape.md) ·
+[D-2026-08-11-what-the-removal-found](D-2026-08-11-what-the-removal-found.md) ·
+[D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks](D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks.md) ·
+[D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim](D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md) ·
+[D-2026-08-14-the-coupling-is-the-cost-not-the-line-count](D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md)
+
+## Every decision, in record order
+
+This is the ledger the tests enforce: exactly the files beside it, in the order `_sort_key` defines.
+
 | ADR | Title |
 |---|---|
 | [D-001](D-001-runtime-is-python.md) | Runtime is Python |
@@ -346,5 +492,10 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-14-the-coupling-is-the-cost-not-the-line-count](D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md) | What upstream already does, what it still does not, and the shapes this repository reads that it was never promised |
 | [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) | GxP framing and the audit hash chain are removed; the trail, the gates and the INSERT-only grant stay |
 | [D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major](D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md) | The dependency bump: openai 3 and starlette 1.6 taken with httpx2 beside httpx, and the `mcp<2` cap kept |
+
+| [D-2026-08-15-a-capability-that-ships-off-is-not-a-capability](D-2026-08-15-a-capability-that-ships-off-is-not-a-capability.md) | The specialist team, the challenge panel and the routing measurement are deleted rather than left disabled |
 | [D-2026-08-15-a-claim-is-a-mutex-not-a-line-edit](D-2026-08-15-a-claim-is-a-mutex-not-a-line-edit.md) | GitHub Issues own who is working on a backlog item; `BACKLOG.md` stays the prioritized list |
+| [D-2026-08-15-a-harness-is-adopted-whole-or-its-defaults-are-inherited-silently](D-2026-08-15-a-harness-is-adopted-whole-or-its-defaults-are-inherited-silently.md) | Layer 1 compiles on `create_deep_agent`; the `task` tool it forces is governed, and the summarizer it brings is switched off |
+| [D-2026-08-15-a-turn-needs-somewhere-to-put-intermediate-work](D-2026-08-15-a-turn-needs-somewhere-to-put-intermediate-work.md) | The agent gets a scratchpad, and durable memories behind an actor-keyed namespace |
 | [D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped](D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped.md) | The runaway cap returns to a first-party `before_model` hook, and the four regressions delegating it produced |
+| [D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-the-question](D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-the-question.md) | `HumanInTheLoopMiddleware` is declined for plan approval: `when` cannot be async, a new message discards a pending interrupt, a mismatched resume bypasses the gate, and retention deletes it |

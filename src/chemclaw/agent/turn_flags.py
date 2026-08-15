@@ -6,7 +6,7 @@ autonomy is `plan_only`, an explicit dry run is the natural product primitive â€
 safety valve in front of the durable job launchers.
 
 A `ContextVar` for the same reason the ambient session and identity are (see
-`chemclaw.agent.session_context`, `chemclaw.agent.identity_context`): it must be per-turn, it must
+`chemclaw.core.session_context`, `chemclaw.core.identity_context`): it must be per-turn, it must
 not be a model-supplied tool argument (the model must not be able to turn a real run into a dry
 one or vice versa), and it must default to "off" for every non-request caller.
 

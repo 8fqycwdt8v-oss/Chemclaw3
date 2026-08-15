@@ -4,7 +4,8 @@ Every route is owner-scoped through `chemclaw.api.deps.owned_approval` — a hol
 knowledge write, so it is answerable only by the chemist whose turn raised it, and an unknown hold
 is indistinguishable from someone else's (404, no existence leak). The Temporal-backed
 collaborators are read through the front-door module at call time because the suite patches them
-there (`chemclaw.api.app.approval_owner` and friends) — see `chemclaw/api/routes/README.md`.
+there (`chemclaw.agent.interaction_tools.approval_owner` and friends) — see
+`chemclaw/api/routes/README.md`.
 """
 
 from fastapi import Depends, FastAPI, HTTPException

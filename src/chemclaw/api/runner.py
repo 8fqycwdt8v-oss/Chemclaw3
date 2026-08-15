@@ -29,11 +29,6 @@ from typing import Any
 import psycopg
 from langchain_core.messages import AIMessage, HumanMessage
 
-from chemclaw.agent.challenge import (
-    begin_turn_review,
-    current_turn_review,
-    end_turn_review,
-)
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.framing import frame_untrusted
@@ -43,9 +38,9 @@ from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_c
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.state import turn_config
-from chemclaw.agent.team import begin_delegation_tally, end_delegation_tally
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.budget import BudgetTracker
@@ -165,9 +160,9 @@ async def run_turn(
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
     turn_started = time.perf_counter()
-    # Whether this turn's approval is spendable, asked exactly as `build_agent` asks whether to
-    # attach the gate — one predicate, so the two cannot disagree about a profile that overrides
-    # the deployment's autonomy.
+    # Whether this turn's approval is spendable, asked exactly as `build_langgraph_agent` asks
+    # whether to attach the gate — one predicate, so the two cannot disagree about a profile that
+    # overrides the deployment's autonomy.
     plan_gated = gate_applies(get_profile(profile))
     # Whether this turn produced its answer — the cost ledger's question ("did the user get an
     # answer for the money"), and only that. It is deliberately *not* the rollback predicate:
@@ -192,10 +187,10 @@ async def run_turn(
     session_token = set_current_session_id(session.session_id)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
-    # One correlation id per *turn*, stamped here rather than bound inside `build_agent`: agents
-    # are cached per profile for the process's lifetime, so a build-time id was shared by every
-    # turn from every user on the pod — the audit trail could not tell two conversations apart,
-    # which is the one thing a correlation id exists to do.
+    # One correlation id per *turn*, stamped here rather than bound inside `build_langgraph_agent`:
+    # agents are cached per profile for the process's lifetime, so a build-time id was shared by
+    # every turn from every user on the pod — the audit trail could not tell two conversations
+    # apart, which is the one thing a correlation id exists to do.
     correlation_id = uuid.uuid4().hex
     correlation_token = set_current_correlation_id(correlation_id)
     # Count this turn's tool calls, so the identical question asked a third time is refused rather
@@ -206,13 +201,6 @@ async def run_turn(
     # looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op without the
     # harness, which is what attaches the cap.
     loop_token = begin_loop_watch()
-    # Count the specialists this turn delegates work to, so the challenge gate can tell a *team*
-    # (challenged unconditionally) from a lone subagent (challenged only when already flagged).
-    # No-op unless a team is enabled and the model actually delegates.
-    tally_token = begin_delegation_tally()
-    # Where the challenge gate publishes what it learned about this turn's answer, so the
-    # `AnswerEvent` is stamped from one scoring pass rather than a second judge call.
-    review_token = begin_turn_review()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
     # The tool-bearing messages this turn produced, for the transcript projection: the events
@@ -292,9 +280,10 @@ async def run_turn(
                 correlation_id=correlation_id,
                 connectors=turn_tools,
                 checkpointer=await _turn_checkpointer(),
+                store=await _turn_store(),
             )
             # `turn_config`, not a bare `configurable`: it also carries the graph's step ceiling,
-            # which nothing here had ever chosen — `create_agent` bakes 9999, and reaching it raises
+            # which nothing here had ever chosen — the framework bakes 9999, and reaching it raises
             # rather than degrading. The mid-turn resume below reuses this same config, so the
             # continuation runs under the same bound as the run it continues.
             graph_config = turn_config(session.session_id)
@@ -433,11 +422,6 @@ async def run_turn(
             text,
             tool_trace.outputs,
             tool_trace.called_tools,
-            # The in-graph challenge gate's verdict, when one ran. `None` is the ungated path and
-            # makes `build_answer_event` score the answer itself, exactly as it always has — the
-            # gate is off by default. Read from an ambient rather than off the graph's final state
-            # for `loop_hit_cap`'s reason: this driver streams, so it never receives that state.
-            review=current_turn_review(),
         )
         await _record_transcript(history, session, user_message, text, tool_exchanges)
         # **Before the yield, not after it.** The turn's rows are committed by now and they are a
@@ -592,8 +576,6 @@ async def run_turn(
                 METRICS.increment(name, float(value), spend_labels)
         end_call_watch(calls_token)
         end_loop_watch(loop_token)
-        end_delegation_tally(tally_token)
-        end_turn_review(review_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_correlation_id(correlation_token)
@@ -616,6 +598,28 @@ async def _turn_checkpointer() -> Any:
     if settings.session_store != "postgres":
         return None
     return await checkpointer()
+
+
+async def _turn_store() -> Any:
+    """This turn's durable memory store, or `None` where the deployment keeps none.
+
+    Two gates, both necessary and neither redundant. `agent_memory_enabled` is the deployment's
+    decision that agent-authored files may outlive a session at all; `session_store` is the same
+    condition `_turn_checkpointer` reads, because the store shares the checkpointer's pool and a
+    process on the in-memory store has no Postgres to put one in. Building it here rather than in
+    `build_langgraph_agent` is what keeps that builder synchronous — the same seam the checkpointer
+    already uses.
+
+    The *third* gate is not here and that is deliberate: whether the turn has an actor is decided by
+    `scratchpad_backend`, because that is where the namespace is computed and an actorless memory is
+    one nobody could erase.
+
+    Returns:
+        A ready `AsyncPostgresStore`, or `None` for a turn with a scratchpad but no memory.
+    """
+    if not settings.agent_memory_enabled or settings.session_store != "postgres":
+        return None
+    return await memory_store()
 
 
 async def _durable_subsystem_reachable() -> bool:

@@ -33,17 +33,6 @@ class AgentSettings(BaseSettings):
     # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
     framing_envelope_secret: str = ""
 
-    # Route turns through a supervisor and five specialists rather than one agent (M9,
-    # `docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md`).
-    #
-    # **Off by default, and this is not caution about the code.** A single agent holding sixty
-    # tools chooses badly among them and pays for the whole surface in every prompt, which is the
-    # case for a team; but a supervisor that mis-routes is *worse* than the agent it replaces, and
-    # no unit test can establish which of those a deployment gets. M12 measures routing accuracy
-    # and per-specialist token cost against the single-agent baseline, and that measurement — not
-    # this flag — is what decides whether the default changes. LangGraph only.
-    agent_teams_enabled: bool = False
-
     # The agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat model from its own env var
     # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers
@@ -97,6 +86,19 @@ class AgentSettings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
+    # and the default is about *data* rather than about the code being unproven: enabling it
+    # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a
+    # place that outlives the session. A deployment should decide that, not inherit it.
+    #
+    # With it off, a turn still gets `/scratch/` — the graph-state scratchpad that makes a
+    # multi-source research turn possible — and simply has no `/memories/` route. The two are
+    # separate capabilities and only the durable half needs a decision.
+    #
+    # It is also inert without an actor: no ambient identity means no namespace, and a memory
+    # written under a shared prefix would be one nobody can erase and everybody can read
+    # (`agent/scratchpad.memory_namespace`).
+    agent_memory_enabled: bool = False
     # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
     # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
     # (architektur.md §7), not this. Because Entra enforcement defaults off in dev
@@ -142,7 +144,9 @@ class AgentSettings(BaseSettings):
 
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
     #
-    # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999` and
+    # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999`, and
+    # `create_deep_agent` bakes a second onto the graph it returns; a config passed at invoke time
+    # displaces both (measured — a looping model reports "Recursion limit of 158"), and
     # nothing here ever chose otherwise, so a turn's real bound was thousands of model calls — and
     # it fails by raising `GraphRecursionError`, which discards whatever the turn had produced.
     # That is the opposite of the position `agent.loop_cap` takes deliberately: end the run, let the
@@ -219,7 +223,7 @@ class AgentSettings(BaseSettings):
     def skills_dirs(self) -> list[str]:
         """The skills directories, split on the OS path separator (like PATH), empties dropped.
 
-        `FileSkillsSource` takes a list of directories; keeping the config a single delimited
+        The skills backend takes a list of directories; keeping the config a single delimited
         string (rather than a JSON list) means an admin sets `CHEMCLAW_SKILLS_DIR=skills:/opt/
         team-skills` the same way they set `PATH`, no JSON quoting.
         """
@@ -241,26 +245,48 @@ class AgentSettings(BaseSettings):
         Derived from `harness_max_loop_iterations` rather than set directly, because the two are one
         decision: the cap is what a deployment says a turn may cost, and a step ceiling that did not
         follow it would either fire first — discarding an answer the cap would have let out — or
-        never fire at all, which is what `create_agent`'s baked 9999 does today.
+        never fire at all, which is what an inherited 9999 would do.
 
-        `+ 3` is measured, not decorative: the minimal working limit is `4*N + 3` on the real graph
-        (measured cap 1 → 7, cap 2 → 11, cap 3 → 15), the 3 being the supersteps outside the loop —
-        `before_agent` (the skills listing), the entry, and the one the stopping jump costs.
+        `+ 8` is a *bound with margin*, not the measured cost, and the distinction is the whole
+        lesson of this docstring. Both halves of the formula have been wrong, at different times,
+        for opposite reasons — and each time only the smallest cap noticed.
 
-        **The constant is 3 rather than the 1 it was, and the reason is a near miss.** At a cap of 1
-        the old formula granted `1 * 6 + 1 = 7` against a requirement of 7 — it fitted, with **zero
-        margin**. When M14 briefly
-        moved the cap onto `ModelCallLimitMiddleware` the requirement became `5N + 3 = 8` and a
-        one-iteration harness turn died with `GraphRecursionError` — the failure this ceiling exists
-        to avoid, since it discards the partial answer the cap would have let out. Only the smallest
-        cap was affected. The swap is reverted; the margin stays, because a ceiling that fits
-        exactly
-        is one node away from being wrong. Re-measure this with `agent_supersteps_per_model_call`,
-        never on its own.
+        **The history, because the procedure matters more than the number.** The constant was `+ 1`
+        until M14 moved the runaway cap onto `ModelCallLimitMiddleware`, which declares
+        `after_model` as well as `before_model`: a one-iteration turn then needed 8 where the
+        formula granted 7,
+        and died with `GraphRecursionError` — the failure this ceiling exists to *avoid*, since it
+        discards the partial answer the cap would have let out. It became `+ 3`, and stayed right
+        until `create_deep_agent` brought `SubAgentMiddleware`, `SummarizationMiddleware` and
+        `PatchToolCallsMiddleware`, at which point a one-iteration turn needed 14 against the 9 the
+        formula granted.
 
-        At the shipped defaults this is `25 * 6 + 3 = 153`, against the 103 a 25-iteration harness
-        turn actually needs — so the cap fires first with headroom to spare, which is the intent.
-        The ceiling should never be what stops a harness turn; it is what stops a turn that has no
-        cap, because the loop cap is attached only when the harness is on.
+        **Then two branches each measured a graph the other did not have, and neither number
+        survived the merge.** `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
+        reverted the cap to a first-party `before_model` hook and measured `4*N + 3`; the
+        `create_deep_agent` swap measured `6*N + 8`. Merged, the graph has main's cheaper cap *and*
+        the swap's extra middleware, so it is neither.
+
+        **Re-measured on the merged graph by binary search rather than by counting nodes**
+        (2026-08-15): the minimal working `recursion_limit` for N tool calls is 12, 17, 22, 32, 47
+        for N = 1, 2, 3, 5, 8 — an exact fit to **`5*N + 7`**. The multiplier fell from 6 to 5
+        because a `before_model` hook costs one superstep per model call less than a middleware
+        declaring both hooks; the constant rose from 3 to 7 because the harness brought fixed
+        overhead. Five points rather than one precisely because a single point cannot tell a changed
+        multiplier from a changed constant — which is how it went stale the first time. Re-measure
+        both together, never one alone.
+
+        **So why `6 * N + 8` and not `5 * N + 7`.** The formula grants
+        `agent_supersteps_per_model_call` (6) per call against a true cost of 5, plus 8 against a
+        true 7 — a margin of `N + 1`
+        supersteps that widens with the cap and is never below 2. That is deliberate: a ceiling that
+        fits exactly is one node away from being wrong, and every stale-constant incident above was
+        a graph gaining a node nobody re-measured for. The setting stays the knob a deployment can
+        raise; this constant is the floor under it.
+
+        At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
+        turn actually needs — so the cap fires first, which is the intent. The ceiling should never
+        be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
+        is attached only when the harness is on.
         """
-        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 3
+        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8

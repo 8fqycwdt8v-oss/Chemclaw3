@@ -7,7 +7,7 @@ demanded before any durable work, and re-launching the identical job returns the
 instead of paying twice. Those are the five properties the four hand-written adapters had, now
 asserted once against the factory that replaced them.
 
-Temporal is faked at the client seam (`chemclaw.connectors.jobs.connect`) because none of this is
+Temporal is faked at the client seam (`chemclaw.connectors.jobs`) because none of this is
 about
 Temporal's behavior — `test_connector_job_workflow.py` covers that against a real server. What
 is under test here is what happens *before* the workflow starts, which is where the gates live.

@@ -401,12 +401,20 @@ def test_the_erase_statements_are_valid_sql() -> None:
     Runs each delete inside a rolled-back transaction on an actor nobody has: the statements must
     be *executable*, which a string never proves on its own.
 
-    **The checkpointer's three tables are reported but not necessarily parsed here.** They are
-    created by `AsyncPostgresSaver.setup()` rather than by a migration, so `erase_actor` skips —
-    and reports zero for — any that this schema does not have. Their statements are executed
-    against real tables in `tests/test_message_migration.py`, which is where a typo in one would
-    fail. The keys stay asserted here because a table silently dropping out of the report is the
-    failure this test is for.
+    **The library-created tables are reported but not necessarily parsed here.** The checkpointer's
+    three come from `AsyncPostgresSaver.setup()` and the memory store's two from
+    `AsyncPostgresStore.setup()`, rather than from a migration, so `erase_actor` skips — and reports
+    zero for — any that this schema does not have. Their statements are executed against real tables
+    in `tests/test_message_migration.py`, which is where a typo in one would fail. The keys stay
+    asserted here because a table silently dropping out of the report is the failure this test is
+    for.
+
+    **`store` and `store_vectors` were added by the arrival they exist to catch.** The scratchpad
+    gave a turn durable memories under an actor-keyed namespace, `agent/leaver.py` grew the two
+    statements that erase them, and this assertion went red on the *addition* — which is the same
+    alarm working in the useful direction. Growing the set is the deliberate act the test forces;
+    the failure it is really guarding against is the silent shrink, because a table that stops being
+    reported is a departing person's data nobody knows is still there.
     """
 
     async def _run() -> None:
@@ -418,6 +426,8 @@ def test_the_erase_statements_are_valid_sql() -> None:
             "checkpoints",
             "checkpoint_blobs",
             "checkpoint_writes",
+            "store",
+            "store_vectors",
             "session_events",
             "session_turns",
             "subscriptions",

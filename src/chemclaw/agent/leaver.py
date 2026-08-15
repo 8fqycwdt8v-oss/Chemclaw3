@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.scratchpad import memory_prefix
 from chemclaw.agent.session_store import _session_dsn
 from chemclaw.core import db
 from chemclaw.core.db import existing_tables
@@ -134,9 +135,33 @@ _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = tuple(
     (table, f"DELETE FROM {table} WHERE thread_id IN ({_SESSION_SCOPED})")
     for table in CHECKPOINT_TABLES
 )
+# The agent's durable memories, which are **not** session-scoped and so cannot ride the pass above.
+# A memory outlives the session it was written in — that is the whole point of it — so the only key
+# that finds a departing person's is the one `agent/scratchpad.py` deliberately put in the store's
+# namespace. `store.prefix` holds the dotted namespace, and `memory_prefix` builds the same string
+# the writer wrote under rather than re-deriving the join here.
+#
+# **This is the row that makes the erasure check honest.**
+# `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` rejected `BaseStore` partly
+# because `store` has no actor column, so a derived completeness test would pass while a departing
+# person's memories remained — *a safety net that returns a false green is worse than no safety
+# net, because it is trusted*. Keying the namespace by actor is what answers that, and this is
+# where the answer is spent.
+#
+# `store_vectors` before `store`: it has a foreign key on `(prefix, key)`, so the dependent side
+# goes first for the same reason the session-scoped rows precede `session_owners`.
+#
+# Skipped when absent, for the reason `_CHECKPOINT_ERASE` is: `AsyncPostgresStore.setup()` creates
+# these, not a migration, so a deployment that never enabled memories does not have them and
+# erasure must not be the one operation it cannot perform.
+_MEMORY_ERASE: tuple[tuple[str, str], ...] = (
+    ("store_vectors", "DELETE FROM store_vectors WHERE prefix = ANY(%(memory_prefixes)s)"),
+    ("store", "DELETE FROM store WHERE prefix = ANY(%(memory_prefixes)s)"),
+)
 _ERASE: tuple[tuple[str, str], ...] = (
     ("session_messages", f"DELETE FROM session_messages WHERE session_id IN ({_SESSION_SCOPED})"),
     *_CHECKPOINT_ERASE,
+    *_MEMORY_ERASE,
     ("session_events", f"DELETE FROM session_events WHERE session_id IN ({_SESSION_SCOPED})"),
     # `holder` as well as the session scope: a turn lease names the actor holding it, and releasing
     # a departed person's lease is the point. The session-scoped half alone would leave a lease held
@@ -245,6 +270,10 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
         # checkpointer's tables (`agent/checkpointer.py` opens its pool on the same DSN). Erasing
         # against the default while the data lives on the configured one deletes nothing and
         # reports success, which is the one outcome a right-to-erasure sweep must never produce.
+        # One digest per spelling of the id, for the reason `actors` is a list of spellings: a
+        # memory written on the `unverified:` path is under a different namespace from one written
+        # on the authenticated path, and both are the same chemist's.
+        memory_prefixes = [memory_prefix(form) for form in actors]
         async with db.connection(_session_dsn()) as conn:
             async with conn.cursor() as cur:
                 for table, columns, _ in _RETAINED:
@@ -268,7 +297,14 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                         # operator cannot compare against another run.
                         report.erased[table] = 0
                         continue
-                    await cur.execute(statement, {"actors": actors})
+                    # `memory_prefixes` alongside `actors` because the two erasure keys are
+                    # genuinely different shapes: everything session-scoped matches an actor id,
+                    # and the store matches the digest of one. Both are passed to every statement
+                    # — psycopg ignores a parameter a statement does not name — so the loop stays
+                    # one loop rather than branching on which key a table happens to use.
+                    await cur.execute(
+                        statement, {"actors": actors, "memory_prefixes": memory_prefixes}
+                    )
                     report.erased[table] = cur.rowcount if cur.rowcount > 0 else 0
             if apply:
                 await conn.commit()

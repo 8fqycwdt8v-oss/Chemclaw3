@@ -141,8 +141,9 @@ async def graph_events(
             event = _custom_event(payload, on_signal)
             if isinstance(event, HandoffEvent):
                 # The enter names the specialist, the hand back clears it. Safe to read as state
-                # because the pair brackets the specialist's execution in stream order, which
-                # `tests/test_agent_team.py` pins by asserting its output lands between them.
+                # because the pair brackets the specialist's execution in stream order. Nothing
+                # raises this event today — the specialist team went in D-2026-08-15 — so this
+                # branch is reachable only once subagents return.
                 agent = event.to
             if event is not None:
                 yield event

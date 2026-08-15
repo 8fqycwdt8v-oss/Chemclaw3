@@ -176,7 +176,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     # agent: layer 1. "LangGraph — conversation orchestration" is the definition of the layer.
     ("chemclaw.agent", "langgraph"): "layer 1 IS LangGraph (D-2026-08-10)",
     ("chemclaw.agent", "postgres"): "durable sessions, preferences and plan approvals (F3)",
-    ("chemclaw.agent", "httpx"): "the workload-identity and OBO token exchanges are HTTP",
     # api: layer 1's front door (F2).
     ("chemclaw.api", "http"): "api/ IS the FastAPI + SSE front door",
     ("chemclaw.api", "postgres"): "routes/ops.py reads readiness straight off the pool",
@@ -254,6 +253,12 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "runtime; they carry the `llm` label rather than the framework's on purpose, so holding "
         "the `langgraph` row does not also license building a model client"
     ),
+    ("chemclaw.agent", "httpx"): (
+        "agent/llm_provider builds the CA-pinned client inside `_tls_http_client`, so only a "
+        "private-CA internal endpoint pays for it. This row used to be module-scope and to say "
+        "'the workload-identity and OBO token exchanges are HTTP'; both exchanges were deleted "
+        "unused, and what is left of agent's HTTP is one lazy client factory"
+    ),
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
     ("chemclaw.evals", "llm"): "the judge client is built per run",
     ("chemclaw.ingest", "warehouse"): (
@@ -285,15 +290,6 @@ _KNOWN_LEAKS: dict[Site, str] = {
     ("src/chemclaw/templates/registry.py", "temporal"): (
         "the fifth copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
         "`TemplateWorkflow` is legitimate work — reaching for `temporalio` to do it is what is not"
-    ),
-    ("src/chemclaw/agent/challenge.py", "temporal"): (
-        "the sixth copy of the launch idiom, and the one that shows the debt is still accruing. "
-        "`start_answer_review` opens the hold a challenge panel's upheld objection needs "
-        "(D-2026-08-13-the-challenge-panel-is-generated-per-task-not-declared) and catches "
-        "`WorkflowAlreadyStartedError` to make re-surfacing idempotent — durable policy inside "
-        "layer 1, exactly like the four rows above it. It is function-scope rather than "
-        "module-scope so the agent layer stays importable without Temporal, which bounds the leak "
-        "and does not remove it. Same fix, same BACKLOG row: one `start_job()` in `durable/`"
     ),
     ("src/chemclaw/agent/job_results.py", "temporal"): (
         "the collection half of the same seam, and the row this file's by-file keying was written "

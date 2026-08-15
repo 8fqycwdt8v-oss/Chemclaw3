@@ -2,8 +2,8 @@
 
 **A leaf module, and that is the whole point.** These models are named by `connector.yaml`'s
 `params_model`, and `connectors/jobs.py` resolves that name by *importing* it — on every
-`build_agent`, in the chat service's own process, and again in `make connector-validate`. So
-whatever this module imports, the chat service imports too.
+`build_langgraph_agent`, in the chat service's own process, and again in `make connector-validate`.
+So whatever this module imports, the chat service imports too.
 
 They used to live in `connectors/calc/specs.py`, which imports `chemclaw.science.calc.complexes`,
 `chemclaw.science.calc.conformers`,

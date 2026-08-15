@@ -1,0 +1,141 @@
+"""The scratchpad's routing, its erasure key, and the property that keeps writes auditable.
+
+Three things are worth a test here and the third matters most. Routing and tool narrowing are
+ordinary wiring. The third — that nothing writes to the store except through a *tool* — is what
+answers the audit objection `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` raised,
+rather than merely arguing it. A direct `store.aput` would bypass the audit row, the authorization
+gate, the dry-run refusal and the repeat guard, all at once and silently: nothing fails, the memory
+is simply written with no record that it was.
+"""
+
+import ast
+from pathlib import Path
+
+import pytest
+from deepagents.backends import CompositeBackend, StateBackend
+
+from chemclaw.agent.scratchpad import (
+    MEMORY_ROOT,
+    filesystem_permissions,
+    memory_namespace,
+    memory_prefix,
+    scratchpad_backend,
+    scratchpad_tools,
+)
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+
+
+@pytest.fixture
+def skills() -> CompositeBackend:
+    """A stand-in skills backend with one route, so routing changes are visible."""
+    return CompositeBackend(default=StateBackend(), routes={"/skills/": StateBackend()})
+
+
+def test_memories_need_both_a_store_and_an_actor(skills: CompositeBackend) -> None:
+    """Either condition alone leaves the route off, and neither is a preference.
+
+    Without a store the deployment has no `store` tables at all. Without an actor there is no
+    namespace that could be erased, so a memory written anyway would be one nobody can delete and
+    everybody shares — which is worse than not having the capability.
+    """
+    assert MEMORY_ROOT not in scratchpad_backend(skills).routes
+    assert MEMORY_ROOT not in scratchpad_backend(skills, store=object()).routes
+
+    token = set_current_identity("alice-oid", frozenset())
+    try:
+        assert MEMORY_ROOT not in scratchpad_backend(skills).routes, "an actor alone is not enough"
+        assert MEMORY_ROOT in scratchpad_backend(skills, store=object()).routes
+    finally:
+        reset_current_identity(token)
+
+
+def test_the_skills_routes_survive_being_wrapped(skills: CompositeBackend) -> None:
+    """The narrowing must not be dropped by the thing that extends it.
+
+    The skills middleware and the filesystem tools read the *same* backend object, so a wrapper that
+    rebuilt the routes instead of carrying them would leave the role gate applying to the listing
+    and not to the read.
+    """
+    assert "/skills/" in scratchpad_backend(skills).routes
+
+
+def test_two_spellings_of_one_person_get_two_prefixes() -> None:
+    """`unverified:<id>` and `<id>` are the same chemist and must both be erasable.
+
+    `agent/leaver.py` holds the reason this repository has two spellings: a writer that cannot
+    authenticate its caller records the claim marked as a claim. The erasure sweep hashes each form,
+    so the two must not collapse into one prefix — and must not be equal, or hashing would be
+    hiding the distinction rather than preserving it.
+    """
+    assert memory_prefix("alice-oid") != memory_prefix("unverified:alice-oid")
+    assert memory_prefix("alice-oid") == memory_prefix("alice-oid"), "must be stable across calls"
+    assert memory_namespace("alice-oid")[0] == "memories"
+
+
+def test_the_prefix_is_the_namespace_joined_the_way_the_store_joins_it() -> None:
+    """The erasure sweep matches on `store.prefix`, which is the dotted namespace.
+
+    Pinned because two modules agree about this key: this one writes under the namespace and
+    `agent/leaver.py` deletes by the prefix. Deriving the join twice is how they would drift.
+    """
+    assert memory_prefix("bob") == ".".join(memory_namespace("bob"))
+
+
+def test_the_shell_and_the_delete_verb_are_withheld() -> None:
+    """Two verbs upstream registers that this deployment does not offer.
+
+    `execute` would be a shell — deepagents 0.7 ships one concrete sandbox, which this repository
+    declines on egress grounds, and `LocalShellBackend` is documented as unrestricted. `delete` is
+    withheld on D-2026-08-12's argument: a turn that cannot rewrite a `SKILL.md` but can remove it
+    still decides what judgment the next turn is able to load.
+
+    Asserted as an exact set rather than two `not in`s, because the failure mode worth catching is
+    upstream *adding* a ninth verb that nothing here has answered for.
+    """
+    assert set(scratchpad_tools()) == {"ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+
+
+def test_writes_are_denied_outside_the_two_roots_that_are_meant_to_be_written() -> None:
+    """The deny rule closes the surface behind the allows, and must come last.
+
+    `FilesystemPermission` is first-match-wins, so an ordering that put the blanket deny first would
+    refuse every write including the ones the scratchpad exists for — and the tests would still pass
+    if they only checked that a deny rule was present.
+    """
+    rules = filesystem_permissions()
+    assert [rule.mode for rule in rules] == ["allow", "allow", "deny"]
+    assert rules[-1].paths == ["/**"], "the closing rule must cover everything"
+    allowed = {path for rule in rules[:-1] for path in rule.paths}
+    assert allowed == {"/scratch/**", "/memories/**"}
+
+
+def test_no_first_party_module_writes_to_a_store_directly() -> None:
+    """The property that keeps a memory write auditable, enforced rather than described.
+
+    Every write must arrive as a `write_file`/`edit_file` tool call, because that is what crosses
+    the `wrap_tool_call` chain — the audit row, the authorization gate, the dry-run refusal and the
+    repeat guard. A direct `store.aput` bypasses all four at once, and it would do so silently:
+    nothing fails, the memory is simply written with no record that it was.
+
+    This is the objection `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` raised
+    against adopting `BaseStore` at all. The design answers it by construction, and this asserts the
+    construction holds — an AST walk rather than a grep, so a call spelled across two lines or
+    hidden behind an alias is still caught.
+    """
+    offenders: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr in {"aput", "adelete"} and isinstance(node.func.value, ast.Name):
+                # `store.aput(...)` / `store.adelete(...)`. The receiver's *name* is the signal:
+                # this is about a store, not about any object that happens to expose the verb.
+                if "store" in node.func.value.id.lower():
+                    offenders.append(f"{path.relative_to(_SRC.parent.parent)}:{node.lineno}")
+    assert not offenders, (
+        "a store is written to directly, bypassing the tool-call chain that audits and authorizes "
+        f"every other write: {offenders}"
+    )

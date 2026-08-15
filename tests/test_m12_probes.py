@@ -14,19 +14,15 @@ the half that can be wrong silently:
   broken tool, or that a `capability_degraded` frame arriving *after* the first token is caught;
 * the **corpus as a declaration** — the same gating `tests/test_live_probes.py` applies to
   `data/evals/probes/`: duplicate ids across the directory are fatal, an unknown key is rejected,
-  every `expects_tools` name exists on the agent surface, and (new here) every `expects_specialist`
-  names a real specialist.
+  every `expects_tools` name exists on the agent surface.
 
-**The routing suite has now been run against a live stack** (2026-08-11: Postgres + Temporal +
-front door + a real credential), and what it found belongs here because it changes how these tests
-should be read. Two of the three findings were defects in the *reading* rather than in the system:
-the `agent` attribution named the tool node instead of the specialist
-(`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`), and the cost column was silently
-`None` for every turn because `session_tokens` gated on this process's own `session_store`. Both
-had passing unit tests. The third is a measurement, recorded in `tasks/todo.md`: with the team
-enabled, the supervisor delegated **0 times in 15 probes** and answered each one itself — using
-only tools the expected specialist advertises in 14 of the 15 (12 of those unambiguously; the
-fifteenth called no tool at all).
+**The routing suite is gone** (D-2026-08-15), with the specialist team it measured. What it
+established is worth keeping in view here, because it is the reason this file no longer covers a
+third suite: two of its three live findings were defects in the *reading* rather than in the system
+— the `agent` attribution named the tool node instead of the specialist, and the cost column was
+silently `None` for every turn because `session_tokens` gated on this process's own `session_store`
+— and **both had passing unit tests**. A suite that grades a live system can be wrong in ways its
+own unit tests cannot see.
 
 The plan-gate and degradation suites remain unexecuted against a live model. What each of these
 tests still owns is the half that can be wrong silently: the scoring, the wire reading, and the
@@ -45,8 +41,7 @@ import yaml
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.agent.plan_gate import plan_approval_refusal
-from chemclaw.agent.team import SPECIALISTS
-from chemclaw.cli.live_probes import _M12_SUITES, _findings_report, _m12_probes, _routing_report
+from chemclaw.cli.live_probes import _M12_SUITES, _findings_report, _m12_probes
 from chemclaw.core.config import settings
 from chemclaw.evals.live import (
     PLAN_GATE_MARKER,
@@ -54,14 +49,12 @@ from chemclaw.evals.live import (
     PlanGateRun,
     PlanSnapshot,
     ProbeOutcome,
-    TurnTokens,
     _plan_gate_findings,
     degradation_findings,
     load_probes,
     run_plan_gate_probe,
     run_probe,
     run_turn,
-    score_routing,
 )
 from chemclaw.evals.probe import Probe, ProbeSet, Turn
 
@@ -161,52 +154,6 @@ def test_the_plan_gate_marker_is_still_a_substring_of_the_live_refusal() -> None
     the "refused before approval" and "executed after approval" findings would flip at once.
     """
     assert PLAN_GATE_MARKER in str(plan_approval_refusal("propose_knowledge_note"))
-
-
-def test_a_specialists_name_is_read_off_the_events_it_raised() -> None:
-    """Routing is observed from the `agent` field, in first-seen order.
-
-    Attribution stays the routing key rather than the handoff event, because it is the *stricter*
-    observation: a handoff says the supervisor delegated, while an `agent`-stamped event says the
-    specialist actually did something. A turn routed to `safety` that then did nothing there is a
-    mis-route the handoff alone would score as correct.
-
-    That holds only because the two now share a source. Attribution used to be derived from the
-    subgraph namespace and named the tool node — every specialist event arrived as agent `"tools"`,
-    so this key scored every delegation as a mis-route (measured on the live lane before it was
-    believed). It is now stamped from the handoff pair, which carries the name
-    `agent/team.running_specialist` was constructed with; the handoff is the reading, and this is
-    the reading plus evidence that work happened.
-    """
-    outcome = _run_one(
-        _probe(),
-        {"type": "tool_call", "tool": "screen_hazards", "arguments": "{}", "agent": "safety"},
-        {
-            "type": "tool_result",
-            "tool": "screen_hazards",
-            "preview": "no rule matched",
-            "agent": "safety",
-        },
-        {"type": "answer", "text": "Nothing matched."},
-    )
-    assert outcome.specialists == ["safety"]
-
-
-def test_the_main_agent_leaves_the_specialist_list_empty() -> None:
-    """Empty means the main agent, which is both the pre-teams shape and the control arm's.
-
-    Pinned because the whole single-agent arm rests on it: if an unattributed event ever recorded a
-    specialist, the control arm would report routing it never did.
-    """
-    outcome = _run_one(
-        _probe(),
-        {"type": "tool_call", "tool": "screen_hazards", "arguments": "{}"},
-        {"type": "answer", "text": "Nothing matched."},
-    )
-    assert outcome.specialists == []
-
-
-# ------------------------------------------------------------------- suite A · the plan gate
 
 
 def _plan_gate_transport(
@@ -631,170 +578,6 @@ def test_the_durable_launcher_must_actually_have_been_reached() -> None:
     assert findings["the durable launcher was reached"].ok is False
 
 
-# --------------------------------------------------------------------------- suite C · routing
-
-
-def _routed(probe_id: str, specialist: str | None, tokens: int | None) -> ProbeOutcome:
-    """One scored turn: who handled it and what the ledger said it cost."""
-    return ProbeOutcome(
-        probe_id=probe_id,
-        section=1,
-        persona="lab_technician",
-        bucket="A",
-        question="q",
-        specialists=[specialist] if specialist else [],
-        tokens=None if tokens is None else TurnTokens(turns=1, input=tokens, total=tokens),
-    )
-
-
-def test_routing_accuracy_is_scored_over_the_turns_that_were_delegated() -> None:
-    """The denominator is `routed`, not `probes`, and the two failures stay separable.
-
-    "Never delegated" and "delegated wrongly" have different fixes — a supervisor prompt versus a
-    surface partition — so blending them into one ratio would produce a number naming neither.
-    """
-    probes = [
-        _probe(id="rt-01", expects_specialist="safety"),
-        _probe(id="rt-02", expects_specialist="design"),
-        _probe(id="rt-03", expects_specialist="evidence"),
-    ]
-    outcomes = [
-        _routed("rt-01", "safety", 1000),
-        _routed("rt-02", "evidence", 2000),
-        _routed("rt-03", None, 500),
-    ]
-    score = score_routing(probes, outcomes, arm="team")
-    assert score.probes == 3
-    assert score.routed == 2
-    assert score.correct == 1
-    assert score.accuracy == pytest.approx(0.5)
-    assert score.misroutes == {"rt-02": "design → evidence"}
-
-
-def test_per_specialist_cost_is_attributed_by_the_turns_routing() -> None:
-    """Cost is booked per session, so a specialist's price is the price of a turn routed to it.
-
-    There is no per-subagent ledger row to read — a specialist's model calls run inside the
-    supervisor's turn — and this is the quantity the comparison needs anyway: the single-agent arm
-    has no per-subagent decomposition to be compared against one.
-    """
-    probes = [
-        _probe(id="rt-01", expects_specialist="safety"),
-        _probe(id="rt-02", expects_specialist="safety"),
-    ]
-    outcomes = [_routed("rt-01", "safety", 1200), _routed("rt-02", "safety", 800)]
-    score = score_routing(probes, outcomes, arm="team")
-    assert score.tokens_by_specialist == {"safety": 2000}
-    assert score.turns_by_specialist == {"safety": 2}
-    assert score.total_tokens == 2000
-
-
-def test_a_turn_the_ledger_could_not_price_is_counted_apart_from_a_free_one() -> None:
-    """`None` tokens means unmeasured, and summing it as zero would understate the arm.
-
-    The same distinction `_job_outcomes` draws between `unreachable` and `not-found`: the harness
-    failing to take a measurement is a fact about the harness, and reporting it as a cheap turn
-    would be a fact about the system that is not true.
-    """
-    probes = [_probe(id="rt-01", expects_specialist="safety")]
-    score = score_routing(probes, [_routed("rt-01", "safety", None)], arm="team")
-    assert score.total_tokens == 0
-    assert score.unmeasured_turns == 1
-    assert score.tokens_by_specialist == {}
-
-
-def test_the_single_agent_arm_records_no_routing_at_all() -> None:
-    """The control arm has nothing to route, so its accuracy is not a number about it.
-
-    Pinned so that a future change attributing an unlabelled event to some default specialist would
-    fail here rather than quietly giving the control arm a routing score to be compared.
-    """
-    probes = [_probe(id="rt-01", expects_specialist="safety")]
-    score = score_routing(probes, [_routed("rt-01", None, 900)], arm="single")
-    assert score.routed == 0
-    assert score.accuracy == 0.0
-    assert score.total_tokens == 900
-
-
-def test_one_arm_alone_is_reported_as_not_yet_an_answer() -> None:
-    """A team's accuracy with nothing to compare its cost against does not settle M9's question.
-
-    The ADR's own words: a supervisor that mis-routes is worse than the single agent it replaces.
-    "Worse than" is comparative, so a single-arm report has to say out loud that it is half a
-    measurement — the same correction `cli/live_storm.report` makes about families that did not run.
-    """
-    score = score_routing([_probe(id="rt-01", expects_specialist="safety")], [], arm="team")
-    report = _routing_report({"team": score})
-    assert "Only one arm has run" in report
-    assert "--arm single" in report
-
-
-def test_both_arms_are_reported_side_by_side() -> None:
-    """With two arms the report stops hedging and prints the comparison."""
-    probes = [_probe(id="rt-01", expects_specialist="safety")]
-    team = score_routing(probes, [_routed("rt-01", "safety", 1500)], arm="team")
-    single = score_routing(probes, [_routed("rt-01", None, 900)], arm="single")
-    report = _routing_report({"team": team, "single": single})
-    assert "Only one arm has run" not in report
-    assert "| team |" in report
-    assert "| single |" in report
-
-
-# --------------------------------------------------------------- the cost half of suite C
-
-
-def test_the_cost_ledger_is_read_even_when_this_process_says_memory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The harness must ask the ledger, not ask its own settings whether the ledger exists.
-
-    A `settings.session_store != "postgres"` short-circuit used to stand in front of this query,
-    and it was a local guess about a *remote* process. The harness runs outside the lane,
-    `infra/live/processes.sh` exports `CHEMCLAW_SESSION_STORE` only to the processes it starts, and
-    the default is `memory` — so `make live-routing` from an ordinary shell priced **every** turn
-    `None` against a front door that had been writing the ledger correctly all along. Measured on
-    the live lane: 15/15 turns unmeasured with 26 rows in `turn_costs`.
-
-    That is not a cosmetic gap. `score_routing`'s whole cost column feeds the M9 comparison — "a
-    supervisor that mis-routes is worse than the single agent it replaces" is a claim about price
-    as well as accuracy — so a silently unpriced arm makes half the question unanswerable while the
-    report still prints a table.
-
-    `session_store` is pinned to `memory` here precisely because that is the configuration under
-    which the bug hid: the assertion is that the numbers come back anyway.
-    """
-    from chemclaw.evals import live as live_module
-
-    monkeypatch.setattr(settings, "session_store", "memory")
-
-    class _Cursor:
-        async def fetchone(self) -> tuple[int, int, int, int, int]:
-            return (2, 1200, 300, 50, 10)
-
-    class _Conn:
-        async def execute(self, _sql: str, _args: object) -> _Cursor:
-            return _Cursor()
-
-    class _Connection:
-        def __init__(self, _dsn: str) -> None:
-            """Accept the DSN the caller resolved; this double never opens a socket."""
-
-        async def __aenter__(self) -> _Conn:
-            return _Conn()
-
-        async def __aexit__(self, *_exc: object) -> None:
-            """Nothing to release."""
-
-    monkeypatch.setattr(live_module, "db_connection", _Connection)
-    tokens = asyncio.run(live_module.session_tokens("s-cost"))
-    assert tokens is not None, "the ledger was reachable; the harness must not report it untaken"
-    assert (tokens.turns, tokens.input, tokens.output) == (2, 1200, 300)
-    assert tokens.total == 1560
-
-
-# --------------------------------------------------------------------------- the report shape
-
-
 def test_a_failed_check_is_visible_in_the_report_rather_than_a_missing_row() -> None:
     """A check that could not be taken is a FAIL row with its reason, never an absent one."""
     report = _findings_report(
@@ -862,47 +645,6 @@ def test_every_expected_tool_in_the_m12_corpus_exists_on_the_agent_surface() -> 
         if tool not in surface
     }
     assert unknown == set(), f"m12 probes expect tools that do not exist: {sorted(unknown)}"
-
-
-def test_every_expected_specialist_names_a_real_one() -> None:
-    """The routing key is a declaration against `agent/team.SPECIALISTS`.
-
-    A key naming a specialist that does not exist would score every one of its questions as a
-    mis-route and read as a supervisor problem — a corpus typo reported as a system defect, which
-    is exactly what `expects_tools`' own gate exists to stop.
-    """
-    unknown = {
-        probe.expects_specialist
-        for probe in load_probes(str(M12_DIR))
-        if probe.expects_specialist is not None and probe.expects_specialist not in SPECIALISTS
-    }
-    assert unknown == set(), f"unknown specialists in the routing corpus: {sorted(unknown)}"
-
-
-def test_the_routing_corpus_covers_every_specialist() -> None:
-    """A partition measured on four of five parts is a measurement of four of five parts.
-
-    The routing question is which specialist a question reaches; leaving one out would leave its
-    whole slice of the surface unmeasured while the accuracy number looked complete.
-    """
-    routing = _m12_probes(str(M12_DIR), "routing")
-    covered = {probe.expects_specialist for probe in routing}
-    assert covered == set(SPECIALISTS)
-
-
-def test_the_routing_corpus_asks_each_specialist_more_than_one_question() -> None:
-    """One question per specialist would make each arm's accuracy a five-point scale.
-
-    Not a style preference: with one probe each, a single ambiguous question moves accuracy by 20
-    points and the threshold stops separating "the supervisor mis-routes" from "that question was
-    borderline".
-    """
-    routing = _m12_probes(str(M12_DIR), "routing")
-    per_specialist = dict.fromkeys(SPECIALISTS, 0)
-    for probe in routing:
-        if probe.expects_specialist is not None:
-            per_specialist[probe.expects_specialist] += 1
-    assert all(count >= 2 for count in per_specialist.values()), per_specialist
 
 
 def test_the_plan_gate_probe_scripts_an_approval_and_a_plan_change() -> None:

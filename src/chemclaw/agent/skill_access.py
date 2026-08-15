@@ -5,8 +5,8 @@ Three independent narrowings, deliberately kept separate because they answer dif
 deployment?"* (an admin/config concern); `ToolScopedSkills` answers *"can this agent do any
 of what the skill teaches?"* (a capability concern); `RoleScopedSkills` answers *"may this
 caller see it?"* (an identity concern). All three only ever remove skills, so chaining them in any
-order is safe; `build_agent` wraps them in the order the request reads — what exists at all, then
-what this agent can do, then who may see it.
+order is safe; `build_langgraph_agent` wraps them in the order the request reads — what exists at
+all, then what this agent can do, then who may see it.
 
 All three are the same short-circuit over a different predicate, which is what `_Narrowing`
 holds: await the inner source, return it untouched when this narrowing is unconfigured, otherwise
@@ -31,9 +31,9 @@ against the discovered skills.
 
 The caller's roles are the turn's **ambient identity** (`chemclaw.core.identity_context`), stamped
 by the front door from the validated `Principal` — the same source `chemclaw.agent.audit`/
-`chemclaw.agent.authz` read. So no identity is threaded through `build_agent`, and off the request
-path (tests, the classic non-service caller) there are simply no roles, so only ungated skills show
-— and with no gates configured, that is still every skill.
+`chemclaw.agent.authz` read. So no identity is threaded through `build_langgraph_agent`, and off the
+request path (tests, the classic non-service caller) there are simply no roles, so only ungated
+skills show — and with no gates configured, that is still every skill.
 """
 
 from abc import abstractmethod

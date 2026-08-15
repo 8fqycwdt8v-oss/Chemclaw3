@@ -1,12 +1,19 @@
 # `chemclaw.agent` — the conversation layer
 
 **One engine: LangGraph.** `langgraph_agent.build_langgraph_agent` compiles the agent
-over `create_agent` — one graph per turn, because LangGraph binds tools at construction
-and a connector's MCP session belongs to exactly one turn (measured at ~60 ms, cheaper
-than the process-lived agent it replaced). Turn state is a declared schema (`state.py`)
-persisted by a Postgres checkpointer (`checkpointer.py`); the plan is `TodoListMiddleware`'s
-todo list; every tool call crosses the chain `langgraph_agent.tool_call_middleware` builds,
-whose order is load-bearing and documented there. The Microsoft Agent Framework this layer
+over `deepagents.create_deep_agent` — one graph per turn, because LangGraph binds tools at
+construction and a connector's MCP session belongs to exactly one turn (measured at ~60 ms,
+cheaper than the process-lived agent it replaced). `create_deep_agent` assembles a stack of
+its own and splices this repository's into it **by `.name`**, so the compiled order is not
+the order `_middleware` lists; `tests/test_middleware_order.py` pins what actually compiles,
+and one entry — `FilesystemMiddleware` — deliberately shares upstream's name so it takes its
+place and withholds the shell and the delete verb. Turn state is a declared schema
+(`state.py`) persisted by a Postgres checkpointer (`checkpointer.py`); the plan is
+`TodoListMiddleware`'s todo list; every tool call crosses the chain
+`langgraph_agent.tool_call_middleware` builds, whose order is load-bearing and documented
+there. The `task` tool is not optional — upstream refuses to let a profile strip the
+middleware that registers it — so `subagents.py` supplies the one helper it reaches, compiled
+through this same builder rather than inherited ungoverned. The Microsoft Agent Framework this layer
 was first built on is gone
 (`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`) — replaced
 for defect load rather than capability. `api/events.py` was the conformance boundary the two

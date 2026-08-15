@@ -104,19 +104,6 @@ class ChemclawState(PlanningState):
 
     loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
 
-    # How many revision rounds the challenge panel has already forced this turn. Bounds the
-    # `jump_to: "model"` loop in `agent/challenge_gate.py` against `challenge_max_attempts`, and it
-    # is a counted field for exactly the reason the runaway cap's own record is: the alternative is
-    # inferring "have we been round this before" from the message list, which is the inference
-    # `agent/loop_cap.py` was written to delete.
-    #
-    # **This field was deleted once, by a merge, and nothing went red.** `challenge_gate` writes it
-    # and LangGraph silently drops a write to an undeclared channel, so `attempts` stayed 0, the
-    # `challenge_max_attempts` bound never fired, and the revision loop ran to the recursion limit —
-    # discarding the whole turn. `tests/test_state_channels.py` now drives a compiled graph for
-    # every channel here, because a unit test on the hook cannot see a channel that does not exist.
-    challenge_attempts: NotRequired[Annotated[int, UntrackedValue]]
-
 
 def turn_input(message: str) -> dict[str, Any]:
     """The graph input that starts one turn: the user's message.
@@ -140,7 +127,8 @@ def turn_input(message: str) -> dict[str, Any]:
 def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     """The invocation config one turn runs under: its thread, and the graph's step ceiling.
 
-    **The ceiling is the point.** `create_agent` bakes `recursion_limit=9999` and nothing in this
+    **The ceiling is the point.** `create_agent` bakes `recursion_limit=9999`, `create_deep_agent`
+    bakes a second one onto the graph it returns, and nothing in this
     repo had ever chosen otherwise, so the only bound on a turn was thousands of model calls —
     measured at 2 supersteps per call on the classic path and 4 with the harness, i.e. roughly 5,000
     and 2,500. Worse, reaching it raises `GraphRecursionError`, which discards whatever the turn had

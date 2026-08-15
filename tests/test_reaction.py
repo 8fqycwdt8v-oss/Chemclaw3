@@ -369,7 +369,8 @@ def test_a_reaction_reports_which_conformational_treatment_produced_it() -> None
 def test_the_exotherm_flag_survived_the_consolidation() -> None:
     """The one capability the removed exotherm screen had, now on the composite (D-108).
 
-    `chemclaw.science.calc.reaction_energy` was deleted rather than kept alongside this module, so
+    `compute_reaction_energy`
+    (`chemclaw.science.calc.reaction`) was deleted rather than kept alongside this module, so
     its
     thermal-hazard flag had to move rather than be dropped — that is the difference between
     consolidating and losing a feature. It reads ΔE against the same configured threshold.

@@ -149,7 +149,6 @@ def _example(probe: Probe) -> tuple[dict[str, Any], dict[str, Any], dict[str, An
         {"question": probe.question, "persona": probe.persona, "direction": probe.direction},
         {
             "expects_tools": sorted(probe.expects_tools),
-            "expects_specialist": probe.expects_specialist,
             "forbids_claims": list(probe.forbids_claims),
         },
         {"probe_id": probe.id, "section": probe.section, "bucket": probe.bucket},

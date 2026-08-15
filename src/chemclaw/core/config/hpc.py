@@ -85,11 +85,6 @@ class HpcSettings(BaseSettings):
     # behaviour — the result still reaches the session and the PR-gated note, just without the
     # durable cache entry or the note's `calc_refs`.
     qm_persist_to_calc_store: bool = True
-    # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is
-    # not an Entra relying party, so user jobs run under one service identity while the
-    # requesting Entra `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity
-    # mapping is logged for the audit trail. This is the shared service identity jobs run as.
-    hpc_bridge_identity: str = "chemclaw-hpc"
 
     @model_validator(mode="after")
     def _poll_faster_than_heartbeat(self) -> Self:

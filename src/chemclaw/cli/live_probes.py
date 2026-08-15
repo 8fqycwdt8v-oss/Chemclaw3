@@ -11,7 +11,7 @@ tool at all, nine of them on questions the surface covered). So the tool-reach n
 beside the verdict counts, never folded into them.
 
 **`--suite` selects what is being asked, and the default asks today's corpus question.** Three M12
-suites live beside it (`--suite plan-gate|degradation|routing`), each running its own probe file
+suites live beside it (`--suite plan-gate|degradation`), each running its own probe file
 from `settings.live_m12_probe_dir` and each scored mechanically rather than by a judge. They are
 flags on this entry point rather than three new modules because everything underneath is shared —
 the front-door client, the transcript discipline, the "outputs land beside their own transcripts"
@@ -38,14 +38,11 @@ from chemclaw.evals.live import (
     Finding,
     PlanGateRun,
     ProbeOutcome,
-    RoutingScore,
     degradation_findings,
     load_probes,
     run_plan_gate_probe,
     run_probes,
     run_turn,
-    score_routing,
-    session_tokens,
 )
 from chemclaw.evals.live_judge import Judgement, judge_outcome, judgement_from_transcript
 from chemclaw.evals.probe import Probe, ProbeSet
@@ -58,7 +55,6 @@ logger = logging.getLogger(__name__)
 _M12_SUITES: dict[str, str] = {
     "plan-gate": "plan_gate.yaml",
     "degradation": "degradation.yaml",
-    "routing": "routing.yaml",
 }
 
 
@@ -265,9 +261,9 @@ def _write_suite(directory: Path, report: str, evidence: dict[str, object]) -> N
 def _m12_probes(probe_dir: str | None, suite: str) -> list[Probe]:
     """The probes behind one M12 suite, read from that suite's own file.
 
-    One file per suite rather than `load_probes` over the whole directory: three suites share
+    One file per suite rather than `load_probes` over the whole directory: the suites share
     `live_m12_probe_dir` and each must ask only its own questions, so a directory-wide read would
-    put the routing corpus through the plan-gate protocol. The directory *is* still gated as a
+    put one suite's corpus through another's protocol. The directory *is* still gated as a
     whole — `tests/test_m12_probes.py` runs `load_probes` across it, so a duplicate id between two
     suites is exactly as fatal here as it is in the corpus, and the schema is the same `ProbeSet`
     either way.
@@ -350,174 +346,11 @@ async def _run_degradation(args: argparse.Namespace) -> int:
     return 0 if findings and all(finding.ok for finding in findings) else 1
 
 
-def _routing_report(scores: dict[str, RoutingScore]) -> str:
-    """Both arms side by side, or one arm plus a note that the comparison is not yet possible.
-
-    A single arm is deliberately *not* reported as an answer. The question M9 deferred its default
-    to is comparative, and a team's accuracy with nothing to compare its cost against would be the
-    same category of claim as "17/17 checks passed" over a matrix two families short.
-    """
-    lines = ["# M12 · team routing accuracy and per-specialist token cost\n"]
-    lines.append(
-        "Routing accuracy is scored over the turns that were *delegated*, and token cost over the "
-        "turns the ledger could be asked about. Both denominators are printed, because the two "
-        "failures they separate — never delegating, and delegating wrongly — have different fixes."
-    )
-    lines.append("")
-    lines.append("| arm | probes | delegated | correct | accuracy | tokens | unmeasured turns |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-    for arm in sorted(scores):
-        score = scores[arm]
-        lines.append(
-            f"| {arm} | {score.probes} | {score.routed} | {score.correct} | "
-            f"{score.accuracy:.0%} | {score.total_tokens} | {score.unmeasured_turns} |"
-        )
-
-    for arm in sorted(scores):
-        score = scores[arm]
-        if not score.turns_by_specialist:
-            continue
-        lines.append(f"\n## {arm} · per specialist\n")
-        lines.append("| specialist | turns | tokens | tokens/turn |")
-        lines.append("| --- | ---: | ---: | ---: |")
-        for name in sorted(score.turns_by_specialist):
-            turns = score.turns_by_specialist[name]
-            tokens = score.tokens_by_specialist.get(name, 0)
-            lines.append(f"| {name} | {turns} | {tokens} | {tokens // max(turns, 1)} |")
-
-    if any(score.self_answered for score in scores.values()):
-        lines.append("\n## Turns the supervisor answered itself\n")
-        lines.append(
-            "Scored against the surface the question was declared to belong to, so a run that "
-            "delegates little still measures something. This is a claim about the corpus's "
-            "partition — *was `expects_specialist` the right answer* — and not about the "
-            "supervisor's judgement, which only the delegated turns above can speak to."
-        )
-        lines.append("")
-        lines.append("| arm | self-answered | within expected surface | share |")
-        lines.append("| --- | ---: | ---: | ---: |")
-        for arm in sorted(scores):
-            score = scores[arm]
-            if not score.self_answered:
-                continue
-            share = score.within_expected_surface / score.self_answered
-            lines.append(
-                f"| {arm} | {score.self_answered} | {score.within_expected_surface} | {share:.0%} |"
-            )
-        outside = {
-            a: s.outside_expected_surface for a, s in scores.items() if s.outside_expected_surface
-        }
-        for arm, strayed in sorted(outside.items()):
-            for probe_id, tools in sorted(strayed.items()):
-                lines.append(
-                    f"- **{arm}** {probe_id} reached outside its surface: {', '.join(tools)}"
-                )
-
-    misroutes = {arm: score.misroutes for arm, score in scores.items() if score.misroutes}
-    if misroutes:
-        lines.append("\n## Mis-routes\n")
-        for arm, rows in sorted(misroutes.items()):
-            for probe_id, movement in sorted(rows.items()):
-                lines.append(f"- **{arm}** {probe_id}: expected {movement}")
-
-    if len(scores) < 2:
-        lines.append(
-            "\n**Only one arm has run.** Re-run with `--arm "
-            f"{'single' if 'team' in scores else 'team'}` against a front door configured the "
-            "other way (`CHEMCLAW_AGENT_TEAMS_ENABLED`) — a routing number with nothing to compare "
-            "it against does not answer the question M9 deferred."
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _specialist_surfaces() -> dict[str, set[str]]:
-    """Each specialist's advertised tools, for scoring the turns that were never delegated.
-
-    The agent layer is imported here rather than at module scope for the reason `evals/live.py`
-    takes these as a parameter at all: the scorer stays a pure function of what it is given, and
-    only this CLI — which is already the thing that runs against a live deployment — knows how to
-    open the profiles.
-
-    `load_profiles` is called because this CLI is a *different process* from the front door: the
-    profiles are files, and only `api/app.py` had ever registered them at startup, so
-    `specialist_profiles()` in this process raised `unknown agent profile 'evidence'`. It is
-    idempotent, so calling it here costs a directory scan and cannot conflict with a registry some
-    other entry point has already filled.
-    """
-    from chemclaw.agent.chemclaw_agent import advertised_tool_names
-    from chemclaw.agent.profile_discovery import load_profiles
-    from chemclaw.agent.team import specialist_profiles
-
-    load_profiles()
-    return {profile.name: set(advertised_tool_names(profile)) for profile in specialist_profiles()}
-
-
-async def _run_routing(args: argparse.Namespace) -> int:
-    """Suite C — one arm of the routing measurement, compared against the other when it exists."""
-    probes = _m12_probes(args.probe_dir, "routing")
-    directory = _suite_dir(args.transcript_dir, "routing")
-    directory.mkdir(parents=True, exist_ok=True)
-
-    outcomes: list[ProbeOutcome] = []
-    async with _client(args.base_url) as client:
-        for probe in probes:
-            outcome = await run_turn(client, probe, message=probe.question)
-            # Attached here rather than inside `run_turn`: the ledger read waits for a row that has
-            # not landed yet, and paying that on all 190 corpus probes to serve one suite would be
-            # the harness taxing the measurement it is not making.
-            if outcome.session_id:
-                outcome.tokens = await session_tokens(outcome.session_id)
-            logger.info(
-                "routing probe %s → %s",
-                probe.id,
-                outcome.specialists[0] if outcome.specialists else "(main agent)",
-            )
-            outcomes.append(outcome)
-
-    score = score_routing(probes, outcomes, arm=args.arm, surfaces=_specialist_surfaces())
-    (directory / f"arm-{args.arm}.json").write_text(
-        json.dumps(
-            {
-                "score": score.model_dump(),
-                "outcomes": [outcome.model_dump() for outcome in outcomes],
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    scores = {args.arm: score}
-    for other in ("team", "single"):
-        path = directory / f"arm-{other}.json"
-        if other != args.arm and path.is_file():
-            stored = json.loads(path.read_text(encoding="utf-8"))
-            scores[other] = RoutingScore.model_validate(stored["score"])
-
-    report = _routing_report(scores)
-    print(report)
-    (directory / "summary.md").write_text(report, encoding="utf-8")
-
-    if args.arm == "single":
-        # The control arm has no routing to be right about — it exists to price the same questions
-        # without a supervisor. Its gate is that it ran and was measurable, nothing more.
-        return 0 if outcomes and score.unmeasured_turns < len(outcomes) else 1
-    if not score.routed:
-        logger.error(
-            "the team arm delegated nothing: %d probe(s) were answered by the main agent, so "
-            "there is no routing to score. Is CHEMCLAW_AGENT_TEAMS_ENABLED set on the front door?",
-            len(outcomes),
-        )
-        return 1
-    return 0 if score.accuracy >= settings.live_routing_accuracy_min else 1
-
-
 async def _main(args: argparse.Namespace) -> int:
     if args.suite in _M12_SUITES:
         runner = {
             "plan-gate": _run_plan_gate,
             "degradation": _run_degradation,
-            "routing": _run_routing,
         }[args.suite]
         return await runner(args)
 
@@ -583,12 +416,6 @@ def main() -> int:
         default="corpus",
         choices=["corpus", *sorted(_M12_SUITES)],
         help="corpus (the 190-question run, default) or one M12 re-validation suite",
-    )
-    parser.add_argument(
-        "--arm",
-        default="team",
-        choices=["team", "single"],
-        help="routing suite only: which arm this front door is configured as",
     )
     parser.add_argument("--probe-dir", default=None, help="override the configured probe directory")
     parser.add_argument("--base-url", default=None, help="front door base URL")

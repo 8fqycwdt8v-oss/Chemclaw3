@@ -19,7 +19,7 @@ import pytest
 from deepagents.backends import FilesystemBackend
 from deepagents.backends.protocol import BackendProtocol
 
-from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, skill_read_tool
+from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend
 
 _SKILLS = ("alpha", "beta", "gamma")
 
@@ -250,17 +250,44 @@ def test_the_read_tool_is_named_what_the_skills_prompt_tells_the_model_to_call()
     assert f"`{SKILL_READ_TOOL}`" in SKILLS_SYSTEM_PROMPT
 
 
+def _read(backend: BackendProtocol, path: str) -> str:
+    """Read one path through upstream's `read_file`, bound to a narrowed backend.
+
+    The hand-written tool this replaced is gone: `FilesystemMiddleware` registers `read_file` over
+    whatever backend it is given, which is the same verb reading through the same gate. These tests
+    therefore exercise *upstream's* tool against the narrowing, which is the arrangement that
+    actually ships — the previous version could only prove the first-party wrapper honoured it.
+
+    The `runtime` is constructed rather than mocked because upstream injects it from the graph and
+    the tool takes it as a required argument. Only the fields the read path touches are populated;
+    a stub that satisfied the signature without carrying the backend would be testing nothing.
+    """
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from langgraph.prebuilt import ToolRuntime
+
+    tool = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}["read_file"]
+    runtime: ToolRuntime[Any, Any] = ToolRuntime(
+        state={"messages": []},
+        context=None,
+        config={},
+        stream_writer=lambda _chunk: None,
+        tool_call_id="test",
+        store=None,
+    )
+    return str(asyncio.run(tool.ainvoke({"file_path": path, "runtime": runtime})))
+
+
 def test_the_read_tool_reads_a_permitted_skill(tree: str) -> None:
     """The tool returns the body, so progressive disclosure actually completes."""
-    tool = skill_read_tool(_backend(tree, _only_alpha))
-    assert "body of alpha" in asyncio.run(tool.ainvoke({"file_path": "/alpha/SKILL.md"}))
+    assert "body of alpha" in _read(_backend(tree, _only_alpha), "/alpha/SKILL.md")
 
 
 def test_the_read_tool_carries_no_authority_of_its_own(tree: str) -> None:
     """It reads through the narrowed backend, so it cannot reach what the listing hid.
 
-    The tool is the model's only route to a skill body, so this is the assertion that the gate
-    survives being given a way in: a refused skill stays refused when asked for by name.
+    The model's only route to a skill body is this tool, so this is the assertion that the gate
+    survives being given a way in: a refused skill stays refused when asked for by name. It matters
+    more now than it did, because the tool is no longer first-party — the refusal has to come from
+    the backend, which is exactly where `NarrowedSkillsBackend` puts it.
     """
-    tool = skill_read_tool(_backend(tree, _only_alpha))
-    assert asyncio.run(tool.ainvoke({"file_path": "/beta/SKILL.md"})) == REFUSED
+    assert REFUSED in _read(_backend(tree, _only_alpha), "/beta/SKILL.md")

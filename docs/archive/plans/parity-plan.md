@@ -1,6 +1,6 @@
 # Phase F10 — Platform-parity hardening (implementation tickets)
 
-> **Companion to** `docs/planning/implementation-tickets.md` (F0–F9). Same conventions: config-not-magic-numbers
+> **Companion to** `docs/archive/plans/implementation-tickets.md` (F0–F9). Same conventions: config-not-magic-numbers
 > (`CHEMCLAW_` prefix, one `pydantic-settings` source, `extra="forbid"`), one ADR per decision, `make
 > lint type test` green + the phase **CHECKMATE** (G1–G7) as the done-gate, durability stays in Temporal
 > (D-002), new knowledge goes through the PR-gate (D-005/D-018), and **no abstraction without a second

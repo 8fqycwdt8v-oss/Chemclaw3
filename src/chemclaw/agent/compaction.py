@@ -202,6 +202,46 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         del messages[:cut]
 
 
+def disabled_summarizer(model: Any, backend: Any) -> Any:
+    """Upstream's summarizer, constructed switched off — it arrives whether or not we want it.
+
+    **This exists because the declination above stopped being free.** While the middleware list was
+    hand-assembled, "no summarizer" was expressed by not importing one. `create_deep_agent` composes
+    a `SummarizationMiddleware` unconditionally, so the same decision now has to be *made* rather
+    than merely not unmade — and an argument this repository has held since D-025 must not be
+    reversed by an upstream default nobody chose.
+
+    The argument is unchanged and the deepagents variant does not escape it. That variant genuinely
+    answers half of it: evicted messages are written to a path the summary embeds, so the evidence
+    stays readable instead of being dropped, and `state["messages"]` is left intact. What it cannot
+    answer is the other half. `agent/framing.py` wraps untrusted tool output in an envelope that
+    marks it as untrusted, and a summary is *new prose written by the model over that content* —
+    the envelope does not survive it. So retrieved text that arrived flagged as external comes back
+    as unflagged narration, and is then re-read on every subsequent turn. That is an
+    indirect-prompt-injection surface pointed straight at the thread, and it is the one thing the
+    two deterministic edits below cannot become.
+
+    **`trigger=None` is upstream's own off state, not a large number standing in for one.**
+    `_should_summarize` opens with `if not self._trigger_clauses: return False`, so no clause means
+    it never fires — asserted in `tests/test_compaction.py` rather than read off that source once.
+    Constructed here and passed through `middleware=` so `_apply_custom_middleware` swaps it into
+    upstream's slot by name, which is the same mechanism `FilesystemMiddleware` uses and for the
+    same reason: the alternative, `HarnessProfile.excluded_middleware`, is resolved by the model's
+    self-reported provider and is silently skipped on a key miss.
+
+    Args:
+        model: The turn's resolved chat model. Required by the constructor and never called, since
+            the only thing that would call it is the summarization this disables.
+        backend: The turn's backend. Same: held for the offload path that cannot run.
+
+    Returns:
+        The middleware to hand `create_deep_agent(middleware=…)` in upstream's slot.
+    """
+    from langchain.agents.middleware.summarization import SummarizationMiddleware
+
+    return SummarizationMiddleware(model=model, backend=backend, trigger=None)
+
+
 def context_compaction_middleware() -> list[Any]:
     """The context policy, as the middleware list `build_langgraph_agent` splices in.
 
@@ -275,14 +315,17 @@ class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):
     async half, `build_langgraph_agent(model=fake).invoke(...)` raised "Synchronous implementation
     of wrap_model_call is not available", while the same graph without this middleware answered.
     The reachable caller is a synchronous `graph.invoke()` on a turn that calls no tool — what
-    `tests/test_compaction.py` drives, and the reason the sync half must stay. It is **not**
-    `agent/team.py::_AttributedSpecialist.invoke`, which this sentence used to name: deepagents'
-    `task` tool does carry a sync `func` beside its coroutine, but every tool-call middleware
-    attached here is async-only (`@wrap_tool_call` over an `async def` produces no sync half, and
-    the base class raises for it), so a specialist reached that way dies at its first tool call.
-    The sync tool path is unsupported by design — the governance chain is async — and a reader
-    deciding what to do about the sync question should start from that, not from a caller that
-    cannot reach it.
+    `tests/test_compaction.py` drives, and the reason the sync half must stay. It is **not** the
+    sync `func` deepagents' `task` tool carries beside its coroutine, which is what this sentence
+    used to name: every tool-call middleware attached here is async-only (`@wrap_tool_call` over an
+    `async def` produces no sync half, and the base class raises for it), so a helper reached that
+    way dies at its first tool call. The sync tool path is unsupported by design — the governance
+    chain is async — and a reader deciding what to do about the sync question should start from
+    that, not from a caller that cannot reach it.
+
+    That matters more now than when it was written: `agent/subagents.py` puts a helper behind `task`
+    on every agent, so the sync `func` is present on a real tool rather than a hypothetical one. It
+    is still unreachable for the same reason, and still not what keeps this half alive.
     `ContextEditingMiddleware` above declares both for the same reason; an observer that narrowed
     the engine its editor runs on would be reporting on a policy it had just disabled.
 

@@ -6,8 +6,8 @@ docstring — so it gates the harness around the model and never the model's jud
 `docs/planning/DEFERRED.md` names the gap exactly: a faithful behaviour eval has to run against a
 real LLM, because a mock LLM tests only the mock. This module is that runner.
 
-**Why the HTTP/SSE front door and not `build_agent()` in-process.** The in-process agent skips
-identity, authorization, budget admission, the audit sink, the durable session store and the
+**Why the HTTP/SSE front door and not `build_langgraph_agent()` in-process.** The in-process agent
+skips identity, authorization, budget admission, the audit sink, the durable session store and the
 streaming assembler that reconstructs tool calls from name-first fragments. Three of the five
 defects the fifty-question live pass found lived in exactly that layer
 (`docs/archive/vibe-test-2026-07.md`): tool-call events that carried no arguments, a failing tool
@@ -29,8 +29,6 @@ question the corpus run cannot, and each resolves to a mechanical observation �
 * `degradation_findings` asks where `capability_degraded` sits in the event *order*, because the
   event already being recorded says only that the outage was announced, not that it was announced
   in time for the answer to be planned against it.
-* `score_routing` counts which specialist a supervisor delegated to and what the turn cost, because
-  M9 shipped teams disabled pending exactly that number.
 """
 
 from __future__ import annotations
@@ -39,7 +37,6 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -957,132 +954,3 @@ def degradation_findings(probe: Probe, outcome: ProbeOutcome) -> list[Finding]:
             f"called {outcome.tools_called or '-'}; expected any of {probe.expects_tools}",
         )
     return findings
-
-
-class RoutingScore(BaseModel):
-    """One arm of the routing measurement: where the questions went, and what they cost.
-
-    An *arm*, not a result. The question M9 deferred is comparative — "is a supervisor that
-    delegates better than the single agent it replaces" — and a team's accuracy in isolation
-    answers nothing, because the single agent has no routing to be wrong about and is therefore
-    the only thing its token cost can be judged against.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    arm: str
-    probes: int = 0
-    # Turns in which some specialist raised an event. Zero is the expected shape of the
-    # single-agent arm and a finding in the team arm: a supervisor that answers everything itself
-    # is not a team, whatever `agent_teams_enabled` says.
-    routed: int = 0
-    correct: int = 0
-    # `routed`, not `probes`, is the denominator — accuracy is "of the questions it delegated, how
-    # many went to the right specialist". Dividing by `probes` would blend two different failures
-    # (never delegating, and delegating wrongly) into one number that names neither.
-    accuracy: float = 0.0
-    turns_by_specialist: dict[str, int] = Field(default_factory=dict)
-    tokens_by_specialist: dict[str, int] = Field(default_factory=dict)
-    # Probe id → the specialist it should have gone to, for the ones that did not. The list a
-    # reader actually acts on: a systematic mis-route between two specialists is a prompt problem,
-    # a scattered one is a partition problem.
-    misroutes: dict[str, str] = Field(default_factory=dict)
-    # Turns that were **not** delegated, scored against the surface they should have been delegated
-    # to: every tool the supervisor called itself was one the expected specialist advertises.
-    #
-    # This exists because `accuracy` above is unmeasurable exactly when it matters most. The first
-    # team arm delegated 1 of 15, so accuracy read 100% on a denominator of one and said nothing —
-    # and a check whose denominator depends on the model volunteering a behaviour is the same
-    # defect the DARK-1 probe was fixed for. These two fields need no delegation at all: they ask
-    # whether the corpus's `expects_specialist` was the right answer, which is the half of "routing
-    # quality" that is a property of the partition rather than of the supervisor's judgement. A
-    # supervisor that never delegates still tells you, by which tools it reached for, where the
-    # question belonged.
-    self_answered: int = 0
-    within_expected_surface: int = 0
-    # Probe id → the tools it called that its expected specialist does not advertise. A question
-    # whose tools span two specialists is a partition finding, not a supervisor finding, and this
-    # is the list that distinguishes them.
-    outside_expected_surface: dict[str, list[str]] = Field(default_factory=dict)
-    total_tokens: int = 0
-    # Turns whose cost the ledger could not be asked about. Reported beside the totals and never
-    # folded into them, so a mean over three measured turns is not read as a mean over twenty.
-    unmeasured_turns: int = 0
-
-
-def score_routing(
-    probes: list[Probe],
-    outcomes: list[ProbeOutcome],
-    *,
-    arm: str,
-    surfaces: Mapping[str, set[str]] | None = None,
-) -> RoutingScore:
-    """Fold one arm's turns into its routing accuracy and per-specialist token cost.
-
-    Per-specialist cost is attributed by *the turn's* routing, and it has to be: the ledger books a
-    turn under the session, and a specialist's model calls run inside the supervisor's turn, so
-    there is no per-subagent row to read. What this reports is therefore "what a question routed to
-    `safety` costs end to end", which is the quantity the comparison needs anyway — the single-agent
-    arm has no per-specialist decomposition to compare against a per-subagent one.
-
-    A turn routed to more than one specialist is attributed to the first, which is the delegation
-    decision under test; the rest are what the supervisor did after it.
-
-    `surfaces` maps a specialist name to the tools it advertises, and is what lets a turn the
-    supervisor answered itself still say something about routing (see `RoutingScore`). It is passed
-    in rather than looked up because this module holds no import of the agent layer and should not
-    gain one to serve a score: the caller already has the profiles open. Omitting it leaves the two
-    surface fields at zero, which is the honest reading of "not measured" — the single-agent arm
-    passes it too, and there it measures the corpus rather than any routing decision.
-    """
-    score = RoutingScore(arm=arm, probes=len(probes))
-    expected = {probe.id: probe.expects_specialist for probe in probes}
-    for outcome in outcomes:
-        tokens = outcome.tokens.total if outcome.tokens is not None else None
-        if tokens is None:
-            score.unmeasured_turns += 1
-        else:
-            score.total_tokens += tokens
-        if not outcome.specialists:
-            _score_self_answered(score, outcome, expected.get(outcome.probe_id), surfaces)
-            continue
-        specialist = outcome.specialists[0]
-        score.routed += 1
-        score.turns_by_specialist[specialist] = score.turns_by_specialist.get(specialist, 0) + 1
-        if tokens is not None:
-            score.tokens_by_specialist[specialist] = (
-                score.tokens_by_specialist.get(specialist, 0) + tokens
-            )
-        wanted = expected.get(outcome.probe_id)
-        if wanted is not None and wanted == specialist:
-            score.correct += 1
-        elif wanted is not None:
-            score.misroutes[outcome.probe_id] = f"{wanted} → {specialist}"
-    score.accuracy = score.correct / score.routed if score.routed else 0.0
-    return score
-
-
-def _score_self_answered(
-    score: RoutingScore,
-    outcome: ProbeOutcome,
-    wanted: str | None,
-    surfaces: Mapping[str, set[str]] | None,
-) -> None:
-    """Score one turn the supervisor answered itself against the surface it should have used.
-
-    A turn that called no tool at all is not counted either way: it produces no evidence about
-    where the question belonged, and counting it as a match would make a supervisor that answers
-    everything from memory look perfectly routed — the exact reading this measurement exists to
-    prevent.
-    """
-    if wanted is None or surfaces is None or not outcome.tools_called:
-        return
-    surface = surfaces.get(wanted)
-    if surface is None:
-        return
-    score.self_answered += 1
-    outside = sorted({tool for tool in outcome.tools_called if tool and tool not in surface})
-    if outside:
-        score.outside_expected_surface[outcome.probe_id] = outside
-    else:
-        score.within_expected_surface += 1

@@ -2,8 +2,8 @@
 
 This is the one place that turns folders on disk into agent capability. It deliberately combines
 the two discovery idioms the repo already trusts, each where it fits: **filesystem discovery**
-for the bundles themselves (a connector is a folder, exactly as a skill is —
-`FileSkillsSource`), and a **config enable-token** for which of the discovered bundles a
+for the bundles themselves (a connector is a folder, exactly as a skill is), and a **config
+enable-token** for which of the discovered bundles a
 deployment turns on (exactly as `skills_enabled` and `data_sources` do). Discovery is not
 enablement: a repo can ship every connector and a deployment can run the subset it has
 validated.
@@ -14,13 +14,13 @@ Two products come out of a manifest, and a turn's graph binds both:
   the turn's identity headers on every call and our own credential on the connection
   (`chemclaw.connectors.identity`).
 - **Job tools** — one generated launcher per `jobs:` entry (`chemclaw.connectors.jobs`), registered
-into the
-  shared tool registry so audit, authorization and profile narrowing address it like any other tool.
+  into the shared tool registry so audit, authorization and profile narrowing address it like any
+  other tool.
 
 Nothing here decides *whether* a call is allowed. The registry only assembles the offered
-surface; the audit and authorization middlewares wrap the assembled list in `build_agent`, and a
-profile narrows it afterwards — so a connector can add to what is *offered* and never to what is
-*permitted*.
+surface; the audit and authorization middlewares wrap the assembled list in `build_langgraph_agent`,
+and a profile narrows it afterwards — so a connector can add to what is *offered* and never to what
+is *permitted*.
 """
 
 import asyncio
@@ -233,7 +233,7 @@ def skills_dirs() -> list[str]:
 
     A connector's judgment ships with its capability: the `SKILL.md` explaining *when* to trust
     a similarity hit belongs to the same bundle as the tool that produces one. Appending these
-    to `settings.skills_dirs` means `FileSkillsSource` discovers them with no new machinery, and
+    to `settings.skills_dirs` means the skills backend discovers them with no new machinery, and
     the existing enable-list and role gates still narrow them — a bundled skill is an ordinary
     skill in every respect except where it lives.
 

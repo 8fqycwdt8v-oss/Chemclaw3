@@ -136,9 +136,34 @@ def test_openai_compatible_path_supplies_nothing(monkeypatch: pytest.MonkeyPatch
 
 
 def test_the_setting_turns_it_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A deployment that has measured caching to be a loss can switch it off from config."""
+    """A deployment that has measured caching to be a loss can switch it off from config.
+
+    **"Off" stopped being an empty list, and the payload test below is what found out.**
+    `create_deep_agent` composes an `AnthropicPromptCachingMiddleware` whenever the model is an
+    Anthropic one, so returning nothing here no longer means "no caching" — it means "upstream's
+    default". Off is now a *named placeholder* that occupies that slot and overrides no hook.
+
+    Asserted on the name rather than on the type, because the name is the whole mechanism: it is
+    what `_apply_custom_middleware` matches to replace upstream's entry instead of landing beside
+    it. `test_payload_carries_no_breakpoints_when_caching_is_off` is the one that proves the effect.
+    """
     _use_settings(monkeypatch, llm_provider="anthropic", llm_prompt_caching=False)
-    assert provider.prompt_caching_middleware() == []
+    middleware = provider.prompt_caching_middleware()
+    assert [m.name for m in middleware] == ["AnthropicPromptCachingMiddleware"]
+    assert not isinstance(middleware[0], _real_caching_middleware()), (
+        "the disabled path returned the real caching middleware"
+    )
+
+
+def _real_caching_middleware() -> type:
+    """Upstream's caching middleware class, imported where the layering gate allows it.
+
+    Function-scope for the reason `prompt_caching_middleware` keeps its own import there:
+    `tests/test_third_party_layering.py` lists `langchain_anthropic` as a function-scope row.
+    """
+    from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+
+    return AnthropicPromptCachingMiddleware
 
 
 def test_an_injected_non_anthropic_model_is_ignored_silently() -> None:
@@ -331,12 +356,24 @@ def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
 # cheaper the model, the lower the minimum" is wrong here.
 _MEASURED_FLOORS = {"claude-sonnet-5": 1024, "claude-haiku-4-5-20251001": 4096}
 
-# Profiles known to sit below the haiku floor, and therefore never to cache on it. Recorded rather
-# than fixed: enlarging a prompt to clear a cache floor would pay tokens to save tokens, and the
-# provider's boundary is not a defect in a narrow profile. What this pins is that the *set* does
-# not grow silently — a prompt edit that pushes `design` (5,625) or `evidence` (5,803) under 4,096
-# is a cost regression nobody would otherwise see, because it has no symptom except a bill.
-_BELOW_HAIKU_FLOOR = {"property-lookup", "safety"}
+# Profiles known to sit below the haiku floor, and therefore never to cache on it. What this pins is
+# that the set does not *grow* silently — a prompt edit that pushes a profile under 4,096 is a cost
+# regression with no symptom except a bill.
+#
+# **It is now empty, and the reason is a side effect rather than an improvement.** It held
+# `property-lookup` and `safety` until the scratchpad landed (D-2026-08-15): registering the six
+# filesystem tools added their schemas to every profile's prefix, worth roughly 1,800 tokens, and
+# that carried both over the floor. Re-measured live against `count_tokens` on the day:
+# `safety` 2,958 -> 4,751 and `property-lookup` -> 4,842, against `design` 7,286, `evidence` 7,749,
+# `computation` 10,542, `reporting` 9,240 and `default` 23,309.
+#
+# Adjudicated rather than updated, because the direction is not obviously good. Both profiles now
+# cache, which is a real saving on a narrow agent that used to pay full price on *every* call. But
+# the same 1,800 tokens are added to the five profiles that already cleared the floor, where they
+# buy nothing after the first call and cost a larger cache write. The set is the thing worth
+# ratcheting; the prefix growth is recorded here so that a future reading of "0 below the floor"
+# is not mistaken for a prompt that got leaner.
+_BELOW_HAIKU_FLOOR: set[str] = set()
 
 
 @pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")

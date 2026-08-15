@@ -11,14 +11,17 @@ question about a YAML file.
 Tools come from the capability-tool registry, populated as a side effect of the imports below, so
 adding a tool is a `@tool` at its definition site rather than an edit here. Skills are not in this
 list at all — they reach the model through `skill_backend`, narrowed by the same predicates
-(`skill_access`) — which is why `available_tool_names` unions four name spaces rather than reading
+(`skill_access`) — which is why `available_tool_names` unions six name spaces rather than reading
 one (D-117 records what an omitted name space costs).
 
 **Every narrowing here attenuates and none widens.** A profile selects a subset of what the
 deployment enabled, and `_reject_unknown_tool_names` fails the build on a name nothing provides, so
 a typo is a startup error rather than a capability that silently vanishes from the surface. That
-property is what makes a specialist safe to define as a profile (`agent/team.py`): a subagent
-cannot be handed a tool its caller does not have.
+property is what makes a subagent safe to define as a profile — its tool set an attenuation of its
+caller's, never a widening (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`). One
+subagent does exist: `agent/subagents.py` builds it from the *caller's* profile, so the rule holds
+by construction rather than by discipline, and `tests/test_subagents.py` proves it against the two
+graphs that compile rather than against the two declarations.
 """
 
 from dataclasses import replace
@@ -41,7 +44,7 @@ from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.skill_backend import SKILL_READ_TOOL
+from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.connectors.registry import (
     connector_tool_names,
     endpoint_tool_names,
@@ -311,8 +314,8 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     """
     prof = profile if profile is not None else get_profile(None)
     # Job tools are ordinary registry tools: registering them here (once per process, guarded
-    # against a re-registration when `build_agent` is called for a second profile) is what makes
-    # the audit middleware, `tool_role_gates` and the prose-contract validator address them by
+    # against a re-registration when `build_langgraph_agent` is called for a second profile) is what
+    # makes the audit middleware, `tool_role_gates` and the prose-contract validator address them by
     # name.
     _register_generated_tools()
     inprocess = registered_tools()
@@ -326,19 +329,21 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
 
 
 def skill_tool_names() -> set[str]:
-    """The tools an agent gains by having skills attached.
+    """The filesystem tools an agent gains from having a backend attached.
 
-    One name now. It was four while both engines were live — the previous framework's three
-    skills-provider constants unioned with this one — because the callers are validators asking a
-    deployment-wide question ("does anything provide this name?"), and branching would have made
-    `make prose-validate` pass or fail depending on which engine happened to be configured.
+    **This used to be one name and is now six**, because the hand-written `read_file` was replaced
+    by upstream's `FilesystemMiddleware` — which registers the whole scratchpad surface, not just
+    the verb the skills prompt asks for. Every one of those names has to be answered for here, since
+    four validators read this set to decide whether a reference in a `SKILL.md`, a step template, a
+    profile or the agent's own prose names a tool that exists.
 
-    Read off `skill_backend`'s own constant rather than spelled out here, so a rename becomes a
-    changed value instead of a silently stale allow-list. D-117 is why that is worth the care:
-    three validators once unioned only two of the four name spaces, so a correct reference to a
-    real tool failed validation.
+    Read off the middleware rather than spelled out, so an upstream rename becomes a changed value
+    instead of a silently stale allow-list. D-117 is why that is worth the care: three validators
+    once unioned only two of the then-four name spaces, so a correct reference to a real tool failed
+    validation. `scratchpad_tools` is also where `execute` and `delete` are withheld, so a verb this
+    deployment refuses never enters the set a validator will accept.
     """
-    return {SKILL_READ_TOOL}
+    return set(scratchpad_tools())
 
 
 def harness_tool_names() -> set[str]:
@@ -358,22 +363,52 @@ def harness_tool_names() -> set[str]:
     return {tool.name for tool in TodoListMiddleware().tools}
 
 
-def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all five name spaces.
+def subagent_tool_names() -> set[str]:
+    """The tool that spawns a helper — `task`, and it is not optional.
 
-    The five are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    Its own name space because it appears under conditions none of the others share.
+    `SubAgentMiddleware` is in `create_deep_agent`'s `_REQUIRED_MIDDLEWARE`, which
+    `_apply_excluded_middleware` refuses to strip, so this name is present on *every* agent this
+    deployment builds — unlike `write_todos`, which the plan/execute harness attaches conditionally,
+    and unlike the filesystem verbs, which are a backend's. `agent/subagents.py` records what the
+    tool reaches and why that had to be decided rather than inherited.
+
+    **Derived rather than spelled, and the trivial runnable is the price of deriving it.** Upstream
+    writes `name="task"` as a literal inside `_build_task_tool` and exports no constant, so the only
+    way to read the real name is to build the middleware — which refuses an empty roster and
+    `.with_config`s each runnable it is given. A `RunnableLambda` identity satisfies both without
+    compiling anything. The alternative is a string in this file that an upstream rename would leave
+    silently stale, which is exactly what `skill_tool_names` and `harness_tool_names` avoid;
+    `tests/test_upstream_surface.py` pins the shape this depends on.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from langchain_core.runnables import RunnableLambda
+
+    probe = SubAgentMiddleware(
+        backend=StateBackend(),
+        subagents=[{"name": "probe", "description": "", "runnable": RunnableLambda(lambda s: s)}],
+    )
+    return {tool.name for tool in probe.tools}
+
+
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all six name spaces.
+
+    The six are genuinely separate — in-process `@tool` functions this process holds as symbols,
     connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
-    generated from step templates, the harness's own, and the skill read tool — and only the union
-    is meaningful. Exposed rather than inlined because four other places need exactly this set: the
-    skill validator, the template validator, the prose-contract validator, and the test that checks
-    the instructions against it. Three of those unioned only the first two name spaces, so a skill
-    or template step naming a template launcher failed validation although the tool exists (D-117).
-    One definition, one answer.
+    generated from step templates, the harness's own, the backend's filesystem verbs, and the
+    subagent spawner — and only the union is meaningful. Exposed rather than inlined because four
+    other places need exactly this set: the skill validator, the template validator, the
+    prose-contract validator, and the test that checks the instructions against it. Three of those
+    unioned only the first two name spaces, so a skill or template step naming a template launcher
+    failed validation although the tool exists (D-117). One definition, one answer.
 
     The skill name space was the same omission a second time. Skills are attached
     unconditionally, and a live run recorded skill tools on five turns while this function reported
     them absent — so every validator built on it would have rejected a correct reference to a tool
-    the agent had just called.
+    the agent had just called. `task` is the same shape a third time and was added with the
+    middleware that registers it, rather than after a validator rejected a correct reference to it.
     """
     return {
         *registered_tool_names(),
@@ -381,6 +416,7 @@ def available_tool_names() -> set[str]:
         *template_tool_names(),
         *skill_tool_names(),
         *harness_tool_names(),
+        *subagent_tool_names(),
     }
 
 
@@ -455,8 +491,8 @@ def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> l
 def _register_generated_tools() -> None:
     """Register the generated launchers — connector jobs and templates — exactly once per process.
 
-    `build_agent` may run several times (one agent per profile, and once per test), while the
-    registry is module state keyed by tool name and rejects a duplicate registration as the
+    `build_langgraph_agent` may run several times (one agent per profile, and once per test), while
+    the registry is module state keyed by tool name and rejects a duplicate registration as the
     programming error it usually is. The already-registered check makes repeat builds idempotent
     without weakening that guard for hand-written tools.
     """

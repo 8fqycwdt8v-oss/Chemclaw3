@@ -24,11 +24,9 @@ The claims under test, in the order the phases landed:
 
 import asyncio
 import re
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -39,14 +37,16 @@ from chemclaw.agent.chemclaw_agent import (
     _capability_tools,
     available_tool_names,
     harness_tool_names,
+    subagent_tool_names,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_backend import REFUSED, SKILL_READ_TOOL
+from chemclaw.agent.skill_backend import REFUSED
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
@@ -58,25 +58,7 @@ from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import Signal
 from chemclaw.kg.note import NoteError
-
-
-class _ScriptedModel(GenericFakeChatModel):
-    """A model that replays a fixed script, and accepts tool binding without honouring it.
-
-    Subclassed because `create_agent`'s model node calls `.bind_tools(...)` on every request and
-    `GenericFakeChatModel.bind_tools` raises `NotImplementedError` — measured, not assumed. Binding
-    returns `self` here: the script already contains the tool call under test, so the point of the
-    override is that the graph gets a model it can bind, not that the fake reasons about tools.
-
-    What that costs is worth naming. This proves the *loop* — that a tool call is dispatched, run
-    and fed back — and cannot prove that the tool schemas Chemclaw hands over are ones a real model
-    can call. `test_every_in_process_tool_reaches_the_graph_unchanged` covers the surface, and only
-    a live run covers the schemas; M12's re-validation is where that happens.
-    """
-
-    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        """Accept the binding and keep replaying the script."""
-        return self
+from tests.fakes import ScriptedModel
 
 
 def _listed_skills(prompt: str) -> set[str]:
@@ -92,7 +74,7 @@ def _listed_skills(prompt: str) -> set[str]:
     return names
 
 
-class _Recording(_ScriptedModel):
+class _Recording(ScriptedModel):
     """A scripted model that also records the system prompt each call was given.
 
     The skills listing reaches the model in its system prompt, and `create_agent`'s *output* schema
@@ -114,7 +96,7 @@ def _advertised(graph: Any) -> set[str]:
 
 def _scripted(tool_name: str, tool_args: dict[str, Any]) -> Any:
     """A fake model that calls `tool_name` once and then produces a final answer."""
-    return _ScriptedModel(
+    return ScriptedModel(
         messages=iter(
             [
                 AIMessage(
@@ -164,10 +146,14 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
 
     advertised = _advertised(graph)
-    # `read_file` only: the harness (and with it `write_todos`) is off by default, which the
-    # test below asserts separately rather than folding into this one.
-    assert advertised == {tool.__name__ for tool in _capability_tools()} | {SKILL_READ_TOOL}
-    assert advertised == set(registered_tool_names()) | {SKILL_READ_TOOL}
+    # The registry plus the two surfaces a backend and a subagent middleware bring with them. The
+    # harness (and with it `write_todos`) is off by default, which the test below asserts separately
+    # rather than folding into this one. `task` is *not* conditional — `SubAgentMiddleware` is in
+    # `create_deep_agent`'s required set and `_apply_excluded_middleware` raises rather than let a
+    # profile strip it — so it is unioned in from the same reader the validators use.
+    ambient = set(scratchpad_tools()) | subagent_tool_names()
+    assert advertised == {tool.__name__ for tool in _capability_tools()} | ambient
+    assert advertised == set(registered_tool_names()) | ambient
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:
@@ -192,7 +178,16 @@ def test_a_profile_narrows_the_graph_surface() -> None:
     # `read_file` survives every profile, and it must: it carries no authority of its own — every
     # read goes through the backend the three narrowings already bound — so taking it away would
     # not attenuate anything, it would only make the profile's remaining skills unreadable.
-    assert _advertised(narrowed) == {kept, SKILL_READ_TOOL}
+    #
+    # **`task` survives for the same reason, and that is the part worth stating rather than
+    # accepting.** A tool that spawns an agent looks like it should be narrowed away, and it is not:
+    # `_subagents` builds the helper from *this* profile, so the helper is attenuated by the same
+    # `tool_names` set the caller was. The surface a `task` call can reach is therefore a subset of
+    # the surface the caller already holds — proven against the two compiled graphs in
+    # `tests/test_subagents.py`, not asserted here — which leaves `task` conferring no authority of
+    # its own, exactly like `read_file`. If that ever stopped being true, narrowing would have to
+    # remove it, and the test that would notice is the attenuation one over there.
+    assert _advertised(narrowed) == {kept, *scratchpad_tools(), *subagent_tool_names()}
     assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 
@@ -321,7 +316,7 @@ def test_a_repeated_call_is_refused_on_this_engine(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(settings, "max_identical_tool_calls", 1)
     args = {"question": "which solvent?"}
     graph = build_langgraph_agent(
-        model=_ScriptedModel(
+        model=ScriptedModel(
             messages=iter(
                 [
                     AIMessage(
@@ -671,7 +666,7 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
 
     def _graph(script: list[AIMessage]) -> Any:
         return build_langgraph_agent(
-            model=_ScriptedModel(messages=iter(script)),
+            model=ScriptedModel(messages=iter(script)),
             audit_sink=NullAuditSink(),
             checkpointer=InMemorySaver(),
         )
@@ -735,7 +730,7 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
         answers: list[str] = []
         for turn in range(4):
             graph = build_langgraph_agent(
-                model=_ScriptedModel(messages=iter([AIMessage(content=f"answer {turn}")])),
+                model=ScriptedModel(messages=iter([AIMessage(content=f"answer {turn}")])),
                 audit_sink=NullAuditSink(),
                 checkpointer=saver,
             )
@@ -755,57 +750,44 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
     )
 
 
-def test_a_specialist_is_handed_only_the_connectors_its_profile_declares() -> None:
-    """Invariant 1 at *runtime*: the declaration check is necessary and was not sufficient.
-
-    `reject_widening` compares profiles, and the connector tools are passed down **already open** —
-    so a specialist declaring one bundle was receiving every bundle the supervisor had opened. It
-    declared one surface and got another, which is the widening the invariant forbids, reached
-    without any profile ever naming a tool it should not.
-    """
-    from chemclaw.agent.team import _narrowed_connectors
-
-    calc = SimpleNamespace(name="compute_xtb_energy")
-    hazard = SimpleNamespace(name="screen_hazards")
-    supervisor_surface = frozenset({"compute_xtb_energy", "screen_hazards"})
-
-    narrowing = AgentProfile(name="computation", mcp_server_names=frozenset({"calc"}))
-    kept = _narrowed_connectors(narrowing, [calc, hazard], supervisor_surface)
-
-    assert [t.name for t in kept] == ["compute_xtb_energy"], "the safety bundle leaked into calc"
-
-    # A profile that narrows nothing keeps the supervisor's set — attenuate-only, at the top.
-    wide = AgentProfile(name="reporting")
-    assert len(_narrowed_connectors(wide, [calc, hazard], supervisor_surface)) == 2
-
-
 def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> None:
     """The graph's runaway backstop is this deployment's number, not one inherited from upstream.
 
-    `create_agent` bakes `recursion_limit=9999` (verified: a built agent's `.config` carries it) and
-    nothing here had ever chosen otherwise, so the only bound on a turn was thousands of model calls
+    **Two 9999s now, and only invoke-time config displaces them.** `create_agent` bakes
+    `recursion_limit=9999`, and `create_deep_agent` bakes a second one onto the returned graph via
+    `.with_config` — `build_langgraph_agent`'s result carries it in `.config`. Neither is reached,
+    and that was measured rather than reasoned: a model scripted to call one tool forever, driven
+    through the compiled graph with `turn_config`, raised `GraphRecursionError` reporting
+    "Recursion limit of 158", so the config passed at `ainvoke` wins over the graph's own. The test
+    below asserts the derivation; the run is what established that the derivation is the one that
+    binds.
+
+    Before either was chosen the only bound on a turn was thousands of model calls
     — measured by binary search at 2 supersteps per call with the harness off and 5 with it on, i.e.
     roughly 5,000 and 2,000. Reaching it raises `GraphRecursionError`, which discards the work the
     turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial
     answer still goes out. So the cap is the graceful stop and this is the backstop under it.
 
-    Asserted against the derivation rather than a literal, so the test says *why* 153 is the number
+    Asserted against the derivation rather than a literal, so the test says *why* 158 is the number
     and follows the two settings it comes from. `9999` is named explicitly because that is the value
     this exists to displace.
 
-    **The `+ 3` is the part that has actually been wrong.** It was `+ 1`, and when M14 moved the
-    runaway cap onto `ModelCallLimitMiddleware` — which declares `after_model` as well as
-    `before_model`, one more node per iteration — a one-iteration harness turn needed 8 supersteps
-    against the 7 the formula granted, and died with the `GraphRecursionError` this ceiling exists
-    to avoid. Only the smallest cap was affected, which is why it took the whole-turn test at
-    `harness_max_loop_iterations=1` to find it. Re-measure the constant and the multiplier together.
+    **The constant is the part that has actually been wrong, twice.** It was `+ 1` until M14 moved
+    the runaway cap onto `ModelCallLimitMiddleware` (which declares `after_model` as well as
+    `before_model`), and `+ 3` until `create_deep_agent` brought three more middlewares with it —
+    a one-iteration turn then needed 14 supersteps against the 9 the formula granted, dying with the
+    `GraphRecursionError` this ceiling exists to avoid. Only the smallest cap was affected on both
+    occasions, which is why it takes the whole-turn test at `harness_max_loop_iterations=1` to find
+    it. Re-measured 2026-08-15 by binary search over five values of N — 14, 20, 26, 38, 56 for
+    N = 1, 2, 3, 5, 8 — an exact fit to `6*N + 8`. Five points rather than one, because a single
+    point cannot tell a changed multiplier from a changed constant. Re-measure them together.
     """
     config = turn_config("session-1")
 
     assert config["recursion_limit"] == settings.agent_recursion_limit
     assert config["recursion_limit"] != 9999
     assert config["recursion_limit"] == (
-        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 3
+        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 8
     )
     assert config["configurable"] == {"thread_id": "session-1"}
 

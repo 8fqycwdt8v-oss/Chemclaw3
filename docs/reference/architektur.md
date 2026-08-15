@@ -245,14 +245,15 @@ Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesam
 
 > **Umsetzungsstand (Phase F4, ADR D-043…D-047).** Auf OpenShift ersetzt **Entra Workload Identity
 > Federation** die Managed Identity: der Pod tauscht sein projiziertes ServiceAccount-JWT gegen ein
-> Entra-Token (`src/chemclaw/agent/identity/workload.py`) – kein Client-Secret at rest. Bereits gebaut und
+> Entra-Token per Workload-Identity-Federation – kein Client-Secret at rest. Gebaut und
 > offline (Fake-Endpoint) getestet: Front-Door-OIDC-Validierung (`src/chemclaw/api/auth.py`, Audience-/
 > Issuer-Check gegen den Tenant-JWKS), **eine** Autorisierungsstelle für teure Trigger
 > (`agents/authz.py::authorize_trigger`), die reject-if-absent-Kernregel für user-getriggerte
 > Workflows (`require_actor`, der Entra-`oid` als Pflicht-Claim im Payload, D-044), der OBO-Austausch
-> (`src/chemclaw/agent/identity/obo.py`, wired-but-dormant bis zur ersten user-scoped Quelle) sowie beide
+> (on-behalf-of, dormant bis zur ersten user-scoped Quelle) sowie beide
 > Nicht-Entra-Brücken: Temporal-mTLS/API-Key (`src/chemclaw/core/temporal_client.py`) und der HPC-Bridge, der
-> jede `oid`→HPC-Identität-Zuordnung protokolliert (`src/chemclaw/agent/identity/hpc_bridge.py`). Offene
+> jede `oid`→HPC-Identität-Zuordnung protokolliert. **Alle drei wurden nie verdrahtet und sind in
+> D-2026-08-15 entfernt** — die Entscheidung bleibt, der tote Code nicht. Offene
 > Live-Kanten benötigen einen echten Tenant/Broker/Cluster.
 
 ## 8. Mehrbenutzerfähigkeit & differenzierte Rechte (Multi-Tenancy/RBAC)

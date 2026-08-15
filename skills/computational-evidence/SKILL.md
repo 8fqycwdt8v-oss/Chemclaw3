@@ -3,7 +3,12 @@ name: computational-evidence
 description: >-
   Judgment for deciding whether to compute at all — precedent first, calculation to rank,
   explain, or fill a gap — and for combining computed and retrieved evidence into one
-  cited answer, including how a computed value is recorded and when to escalate to DFT.
+  cited answer. Also holds the two loops that make a computed number worth more later:
+  reaching a finished calculation's stored by-products (a relaxed geometry, a Hessian, a
+  spectrum) so the follow-up question is cheap rather than a rerun, and reporting a chemist's
+  measured value back so this deployment's own calculator accuracy is a measurement instead of
+  a claim. Load it before quoting a computed value, before recording one, and whenever a
+  chemist states an experimental number for something the system also predicts.
 tools:
   - find_notes
   - gather_evidence
@@ -12,6 +17,11 @@ tools:
   - predict_site_reactivity
   - compute_dft_energy
   - propose_knowledge_note
+  - find_calculations
+  - list_artifacts
+  - fetch_artifact
+  - report_measurement
+  - calculator_trust
 ---
 
 # Computational evidence
@@ -72,6 +82,59 @@ Two standing limits of the fast tier, worth repeating because they are silent:
   not a description of a flexible molecule's real behaviour.
 - **Relative, not absolute.** Compare within a series against a stated reference. A lone
   absolute energy is not a physical answer.
+
+## A finished calculation is more than its answer
+
+A calculation's *answer* is a handful of numbers, and `find_calculations` returns it. The run
+usually also left files behind — the relaxed coordinates, the second derivatives, the raw
+vibrational spectrum — and those are what make the *next* question cheap: thermochemistry at
+another temperature off an existing Hessian, a conformer search seeded from a geometry that is
+already a real minimum, a spectrum quoted band by band instead of described from memory.
+
+The habit worth having: before proposing a rerun, ask `list_artifacts` what the stored run
+already produced.
+
+- **Order.** `find_calculations` for the calculation key, `list_artifacts` for what it kept,
+  `fetch_artifact` for the one you need. A knowledge note's `artifact_refs` is the same kind of
+  reference and can be fetched directly.
+- **An empty listing is a normal answer**, not a missing calculation — most runs keep no
+  by-products worth storing. Say "the run kept nothing", never "the calculation is gone".
+- **Check the size before reading.** A Hessian is megabytes and exists to seed another
+  calculation, not to be read into an answer. `fetch_artifact` refuses binary content and
+  truncates large text at a configured ceiling; when it reports the content as truncated, say
+  the value came from part of the file rather than presenting it as the whole.
+- **Quote, do not paraphrase.** The reason to fetch a geometry or a spectrum is to state the
+  actual coordinates or band positions. If you are only going to describe it qualitatively,
+  the numbers already in the calculation record are the better citation.
+- **By-products are eviction-managed.** A reference from an older note can point at something
+  since reclaimed. That is a stale pointer, not a retracted result — report it as such.
+
+## Closing the loop when a chemist reports a measurement
+
+`calculator_trust` answers "how far has this calculator actually been off here?", and it can
+only answer it from measurements someone reported back. That ledger does not fill itself: every
+entry arrives through `report_measurement`, so an unreported measurement is one the next
+person's trust question cannot use.
+
+So whenever a chemist states an experimental value for a property this system also predicts —
+a measured aqueous solubility as log S, a measured pKa — record it with `report_measurement`
+in the same turn. It is cheap, it is not a knowledge-graph write, and it needs no PR-gate: the
+calibration ledger is the calculators' own store.
+
+Read the reply literally and repeat what it actually says:
+
+- **Reconciled against existing predictions** — the measurement scored them, and a later
+  `calculator_trust` will reflect it.
+- **Recorded with nothing predicted yet** — kept anyway, and the next prediction of the same
+  thing scores against it. Worth saying, because it is the reason reporting it was not wasted.
+- **Not recorded** — the deployment has the calibration ledger switched off. Then say exactly
+  that: the value was not kept, nothing will be scored against it, and an operator has to
+  enable the ledger. Do not report it as recorded, and do not call again.
+
+The discipline this protects: never present a calculator's accuracy as established when the
+ledger behind it is empty. "There is not enough logged experimental data here to judge trust,
+and reporting measurements is what would change that" is the honest answer, and a confident
+error bar derived from an empty store is the failure.
 
 ## Recording a computed result
 

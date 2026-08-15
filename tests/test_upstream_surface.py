@@ -177,13 +177,18 @@ def test_create_agent_still_bakes_a_recursion_limit_this_repo_overrides() -> Non
 
 
 def test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout() -> None:
-    """The open backlog row, pinned so it closes itself when upstream fixes it.
+    """Why `connectors/registry.py` has to bound a tool call at the *session*, not the call.
 
-    `langchain_mcp_adapters` calls `session.call_tool` with no `read_timeout_seconds`, so a
-    connector that never answers blocks the turn forever — measured: a 4 s tool still blocked at
-    25 s. This asserts the *absence*, so the day upstream adds the parameter this test fails and
-    the first-party timeout wrapper can be deleted. A test that pins a bug is how a workaround gets
-    removed instead of outliving its reason.
+    `langchain_mcp_adapters` calls `session.call_tool` with no `read_timeout_seconds` of its own, so
+    a connector that never answers blocks the turn forever — measured: a 4 s tool still blocked at
+    25 s. The bound now exists, and it is the only shape available: `_session_kwargs` sets the
+    `ClientSession`'s default so `mcp.shared.session.send_request` has a deadline to expire, because
+    the adapter offers no per-call one to pass. **That is the absence this pins, and it is a
+    different mechanism from the session default — so the assertion is unchanged now that the row it
+    was written beside is closed.** The day upstream names a call timeout, this test fails and the
+    session-wide default should be re-examined: one number per connection is a coarser instrument
+    than one per call, and it was chosen only because it was the one on offer. A test that pins an
+    upstream absence is how a workaround gets revisited instead of outliving its reason.
     """
     import inspect
 
@@ -191,8 +196,8 @@ def test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout() -> None:
 
     source = inspect.getsource(tools)
     assert "read_timeout_seconds" not in source, (
-        "langchain-mcp-adapters now supports a call timeout — remove the first-party workaround "
-        "and close the BACKLOG row"
+        "langchain-mcp-adapters now names a call timeout — re-examine the session-wide default "
+        "`_session_kwargs` sets in `connectors/registry.py`, chosen for want of a per-call one"
     )
 
 
@@ -236,28 +241,278 @@ def test_the_v3_stream_transformer_extension_point_is_present() -> None:
         )
 
 
+def test_create_deep_agent_still_takes_the_parameters_the_harness_is_assembled_from() -> None:
+    """`build_langgraph_agent` passes every one of these by keyword.
+
+    The harness swap (D-2026-08-15) stopped hand-assembling a middleware list and handed the
+    assembly to `create_deep_agent`, which means this signature *is* the seam. A parameter that
+    disappears upstream is a build error here rather than a silent behaviour change, but a
+    parameter that is silently *renamed* would be neither — `**kwargs` does not exist on this
+    function today and this assertion is what notices if it ever does.
+    """
+    import inspect
+
+    from deepagents import create_deep_agent
+
+    parameters = set(inspect.signature(create_deep_agent).parameters)
+    required = {
+        "model",
+        "tools",
+        "system_prompt",
+        "middleware",
+        "subagents",
+        "skills",
+        "permissions",
+        "backend",
+        "interrupt_on",
+        "state_schema",
+        "checkpointer",
+        "store",
+    }
+    assert required <= parameters, (
+        f"create_deep_agent no longer accepts {sorted(required - parameters)}; "
+        "agent/langgraph_agent.build_langgraph_agent passes each of these by keyword"
+    )
+
+
+def test_the_filesystem_tool_surface_is_still_the_eight_names_the_gate_answers_for() -> None:
+    """Every filesystem verb has to be answered for, so a new one must not arrive quietly.
+
+    `FilesystemMiddleware` is the scratchpad, and each name it registers is gated by
+    `tool_role_gates`, validated by `make prose-validate` and listed by
+    `chemclaw_agent.available_tool_names`. Upstream adding a ninth verb would hand the model a
+    capability no gate names — which is exactly what happened once already when deepagents 0.7 added
+    `delete` and `agent/skill_backend.py` had no refusal for it
+    (`docs/decisions/D-2026-08-12-the-cap-was-right-and-what-it-was-holding-back.md`).
+
+    Asserted as equality rather than containment for that reason: a superset is the failure mode.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    surface = {tool.name for tool in FilesystemMiddleware(backend=StateBackend()).tools}
+    assert surface == {
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delete",
+        "glob",
+        "grep",
+        "execute",
+    }, (
+        "the filesystem tool surface changed; agent/langgraph_agent._filesystem_middleware "
+        "allow-lists it by name and chemclaw_agent.available_tool_names must answer for every verb"
+    )
+
+
+def test_the_filesystem_middleware_still_offloads_oversized_tool_results() -> None:
+    """The capability the scratchpad exists for, and the reason `compaction.py` shrank.
+
+    `FilesystemMiddleware.wrap_tool_call` writes a result past `tool_token_limit_before_evict` to
+    the backend and leaves the model a path plus a preview. That is strictly better than
+    `ClearToolUsesEdit`'s placeholder — the evidence stays *readable* instead of being dropped —
+    and it is what makes a multi-source research turn possible at all. If the parameter goes, the
+    offloading goes with it and the context policy is back to discarding.
+    """
+    import inspect
+
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    parameters = inspect.signature(FilesystemMiddleware.__init__).parameters
+    assert "tool_token_limit_before_evict" in parameters, (
+        "FilesystemMiddleware no longer offloads oversized tool results; agent/compaction.py "
+        "was narrowed on the assumption that it does"
+    )
+    assert "tools" in parameters, (
+        "FilesystemMiddleware lost its tool allow-list; agent/langgraph_agent uses it to withhold "
+        "`execute` and `delete`, which is a security narrowing rather than a preference"
+    )
+
+
+def test_a_filesystem_permission_still_has_the_three_modes_the_rules_use() -> None:
+    """`deny` is what keeps the scratchpad out of the skills tree.
+
+    The permission rules are the second half of the narrowing the allow-list starts: the model may
+    write, but not under `/skills/`, because a turn that can rewrite judgment decides what the next
+    turn is able to load. `interrupt` is the third mode and is what Phase 4's approvals ride on.
+    """
+    from deepagents import FilesystemPermission
+
+    mode = FilesystemPermission.__annotations__["mode"]
+    for expected in ("allow", "deny", "interrupt"):
+        assert expected in repr(mode), (
+            f"FilesystemPermission no longer supports mode={expected!r}; "
+            "agent/langgraph_agent._filesystem_permissions declares rules in all three"
+        )
+
+
+def test_the_interrupt_config_still_carries_a_when_predicate() -> None:
+    """The shape the plan gate became.
+
+    `enforce_plan_approval` was a first-party `wrap_tool_call` that asked "does this call need an
+    approved plan, and is the plan behind it the one that was approved". `InterruptOnConfig.when`
+    is that question as an upstream predicate, which is why the gate could stop being first-party.
+    Lose it and the approval either fires on every tool or on none.
+    """
+    from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
+
+    assert "when" in InterruptOnConfig.__annotations__, (
+        "InterruptOnConfig lost its `when` predicate; the plan approval gate is expressed as one"
+    )
+
+
+def test_the_rubric_middleware_still_bounds_its_revision_loop() -> None:
+    """An unbounded critic is a runaway turn, and the bound has to be upstream's.
+
+    `RubricMiddleware` re-enters the *same* run to revise, so its iterations are counted by
+    `CappedModelCallLimit`'s `run_limit` — the cap and the critic share a budget. `max_iterations`
+    is what keeps the critic's share of it finite; without it the two guards fight and the cap wins
+    by truncating an answer mid-revision.
+    """
+    import inspect
+
+    from deepagents import RubricMiddleware
+
+    assert "max_iterations" in inspect.signature(RubricMiddleware.__init__).parameters, (
+        "RubricMiddleware no longer bounds its revision loop; agent/verifier.py delegates to it "
+        "and agent/loop_cap.py counts its iterations against the turn"
+    )
+
+
+def test_the_store_backend_still_takes_a_namespace_factory() -> None:
+    """The namespace is the erasure key, which is why this parameter is load-bearing.
+
+    `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` rejected `BaseStore` partly
+    because `store` has no actor column, so `tests/test_leaver.py`'s derived check would report a
+    departing person's memories as absent while they remained — a safety net returning a false
+    green. The answer is to put the actor *in the namespace*, so erasure is a `list_namespaces` and
+    a `delete`. That only works while the namespace is ours to choose.
+    """
+    import inspect
+
+    from deepagents.backends import StoreBackend
+
+    assert "namespace" in inspect.signature(StoreBackend.__init__).parameters, (
+        "StoreBackend no longer takes a namespace factory; agent/scratchpad.py keys it by actor "
+        "oid so that erasure can find a departing person's memories"
+    )
+
+
+def test_a_checkpointer_can_delete_a_thread_without_naming_its_tables() -> None:
+    """What replaced the hand-maintained table tuple in retention and erasure.
+
+    `CHECKPOINT_TABLES` was the sole route to the checkpoint rows for both `durable/retention.py`
+    and `agent/leaver.py`, and it is hand-maintained against tables `AsyncPostgresSaver.setup()`
+    creates — so a library upgrade adding a fourth table was invisible to every gate that reads it.
+    """
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
+    assert hasattr(BaseCheckpointSaver, "adelete_thread"), (
+        "BaseCheckpointSaver lost adelete_thread; durable/retention.py and agent/leaver.py would "
+        "have to go back to naming the checkpoint tables by hand"
+    )
+
+
+def test_custom_middleware_still_replaces_an_upstream_entry_by_name() -> None:
+    """The splice rule the whole composition rests on, and the reason `execute` stays off.
+
+    `create_deep_agent` composes a `FilesystemMiddleware` registering all eight verbs whether or not
+    a caller wants them. This repository withholds `execute` (a shell — deepagents 0.7 ships one
+    concrete sandbox, declined here on egress grounds, and `LocalShellBackend` is documented as
+    unrestricted) and `delete` (D-2026-08-12's argument) by passing its own instance under the
+    *same* `.name`, which `_apply_custom_middleware` swaps in place of upstream's.
+
+    A private function, asserted here for exactly that reason. If the rule changed to "append", the
+    two middlewares would coexist and upstream's would put the withheld verbs back — with every
+    other test still green, because the narrowed one is still present and still narrow.
+
+    The alternative mechanism, `HarnessProfile.excluded_tools`, is *not* used and this is why: a
+    profile is resolved by the model's self-reported `provider:identifier` and is silently skipped
+    on a key miss (measured during the swap — a registration under `"anthropic"` never reached a
+    model whose resolved provider differed, logging one warning). A narrowing that fails open on a
+    model swap is not a narrowing.
+    """
+    from typing import Any
+
+    from deepagents.graph import _apply_custom_middleware
+    from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
+
+    class Impostor(TodoListMiddleware):
+        """A stand-in for `FilesystemMiddleware`, sharing a name it does not own by class."""
+
+        @property
+        def name(self) -> str:
+            return "TodoListMiddleware"
+
+    base: list[AgentMiddleware[Any, Any, Any]] = [TodoListMiddleware()]
+    mine = Impostor()
+    assert _apply_custom_middleware(base, [mine]) == [mine], (
+        "custom middleware no longer replaces a same-named upstream entry in place; "
+        "agent/langgraph_agent._middleware relies on this to withhold `execute` and `delete`"
+    )
+
+
+def test_the_subagent_middleware_still_cannot_be_excluded() -> None:
+    """Why `agent/subagents.py` exists at all, pinned as the constraint rather than the workaround.
+
+    `SubAgentMiddleware` is in `create_deep_agent`'s required-scaffolding set, and
+    `_apply_excluded_middleware` *raises* rather than let a `HarnessProfile` strip it. So the `task`
+    tool ships on every agent this deployment builds and "no subagents" was never on the menu — the
+    only decision available is whether what `task` reaches is governed.
+
+    Asserted as a *presence* in the required set rather than by provoking the raise, because the
+    property that matters is the membership: if this middleware ever became strippable, the honest
+    move would be to reconsider whether the roster should exist, not to keep the workaround.
+    """
+    from deepagents.graph import _REQUIRED_MIDDLEWARE_NAMES
+
+    assert "SubAgentMiddleware" in _REQUIRED_MIDDLEWARE_NAMES
+
+
+def test_the_general_purpose_subagent_is_still_displaced_by_claiming_its_name() -> None:
+    """The suppression this repository relies on, pinned as the exact string it turns on.
+
+    Left alone, `create_deep_agent` inserts a `general-purpose` subagent holding every tool the
+    parent holds and none of this repository's middleware. It skips that insertion when a supplied
+    spec already claims `GENERAL_PURPOSE_SUBAGENT["name"]` — a plain comparison with nothing to
+    mismatch, unlike the harness-profile route. `agent/subagents.py` hard-codes the winning string,
+    so an upstream rename would silently restore the ungoverned subagent beside ours.
+    """
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from chemclaw.agent.subagents import general_purpose_helper
+
+    assert general_purpose_helper(runnable=None)["name"] == GENERAL_PURPOSE_SUBAGENT["name"], (
+        "upstream renamed its default general-purpose subagent, so the spec in agent/subagents.py "
+        "no longer displaces it — the `task` roster now carries an ungoverned copy of the surface"
+    )
+
+
 @pytest.mark.parametrize(
     ("module", "name", "reader"),
     [
+        ("deepagents", "create_deep_agent", "agent/langgraph_agent.build_langgraph_agent"),
         ("deepagents", "RubricMiddleware", "the in-loop answer critic"),
-        ("deepagents.middleware.subagents", "SubAgentMiddleware", "agent/team.py"),
-        ("deepagents.middleware.subagents", "CompiledSubAgent", "agent/team.py"),
+        ("deepagents.middleware.subagents", "SubAgentMiddleware", "the subagent seam"),
+        ("deepagents.middleware.subagents", "CompiledSubAgent", "the subagent seam"),
         ("deepagents.middleware.skills", "SkillsMiddleware", "agent/langgraph_agent.py"),
         ("deepagents.backends", "FilesystemBackend", "agent/skill_backend.py"),
         ("deepagents.backends", "CompositeBackend", "agent/langgraph_agent.skills_backend"),
         ("deepagents.backends", "StateBackend", "agent/langgraph_agent.skills_backend"),
     ],
 )
-def test_the_deepagents_middleware_this_repo_composes_are_importable(
+def test_the_deepagents_symbols_this_repo_names_are_importable(
     module: str, name: str, reader: str
 ) -> None:
-    """`create_deep_agent` is deliberately not called; these are imported one at a time.
+    """Every deepagents name `src/` spells, asserted rather than assumed, on a 0.x dependency.
 
-    D-2026-08-11 declines the bundled harness because its default stack always registers
-    `FilesystemMiddleware` — a write/edit/glob/grep surface acquired as a side effect of wanting to
-    read a `SKILL.md`. The cost of picking middleware individually is that a 0.x reshuffle can move
-    one without moving the others, so each import this repository makes is asserted rather than
-    assumed.
+    This docstring used to say `create_deep_agent` was deliberately not called. It is called now
+    (`D-2026-08-15-the-harness-is-adopted-whole-or-its-defaults-are-inherited-silently`), and the
+    list below is no longer "middleware picked one at a time" — half of these are reached *through*
+    `create_deep_agent` rather than composed beside it. What has not changed is the reason to assert
+    them: a 0.x minor can move a symbol between modules without a deprecation, and an import that
+    breaks at construction time breaks every turn at once.
     """
     import importlib
 

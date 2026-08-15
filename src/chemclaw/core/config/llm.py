@@ -57,8 +57,8 @@ class LlmSettings(BaseSettings):
     # always sent one failed *every* turn on the default Anthropic path. No test caught it
     # because every test injects a fake chat client, so the parameter never reached a real API.
     # `None` means "send no temperature and let the model use its own default"; a deployment on a
-    # model that still accepts one sets it explicitly. Threaded into the agent by `build_agent`,
-    # which omits the key entirely when this is None (F0.3).
+    # model that still accepts one sets it explicitly. Threaded into the agent by
+    # `build_langgraph_agent`, which omits the key entirely when this is None (F0.3).
     llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
     # Anthropic prompt caching: mark the static prefix — the tool schemas and the system prompt —
@@ -120,50 +120,6 @@ class LlmSettings(BaseSettings):
     # produced a complete branded HPLC method table *while writing* "not a validated method".
     # Prompting is necessary and demonstrably not sufficient.
     answer_shape_gate_enabled: bool = False
-    # The automatic challenge round (`agent/challenge_gate.py`). When enabled, a finished answer is
-    # attacked by a panel of independent agents before it is delivered — and the panel's angles are
-    # *generated for the task*, not declared here, because a fixed persona list is a guess about
-    # what a given answer gets wrong.
-    #
-    # **The trigger is the shape of the turn, not only its confidence.** A turn that spawned two or
-    # more subagents is a *team*, and a team is challenged unconditionally: work split across agents
-    # is exactly where no single context saw the whole thing, so the confidence signal that reads
-    # one answer is the wrong instrument. A turn that delegated once or not at all is challenged
-    # only when `verifier_enabled`/`answer_shape_gate_enabled` already flagged it — those checks
-    # keep their existing meaning and this adds a second opinion where they fire.
-    #
-    # Off by default for the reason `agent_teams_enabled` is (`agent/team.py`): a panel that
-    # over-flags is worse than no panel, and which of those this deployment gets is a measurement
-    # nobody has taken yet.
-    #
-    # **It has two ways of being on and doing nothing, and both are worth naming.** With
-    # `verifier_enabled` and `answer_shape_gate_enabled` both off, only a *team* triggers a
-    # challenge — which is coherent, but only while `agent_teams_enabled` is on; with teams off too,
-    # nothing can ever reach the threshold and the gate is dead config that reads as a live feature.
-    # And a profile narrowed away from every tool the challenger declares leaves a panel with
-    # nothing to check with, so it is skipped with a warning rather than run as a weaker verifier
-    # (`agent/challenge.run_panel`).
-    challenge_enabled: bool = False
-    # One challenger's deadline. Same argument as `verifier_timeout_seconds`: the panel sits between
-    # the model's last token and the AnswerEvent, so an unreachable endpoint must cost the challenge
-    # and never the answer. On expiry a challenger returns "no objection" — the panel degrades to
-    # the opinions that did arrive rather than holding a finished answer hostage.
-    challenge_timeout_seconds: float = Field(default=30.0, gt=0)
-    # How many angles the panel is asked for. Bounded at both ends: one challenger is an opinion
-    # rather than a panel, and past a handful the marginal angle is a rephrasing of an earlier one
-    # while every member costs a model call on the answer's hot path.
-    challenge_panel_size: int = Field(default=3, ge=1, le=6)
-    # How many challengers must corroborate before the objection is acted on. A quorum rather than
-    # any-one-objects because a single adversarial persona instructed to find fault will find fault;
-    # requiring agreement between independently-briefed angles is what separates a real defect from
-    # one challenger's enthusiasm. Clamped to the panel size at read time, so a quorum larger than
-    # the panel cannot silently mean "never".
-    challenge_quorum: int = Field(default=2, ge=1)
-    # How many revision rounds a corroborated objection may force. Zero means "never revise, surface
-    # it" — a coherent choice for a deployment that wants the chemist, not the model, to resolve
-    # every objection. The bound exists because the panel and the model can disagree indefinitely,
-    # and an unbounded argument between them is a turn that never ends.
-    challenge_max_attempts: int = Field(default=1, ge=0)
     # Embedding provider (plan F10-A). Selects how a note/query is embedded: `hash` is a
     # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
     # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's

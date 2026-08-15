@@ -93,18 +93,6 @@ class Probe(BaseModel):
     # Later turns of the *same* session, in order, each naming the human act that precedes it.
     # Empty for every probe in the shipped corpus, which is why adding this changed nothing there.
     follow_ups: list[Turn] = Field(default_factory=list)
-    # The specialist a supervisor should delegate this question to (`agent/team.py::SPECIALISTS`).
-    #
-    # A single name rather than the any-of `expects_tools` is, and the asymmetry is the point:
-    # several tools can legitimately serve one question, but routing has exactly one right answer
-    # by construction — the specialists partition the surface, so a question the `safety` agent
-    # should hold is not also the `design` agent's. That is what makes accuracy a number rather
-    # than a judgement, and it is the number M9 deferred its default to (`agent_teams_enabled`).
-    #
-    # Validated against the live specialist set by the corpus test, not here, for the same reason
-    # `expects_tools` is: a schema that imported the agent layer would make loading a probe file
-    # depend on building an agent.
-    expects_specialist: str | None = None
 
 
 class ProbeSet(BaseModel):

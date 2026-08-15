@@ -281,7 +281,8 @@ def test_the_cap_stops_the_loop_at_exactly_its_limit(
     this hook with a `ModelCallLimitMiddleware` subclass, which counts in `after_model`; hooks there
     run in reverse list order, so a gate jumping to `model` ran first and short-circuited the
     increment — measured then at 2, 3, 4, 5 model calls for 0, 1, 2, 3 revision rounds against a cap
-    of 2. `agent/challenge_gate.py` is exactly such a gate. Counting in `before_model` is what makes
+    of 2. The challenge panel's revision gate was exactly such a gate. Counting in `before_model` is
+    what makes
     the count unskippable, and this parameter is what proves it: the version of this test that
     attached no other `after_model` middleware could not see the defect at all.
     """

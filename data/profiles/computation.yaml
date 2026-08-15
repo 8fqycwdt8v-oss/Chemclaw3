@@ -9,7 +9,11 @@ instructions: >-
   nothing about an organic solvent, and offering it as though it did is the same failure as
   inventing the number. A bigger calculation answers inline when it is quick and otherwise returns
   a job id: report the id as work in progress and poll it with get_durable_job_status. Check
-  calculator_trust before presenting a number as settled.
+  calculator_trust before presenting a number as settled — and when a chemist gives you a measured
+  value for something you predict, record it with report_measurement, because that ledger is the
+  only thing calculator_trust reads and nothing else fills it. Before proposing a rerun, ask
+  list_artifacts what a stored calculation already left behind and fetch_artifact for the geometry
+  or spectrum you need; the follow-up question is usually cheaper than the calculation it follows.
 tool_names:
   - compute_xtb_energy
   - compute_electronic_properties
@@ -28,6 +32,9 @@ tool_names:
   - sample_conformers
   - calculator_trust
   - calculator_outliers
+  - report_measurement
   - find_calculations
+  - list_artifacts
+  - fetch_artifact
   - get_durable_job_status
   - ask_clarifying_question

@@ -16,9 +16,9 @@ class EntraSettings(BaseSettings):
     """Azure Entra ID identity and authorization (plan Phase F4, F10-C).
 
     Grouped because identity is one coherent contract: the OIDC fields, the derived JWKS/issuer
-    URLs, the parsed role/action sets, the tool-authz gates, the workload-federation/OBO
-    bridges, and the enforcement validator that rejects a half-configured deployment — all in
-    one place (kernel review note).
+    URLs, the parsed role/action sets, the tool-authz gates, the outbound token endpoint, and
+    the enforcement validator that rejects a half-configured deployment — all in one place
+    (kernel review note).
     """
 
     # User auth at the front door is OIDC with Entra as the IdP: the service is an Entra app
@@ -63,15 +63,14 @@ class EntraSettings(BaseSettings):
     # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead of
     # falling back. Config, not the old magic `"unknown"` literal.
     service_actor_id: str = "service-account"
-    # Workload identity federation (plan F4-T2): a backend pod mints its *own* short-lived Entra
-    # token by exchanging its projected ServiceAccount JWT (at `entra_sa_token_path`) via the
-    # OAuth2 client-credentials grant with a `client_assertion` — no client secret ever at rest.
-    # Disabled by default (local dev has no tenant). The generic LLM credential is the
-    # documented exception and does NOT use this path. `entra_token_refresh_leeway_seconds`
-    # refreshes a cached token before it actually expires; `entra_http_timeout_seconds` bounds
-    # the token/OBO HTTP calls.
-    entra_workload_federation_enabled: bool = False
-    entra_workload_client_id: str = ""
+    # The outbound-token settings a backend pod would use to mint its own Entra token from its
+    # projected ServiceAccount JWT. The code that did it (workload identity federation, F4-T2, and
+    # the On-Behalf-Of exchange, F4-T4) is gone: it was written before any caller existed, acquired
+    # none in the year since, and a dormant token exchange nobody invokes is a credential path with
+    # no test of its real behaviour rather than a feature in waiting. These three survive it because
+    # they describe the tenant rather than the deleted mechanism, and whatever mints a token here
+    # next will need exactly them. `entra_http_timeout_seconds` also bounds the front door's JWKS
+    # fetch, which is a live reader.
     entra_token_endpoint: str = ""
     entra_sa_token_path: str = "/var/run/secrets/azure/tokens/azure-identity-token"
     entra_token_refresh_leeway_seconds: float = Field(default=300.0, gt=0)
@@ -84,12 +83,6 @@ class EntraSettings(BaseSettings):
     # long instead of on the first token that uses it. That is bounded and configurable, and the
     # 300 s `lifespan` of the key cache already admits staleness of its own.
     entra_jwks_refresh_cooldown_seconds: float = Field(default=60.0, ge=0)
-    # On-Behalf-Of exchange (plan F4-T4): when a backend acts for a specific user against a
-    # user-scoped resource (ELN/LIMS), it swaps the user's token OBO for a downstream token so
-    # the resource sees the real user, not the service. Generic and dormant — off until a
-    # user-scoped source (the deferred custom Snowflake ELN connector) opts in by calling
-    # `exchange_obo`.
-    entra_obo_enabled: bool = False
     # Read the token's `groups` claim and fold it into the same role set every gate already
     # matches on (D-2026-08-06-a-share-is-mounted-not-called). An AD security group is an
     # entitlement, and this system has exactly one entitlement vocabulary; a second one (a

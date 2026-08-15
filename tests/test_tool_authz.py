@@ -7,12 +7,18 @@ the tool body runs and passes an allowed one through — all offline with fakes,
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
+from langchain_core.messages import ToolMessage
+from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp.server.fastmcp import FastMCP
+from mcp.shared.memory import create_connected_server_and_client_session
 
+from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.authz import AuthorizationError, authorize_tool
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -22,7 +28,9 @@ from chemclaw.agent.tool_authz import (
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import Signal, ToolFailureSignal
+from tests.fakes_langgraph import ScriptedChatModel
 from tests.middleware import run_middleware, tool_request
 from tests.signals import collect_signals
 
@@ -584,3 +592,171 @@ def test_a_pr_gate_git_failure_reaches_the_model() -> None:
     _drive_domain_errors(ctx, _git_failed)
     assert isinstance(ctx.result, str)
     assert "no 'origin' remote" in ctx.result
+
+
+# --- the third way a tool call fails: it returns instead of raising ---------------------
+
+
+@contextlib.asynccontextmanager
+async def _connector_tools() -> AsyncIterator[dict[str, Any]]:
+    """The real MCP tools of a two-tool server, keyed by name, over an in-memory session.
+
+    Real components on both sides of the boundary — a real `FastMCP` server, the real MCP client
+    session, and the real `load_mcp_tools` conversion — because the whole premise of these tests is
+    a shape *upstream* produces: a tool that fails by returning `ToolMessage(status="error")`
+    instead of raising. A hand-built `ToolMessage` would assert that the middleware does what the
+    test author already believed, which is exactly the class of proof this repository has been
+    burned by. Only the socket is dropped, which changes nothing about the message.
+    """
+    server = FastMCP("refusals")
+
+    @server.tool()
+    async def refuse_smiles(smiles: str) -> str:
+        """Refuse the way a connector tool refuses: raise *over there*, out of core's reach."""
+        raise ChemclawError(f"{smiles} has an unclosed ring")
+
+    @server.tool()
+    async def echo_smiles(smiles: str) -> str:
+        """Succeed, so the mirror case has something that must be left alone."""
+        return f"echoed {smiles}"
+
+    # `_mcp_server` is the low-level server `FastMCP` wraps; the in-memory transport takes that
+    # rather than the FastAPI app `connectors/server.py` builds around it for a deployment.
+    async with create_connected_server_and_client_session(server._mcp_server) as session:
+        yield {tool.name: tool for tool in await load_mcp_tools(session)}
+
+
+async def _through_domain_errors(tool: Any, smiles: str) -> Any:
+    """Call `tool` for real inside `surface_domain_errors`, and return what the model would read."""
+
+    async def _handler(request: Any) -> Any:
+        return await tool.ainvoke(request.tool_call)
+
+    request = tool_request(tool.name, {"smiles": smiles})
+    return await run_middleware(surface_domain_errors, request, _handler)
+
+
+def test_a_connector_refusal_reaches_the_model_without_the_retry_flag() -> None:
+    """BACKLOG:317 — the policy `_refusal_message` states, applied to the kind that returns.
+
+    `status="error"` reaches Anthropic as `is_error` on the tool_result block, which invites the
+    retry a worded refusal exists to prevent. Both in-process kinds raise, so both converters
+    answer with a `_refusal_message` that carries no such flag; the MCP kind returns, so nothing
+    converted it and the connector — where most domain refusals are actually diagnosed — was the
+    one path sending it.
+
+    The premise is asserted first, on the untouched tool, so this test fails loudly rather than
+    vacuously the day the adapter stops flagging a failed call.
+    """
+
+    async def _go() -> None:
+        async with _connector_tools() as tools:
+            raw = await tools["refuse_smiles"].ainvoke(
+                {
+                    "name": "refuse_smiles",
+                    "args": {"smiles": "c1ccccc"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            )
+            assert raw.status == "error", (
+                "the adapter no longer returns a flagged failure; this whole conversion is moot"
+            )
+
+            answered = await _through_domain_errors(tools["refuse_smiles"], "c1ccccc")
+            assert answered.status == "success", (
+                "a connector refusal still reaches the provider as a retryable error"
+            )
+            # The server's own sentence, verbatim — a refusal that arrives without its reason is
+            # no better than the flag it was carrying.
+            assert "c1ccccc has an unclosed ring" in answered.text
+            # And it still answers the call it was made for: an assistant tool_use block with no
+            # matching tool_result is a malformed exchange the provider rejects outright.
+            assert answered.tool_call_id == "call-1"
+
+    asyncio.run(_go())
+
+
+def test_a_working_connector_tool_is_handed_back_untouched() -> None:
+    """The mirror: nothing is rewritten for a call that worked.
+
+    A predicate that fired on any returned `ToolMessage` rather than on a failed one would silently
+    rewrite every successful connector result, which is the same defect mirrored.
+    """
+
+    async def _go() -> None:
+        async with _connector_tools() as tools:
+            answered = await _through_domain_errors(tools["echo_smiles"], "CCO")
+            assert answered.status == "success"
+            assert "echoed CCO" in answered.text
+
+    asyncio.run(_go())
+
+
+class _RecordingSink:
+    """An audit sink that keeps what it was given, so a turn's trail can be asserted on."""
+
+    def __init__(self) -> None:
+        """Start with an empty trail."""
+        self.events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        """Keep the event."""
+        self.events.append(event)
+
+
+def test_the_trail_and_the_transcript_still_see_the_failure_the_model_is_spared() -> None:
+    """The three readers must not cancel each other out — one real turn, all three checked.
+
+    The flag is cleared *outside* the audit middleware and the announcer, which is the whole reason
+    it is cleared there. Clearing it any lower — at the MCP seam, where `langchain_mcp_adapters`
+    offers a `ToolCallInterceptor` that could rewrite the `CallToolResult` before it is ever
+    converted — would leave both of them reading a success, re-opening BACKLOG:309 in the act of
+    closing BACKLOG:317. Only a composed run can show that, so this drives the real compiled graph
+    rather than a hand-nested chain, and reads the chemist's signals off a real stream writer.
+    """
+    sink = _RecordingSink()
+
+    async def _go() -> tuple[Any, list[Signal]]:
+        async with _connector_tools() as tools:
+            graph = build_langgraph_agent(
+                model=ScriptedChatModel(
+                    [{"name": "refuse_smiles", "args": {"smiles": "c1ccccc"}}, "done"]
+                ),
+                audit_sink=sink,
+                connectors=[tools["refuse_smiles"]],
+            )
+
+            # Two stream modes on one run, because the two halves of the contract are published
+            # on two channels: the model-facing message lands in graph state (`values`) and the
+            # chemist's failure signal is written to the custom stream. Driving the turn twice
+            # would let them disagree about the same call.
+            state: Any = None
+            signals: list[Signal] = []
+            async for mode, payload in graph.astream(
+                {"messages": [("user", "check that smiles")]}, stream_mode=["values", "custom"]
+            ):
+                if mode == "values":
+                    state = payload
+                elif isinstance(payload, dict) and isinstance(payload.get(_SIGNAL_KEY), Signal):
+                    signals.append(payload[_SIGNAL_KEY])
+            return state, signals
+
+    state, signals = asyncio.run(_go())
+
+    # The turn survived the failed step, and the model was answered without the retry flag.
+    assert str(state["messages"][-1].content) == "done"
+    (tool_message,) = [m for m in state["messages"] if isinstance(m, ToolMessage)]
+    assert tool_message.status == "success"
+    assert "has an unclosed ring" in tool_message.text
+    # ...while the durable trail still records the call as the failure it was.
+    recorded = {event.tool: event for event in sink.events}
+    assert recorded["refuse_smiles"].outcome == "error", (
+        "clearing the model-facing flag also blanked the audit trail"
+    )
+    assert "has an unclosed ring" in recorded["refuse_smiles"].detail
+    # ...and the chemist was still told the step did not work.
+    failures = [signal for signal in signals if isinstance(signal, ToolFailureSignal)]
+    assert [failure.tool for failure in failures] == ["refuse_smiles"], (
+        f"the chemist was never told the step failed; saw {signals}"
+    )

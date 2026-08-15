@@ -3,7 +3,7 @@
 > **Companion to** `docs/archive/foundation-assessment.md` (the *what/why*). This document is the
 > *how* — an extensive, staged, acceptance-gated plan that resolves every issue the assessment
 > identified, on the **real target stack** and on **MAF** (D-013 stands). It follows the
-> conventions of `docs/planning/implementation-plan.md`: small individually-acceptable steps, a
+> conventions of `docs/archive/plans/implementation-plan.md`: small individually-acceptable steps, a
 > **CHECKMATE** (G1–G7) after each phase, config-not-magic-numbers, ADR per decision,
 > `make lint type test` green as a gate.
 >

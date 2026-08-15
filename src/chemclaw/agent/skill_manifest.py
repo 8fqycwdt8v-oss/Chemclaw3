@@ -24,7 +24,7 @@ access to it — tools are advertised by the agent's own registry/profile and ga
 input, so this module cannot widen what a skill's reader may do (audit doc 10 §7).
 
 It is, since D-2026-08-05, read at run time too — by `chemclaw.agent.skill_access.
-ToolScopedSkillsSource`, which *hides* a skill whose whole declared capability is absent from the
+ToolScopedSkills`, which *hides* a skill whose whole declared capability is absent from the
 agent's surface. That is the same one-way direction: the declaration can only cost a skill its
 visibility, never buy it a tool. `declared_tools` below is the reader, and it exists here rather
 than in the source because a skill loader keeps only the Agent Skills spec's own fields
@@ -82,7 +82,7 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
     """Each discovered skill's declared tool dependencies, by skill name.
 
     The run-time reader of the `tools:` declaration, for `chemclaw.agent.skill_access.
-    ToolScopedSkillsSource`. Read once per process, not per turn: the skills tree does not change
+    ToolScopedSkills`. Read once per process, not per turn: the skills tree does not change
     while the process runs, and re-reading every `SKILL.md` on every turn would trade the whole
     point of progressive disclosure for a filter.
 
@@ -90,11 +90,11 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
     was true when an agent was built once and lived in the process. A graph is now compiled *per
     turn* (`agent/langgraph_agent.py`, M7 — LangGraph binds tools at construction), and this
     function sat on that path uncached: measured at **2.6 ms of synchronous `open()` + YAML parse
-    across 28 skills, on the event loop, per turn** — six times that with `agent_teams_enabled`,
-    since every specialist is built through the same function, plus one pass per challenger. That
-    is the hazard `tests/test_event_loop_offload.py` exists for, in the layer above the one it
-    watches. `@cache` on `_declared_tools` restores the property the paragraph describes, so the
-    docstring is now enforced rather than asserted.
+    across 28 skills, on the event loop, per turn** — and doubled again by `agent/subagents.py`,
+    which compiles a second graph through the same builder for the helper behind `task`. That is
+    the hazard `tests/test_event_loop_offload.py` exists for, in the layer above the one it watches.
+    `@cache` on `_declared_tools` restores the property the paragraph describes, so the docstring is
+    now enforced rather than asserted.
 
     **Tolerant where `chemclaw.cli.validate_skills` is strict, and deliberately so.** An unreadable
     or invalid `SKILL.md` is reported there, loudly, before deploy; here it is simply absent from
@@ -108,12 +108,14 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
 
     Args:
         skills_dirs: The directories to walk — the configured tree plus each enabled connector
-            bundle's own `skills/` (the same list `build_agent` hands `FileSkillsSource`).
+            bundle's own `skills/` (the same list `build_langgraph_agent` routes through
+            `langgraph_agent.skills_backend`).
 
     Returns:
         `{skill name: declared tool names}`, keyed by the frontmatter `name` because that is what a
         `Skill` object carries and therefore what the filter can match on. A duplicate name across
-        two directories keeps the first, matching `FileSkillsSource`'s own precedence.
+        two directories keeps the first, matching the precedence `langgraph_agent._labelled` gives
+        the routed trees.
     """
     return _declared_tools(tuple(skills_dirs))
 

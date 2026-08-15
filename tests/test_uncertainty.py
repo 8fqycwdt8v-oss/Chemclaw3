@@ -1,26 +1,24 @@
 """F8-T1: a prediction says how sure it is, where that came from, and whether to trust it at all.
 
 The row: `implementation-tickets.md` specified a `science/calc/uncertainty.py` module with
-`value + uncertainty + in_domain + method` and conformal prediction where feasible; none of it
-existed, so `predict_solubility` on a molecule ESOL cannot describe returned a confident number
-with a training-set RMSE attached and nothing machine-readable said otherwise.
+`value + uncertainty + in_domain + method`; none of it existed, so `predict_solubility` on a
+molecule ESOL cannot describe returned a confident number with a training-set RMSE attached and
+nothing machine-readable said otherwise.
 
 The tests below hold three claims that are easy to state and easy to get subtly wrong:
 
 - **"unknown" is not "fine".** `in_domain=None` must never read as trustworthy.
-- **The conformal interval is a claim about future predictions**, which is what the `(n + 1)` in
-  the rank is for. Drop it and the interval is reliably too narrow — a coverage guarantee turned
-  into an in-sample summary, which is exactly the miscalibration `calibration.py` warns about.
 - **The domain check refuses rather than widens.** An out-of-domain prediction does not get a bigger
   error bar; it gets a flag, because extrapolating a linear fit leaves the distribution its
   residuals were drawn from.
+- **Where the uncertainty came from is part of the claim.** Two numbers rendered identically say
+  different things, so `method` has to reach the rendering rather than stopping at the model.
 """
 
-import pytest
 from rdkit import Chem
 
 from chemclaw.science.calc.solubility import SolubilityInput, predict_solubility
-from chemclaw.science.calc.uncertainty import Estimate, conformal_uncertainty, structural_domain
+from chemclaw.science.calc.uncertainty import Estimate, structural_domain
 
 
 def test_an_unknown_domain_is_not_a_trustworthy_one() -> None:
@@ -97,56 +95,6 @@ def test_solubility_reports_the_uniform_shape_and_flags_what_it_cannot_describe(
     assert salt.estimate.uncertainty == ethanol.estimate.uncertainty
 
 
-def test_the_conformal_interval_covers_the_next_prediction_not_the_recorded_ones() -> None:
-    """The `(n + 1)` in the rank is the finite-sample guarantee, and it is easy to drop.
-
-    With 19 residuals and 90% coverage the honest rank is `ceil(20 × 0.9) = 18`, not
-    `ceil(19 × 0.9) = 18`… which happens to agree, so the case that separates them is chosen
-    deliberately: 9 residuals at 90% needs rank `ceil(10 × 0.9) = 9` — the largest of the nine —
-    where the in-sample version would take the 9th of 9 by a different route and a 95% request
-    would need rank 10 and have to refuse.
-    """
-    residuals = [0.1 * i for i in range(1, 10)]  # 0.1 … 0.9, n = 9
-    assert conformal_uncertainty(residuals, coverage=0.9, minimum_samples=1) == pytest.approx(0.9)
-    # 95% of ten future predictions cannot be bounded by nine observations:
-    # ceil(10 × 0.95) = 10 > 9. Returning 0.9 anyway would state a guarantee the data lacks.
-    assert conformal_uncertainty(residuals, coverage=0.95, minimum_samples=1) is None
-
-
-def test_float_drift_does_not_push_the_rank_one_place_too_high() -> None:
-    """`75 * 0.68` is `51.00000000000001`, so an unrounded ceiling asks for rank 52, not 51.
-
-    The interval is then one residual wider than the guarantee requires — an overstated uncertainty,
-    which is the quieter of the two ways to be wrong and the one nobody investigates. 0.68 is not a
-    contrived coverage: it is one sigma, and it is the value that makes the drift visible where 0.9
-    and 0.95 happen to land on exact binary fractions. (That "happen to" is the point — the first
-    version of this test asserted drift at 0.95, where there is none, and passed with the rounding
-    removed.)
-    """
-    residuals = [float(i) for i in range(1, 75)]  # n = 74; ceil(75 × 0.68) = 51 → the 51st, = 51.0
-    assert conformal_uncertainty(residuals, coverage=0.68, minimum_samples=1) == pytest.approx(51.0)
-
-
-def test_too_few_observations_report_nothing_rather_than_a_badly_estimated_interval() -> None:
-    """Valid and badly estimated are different failures, and only the second is silent.
-
-    Nine residuals give an arithmetically valid 90% interval whose value is the largest of nine
-    numbers — one unusual compound sets it. The floor is where the caller falls back to the model's
-    reported constant and says so through `method`.
-    """
-    residuals = [0.1 * i for i in range(1, 10)]
-    assert conformal_uncertainty(residuals, coverage=0.9, minimum_samples=20) is None
-
-
-def test_the_sign_of_a_residual_never_matters() -> None:
-    """An interval is two-sided; residuals that happen to skew negative do not make it narrower."""
-    positive = [float(i) for i in range(1, 21)]
-    mixed = [float(i) if i % 2 else -float(i) for i in range(1, 21)]
-    assert conformal_uncertainty(
-        positive, coverage=0.9, minimum_samples=1
-    ) == conformal_uncertainty(mixed, coverage=0.9, minimum_samples=1)
-
-
 def test_the_trust_rides_on_the_value_line_because_the_excerpt_truncates() -> None:
     """`render` is one fragment, not a stanza, and that is a constraint rather than a preference.
 
@@ -194,21 +142,20 @@ def test_an_out_of_domain_estimate_shouts_and_gives_its_reasons() -> None:
 
 
 def test_the_rendering_distinguishes_where_the_uncertainty_came_from() -> None:
-    """A constant from a paper and an interval measured here are different claims (D-2026-08-01).
+    """A constant from a paper and a figure carried through arithmetic are different claims.
 
-    The ± is identical in both, so if the rendering collapsed `method` the note would state the
-    weaker claim and the stronger one in the same words — which is the distinction the field was
-    added to preserve.
+    The ± is identical in both, so if the rendering collapsed `method` the note would state the two
+    in the same words — which is the distinction the field was added to preserve (D-2026-08-01).
     """
     base = Estimate(value=1.0, unit="log10(mol/L)", uncertainty=0.5, in_domain=True)
     reported = base.model_copy(update={"method": "reported"}).render(fmt=".3g")
-    conformal = base.model_copy(update={"method": "conformal"}).render(fmt=".3g")
-    assert reported != conformal
+    propagated = base.model_copy(update={"method": "propagated"}).render(fmt=".3g")
+    assert reported != propagated
     assert "reported" in reported
-    assert "conformal" in conformal
+    assert "propagated" in propagated
     # Both still carry the number itself, so the difference is in the claim, not the value.
     assert "1 ± 0.5 log10(mol/L)" in reported
-    assert "1 ± 0.5 log10(mol/L)" in conformal
+    assert "1 ± 0.5 log10(mol/L)" in propagated
 
 
 def test_a_missing_uncertainty_renders_no_plus_minus_at_all() -> None:

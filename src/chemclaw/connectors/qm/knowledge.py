@@ -24,7 +24,8 @@ def qm_energy_estimate(result: QMJobResult) -> Estimate:
     mistake `tests/test_connector_isolation.py` exists to catch: `specs.py` is the leaf module
     `connector.yaml` names as `params_model`, so the chat service imports whatever it imports, and
     reaching into `chemclaw.science` from there is how `connectors/calc/specs.py` once dragged four
-    science modules into every `build_agent` (D-118). This module is already past that boundary.
+    science modules into every `build_langgraph_agent` (D-118). This module is already past that
+    boundary.
 
     **`uncertainty` is `None`, and that is the answer rather than a gap awaiting a number.** An
     absolute total energy has no meaningful error bar — as this repo already says where it
