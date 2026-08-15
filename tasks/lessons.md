@@ -211,3 +211,22 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
     they take 12s against the 180s cap, so the suite is not marginal: 15x headroom, and it took
     full saturation to break it. There was no defect to file, which is why the elimination had to
     come before the instinct to file one.
+
+    **The sharper consequence, hit again this session: a pipe replaces the *verdict*, not just the
+    diagnostic.** `cmd | tail` exits with `tail`'s status, which is almost always 0 — so
+    `uv run pytest ... | tail -2 && git commit ...` **commits over a failing suite**, silently, and
+    the `&&` that looks like a guard is checking nothing. It did exactly that here: two
+    `test_docstring_paths` failures were committed and only found on the next run. The rule is
+    therefore stronger than "keep the output": never put a test or lint command on the left of a
+    pipe when its exit code is load-bearing. Redirect (`> run.log 2>&1`) and read the file, or use
+    `set -o pipefail`. A green line you read with your eyes is not a passing exit code.
+
+30. **A one-token edit after the last green check is still an edit.** A merged sibling repo put the
+    ported module one directory deeper, so a backticked pointer gained `engine/` — six characters,
+    correcting a path to make it *more* accurate — and the docstring went from 99 columns to 105.
+    Nothing was re-run, because the change felt like a typo fix rather than a code change, and CI
+    went red on lint for a branch whose suite had been green minutes earlier. Then the reflow of
+    that line pushed the *next* line over, twice, because each fix was checked by eye instead of by
+    `ruff`. The mechanism: `ruff check . && ruff format --check .` is cheap and takes seconds — run
+    it after the last edit, not after the last edit you *considered significant*. The category
+    "too small to re-check" does not exist for a linter with a column limit.
