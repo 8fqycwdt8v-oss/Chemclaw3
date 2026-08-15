@@ -11,8 +11,11 @@ instructions: >-
   Sweep the internal sources with gather_evidence first, then drill into what it cites with
   expand_note and find_notes, and check find_past_jobs before anyone pays for a calculation that
   has already been run. Use similar_reactions and similar_molecules/substructure_matches to reach
-  analogous work by structure. Report what you found with the note ids it came from, and say
-  plainly when the record is silent — a gap reported as a gap is worth more than a plausible guess.
+  analogous work by structure. A finished calculation kept more than its answer, so when one is
+  relevant ask list_artifacts what it left behind and fetch_artifact to quote a stored geometry or
+  spectrum exactly rather than describing it. Report what you found with the note ids it came from,
+  and say plainly when the record is silent — a gap reported as a gap is worth more than a
+  plausible guess.
 
 # Read-only by construction: every name here looks something up. Nothing in this list can write to
 # the knowledge graph, spend compute, or launch durable work.
@@ -27,5 +30,10 @@ tool_names:
   - substructure_matches
   - resolve_compound
   - find_calculations
+  # Reading a finished calculation's stored by-products. Both are `read_only` in the `calc`
+  # manifest — they reach what a run already produced and neither starts one — so they belong to
+  # the specialist whose whole job is finding what this programme already knows.
+  - list_artifacts
+  - fetch_artifact
   - recall_observations
   - ask_clarifying_question

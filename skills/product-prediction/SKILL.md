@@ -12,6 +12,7 @@ tools:
   - find_notes
   - gather_evidence
   - screen_hazards
+  - render_structure
 ---
 
 # Product prediction
@@ -83,7 +84,18 @@ as you would for the reactants.
 
 Lead with the major product and the reason (electronic preference, precedent, or both).
 Name the credible minor products — a chemist plans a purification around those, so omitting
-them is worse than being uncertain about them. State the confidence honestly: "the electronics
+them is worse than being uncertain about them.
+
+**Draw them.** This skill's whole output is several closely related structures that differ in
+one position, and that is exactly the case prose describes worst — "the 5-substituted isomer"
+and "the 7-substituted isomer" are one numbering convention away from meaning the opposite
+thing, while a picture is unambiguous and a chemist reads it faster. Call `render_structure`
+on the major product, on each minor product you name, and on the transformation as a whole
+when a reaction SMILES (`reactants>>products`) says it more cleanly than two separate
+drawings. Keep the SMILES in the text as well: the drawing is for the reader and the string
+is what the next tool call takes.
+
+State the confidence honestly: "the electronics
 and the classical directing effect agree, so this is a solid call" is different from "the ring
 positions are electronically comparable, so the reagent and sterics will decide". Where the
 answer matters and the evidence is thin, say what would settle it — a small test reaction is

@@ -15,7 +15,7 @@
 > (the *what/why*). This document is the **executable backlog**: every phase F0–F9 broken into
 > small, individually-shippable tickets grounded in the **real symbols in this repo**. Each ticket
 > names the files it touches, the concrete signatures/config it adds, the tests that prove it, and
-> its acceptance bar. Conventions follow `docs/planning/implementation-plan.md`: config-not-magic-numbers
+> its acceptance bar. Conventions follow `docs/archive/plans/implementation-plan.md`: config-not-magic-numbers
 > (`CHEMCLAW_` prefix, one `pydantic-settings` source), an ADR per decision, and `make lint type
 > test` green plus the phase **CHECKMATE** (G1–G7) as the done-gate.
 >

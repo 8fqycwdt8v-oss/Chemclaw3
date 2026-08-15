@@ -37,9 +37,11 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   truth; it cannot *merge* it — the agent proposes, a human decides.
 - **Transport identity (non-Entra bridges).** Identity rides *inside* the workflow payload, so the
   transports are authenticated separately: Temporal by mTLS (`temporal_tls_*`) or a Cloud API key,
-  and the HPC launcher by a bridged/mounted token (F4-T6). Backend pods mint their own short-lived
-  Entra tokens via **workload identity federation** (`src/chemclaw/agent/identity/workload.py`) — no client
-  secret at rest.
+  and the HPC launcher by a bridged/mounted token (F4-T6). No backend component mints an outbound
+  Entra token of its own: the workload-identity-federation and On-Behalf-Of exchanges written for
+  F4-T2/F4-T4 were deleted, having never acquired a caller. What that guarantee rested on holds
+  anyway and more simply — there is no client secret at rest because there is no outbound token
+  exchange at all.
 
 ## Data handling & logging (PII in the audit trail)
 
@@ -93,9 +95,8 @@ The code paths exist and are unit-tested against local keys/fakes, but the follo
 infrastructure to exercise end to end and must be validated in a staging tenant/cluster before
 production (tracked in `docs/planning/BACKLOG.md`):
 
-- Real Entra token validation against a live tenant JWKS; the federation and On-Behalf-Of
-  (`src/chemclaw/agent/identity/obo.py`, currently dormant) token exchanges.
-- Temporal broker mTLS/API-key transport and the HPC identity bridge against real endpoints.
+- Real Entra token validation against a live tenant JWKS.
+- Temporal broker mTLS/API-key transport against real endpoints.
 - Live-cluster delivery: `helm`/`kubeconform` render, the NetworkPolicy ingress gate, and durability
   under a self-hosted Temporal.
 

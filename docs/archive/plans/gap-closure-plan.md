@@ -1,6 +1,6 @@
 # Gap-closure plan — implementing `docs/archive/audit/12-capability-gap-analysis.md`
 
-> Companion to `docs/planning/implementation-tickets.md` (F0–F9) and `docs/archive/plans/parity-plan.md` (F10). Same
+> Companion to `docs/archive/plans/implementation-tickets.md` (F0–F9) and `docs/archive/plans/parity-plan.md` (F10). Same
 > conventions: config-not-magic-numbers (`CHEMCLAW_` prefix, one `pydantic-settings` source,
 > `extra="forbid"`), docstrings state the *why*, `mypy --strict`, durability stays in Temporal
 > (D-002), agent-authored knowledge goes through the PR-gate (D-005), and **no abstraction without a

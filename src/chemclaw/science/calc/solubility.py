@@ -98,9 +98,10 @@ def predict_solubility(job: SolubilityInput) -> SolubilityResult:
             value=log_s,
             unit="log10(mol/L)",
             uncertainty=uncertainty,
-            # "reported", not "conformal": this is the constant from Delaney's paper. A conformal
-            # interval replaces it only where this deployment has reconciled measurements, which is
-            # a database read and therefore belongs on the cached path, not in the pure predictor.
+            # "reported": this is the constant from Delaney's paper, not a spread measured here.
+            # Narrowing it to this deployment's own residuals would take a read of the calibration
+            # ledger, which is a database call and therefore belongs on the cached path rather than
+            # in a pure predictor — which is why no such method exists (see `uncertainty`).
             method="reported",
             in_domain=in_domain,
             domain_reasons=reasons,

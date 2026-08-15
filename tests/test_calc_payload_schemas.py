@@ -105,7 +105,11 @@ RECORDED_SHAPES: dict[str, str] = {
     "QMJobResult": "fce36419000e7f0d",
     "ScanResult": "72609a59a86db985",
     "SiteReactivityResult": "0378ea844edafd37",
-    "SolubilityResult": "5c92ee2148cc213a",
+    # Changed when `Estimate.method` dropped its unreachable `"conformal"` member: nothing ever
+    # produced that value (the function behind it had no caller and was deleted), so every row on
+    # disk carries `"reported"` and still validates and still means what it said. A narrowing that
+    # removes a value nothing wrote is the one shape change that needs no epoch bump.
+    "SolubilityResult": "9c81f577df57caed",
     "ThermochemistryResult": "c60a948c32b35abd",
     "XtbResult": "cc278ccf4b7832db",
 }

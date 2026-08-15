@@ -174,7 +174,6 @@ def test_hpc_and_deploy_defaults() -> None:
     assert settings.hpc_launch_interface == "mock"
     assert settings.hpc_pipeline_version == ""
     assert settings.otel_endpoint == ""
-    assert settings.hpc_bridge_identity == "chemclaw-hpc"
 
 
 def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

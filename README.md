@@ -5,7 +5,7 @@ Temporal durable jobs, Agent Skills, and a PR-gated Markdown knowledge graph.
 
 **`ARCHITECTURE.md` is the map** — the four layers and what every directory in this
 repository is for. Read it before going looking for something. The original design and
-build order live in `docs/reference/architektur.md` and `docs/planning/implementation-plan.md`; both are
+build order live in `docs/reference/architektur.md` and `docs/archive/plans/implementation-plan.md`; both are
 historical (see `CLAUDE.md`).
 
 ## Quickstart
@@ -70,7 +70,7 @@ plan→approve→execute harness. Entra identity is enforced when
 Route behind OIDC, the background worker plus one Temporal worker per connector
 bundle that owns durable work, the connector servers, workload identity
 federation, and the plain secrets `values.yaml` declares). The build order and
-per-phase status live in `docs/planning/implementation-tickets.md`.
+per-phase status live in `docs/archive/plans/implementation-tickets.md`.
 
 ## Security
 

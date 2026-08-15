@@ -1,21 +1,27 @@
 """One shape for "how much should this number be trusted", across every calculator.
 
-Ticket F8-T1 asked for `value + uncertainty + in_domain + method`, and conformal prediction where
-feasible. What existed was three calculators each carrying an uncertainty in its own field name
-(`uncertainty_log`, `uncertainty`), no notion of an applicability domain anywhere in the tree, and
-nothing saying *where a number came from* — so `predict_solubility` on an organometallic returned a
-confident value with a training-set RMSE attached, and the `calculation-selection` skill had nothing
-machine-readable to consult.
+Ticket F8-T1 asked for `value + uncertainty + in_domain + method`. What existed was three
+calculators each carrying an uncertainty in its own field name (`uncertainty_log`, `uncertainty`),
+no notion of an applicability domain anywhere in the tree, and nothing saying *where a number came
+from* — so `predict_solubility` on an organometallic returned a confident value with a training-set
+RMSE attached, and the `calculation-selection` skill had nothing machine-readable to consult.
 
 **Three questions, and they are genuinely different.**
 
 *How wrong is this likely to be?* — `uncertainty`, and `method` says how it was obtained.
 `reported` is the model's published error, a constant that knows nothing about *this* molecule.
-`conformal` is a split-conformal interval over this deployment's own recorded residuals, which is
-strictly better evidence when there is enough of it. `propagated` is an input's uncertainty carried
-through arithmetic (`logd` does this from the pKa calibration). The distinction matters to a
-reviewer: a constant RMSE is a claim about a paper's test set, and a conformal interval is a claim
-about this system.
+`propagated` is an input's uncertainty carried through arithmetic (`logd` does this from the pKa
+calibration). The distinction matters to a reviewer: a constant RMSE is a claim about a paper's
+test set rather than about this system's chemistry.
+
+The same ticket also asked for conformal prediction "where feasible", and a split-conformal
+half-width over this deployment's own recorded residuals was written for it. It never became
+feasible: it needs a read of the calibration ledger, which is a database call and therefore belongs
+on the cached path rather than in a pure predictor, and no caller was ever written. Nothing
+produced a `conformal` method in a year, so the member, its prose and the function are gone — a
+`Method` value nothing can emit is a distinction a reviewer is invited to look for and will never
+see. The ledger and its residuals are untouched; whatever reads them next can bring its own
+interval.
 
 *Was this molecule the kind of thing the model can speak about at all?* — `in_domain`. Separate from
 the uncertainty because an out-of-domain prediction's error bar is not merely larger, it is
@@ -37,7 +43,6 @@ confident number is most wrong. The statistical half stays open and is named in 
 than approximated.
 """
 
-import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -48,7 +53,7 @@ from chemclaw.core.errors import ChemclawError
 # How an uncertainty was arrived at. Not decoration: it is the difference between "the paper that
 # published this model measured this spread on its own test set" and "this deployment measured this
 # spread on its own chemistry", and a reviewer weighs the two differently.
-Method = Literal["reported", "conformal", "propagated", "none"]
+Method = Literal["reported", "propagated", "none"]
 
 # Elements ESOL-style organic property models are parameterised over. Not a chemistry opinion — the
 # Crippen contributions and the aromatic-proportion term are defined for organic structures, and a
@@ -60,7 +65,6 @@ _ORGANIC_ELEMENTS = frozenset({"H", "B", "C", "N", "O", "F", "Si", "P", "S", "Cl
 # parenthetical, which is the silence this module exists to break.
 _METHOD_PROSE: dict[Method, str] = {
     "reported": "the model's own reported error",
-    "conformal": "conformal, over this deployment's recorded residuals",
     "propagated": "propagated from the inputs",
     "none": "no uncertainty established",
 }
@@ -190,37 +194,3 @@ def structural_domain(mol: Chem.Mol) -> tuple[bool, tuple[str, ...]]:
             "defined for them and RDKit sums whatever it recognises rather than refusing"
         )
     return not reasons, tuple(reasons)
-
-
-def conformal_uncertainty(
-    residuals: list[float], *, coverage: float, minimum_samples: int
-) -> float | None:
-    """The split-conformal half-width covering `coverage` of observed absolute residuals.
-
-    Split conformal in its simplest honest form: with `n` recorded residuals, the interval that
-    covers a fraction `coverage` of *future* predictions with finite-sample validity is the
-    `ceil((n + 1) · coverage) / n` empirical quantile of the absolute residuals. The `(n + 1)`
-    is the whole point — it is what makes the guarantee hold for the next, unseen prediction rather
-    than only for the ones already in hand, and dropping it turns a coverage guarantee into an
-    in-sample summary that is reliably too narrow.
-
-    Returns None below `minimum_samples`, and when the required quantile falls past the largest
-    residual observed. The second case is not an edge case to paper over: with 5 residuals there is
-    no finite 95% conformal interval, and returning the maximum residual instead would state a
-    guarantee the data cannot support. The caller falls back to the model's reported error and says
-    so through `method`.
-    """
-    if len(residuals) < minimum_samples or not 0 < coverage < 1:
-        return None
-    ordered = sorted(abs(r) for r in residuals)
-    n = len(ordered)
-    # Rounded before the ceiling because `(n + 1) * coverage` lands just above an integer for some
-    # perfectly ordinary inputs — `75 * 0.68` is `51.00000000000001` — and an unrounded `ceil` then
-    # asks for rank 52 rather than 51, reporting an interval one residual wider than the guarantee
-    # requires. An overstated uncertainty is the quieter of the two ways to be wrong and the one
-    # nobody investigates. The rounding is at the ninth decimal: far below any coverage anyone
-    # configures, far above the drift.
-    rank = math.ceil(round((n + 1) * coverage, 9))
-    if rank > n:
-        return None
-    return ordered[rank - 1]  # 1-indexed rank → 0-indexed position

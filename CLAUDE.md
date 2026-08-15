@@ -17,7 +17,9 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
 - **F0** LLM provider seam (generic credential, not Entra) · **F1** the plan/execute harness ·
   **F2** FastAPI+SSE front door · **F3** durable Postgres sessions + job→session push-back.
 - **F4** Entra identity/RBAC: front-door OIDC, one authorization gate, `require_actor` reject-if-absent
-  core rule, workload identity federation, OBO (dormant), Temporal-mTLS + HPC identity bridges.
+  core rule, Temporal-mTLS. (Workload-identity federation, OBO and the HPC identity bridge were
+  built and never wired to anything; D-2026-08-15 deleted all three — 254 LOC whose only callers
+  were their own tests. Re-adding one is a new decision, and the ADRs that designed them stand.)
 - **F5** real Nextflow (Seqera/Tower) launcher behind the QM activities (mock kept for CI).
 - **F6** OpenShift delivery: one rootless image, Helm chart, CI, the plain-secret set `values.yaml`
   declares and `tests/test_helm_chart.py` pins, Temporal self-hosted.
@@ -119,7 +121,7 @@ the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is th
 store, the `session_messages` read-model, `HumanInTheLoopMiddleware` and `RubricMiddleware`.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
-validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See
+validation, live cluster durability + `helm`/`kubeconform` render. See
 `docs/planning/BACKLOG.md` for the exact list.
 
 **On the design documents below: they are historical, not current.** `docs/reference/architektur.md` is
@@ -130,7 +132,7 @@ READMEs and `docs/guides/runbook.md` for what is true today.
 
 - `docs/reference/architektur.md` — the four-layer architecture (§6 = the real OpenShift/Nextflow/internal-LLM
   deployment; §7/§8 = Entra durchgängig).
-- `docs/planning/implementation-plan.md` — the original build order; `docs/planning/implementation-tickets.md` — the
+- `docs/archive/plans/implementation-plan.md` — the original build order; `docs/archive/plans/implementation-tickets.md` — the
   F0–F9 ticket backlog with per-phase status.
 
 ## Related repositories
@@ -262,7 +264,7 @@ destructive/ambiguous, or the user asked to review before merge for this task.
 - **Config, never magic numbers**: every URL, path, threshold, timeout, model name comes from
   the one `pydantic-settings` config, ENV-overridable.
 
-Run the plan's **Quality-Gate ("Checkmate")** checklist (G1–G7, see `docs/planning/implementation-plan.md`)
+Run the plan's **Quality-Gate ("Checkmate")** checklist (G1–G7, see `docs/archive/plans/implementation-plan.md`)
 after each cluster of steps before moving on.
 
 ## Persistent knowledge (read at session start, update at session end)

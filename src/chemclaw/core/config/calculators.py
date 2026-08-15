@@ -176,22 +176,6 @@ class CalculatorSettings(BaseSettings):
     # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3):
     # model uncertainty attached to every prediction, config like `pka_uncertainty`.
     solubility_rmse_log: float = 0.75
-    # Split-conformal intervals over this deployment's own recorded residuals (F8-T1), which are a
-    # claim about *this* system's chemistry rather than about a paper's test set — so they replace
-    # the reported constant above whenever there is enough evidence, and `Estimate.method` says
-    # which was used.
-    #
-    # `coverage` is the fraction of future predictions the interval is meant to contain. 0.9 rather
-    # than 0.95 deliberately: the guarantee needs `ceil((n+1)·coverage) ≤ n` observations to exist
-    # at all, so 0.95 needs 19 reconciled measurements before it can report anything and 0.9 needs
-    # 9 — and a deployment that has measured ten compounds should get the benefit of them.
-    #
-    # `minimum_samples` is a floor beneath the arithmetic one, because an interval computed from
-    # nine residuals is *valid* and still badly estimated: the quantile is the largest of nine
-    # numbers, so one unusual compound sets it. 20 is where a residual distribution starts to have
-    # a shape. Below it the reported constant is used and said so.
-    calibration_conformal_coverage: float = Field(default=0.9, gt=0, lt=1)
-    calibration_conformal_min_samples: int = Field(default=20, gt=0)
 
     # logD (calc.logd, D-092): the working pH used when a caller does not name one.
     # 7.4 (physiological pH) is the conventional analytical-chemistry default.
