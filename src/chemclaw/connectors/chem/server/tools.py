@@ -326,8 +326,32 @@ def _render_svg(smiles: str) -> str:
     """
     size = settings.structure_render_size_px
     if ">>" in smiles:
-        reaction = rdChemReactions.ReactionFromSmarts(smiles, useSmiles=True)
-        if reaction is None:
+        # **Each side is validated before the reaction is built, and the `is None` check below is
+        # not what catches a bad one.** `ReactionFromSmarts` does not return `None` for the inputs
+        # that matter — it returns a *parsed reaction containing garbage*, which is then drawn.
+        # Measured against the installed RDKit:
+        #
+        #   "°C>>CC=O"  -> a reaction whose reactant is **methane**. A stray temperature annotation
+        #                  becomes a molecule, and a chemist is shown chemistry nobody wrote, with
+        #                  no error anywhere.
+        #   ">>"        -> an empty reaction, and `DrawReaction` on it **segfaults** — a hard crash
+        #                  of the connector process, not an exception a caller can handle. That is
+        #                  the whole worker gone, taking every other in-flight tool call with it,
+        #                  reachable from one malformed string.
+        #
+        # So the guard has to be the strict parser the molecule branch already uses, applied per
+        # side. `require_canonical_smiles` refuses "°C" and the empty string outright, which is
+        # exactly the discrimination `ReactionFromSmarts` declines to make. Reassembling from the
+        # canonical halves also means the drawn reaction is the one that was validated, rather than
+        # a second parse of the raw text.
+        sides = smiles.split(">>")
+        if len(sides) != 2:
+            raise InvalidSmilesError(
+                f"a reaction SMILES has exactly one '>>' separator: {smiles!r}"
+            )
+        validated = ">>".join(require_canonical_smiles(side) for side in sides)
+        reaction = rdChemReactions.ReactionFromSmarts(validated, useSmiles=True)
+        if reaction is None:  # pragma: no cover - both sides already parsed individually
             raise InvalidSmilesError(f"not a drawable reaction SMILES: {smiles!r}")
         drawer = rdMolDraw2D.MolDraw2DSVG(size * 2, size)
         drawer.DrawReaction(reaction)

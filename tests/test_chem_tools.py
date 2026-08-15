@@ -159,6 +159,46 @@ def test_an_unparseable_structure_raises_rather_than_drawing_nothing() -> None:
         _run(render_structure("not-a-molecule"))
 
 
+@pytest.mark.parametrize(
+    ("smiles", "why"),
+    [
+        ("\u00b0C>>CC=O", "a temperature annotation parses as methane"),
+        (">>", "an empty reaction segfaults the drawer"),
+        ("A>>B>>C", "two separators is not a reaction"),
+    ],
+)
+def test_a_reaction_side_that_is_not_chemistry_is_refused(smiles: str, why: str) -> None:
+    """The dangerous reaction inputs are the ones RDKit *accepts*, not the ones it rejects.
+
+    `ReactionFromSmarts` returns `None` for very little. Measured against the installed RDKit,
+    `"\u00b0C>>CC=O"` comes back as a fully-formed reaction whose reactant is **methane** — a stray
+    temperature annotation silently becomes a molecule, so a chemist asking for a picture of their
+    reaction got chemistry nobody wrote.
+
+    `">>"` is worse and is why this is a defect rather than a polish item: it parses to an empty
+    reaction, and `DrawReaction` on that **segfaults**. Verified by reverting the guard and running
+    these cases — `Fatal Python error: Segmentation fault` at the `DrawReaction` line. A hard crash
+    is not an exception any caller can convert into a refusal: it takes the connector process down
+    with every other in-flight tool call, from one malformed string.
+
+    That is why the guard is `require_canonical_smiles` per side rather than the `is None` check:
+    the strict parser refuses exactly what the reaction parser waves through. Parametrised because
+    the three failures have different shapes and a single case would leave the other two silent.
+    """
+    with pytest.raises(InvalidSmilesError):
+        _run(render_structure(smiles))
+
+
+def test_a_reaction_with_several_reagents_a_side_still_renders() -> None:
+    """The per-side validation must not reject a legitimate multi-component reaction.
+
+    The pair to the test above: a guard that refuses bad input is only correct if it still passes
+    the good input it sits in front of. Dot-separated fragments are ordinary reaction SMILES — a
+    salt, a co-reagent — and canonicalising a side must keep them.
+    """
+    assert "<svg" in _run(render_structure("CCO.CC(=O)O>>CC(=O)OCC.O"))
+
+
 # --- TOOL-4b: solvent charges by volume ------------------------------------------------------
 
 
