@@ -26,16 +26,20 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
 
+from chemclaw.connectors import registry
+from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
     CalcServerError,
     CalcToolError,
     cached_remote,
     remote_key,
 )
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.store import CALCULATION_EPOCH, InMemoryStore
@@ -229,6 +233,58 @@ def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     assert issubclass(CalcToolError, ChemclawError)
     assert issubclass(CalcServerError, SubsystemUnavailableError)
     assert not issubclass(CalcServerError, ChemclawError)
+
+
+def test_the_servers_internal_error_is_an_outage_not_bad_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An infrastructure fault on the calc server must stay retryable, though it arrives as isError.
+
+    This is the door the split above did not cover. FastMCP turns *every* exception in a tool body
+    into `isError=True`, and `Chemclaw3-mcp`'s `mcp_server_kit.app._sanitize_tool_errors` replaces
+    anything that is not a deliberate `ValueError` with the literal "an internal error occurred" —
+    which is the path `engine/xtb_cli.py` takes *by design*, since `CliError` is a `RuntimeError`.
+
+    So an xtb subprocess timeout, a non-zero exit, a full scratch directory and an OOM all looked
+    exactly like an unparameterised solvent, and `CalcToolError` is registered non-retryable: the
+    single most likely fault on that server failed an expensive durable job on attempt 1 with
+    `activity_max_attempts` untouched.
+
+    The refusal case in the test above still classifies as bad data, which is what makes this a
+    distinction rather than a blanket loosening.
+    """
+
+    class _Broken(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            return _Result({"detail": "an internal error occurred"}, is_error=True)
+
+    _session(monkeypatch, _Broken(_KEY, {}))
+
+    async def _run() -> None:
+        with pytest.raises(CalcServerError) as outage:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        assert "may work on a retry" in str(outage.value)
+
+    asyncio.run(_run())
+
+
+def test_a_black_holed_server_fails_to_connect_in_seconds_not_quarter_hours() -> None:
+    """The connect bound is the connectors' 5 s, not the 900 s a calculation is allowed to take.
+
+    `streamablehttp_client(timeout=…)` composes one `httpx.Timeout` for connect, write and pool
+    alike, so `calc_server_timeout_seconds` — necessarily large, these are the calculations — also
+    became the time a deleted pod had to accept a TCP connection. Measured before the factory:
+    `connect 900.0`. A durable activity stalled fifteen minutes per attempt while its heartbeat
+    reported it healthy.
+
+    The read leg is asserted too, because it must stay long: shortening it is the measured hang
+    `calc_session` documents, where the client swallows a read timeout and the caller waits forever.
+    """
+    composed = httpx.Timeout(settings.calc_server_timeout_seconds, read=905.0)
+    client = remote._short_connect_client(headers=None, timeout=composed, auth=None)
+
+    assert client.timeout.connect == registry._CONNECT_TIMEOUT_SECONDS
+    assert client.timeout.read == 905.0
 
 
 class _Wire:
