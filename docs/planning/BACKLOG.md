@@ -244,9 +244,15 @@ topic).
       today (see the ADR below), so this is latent rather than live, and fixing it without a producer
       is a branch no test can reach. The row exists so whoever adds the first interrupt finds it.
 
-- [ ] **`RubricMiddleware` in the turn loop** — [M]. `agent/verifier.py`'s own docstring says a
+- [ ] **A flagged answer is never revised** — [M]. `agent/verifier.py`'s own docstring says a
       low-confidence answer is "marked, not blocked", and nothing routes a `review_required` answer
-      back for another pass. Upstream has the loop.
+      back for another pass. **`RubricMiddleware` is not the fix**
+      (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`): it builds a grader
+      of its own with no seam to reuse `score_answer`, so the tree would hold two judges reading
+      different things, and every non-satisfied termination — `grader_error` included — returns the
+      **ungraded** answer with only a log line. What would move this row is a measurement, not a
+      library: revise the answers `score_answer` already flags and score the revisions. If revision
+      helps, build the loop first-party on the one judge that reads the turn's own tool results.
 
 - [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S].
       `durable/retention.py` and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE

@@ -129,7 +129,7 @@ A maintenance coupling is the smaller harm; the finding and the restart conditio
 `D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` reached
 independently and carried out, removing the audit hash chain while keeping the trail, the gates and
 the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
-store, the `session_messages` read-model, `HumanInTheLoopMiddleware` and `RubricMiddleware`.
+store, the `session_messages` read-model and `HumanInTheLoopMiddleware`. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, live cluster durability + `helm`/`kubeconform` render. See
