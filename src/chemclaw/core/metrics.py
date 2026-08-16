@@ -182,6 +182,23 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_notes_publish_failures_total": (
         "Knowledge notes that could not be opened on a branch; the knowledge was lost."
     ),
+    # A fan-out child that exhausted its retries and was dropped (`durable/orchestrator.py`).
+    # Isolate-and-drop is the right policy — one poison input must not restart its siblings — but
+    # until this counter existed the drop's only trace was a `workflow.logger.warning`, so the
+    # parent completed *successfully* with a short list and every operator-visible signal said
+    # healthy. Measured: a live fan-out returned two results from four inputs with nothing but log
+    # lines to show for it.
+    #
+    # The failure this makes visible: the PR-gate's git credential expires, every
+    # `PublishNoteWorkflow` child fails, and all three memory-synthesis jobs complete green
+    # returning `[]` every night — `/schedules` showing `runs_total` climbing and no failures — for
+    # as long as it takes someone to notice that nothing has been proposed in months.
+    # `chemclaw_notes_publish_failures_total` above does not cover it: that one is incremented by
+    # `publish_note_best_effort`, which the memory fan-out does not use.
+    "chemclaw_fan_out_children_dropped_total": (
+        "Fan-out children that failed their retries and were dropped; their work is missing from "
+        "an otherwise successful parent."
+    ),
     # The gate's outcomes, which the two counters above cannot express: they count submissions,
     # and the question an operator actually has is whether anything is being *reviewed*. A rising
     # `open` against a flat `merged` is a review queue nobody is working; `rejected` is the series

@@ -190,6 +190,7 @@ def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("CHEMCLAW_HPC_API_BASE_URL", "https://tower.internal/api")
     monkeypatch.setenv("CHEMCLAW_HPC_PIPELINE_NAME", "qm-dft")
     monkeypatch.setenv("CHEMCLAW_HPC_ARTIFACT_STORE_URL", "https://artifacts.internal")
+    monkeypatch.setenv("CHEMCLAW_HPC_API_TOKEN", "tower-token")
     with pytest.raises(ValueError, match="hpc_pipeline_version"):
         Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -213,21 +214,6 @@ def test_nextflow_requires_launcher_endpoints() -> None:
         )
 
 
-def test_nextflow_poll_interval_must_beat_run_heartbeat() -> None:
-    """The nextflow poll heartbeats against its own timeout — the pair is validated too."""
-    with pytest.raises(ValueError, match="hpc_run_heartbeat_timeout_seconds"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            hpc_launch_interface="nextflow",
-            hpc_api_base_url="https://tower.internal/api",
-            hpc_pipeline_name="qm-dft",
-            hpc_artifact_store_url="https://artifacts.internal",
-            hpc_poll_interval_seconds=300.0,
-            qm_poll_heartbeat_timeout_seconds=600.0,  # mock pair satisfied...
-            # ...but hpc_run_heartbeat_timeout_seconds stays at its 120s default.
-        )
-
-
 def _nextflow(**overrides: Any) -> Settings:
     """A fully-configured `nextflow` deployment, so the guard under test is the one that fires."""
     return Settings(  # type: ignore[call-arg]
@@ -237,8 +223,68 @@ def _nextflow(**overrides: Any) -> Settings:
         hpc_pipeline_name="qm-dft",
         hpc_pipeline_version="1.0.0",
         hpc_artifact_store_url="https://artifacts.internal",
+        hpc_api_token="tower-token",
         **overrides,
     )
+
+
+def test_nextflow_requires_its_launcher_credential() -> None:
+    """A mounted secret that did not mount must fail at boot, not on the first DFT job.
+
+    `_auth_headers()` returns `{}` for an empty token rather than refusing, so the omission was
+    invisible: green pods, green probes, and a first QM job dying five retried activity attempts
+    deep on `launch failed: 401` — verbatim the outcome `_hpc_launch_config` says it exists to
+    prevent. The token was left out of the required set because it was said to arrive "via the HPC
+    bridge"; that bridge was deleted with workload-identity federation, so a mounted secret is the
+    only path and nothing else checks it.
+    """
+    with pytest.raises(ValueError, match="hpc_api_token"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            hpc_launch_interface="nextflow",
+            hpc_api_base_url="https://tower.internal/api",
+            hpc_pipeline_name="qm-dft",
+            hpc_pipeline_version="1.0.0",
+            hpc_artifact_store_url="https://artifacts.internal",
+        )
+
+
+def test_a_slow_launcher_floors_the_heartbeat_instead_of_being_refused() -> None:
+    """The poll's heartbeat timeout follows the gap the loop can achieve — no second knob.
+
+    `_poll_nextflow` beats once per loop and then makes an HTTP call before sleeping, so the real
+    gap between beats is `hpc_http_timeout_seconds + hpc_poll_interval_seconds`. The old guard
+    compared the *sleep* alone, which accepted the pairing an operator actually reaches for —
+    raising the HTTP timeout for a sluggish Tower — and left Temporal declaring a healthy worker
+    dead 302 s into a 120 s heartbeat timeout.
+
+    Refusing that pairing would have been the other way to fix it, and it is the worse one: the
+    relation is arithmetic about this loop, not a policy an operator holds an opinion about, so it
+    is derived. The configured value still wins whenever it is above the floor, because *how fast a
+    genuinely dead worker is noticed* is a real preference.
+    """
+    slow = _nextflow(hpc_http_timeout_seconds=300.0)
+    gap = slow.hpc_http_timeout_seconds + slow.hpc_poll_interval_seconds
+
+    assert slow.hpc_run_heartbeat_timeout_seconds == 120.0  # what the operator set
+    assert slow.hpc_effective_heartbeat_timeout_seconds > gap  # what the poll is given
+    assert _nextflow().hpc_effective_heartbeat_timeout_seconds == 120.0  # unchanged when ample
+
+
+def test_the_launch_activity_outlasts_the_launch_call_it_contains() -> None:
+    """The submit activity's bound is derived from the POST's, so the two cannot race.
+
+    Equal at the shipped defaults (30 s each), which is how a slow launcher got its run id lost to
+    start-to-close and its retry double-submitted a cluster run. Derived rather than validated for
+    the reason the property records: a `2 * http < activity` guard would have refused the shipped
+    chart and made every deployment tune two unrelated knobs to state arithmetic.
+    """
+    default = _nextflow()
+    assert default.hpc_submit_timeout_seconds > default.hpc_http_timeout_seconds * 2
+
+    slow = _nextflow(hpc_http_timeout_seconds=300.0)
+    assert slow.hpc_submit_timeout_seconds > slow.hpc_http_timeout_seconds * 2
+    assert slow.hpc_submit_timeout_seconds > slow.qm_activity_timeout_seconds
 
 
 def test_the_connector_job_ceiling_stays_above_the_poll_budget_it_bounds() -> None:

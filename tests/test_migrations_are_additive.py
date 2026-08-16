@@ -341,6 +341,30 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout.strip()
 
 
+def _shallow_grafts(repo: Path) -> frozenset[str]:
+    """The commits git reports as parentless *only* because the clone was truncated there.
+
+    A graft is indistinguishable from a real commit in `git log`: it has a hash, a tree and a date,
+    and `--diff-filter=A` will happily name it as the commit that "added" every file whose true
+    introduction lies beyond the boundary. That is not a defect in git — the earlier history is
+    simply absent — but it makes the comparison below vacuous in a way `compared` cannot see, so the
+    walk has to know which commits are boundaries rather than beginnings.
+
+    Read from `.git/shallow` via `rev-parse --git-path`, so it resolves under a worktree or a
+    relocated `$GIT_DIR` rather than assuming `repo/.git`. Empty on a full clone, which is what
+    makes this a no-op on CI (`fetch-depth: 0`) and keeps the *true* root commit a legitimate
+    introducing commit — a migration added in the repository's first commit must still be checked.
+    """
+    if _git(repo, "rev-parse", "--is-shallow-repository") != "true":
+        return frozenset()
+    shallow = Path(_git(repo, "rev-parse", "--git-path", "shallow"))
+    if not shallow.is_absolute():
+        shallow = repo / shallow
+    if not shallow.is_file():
+        return frozenset()
+    return frozenset(shallow.read_text(encoding="utf-8").split())
+
+
 def _statements_changed_since_merge() -> tuple[list[str], int]:
     """Which merged migrations differ from the commit that added them, and how many were compared.
 
@@ -349,12 +373,27 @@ def _statements_changed_since_merge() -> tuple[list[str], int]:
     walk would let the exemption be validated against a rule the check no longer applies — which is
     precisely how an exemption outlives its reason.
 
-    `compared` counts only comparisons that **span a commit**: a file introduced by `HEAD` itself
-    has nothing earlier to differ from, and on a truncated clone every file looks introduced by the
-    graft (which *is* `HEAD`), so it is the one number telling a real run from a vacuous one.
+    `compared` counts only comparisons that **span a commit**, and there are two ways for one not
+    to. A file introduced by `HEAD` itself has nothing earlier to differ from. And a file whose
+    introducing commit is a **shallow graft** has nothing earlier *available*: git names the
+    boundary as the adding commit, `git show <graft>:file` returns the content as of the boundary,
+    and a file untouched since then compares equal to itself while any edit made before the boundary
+    is invisible.
+
+    **The second case is the one that was missing, and it was measured rather than reasoned about.**
+    The docstring below used to say this repository's shallow checkout "still spans every
+    migration, so the skip is narrow". That stopped being true: on a 171-commit shallow clone whose
+    graft is `4ee6056`, `002_molecule_fingerprints.sql` reported that graft as its adding commit and
+    compared equal, so all 47 migrations "compared" — clearing the `>= 30` floor — while both
+    genuinely-edited exemptions looked stale and
+    `test_no_grandfathered_edit_outlives_its_reason` failed. A truncation deep enough to clear the
+    floor is exactly the case the floor was meant to catch, so the boundary has to be excluded at
+    the source rather than absorbed by a larger threshold: a bigger number would only move the depth
+    at which the same silence returns.
     """
     repo = _MIGRATIONS.parents[1]
     head = _git(repo, "rev-parse", "HEAD")
+    grafts = _shallow_grafts(repo)
     edited: list[str] = []
     compared = 0
     for path in sorted(_MIGRATIONS.glob("*.sql")):
@@ -365,6 +404,8 @@ def _statements_changed_since_merge() -> tuple[list[str], int]:
             continue  # added in the working tree; not merged, so not yet immutable
         if introduced[-1] == head:
             continue  # introduced by the commit under test — there is no earlier version to differ
+        if introduced[-1] in grafts:
+            continue  # the clone stops here; the real introduction is beyond the boundary
         original = subprocess.run(
             ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
             cwd=repo,
@@ -412,16 +453,23 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
     to `fetch-depth: 1`, so that is exactly the CI checkout.
 
     So what is counted is not "files looked at" but **comparisons that span a commit** — the
-    introducing commit is not `HEAD`. That one number distinguishes all three cases without a
-    second mechanism: 42 here, 0 on a depth-1 clone, 0 with no `.git`. A migration genuinely added
-    in `HEAD` is excluded from it and from the check, which is right: it has nothing earlier to
-    differ from.
+    introducing commit is neither `HEAD` nor a shallow graft. That one number distinguishes all
+    three cases without a second mechanism: 42 here, 0 on a depth-1 clone, 0 with no `.git`. A
+    migration genuinely added in `HEAD` is excluded from it and from the check, which is right: it
+    has nothing earlier to differ from.
+
+    **A partial clone is not only a depth-1 clone**, and excluding the graft is what makes the
+    count honest about the difference. A truncation *above* the migrations leaves plenty of visible
+    history — enough to clear any floor — while every comparison still lands on the boundary rather
+    than on a real earlier version. `_shallow_grafts` says how that is detected and what it
+    measured; the consequence here is that the count now falls to the comparisons that are real, so
+    the skip below fires on a truncated clone of *any* depth instead of only the shallowest one.
 
     The floor is an assertion, except where git says the history is truncated — then it is a skip
     naming the fix, because a truncated checkout is a CI setting rather than a defect in the tree
-    and a red build would say the wrong thing about it. This repository's own checkout is shallow
-    at 103 commits and still spans every migration, so the skip is narrow: it fires only when the
-    truncation has eaten every comparison.
+    and a red build would say the wrong thing about it. CI sets `fetch-depth: 0`
+    (`.github/workflows/ci.yml`), so on CI there are no grafts, nothing is excluded, and the check
+    asks its question of every merged migration.
     """
     repo = _MIGRATIONS.parents[1]
     edited, compared = _statements_changed_since_merge()
