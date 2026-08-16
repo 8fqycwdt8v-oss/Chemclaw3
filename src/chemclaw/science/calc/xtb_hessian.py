@@ -263,16 +263,16 @@ async def _persist(
     """Store the blobs and, only if the matrix landed, the row that addresses them.
 
     Returns whether the calculation was cached. The ordering matters and is the whole reason this
-    is not `run_cached_with_artifacts`: a row whose `hessian_artifact` points at nothing would be
-    served as a hit forever and rejected on every read. So the artifacts are written first and the
-    row is written only if the matrix is genuinely retrievable.
+    is hand-rolled rather than written on a generic wrapper: a row whose `hessian_artifact` points
+    at nothing would be served as a hit forever and rejected on every read. So the artifacts are
+    written first and the row is written only if the matrix is genuinely retrievable.
     """
     try:
         stored = await put_all(artifacts, key.as_str(), files, compute_seconds=compute_seconds)
     except Exception:
-        # Same contract as `calc.store.run_cached_with_artifacts`: losing a by-product costs a
-        # future recomputation, never the calculation in hand, which this function's caller
-        # already holds.
+        # An artifact is optional by construction: losing a by-product costs a future
+        # recomputation, never the calculation in hand, which this function's caller already
+        # holds.
         logger.warning("could not store hessian artifacts for %s", key.as_str(), exc_info=True)
         return False
 
@@ -315,10 +315,10 @@ async def run_cached_hessian(
 ) -> tuple[Hessian, bool]:
     """Return the Hessian at `structure`, reusing the store on a repeat.
 
-    Not built on `run_cached`/`run_cached_with_artifacts`, and the reason is specific rather than
-    stylistic: those decide hit-versus-miss from the result row alone, and here the row is only
-    half the result. The matrix lives in the artifact store, so a hit is only a hit if the blob
-    comes back — see the module docstring.
+    Not built on `run_cached`, and the reason is specific rather than stylistic: it decides
+    hit-versus-miss from the result row alone, and here the row is only half the result. The
+    matrix lives in the artifact store, so a hit is only a hit if the blob comes back — see the
+    module docstring.
 
     Returns `(hessian, was_cached)`, matching every other cached calculator's shape.
     """

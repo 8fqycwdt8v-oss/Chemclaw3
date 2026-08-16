@@ -11,11 +11,12 @@ calculator was invoked*, and that is exactly what a call counter measures.
 """
 
 import asyncio
+import logging
 
 import numpy as np
 import pytest
 
-from chemclaw.science.calc.artifacts import InMemoryArtifactStore
+from chemclaw.science.calc.artifacts import ArtifactRef, InMemoryArtifactStore
 from chemclaw.science.calc.store import InMemoryStore
 from chemclaw.science.calc.structure import Structure
 from chemclaw.science.calc.xtb_hessian import (
@@ -23,6 +24,7 @@ from chemclaw.science.calc.xtb_hessian import (
     HESSIAN_ARTIFACT,
     Hessian,
     HessianSpec,
+    _persist,
     run_cached_hessian,
 )
 from chemclaw.science.calc.xtb_thermo import (
@@ -198,6 +200,50 @@ def test_a_cached_hessian_whose_blob_is_gone_recomputes_rather_than_failing(
         assert was_cached is False
         assert counted.calls == 2
         assert recovered.matrix.shape == (9, 9)
+
+    asyncio.run(_run())
+
+
+def test_a_raising_artifact_store_leaves_no_row_behind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_persist` refuses to write a row whose blob did not land — asserted where it is visible.
+
+    This path had no test until `store.run_cached_with_artifacts` was deleted: that dead wrapper
+    carried the only coverage of a raising artifact store, and it exercised the **opposite** policy
+    (keep the row, lose the by-product, warn).
+
+    The first version of this test drove `run_cached_hessian` and asserted the second call
+    recomputed. **It passed with the policy deliberately broken**, twice, and that is why it is
+    written against `_persist` instead: the read path independently treats a missing blob as a miss
+    (`_load` returns `None`), so a dangling row is invisible from outside — the recompute happens
+    either way and the assertion could not fail. What the refusal actually buys is that no
+    unreadable row is written at all, and `_persist`'s return value is the only place that shows.
+
+    So the module docstring's "rejected on every read" is not quite what happens; the read path
+    recomputes silently. The write-side refusal keeps the store from accumulating rows that can
+    never be served, which is a smaller claim and the true one.
+    """
+
+    class _Broken(InMemoryArtifactStore):
+        async def put(self, *args: object, **kwargs: object) -> ArtifactRef | None:
+            raise ConnectionError("Postgres unreachable at <postgres>")
+
+    async def _run() -> None:
+        results = InMemoryStore()
+        key = HessianSpec().cache_key(_water())
+        hessian = Hessian(
+            matrix=np.eye(9),
+            electronic_energy_hartree=-5.07,
+            dipole_derivatives=None,
+            ir_intensities=None,
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.science.calc.xtb_hessian"):
+            cached = await _persist(results, _Broken(), key, hessian, {"hessian.npy": b"x"}, 1.0)
+
+        assert cached is False
+        assert await results.get(key) is None, "a row was written that no read can ever satisfy"
+        assert "could not store hessian artifacts" in caplog.text  # and the loss is loud
 
     asyncio.run(_run())
 
