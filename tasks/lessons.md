@@ -293,3 +293,27 @@ either be omitted from the request or re-applied locally after the cache.
     model of the fix. **When a test you wrote to prove a fix fails, consider that it may be telling
     you the fix works for a different reason than you thought** — before assuming the test is
     wrong.
+
+34. **A null control is what turns "it helped 26% of the time" into a decision.** The brief for the
+    answer-revision measurement asked for before/after scores and a substance check. A subagent
+    added something I had not specified: re-score the *unchanged* answers, three more times. Doing
+    nothing cleared the flag 5.1% of the time; revising and keeping the substance cleared it 5.1%
+    of the time. Without that arm the honest write-up would have been "revision clears a quarter of
+    flagged answers, most by deletion" — suggestive, arguable, and probably enough to justify
+    building something. With it the answer is *zero measured benefit*, and the decision is made.
+
+    **The rule: whenever a measurement scores an intervention against a stochastic judge, measure
+    the judge alone on the same inputs.** The null arm costs one extra pass and is the difference
+    between an effect size and an anecdote.
+
+35. **Do not report a subagent's headline finding without probing it yourself — and when your probe
+    disagrees, that is information, not a refutation.** The same agent reported the judge scoring
+    `1.0, 0.0, 1.0, 0.5, 0.5` on five identical calls, which would make `review_required` noise. Two
+    probes here — one trivial, one a realistic multi-claim fully grounded answer — both returned
+    1.00 six times out of six. Neither of us was wrong: the judge is stable where the answer is
+    unambiguous and unstable at the margin, which is exactly where the 0.7 threshold sits, and the
+    null control had already measured that margin at 5.1% per roll.
+
+    Reporting either number alone would have been misleading — "the judge is unreliable" overstates
+    it, "I could not reproduce it" buries it. The characterization that survives contact with both
+    observations is narrower and more useful than either.

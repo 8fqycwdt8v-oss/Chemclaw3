@@ -104,6 +104,64 @@ exactly the degenerate fix the agreed criterion was designed to catch, visible b
 revision was run. Whoever resumes this should treat the three flag reasons as three questions, not
 one.
 
+## The measurement, run — and it settles the decline
+
+Run on `claude-haiku-4-5` throughout (agent, judge, reviser), 51 probes stratified across eight
+probe files, full live stack, model routing asserted rather than assumed. **39 of 51 answers
+flagged; all 39 revised.**
+
+| | n | of flagged |
+|---|---:|---:|
+| cleared the flag | 10 | 25.6% |
+| cleared **and kept their substance** | 2 | 5.1% |
+| **cleared with no edit at all** (null control, per roll) | **2.0** | **5.1%** |
+
+**The null control is what decides it, and it was not in the brief.** Re-scoring the same 39
+answers *unchanged*, three more times, clears 2.0 per roll. Revision's non-degenerate clear rate is
+identical. **The measured benefit over doing nothing is zero** — at $0.0149 and a 3.4 s median per
+flagged turn, added to the answer hot path after the user has already waited.
+
+Eight of the ten clears are deletions, and what they delete matters: a `screen_hazards` call
+offered on a diazo compound, replaced with "consult your standard hazard-assessment process"; a
+five-step protocol the user explicitly asked for; a mechanistic explanation replaced with "the
+record does not contain details on why this works". One answer cleared by *fabricating* citations —
+`[[evidence-0]]`, the labels of the harness's own evidence envelopes.
+
+**`promised but not called` is the cleanest result and the least model-dependent: 8 of 8 were
+"fixed" by deleting the promise.** None called the tool, which a text reviser structurally cannot.
+Any loop scored on flag clearance learns exactly that move. If that class is worth fixing, the
+intervention is re-entering the agent loop with the tool call forced — a different and much larger
+feature than a rewrite pass.
+
+Two failure modes a first-party loop would inherit, both measured: a reviser **must** be shown the
+evidence, so `turn_evidence`'s synthetic `tool-output-N` ids stop being uncitable — the reviser
+cited them, and went on citing renamed labels after being told not to, so any loop must exclude
+them structurally rather than by prompt. And under an ungrounded-number flag the reviser's instinct
+was to *change* the number (254 nm → 280 nm), not remove it.
+
+**What the measurement does not support**, stated because the sample is small: n=39 flagged, and
+2 vs 2 cannot exclude a small positive effect. Haiku is weaker than a deployment model and cuts
+both ways — it likely inflates the flag rate *and* revises worse. The null control is measured on
+the same judge, so the comparison that carries the conclusion is internally controlled; what it
+cannot say is what a stronger judge and reviser would do. That is the one experiment that could
+overturn this, and it needs a bigger model on both legs.
+
+## A prior question the measurement raised about the judge itself
+
+`verified_by == "judge"` on 51 of 51, so the `json_schema` fix holds. Two things about the signal
+are worth more than the revision question:
+
+- **The judge enumerated claims on only 6 of 51 turns.** 26 of the 39 flagged answers carry an
+  *empty* `unsupported` list, so a reviser is told "(none listed)" and given no target.
+- **At the threshold, the verdict is not reproducible.** The null control measures this directly:
+  5.1% of flagged answers clear on a re-roll with no edit. It is a *margin* effect rather than
+  general noise — two independent probes here, one trivial and one a realistic multi-claim fully
+  grounded answer, both scored 1.00 six times out of six. So the judge is stable where the answer
+  is unambiguous and unstable exactly where the threshold lives.
+
+Both are recorded in `BACKLOG.md`. They matter more than the revision loop, because they are about
+whether `review_required` means anything — and that question is prior to what one would do with it.
+
 ## Consequences
 
 - `agent/verifier.py` remains the only judge, and now actually runs: the `method="json_schema"`
