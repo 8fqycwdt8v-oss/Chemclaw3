@@ -360,6 +360,30 @@ ledger listing exactly the files beside it, in record order.
   have their own context and tools). One focused task per subagent. For hard problems, throw
   more compute at them by fanning out across several subagents.
 
+## The sandbox is not offline — start the infrastructure
+
+**Docker, Postgres and Temporal all run in the Claude Code Remote environment for this repo.** The
+daemon is simply not started at session start, which is easy to misread as "no Docker here": a bare
+`docker info` fails, `/var/run/docker.sock` is absent, and every Postgres-backed test then skips
+with a message that *says* "offline sandbox" (`tests/pg.py`). That message describes a default, not
+a limit.
+
+```
+sudo -n dockerd &        # then `docker info` answers within ~8s
+make up                  # Postgres/pgvector + Temporal + the Temporal UI
+make db-migrate
+```
+
+Why this matters enough to be written down: believing it costs coverage silently. A full local
+`pytest` skips ~157 Postgres tests and still prints a green line, so a change that breaks the
+durable layer, the session store, the note-proposal tables or retention passes locally and fails in
+CI — and the session that trusted the green line has already pushed. The same belief makes the live
+lane (`make live-infra`, `make live-up`, `make live-probes`) and the four-repo
+`infra/live/e2e-full-stack/up.sh` look impossible when they are not.
+
+**So: start the daemon before claiming anything about the suite, and never report a local run as
+green without saying what it skipped.**
+
 ## Local live/e2e credentials
 
 Some Claude Code Remote environments for this repo carry a working Anthropic credential for the

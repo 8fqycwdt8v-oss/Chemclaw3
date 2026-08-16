@@ -1,7 +1,10 @@
 """Shared bootstrap for Postgres-backed integration tests.
 
-CI provides a real (pgvector-enabled) database; the offline sandbox has none, so
-`migrated_db_or_skip` turns an unreachable server into a skip. Kept in one place
+CI provides a real (pgvector-enabled) database, and a dev sandbox has one too once `sudo dockerd`
+and `make up` have run — the daemon is simply not started by default, which reads as "no Postgres
+here" and is not (CLAUDE.md, "The sandbox is not offline"). Until it is running,
+`migrated_db_or_skip` turns an unreachable server into a skip, so a green local run can mean ~157
+tests never executed. Kept in one place
 so every Postgres-backed test uses the same connect-check + migration (DRY); each
 test file only constructs its own store on top of the migrated database.
 
@@ -77,5 +80,5 @@ async def migrated_db_or_skip() -> None:
         conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
         await conn.close()
     except psycopg.OperationalError as exc:  # pragma: no cover - env-dependent
-        pytest.skip(f"Postgres unavailable (offline sandbox): {exc}")
+        pytest.skip(f"Postgres unavailable (start it: sudo dockerd; make up): {exc}")
     await migrate()
