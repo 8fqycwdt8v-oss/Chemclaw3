@@ -94,6 +94,30 @@ test's bad file sorts first, so under the defect the good one is never reached a
   tree's own content and every migration compared equal to itself. The test already skips honestly
   rather than passing; this one line is what makes it actually run.
 
+  **And the first time it ran, it found two** — `002_molecule_fingerprints.sql` and
+  `003_reaction_fingerprints.sql`, both with their `CREATE TABLE` edited in place after merge
+  (`smiles` → `label`, plus a `definition` column). That is the check working on its first
+  execution, not a regression, and it is recorded here because the *resolution* is a judgement
+  rather than a repair.
+
+  The edit was deliberate and is documented in the tree: `004_fingerprint_definition.sql` opens with
+  "Fresh databases get the column straight from 002/003; this migration brings an existing dev
+  database up to date." Someone added the column to both `CREATE TABLE`s *and* wrote the `ALTER` for
+  databases that had already run them. Under `D-2026-08-04-the-schema-only-goes-forward` only the
+  second half is allowed — but that rule, and the checksum guard that enforces it, both postdate the
+  edit.
+
+  **Reverting would break every database that exists in order to fix one that cannot.** The ledger
+  keys on the checksum recorded when a file was applied. A database that ran 002 *before* the edit
+  already fails `make db-migrate` today, and is unreachable regardless: that version named the
+  column `smiles`, nothing ever renamed it, and no current query would find it. Every database
+  created since recorded the current checksum, and restoring the old statements would make the
+  runner refuse on all of them. So the two are named exemptions with the reason stated, exactly as
+  the collision check grandfathers `037`/`043` — and
+  `test_no_grandfathered_edit_outlives_its_reason` fails if either stops being an edit, so the
+  permission cannot outlive what it was granted for. The teeth are intact for everything after:
+  appending an `ALTER TABLE` to `006_audit_events.sql` turns the check red, measured.
+
 ## Consequences
 
 - A live eval run can now report a non-zero silent-failure count, and a broker-less run no longer
