@@ -142,7 +142,10 @@ def test_persisted_payload_shapes_have_not_changed() -> None:
     assert not changed, (
         f"persisted payload shape(s) changed: {sorted(changed)}.\n"
         "If rows already in `calculation_results` are now wrong or incomplete, bump "
-        "`chemclaw.science.calc.store.CALCULATION_EPOCH` (and log the reason beside it).\n"
+        "`chemclaw.science.calc.store.CALCULATION_EPOCH` (and log the reason beside it). It "
+        "reaches every key: `CalculationKey.build` folds it in for the DFT path, and "
+        "`connectors.calc.remote.remote_key` folds it into the params hash of every key the "
+        "calculation server derives.\n"
         "Then record the new digest(s) in RECORDED_SHAPES: "
         + ", ".join(f'"{name}": "{digest}"' for name, digest in sorted(changed.items()))
     )

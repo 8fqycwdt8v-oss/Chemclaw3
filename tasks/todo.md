@@ -19,118 +19,79 @@ Postgres tests and still prints green.
 was green throughout, so nothing here is a regression the tooling could have caught — each one is a
 gap between what a declaration claims and what the code does.
 
-## Fixed and pushed (each proven by reproduction)
+## Fixed (each proven by reproduction)
 
 - [x] **CRITICAL — the grant reconciliation stripped write access to every LangGraph table on the
       second deploy.** `REVOKE ALL ON ALL TABLES` reaches the six tables `setup()` creates; the
       enumerated re-grants named none. Reproduced in Postgres 16: the app role *owns* `checkpoints`
-      and still ends with `INSERT=f SELECT=t`. First install survives (tables absent), the second
-      `helm upgrade` takes every turn down at its first checkpoint write. The guard was blind —
-      `_tables()` knew only `infra/sql/*.sql`, so `_DYNAMIC`'s explicit `checkpoints` entry was
-      discarded. ADR `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name`.
-- [x] **HIGH — a dry run could write a durable memory.** `write_file`/`edit_file` are registered by
-      middleware, so they are in no part of `side_effecting_tools()` and neither the dry-run refusal
-      nor the plan gate saw them. Fixed with a path-aware predicate rather than by adding the names:
-      one verb serves `/memories/` (Postgres, outlives everything) and `/scratch/` (turn-local), and
-      gating the name would deny an unapproved turn the notepad it needs to produce a plan.
-- [x] **HIGH — a template step read a tool's refusal as its answer.** Measured: on the plain-args
-      invocation this path used, a failed MCP tool returns a bare `str`, so the error sentence became
-      `${steps.<id>.result}` *and* `audit._recording` booked the refused call as `ok`. Invoking with
-      the whole call was tried first and rejected — it stringifies a `job` step's dict payload.
+      and still ends with `INSERT=f SELECT=t`. The guard was blind — `_tables()` knew only
+      `infra/sql/*.sql`, so `_DYNAMIC`'s explicit `checkpoints` entry was discarded. ADR
+      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name`.
+- [x] **HIGH — a dry run could write a durable memory.** Fixed with a path-aware predicate rather
+      than by adding names: one verb serves `/memories/` and `/scratch/`.
+- [x] **HIGH — a template step read a tool's refusal as its answer**, and the audit trail booked the
+      refused call as `ok`. Measured: on the plain-args form this path used, a failed MCP tool
+      returns a bare `str`. Invoking with the whole call was tried and rejected — it stringifies a
+      `job` step's dict payload.
+- [x] **HIGH — every failed tool call emitted both `tool_failed` and `tool_result`, and the error
+      text joined the corpus `score_answer` grades grounding against.** `graph_stream` read a
+      `status` that `answered_failure` rewrites to `"success"`; `ToolFailureSignal` now carries
+      `call_id` and the stream suppresses on the turn's own failure set.
+- [x] **HIGH — a subagent's tool calls, results and plan were emitted as the main agent's.** Work
+      below the root is now marked, and its plan withheld rather than relabelled — `PlanEvent` has
+      no `agent` field, so there is nowhere to say whose it is.
+- [x] **HIGH — subject erasure missed the full text of every tool result.** `tool_result_blobs` is
+      now erased by the session its links name. The links themselves are left to the cascade, which
+      is what lets the grant keep withholding DELETE on that table — a conflict the grants test
+      caught.
+- [x] **HIGH — the remote calc client had no session timeout**, so the only live bound was httpx's
+      un-overridden 300 s rather than the 900 s its setting names, and it fires *silently*. Both
+      bounds are now set, session-first.
+- [x] **HIGH — `CALCULATION_EPOCH` reached no calc cache key.** Folded into `remote_key`'s params
+      hash; the three documents that prescribed bumping it now describe something that works.
+- [x] **MEDIUM — a Postgres failure was reported as a calculation-server outage.** The blanket
+      `except` spanned the `yield`, so the caller's `cached_compute` body re-entered it. Narrowed,
+      with `_call` converting its own transport failures.
+- [x] **MEDIUM — a reaction result stamped a locally-configured `method`** describing a calculation
+      this process did not run. `SpeciesEnergy` now carries the server's.
+- [x] **MEDIUM — an empty-answer turn also yielded an empty answer** and booked itself
+      `completed=True` in the cost ledger.
+- [x] **MEDIUM — the reference UI spliced a subagent's prose into the answer bubble.**
+- [x] **MEDIUM — `calc_session` had no test at all**, which is why the three defects in it were
+      invisible to a green suite.
+- [x] **MEDIUM — the image still installed xtb and crest** (~200 MB, and a GPL-3.0 redistribution
+      decision) for two modules that left with the physics; **and nothing in `deploy/` pointed
+      anything at the calculation server**, so `helm install` produced a `calc` bundle failing
+      against loopback.
+- [x] Record drift: `ARCHITECTURE.md`'s specialist team, `science/__init__.py` calling `calc` "the
+      physics", the dead `SafetyRulesError` entry, the unbounded
+      `xtb_minimum_refinement_attempts`, the present-tense handoff docstrings, `CLAUDE.md`'s three
+      non-existent backlog rows, and the one closed `[x]` row.
 
-Suite after the three: **3988 passed**, lint and `mypy --strict` clean.
+Suite after: **3991 passed**, `ruff` and `mypy --strict` clean, seven of eight validators green
+(`helm-validate` needs the `helm` binary, absent here; the chart change is covered by
+`tests/test_helm_chart.py` and `tests/test_deploy_chart.py`).
 
-## Open, highest consequence first
+## Open
 
-Not fixed in this pass. Each names an anchor so it can be checked with one `grep`.
+Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor. The largest are:
 
-### The calc wire — the physics left and the seam around it was not finished
-- [ ] `CALCULATION_EPOCH` reaches **no** calc cache key. `CalculationKey.build` has one caller left
-      (`connectors/qm/cache.py:96`, DFT); `remote.py:166` builds the key field-by-field from the
-      server. Three places — including `tests/test_calc_payload_schemas.py:144`'s own failure
-      message — prescribe bumping it as the remedy for a changed payload meaning. It does nothing.
-- [ ] `connectors/calc/remote.py:92` passes no `read_timeout_seconds`, so the only live bound is
-      httpx's un-overridden `sse_read_timeout` of **300 s**, not `calc_server_timeout_seconds=900`.
-      `registry.py:71-87` records from measurement that this is the bound that raises and that the
-      other is swallowed *silently*. A CREST search past 300 s never returns while `beating` keeps
-      heartbeating, so Temporal sees health and the job burns its full 4 h.
-- [ ] Nothing in `deploy/` points anything at the calculation server: no `CALC_SERVER`, no
-      `CALC_TOKEN`, no `8860`, no egress rule. `helm install` yields a `calc` bundle whose every tool
-      and all five durable jobs fail against loopback. `values.yaml:200` still calls it the pod that
-      runs the binaries; `deploy/Containerfile:85-101` still installs xTB into every image.
-- [ ] `settings.xtb_geometry_decimals` still shapes half of every **remote** key —
-      `Structure._normalize_and_validate` rounds before the structure crosses the wire.
-- [ ] `list_artifacts` / `fetch_artifact` read a store with no writer left; `ArtifactStore.put` has
-      no caller. The eviction schedule, eight settings and `019_artifact_store.sql` go with it.
-- [ ] `connectors/calc/remote.py:91-107` — the blanket `except` spans the `yield`, so a **Postgres**
-      failure is reported to the chemist as "the calculation service is not answering", retryable.
-- [ ] `compose.py:738` stamps `method=settings.xtb_method` onto `ReactionEnergyResult` — a local
-      string describing a calculation this process did not run — and drops the server's `engine`.
-- [ ] `calc_session` is monkeypatched wholesale by every test, so the function holding the three
-      findings above **is never executed as written**. This is why a green suite cannot see them.
-- [ ] No live lane can start: `processes.sh:47` requires connectors, chem/safety/calc are never
-      started, and `make live-e2e-full-stack` starts only `props` and `rxnpredict`.
-
-### The front door
-- [ ] Every failed tool call emits **both** `tool_failed` and `tool_result`, and the error text joins
-      `ToolCallTrace.outputs` — the corpus `score_answer` grades against. `graph_stream.py:241` gates
-      on a `status` that `tool_authz.py:183` unconditionally rewrites to `"success"`; that function's
-      own docstring names `graph_stream` as the reader that had to change, and it never did.
-      Measured across four failure shapes on a real compiled graph.
-- [ ] `api/static/app.js:114` appends `token` events with no `evt.agent` check, splicing a
-      subagent's prose into the answer bubble — and `case "answer"` only fills an *empty* element, so
-      the clean `AnswerEvent.text` never replaces it. The server side is correct.
-- [ ] `graph_stream.py:151` drops `namespace` for `updates`, so a subagent's tool calls, results and
-      **plan** are emitted as the main agent's. With the harness on, the helper's `write_todos`
-      replaces the supervisor's `PlanEvent` — under `plan_only`, that is the checklist a chemist
-      approves.
-- [ ] `runner.py:402` has no `return` after the `empty_answer` error, so the turn also yields an
-      empty `AnswerEvent`, spends a judge call scoring `""`, and books `completed=True`.
-- [ ] `retrieval/fanout.py:100` — a leg that *raised* reports `chunks: 0`, identical to one that
-      found nothing, and `chemclaw_evidence_source_failures_total` carries no `source` label while
-      the chunks counter does. This is `D-2026-08-01-a-cap-that-starves-a-source` again.
-
-### Persistence
-- [ ] `agent/leaver.py` never touches `tool_result_links` / `tool_result_blobs`, which hold the full
-      text of every tool result, keyed by session. `tests/test_leaver.py` derives completeness from
-      columns whose *name* identifies a person, so a session-keyed content table is invisible to it.
-- [ ] `message_migration.py:242` is a destructive in-place `UPDATE`; its own docstring and
-      `043_session_message_shape.sql` both promise the original stays readable. It runs as a Helm
-      **pre-upgrade** hook, so it rewrites the data the *previous* release is still serving with a
-      reader that raises `TypeError` on the new shape — and `helm rollback` stays broken. Needs an
-      ADR, not a patch.
-- [ ] `scratchpad.py:74` claims retention prunes the memory tables; `_PRUNABLE` contains no store
-      table. `store_vectors` is never created (no `index_config`), so one erasure statement is a
-      permanent no-op and the FK comment beside it describes a constraint that does not exist.
-- [ ] `retention.py:138` — the `LIMIT` bounds the deletes, not the scan; the `GROUP BY … HAVING
-      max(...)` aggregates the whole table on an unindexed expression under `statement_timeout`.
-- [ ] `session_store.py:84` — only the MAF branch is guarded, and the fallback at `:96` always
-      returns `AIMessage`, so a chemist's own question can render as something the agent said.
-
-### The dead surfaces the removals left
-- [ ] ~24 calculator settings (`xtb_*`, `crest_*`, `pka_*`, `solubility_rmse_log`) have no reader in
-      `src/`. Found independently three times. The seven pKa/solubility calibration constants are the
-      dangerous subset: the *server* bakes those values into `calc_version`, so editing them here
-      changes nothing while `.env.example:223` presents them as the predictor's calibration.
-- [ ] `core/turn_signals.record_handoff` has zero callers anywhere; `set_current_specialist` /
-      `reset_current_specialist` have only test callers, so `agent/audit.py:310` writes an `agent`
-      column that can never be non-empty — `D-2026-08-10`'s "records the specialist beside the human"
-      is false in the data. `close_memory_store()` has no caller either.
-- [ ] `tblite` is a runtime dependency with no importer, kept alive by one test — and `ALPB_SOLVENTS`,
-      the launch gate for four durable jobs, is derived against *this* checkout's copy rather than
-      the server's.
-
-### Record drift
-- [ ] `ARCHITECTURE.md:35` lists "the specialist team", which `CLAUDE.md:57` says does not exist.
-- [ ] `api/events.py:413` and `graph_stream.py:211,337` say `agent/team.running_specialist` raises
-      the handoff, in the present tense, thirty lines from `events.py:422` saying nothing produces it.
-- [ ] `science/README.md:3`, `science/__init__.py:3`, `connectors/README.md:21,34` still call
-      `science/calc` "the physics" and list the deleted `science/safety`.
-- [ ] `CLAUDE.md:132` names three `BACKLOG.md` rows that do not exist; one was declined in this same
-      range and one has shipped. `BACKLOG.md:283` is a closed `[x]` row against the delete-on-close
-      rule. `BACKLOG.md:229` says erasure has no route; it has one, over eleven tables.
-- [ ] `SafetyRulesError` (`durable/publish.py:51`) is the only one of 38 names resolving to nothing.
-- [ ] `xtb_minimum_refinement_attempts` has no `ge=` bound; at `-1` it raises `UnboundLocalError`.
+- **~25 calculator settings with no reader**, seven of which look like live pKa/solubility
+  calibration but are baked into the *server's* `calc_version`.
+- **`tblite` is a runtime dependency with no importer**, kept alive by the test that derives
+  `ALPB_SOLVENTS` — a launch gate for four durable jobs — from a local install rather than from the
+  server that now decides it.
+- **`list_artifacts`/`fetch_artifact` read a store with no writer**, alongside a live eviction
+  schedule, eight settings and a migration.
+- **The stored-message conversion is a destructive in-place rewrite run as a `pre-upgrade` hook**,
+  against data the previous release is still serving. Needs an ADR, not a patch.
+- **`xtb_geometry_decimals` still shapes half of every remote cache key.**
+- **No live lane in this repo can start**, and the e2e harness does what `calc`'s manifest forbids.
+- **A retrieval leg that raised is indistinguishable from one that found nothing.**
+- **The audit trail's `agent` column can never be non-empty**, and `memory_store()` repeats the
+  cold-start race `checkpointer.py` was fixed for.
+- **Retention's checkpoint `LIMIT` bounds the deletes, not the scan.**
+- **`message_from_row` degrades on one branch and mislabels the speaker on the other.**
 
 ## Checked and found sound
 

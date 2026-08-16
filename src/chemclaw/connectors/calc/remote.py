@@ -37,9 +37,12 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from chemclaw.connectors.registry import _READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
+from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.store import (
+    CALCULATION_EPOCH,
     CalculationKey,
     ResultPayload,
     ResultStore,
@@ -82,24 +85,53 @@ class CalcToolError(ChemclawError):
 async def calc_session() -> AsyncIterator[ClientSession]:
     """Open one MCP session to the calculation server, with our bearer attached.
 
-    The credential is an `httpx.Auth` rather than a per-call header for the reason
+    The credential is a connection header rather than a per-call one for the reason
     `connectors.identity` records: MCP's per-call header callback is not applied to the
     `initialize()` that opens the connection, so a credential passed that way 401s at connect.
+
+    **Both timeouts are set, and which one fires matters more than either value.**
+    `connectors/registry.py` records the measurement: when httpx's read timeout trips first,
+    `mcp.client.streamable_http` catches it at debug level and does not reconnect, so the answer is
+    lost *silently* and the caller waits forever; when `ClientSession`'s bound trips, `send_request`
+    raises `McpError` naming it. So the session bound must be the one that wins.
+
+    This function had neither. `read_timeout_seconds` was unset — which upstream documents as *wait
+    forever* — and `timeout=` on `streamablehttp_client` sets connect/write/pool only, leaving the
+    read timeout at the un-overridden `sse_read_timeout` default of 300 s rather than the 900 s
+    `calc_server_timeout_seconds` names. So the only live bound was the invisible one, at a value
+    nothing configured: a CREST search past five minutes never returned, while `durable/heartbeat`
+    kept heartbeating on its timer so Temporal saw a healthy activity and the job burned its full
+    four hours.
     """
     token = _token()
     headers = {"Authorization": f"Bearer {token}"} if token else None
+    bound = settings.calc_server_timeout_seconds
+    connected = False
     try:
         async with streamablehttp_client(
             settings.calc_server_url,
             headers=headers,
-            timeout=timedelta(seconds=settings.calc_server_timeout_seconds),
+            timeout=timedelta(seconds=bound),
+            sse_read_timeout=timedelta(seconds=bound + _READ_TIMEOUT_GRACE_SECONDS),
         ) as (read, write, _):
-            async with ClientSession(read, write) as session:
+            async with ClientSession(
+                read, write, read_timeout_seconds=timedelta(seconds=bound)
+            ) as session:
                 await session.initialize()
+                # **Everything past this point belongs to the caller.** The `except` below wraps a
+                # `yield`, so whatever the caller's body raises re-enters here — and this context
+                # manager's callers run `cached_compute`, i.e. `store.get()` and `store.put()`. A
+                # Postgres failure told the chemist the calculators were down, was classified
+                # retryable so a durable job spent its whole attempt budget on it, and erased the
+                # `ValidationError` that `_BAD_DATA_TYPES` would have failed fast. Once the session
+                # is open, a failure is no longer evidence about the connection.
+                connected = True
                 yield session
     except (CalcServerError, CalcToolError):
         raise
     except Exception as exc:
+        if connected:
+            raise
         raise CalcServerError(
             "the calculation service is not answering, so no calculation was run. This is an "
             "outage rather than a problem with what was asked; the same request will work once "
@@ -128,7 +160,22 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
     changes — and it carries the server's own message, because that message is the whole content of
     the refusal (which solvent is unparameterised, which atom index is out of range).
     """
-    result = await session.call_tool(tool, arguments)
+    # **The transport failure is converted here, not by the session context manager.** It used to
+    # be caught by a blanket `except Exception` in `calc_session` that spanned the `yield` — so
+    # anything the *caller's* body raised re-entered there too, and `cached_compute`'s body is
+    # `store.get()`/`store.put()`. A Postgres pool exhaustion was therefore reported to the chemist
+    # as "the calculation service is not answering", reclassified as a retryable outage, and the
+    # `ValidationError` that would have failed fast was erased by the conversion. Converting at the
+    # call is what lets that catch be narrowed to the connection it is about.
+    try:
+        result = await session.call_tool(tool, arguments)
+    except (CalcServerError, CalcToolError):
+        raise
+    except Exception as exc:
+        raise CalcServerError(
+            f"the calculation service stopped answering during {tool}, so no result was "
+            "returned. This is an outage rather than a problem with what was asked."
+        ) from exc
     if result.isError:
         raise CalcToolError(f"{tool} failed: {_text(result.content)}")
     text = _text(result.content)
@@ -162,12 +209,26 @@ async def remote_key(
     key = identity.get("key")
     if key is None:
         return None
+    # **The epoch is folded in on this side, because nothing else does it any more.**
+    # `CalculationKey.build` is where `CALCULATION_EPOCH` enters a key, and after the physics left
+    # it had exactly one caller — `connectors/qm/cache.py`, the DFT path. Every `calc` key now comes
+    # back from the server as its four parts and is rebuilt field-by-field here, so bumping the
+    # epoch invalidated DFT rows and nothing else, while `science/calc/store.py`, `science/calc`'s
+    # `__init__` and `tests/test_calc_payload_schemas.py`'s own failure message all prescribed
+    # bumping it as the remedy for a stored payload changing meaning. It would have appeared to
+    # work.
+    #
+    # Folded into `params_hash` rather than into the type or the version, so it composes with the
+    # server's own params digest the same way `build` composes it with a local one, and a bump
+    # invalidates every `calc` row without touching what the server considers its identity.
     try:
         return CalculationKey(
             calc_type=key["calc_type"],
             calc_version=key["calc_version"],
             input_hash=key["input_hash"],
-            params_hash=key["params_hash"],
+            params_hash=stable_hash(
+                {"epoch": CALCULATION_EPOCH, "remote_params": key["params_hash"]}
+            ),
         )
     except (KeyError, TypeError) as exc:
         raise CalcToolError(f"calculation_key returned an unusable key for {tool}: {key}") from exc

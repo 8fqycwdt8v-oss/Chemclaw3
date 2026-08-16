@@ -29,7 +29,15 @@ logger = logging.getLogger(__name__)
 ResultPayload = dict[str, Any]
 
 # The version of **ChemClaw's own** contribution to a stored result — the half no `calc_version`
-# covers, folded into every key by `CalculationKey.build`.
+# covers.
+#
+# **Two places fold it in, and it has to be both.** `CalculationKey.build` is the original and now
+# serves only the DFT path (`connectors/qm/cache.py`); every `calc` key comes back from the
+# calculation server as four parts and is assembled by `connectors.calc.remote.remote_key`, which
+# folds the epoch into the params hash there. For one release after the physics moved it was folded
+# in *neither* place for `calc`, so a bump invalidated DFT rows and nothing else while this comment,
+# `science/calc/__init__.py` and a test's own failure message all prescribed bumping it as the
+# remedy for a stored payload changing meaning.
 #
 # Every calculator's `calc_version` answers one question: *would the program we shell out to
 # produce a different number now?* It is built from a tblite build, an xtb/crest binary version, an

@@ -159,6 +159,25 @@ _MEMORY_ERASE: tuple[tuple[str, str], ...] = (
     ("store", "DELETE FROM store WHERE prefix = ANY(%(memory_prefixes)s)"),
 )
 _ERASE: tuple[tuple[str, str], ...] = (
+    # **The full text of everything this person's tools returned.** Session-scoped rather than
+    # actor-scoped, which is exactly why it was missed: `tests/test_leaver.py` derives completeness
+    # from columns whose *name* identifies a person, and `tool_result_links` has none — its columns
+    # are `session_id, content_hash, tool, correlation_id, created_at`. So a table holding a hazard
+    # screen naming a chemist's compounds, an evidence sweep and a solvent ranking, in full
+    # untruncated text, was invisible to the check while the report said the erasure was complete.
+    #
+    # **The blob is deleted and the link follows it**, rather than both being deleted here. The
+    # link is what carries the session, so it is what selects the rows — but the DELETE is issued
+    # against the blob, because `infra/sql/grants/app_privileges.sql` withholds DELETE on
+    # `tool_result_links` on purpose: a cascade runs with the referencing table's owner privileges,
+    # not the deleting role's, so "the sweep deletes blobs and links follow" is the *only* way a
+    # link row can disappear. Deleting the link directly here would need that grant widened, which
+    # is the boundary quietly moving to make an erasure convenient.
+    (
+        "tool_result_blobs",
+        "DELETE FROM tool_result_blobs WHERE content_hash IN ("
+        f"SELECT content_hash FROM tool_result_links WHERE session_id IN ({_SESSION_SCOPED}))",
+    ),
     ("session_messages", f"DELETE FROM session_messages WHERE session_id IN ({_SESSION_SCOPED})"),
     *_CHECKPOINT_ERASE,
     *_MEMORY_ERASE,

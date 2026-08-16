@@ -48,7 +48,6 @@ _BAD_DATA_TYPES = [
     # baseline file and the version the run declared are both facts, and the identical comparison
     # stays impossible until a person refreshes one of them.
     "CaseSetMismatchError",
-    "SafetyRulesError",
     # A tool that answered a template's `tool` step with `isError=True` rather than a result
     # (`chemclaw.agent.tool_invocation`). Non-retryable because the server *answered*: it has made
     # its verdict, and the identical call gets the identical refusal. The retryable neighbour is

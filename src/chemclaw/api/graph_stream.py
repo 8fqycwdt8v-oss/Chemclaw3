@@ -255,8 +255,11 @@ async def _from_update(
     because it parametrized hand-written namespaces (`("evidence:7f3a",)`) the engine never emits —
     the repo's recurring failure of asserting against an invented shape.
 
-    The handoff pair is the reader that *can* be right: `agent/team.running_specialist` raises it
-    with the name it was constructed with, rather than reconstructing one from a graph path.
+    The handoff pair was the reader that *could* be right — it was raised with the name the
+    specialist was constructed with, rather than reconstructing one from a graph path. Nothing
+    raises it since the specialist team went (D-2026-08-15), so `agent` is empty on every real turn
+    and the caller marks work from below the root by the one fact the namespace does carry: that it
+    is non-empty.
     """
     for node, update in (payload or {}).items():
         if not isinstance(update, dict):
@@ -384,7 +387,8 @@ def _signal_event(signal: Signal) -> Event:
     if isinstance(signal, ToolFailureSignal):
         return ToolFailedEvent(tool=signal.tool, message=signal.message)
     if isinstance(signal, HandoffSignal):
-        # Raised by `agent/team.running_specialist`, so the pair brackets exactly the interval the
-        # audit trail attributes to the specialist. `to=""` is the hand back, not a missing field.
+        # Was raised by `agent/team.running_specialist`, so the pair bracketed exactly the
+        # interval the audit trail attributed to the specialist. `to=""` is the hand back,
+        # not a missing field.
         return HandoffEvent(to=signal.to, reason=signal.reason)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)

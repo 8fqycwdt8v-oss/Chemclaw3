@@ -149,7 +149,7 @@ class CalculatorSettings(BaseSettings):
     # minutes — so on large molecules the refinement, when it triggers, dominates the
     # job. Measured: sildenafil (63 atoms) does not reach a clean minimum on the first
     # pass, so this is not a rare path at drug size.
-    xtb_minimum_refinement_attempts: int = 2
+    xtb_minimum_refinement_attempts: int = Field(default=2, ge=0)
     xtb_imaginary_kick_angstrom: float = 0.3
     # Default number of IR bands a thermochemistry result reports, strongest first.
     # A measured spectrum is compared on its strong bands; the weak modes between them

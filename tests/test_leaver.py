@@ -409,6 +409,14 @@ def test_the_erase_statements_are_valid_sql() -> None:
     asserted here because a table silently dropping out of the report is the failure this test is
     for.
 
+    **`tool_result_blobs` was the shape this test could not see.** It is reached only through
+    `tool_result_links.session_id`, and the completeness check below derives its expectations from
+    columns whose *name* identifies a person — so a table holding the full untruncated text of
+    everything a chemist's tools returned was invisible to the derivation, and the erasure report
+    said nothing about it. A partial erasure that looks complete is the one outcome this module says
+    it must never produce. The link rows are not listed because they are not deleted here: the
+    cascade removes them, which is what lets the grant keep withholding DELETE on that table.
+
     **`store` and `store_vectors` were added by the arrival they exist to catch.** The scratchpad
     gave a turn durable memories under an actor-keyed namespace, `agent/leaver.py` grew the two
     statements that erase them, and this assertion went red on the *addition* — which is the same
@@ -423,6 +431,7 @@ def test_the_erase_statements_are_valid_sql() -> None:
         assert report.erased_total == 0
         assert set(report.erased) == {
             "session_messages",
+            "tool_result_blobs",
             "checkpoints",
             "checkpoint_blobs",
             "checkpoint_writes",
