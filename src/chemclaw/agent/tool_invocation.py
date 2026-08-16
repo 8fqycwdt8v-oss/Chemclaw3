@@ -38,11 +38,23 @@ from typing import Any, cast
 
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 
-from chemclaw.agent.audit import AuditSink, make_audit_middleware
+from chemclaw.agent.audit import AuditSink, make_audit_middleware, returned_failure
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.tool_authz import returned_failure_detail
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
+
+
+class ToolReturnedFailure(ChemclawError):
+    """A tool answered with a failure instead of a result, on a path that has no model to tell.
+
+    A `ChemclawError` so `durable/publish.py` classifies it non-retryable: a server that reported
+    `isError=True` has answered, and asking again gets the same answer. Its own class rather than a
+    bare `ChemclawError` so a template's failed step can be told from a step that failed because the
+    activity itself broke — one is the tool's verdict, the other is ours.
+    """
 
 
 def _request(tool: BaseTool, arguments: dict[str, Any]) -> ToolCallRequest:
@@ -107,8 +119,38 @@ async def invoke_governed(
     audit = make_audit_middleware(correlation_id=correlation_id, actor=actor, sink=sink)
 
     async def _call(request: ToolCallRequest) -> Any:
-        """The innermost handler: the tool body itself."""
-        return await request.tool.ainvoke(request.tool_call["args"])  # type: ignore[union-attr]
+        """The innermost handler: the tool body itself, with its error handler off.
+
+        **The whole call, not just its arguments, and the difference is not cosmetic.** LangChain
+        decides what a failing tool *returns* from the form it was invoked with. Measured on a tool
+        built the way `langchain_mcp_adapters` builds one (a `ToolException` subclass plus a
+        `handle_tool_error` callback), against the same failure:
+
+            ainvoke(tool_call["args"])  ->  str        status=None      'Error: …'
+            ainvoke(tool_call)          ->  ToolMessage status='error'  'Error: …'
+
+        This path used the first form, so a failed connector call arrived indistinguishable from a
+        successful one — a bare string. Every reader that decides success by looking at the result
+        was therefore reading a failure as an answer, and two did: `audit._recording` books
+        `returned_failure(result)`, which is `isinstance`-based and saw nothing, so a refused tool
+        was recorded in the trail as `ok`; and the string became `${steps.<id>.result}`, so a later
+        step — a `job` step included — ran on "the instrument is offline" as though it were data.
+
+        **Invoking with the whole call is not the fix**, and trying it is what showed why. That form
+        makes LangChain wrap the return in a `ToolMessage`, whose content is coerced to text — so a
+        `job` step, whose tool returns a dict, got `'{"subject": "benzene"}'` and `ResolvedJob`
+        rejected it. Three tests in `test_template_job_step.py` say so.
+
+        What this path wants is the opposite of what `handle_tool_error` is for. That callback
+        exists to keep a *model* in the loop: it converts a failure into prose the model can
+        self-correct against. A template step has no model — the same argument this module makes for
+        withholding the two model-facing converters — so here the failure should simply *raise*, and
+        `invoke_governed` turns it into `ToolReturnedFailure` below. Disabling it on a copy leaves
+        the caller's tool untouched, which matters because the same tool object is the one a chat
+        turn uses, and there the handler is exactly right.
+        """
+        tool = cast(Any, request.tool).model_copy(update={"handle_tool_error": False})
+        return await tool.ainvoke(request.tool_call["args"])
 
     handler: Callable[[ToolCallRequest], Any] = _call
     # Folded in reverse so the *first* entry ends up outermost, which is how LangChain composes the
@@ -118,9 +160,32 @@ async def invoke_governed(
     for middleware in reversed(tool_governance_middleware(audit, profile)):
         handler = _wrapped(middleware, handler)
 
-    result = await handler(_request(tool, arguments))
-    # A `ToolMessage` can still arrive from a middleware this chain *does* include if a future one
-    # short-circuits, so it is unwrapped rather than returned as an envelope no caller expects.
+    # **A tool that reports failure by answering must still fail the step.** An MCP tool never
+    # raises of its own accord: `langchain_mcp_adapters` gives every connector tool a
+    # `handle_tool_error` callback, so a server reporting `isError=True` is converted inside
+    # `ainvoke` and comes back as an ordinary value. Measured on a tool built the way the adapter
+    # builds one, against the same failure:
+    #
+    #     ainvoke(tool_call["args"])  ->  str          status=None      'Error: …'
+    #     ainvoke(tool_call)          ->  ToolMessage   status='error'  'Error: …'
+    #
+    # This path took the first form, so a refused call arrived as a bare string, indistinguishable
+    # from an answer. Two readers believed it: `audit._recording` decides by `returned_failure`,
+    # which is `isinstance`-based and saw nothing, so the trail recorded a refused tool as `ok`; and
+    # the sentence became `${steps.<id>.result}`, so the next step — a `job` step included — ran on
+    # "the instrument is offline" as though it were data.
+    #
+    # `_call` disables the handler so the failure raises instead, which is what a step with no model
+    # wants. It propagates *through* the chain, so audit books its `error` row and the announcer
+    # reports it before this converts it — nothing is recorded twice.
+    try:
+        result = await handler(_request(tool, arguments))
+    except ToolException as exc:
+        raise ToolReturnedFailure(str(exc)) from exc
+    # A middleware this chain *does* include can still short-circuit with a `ToolMessage`, so the
+    # same question is asked of a returned one before it is unwrapped.
+    if (failed := returned_failure(result)) is not None:
+        raise ToolReturnedFailure(returned_failure_detail(failed))
     return result.content if isinstance(result, ToolMessage) else result
 
 

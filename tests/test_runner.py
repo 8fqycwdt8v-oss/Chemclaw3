@@ -847,6 +847,16 @@ def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> No
     assert errors[0].code == "empty_answer"
     assert errors[0].retryable is True, "a narrower question can succeed; this is not terminal"
 
+    # **And no answer beside it.** `events.py` names `loop_cap_reached` as the only error that
+    # shares its turn with an answer; this branch used to fall through to `build_answer_event("")`
+    # and yield an `AnswerEvent` whose text is empty — which the reference page renders as an empty
+    # assistant bubble, so the turn looked answered rather than failed. Under `verifier_enabled` it
+    # also spent a judge call grading `""`.
+    assert not [e for e in events if isinstance(e, AnswerEvent)], (
+        "a turn that produced nothing also claimed an answer; the error and the empty bubble "
+        "tell a chemist two different things about the same turn"
+    )
+
 
 def test_a_named_fragment_stream_reassembles_into_one_call() -> None:
     """The OpenAI Responses shape: every fragment carries the name *and* a partial document.

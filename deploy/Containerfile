@@ -55,50 +55,18 @@ RUN dnf -y update && dnf install -y git rsync util-linux && dnf clean all \
     && pip install --no-cache-dir uv
 WORKDIR /app
 
-# The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a
-# package manager, because UBI9 has neither in its repositories and a pinned artifact is
-# what makes the image reproducible. Both are optional at *runtime* — `calc.xtb_cli` and
-# `calc.crest_cli` fall back or report unavailable — but a worker image without them
-# loses the 9-11x ANCopt speedup and conformer sampling entirely.
+# **No calculation binaries.** `xtb` and `crest` used to be installed here, pinned release tarballs
+# for the two modules that shelled out to them. `D-2026-08-16-the-physics-leaves-the-cache-stays`
+# moved that physics to `Chemclaw3-mcp`, and `calc.xtb_cli`/`calc.crest_cli` — the two callers this
+# layer named as its reason — went with it. Nothing in `src/` invokes either binary now, so the
+# layer was building a ~200 MB dependency into every image (front door, every worker, every
+# connector pod) for no caller.
 #
-# Licensing: xtb is LGPL-3.0, crest is GPL-3.0. Both are invoked as separate processes
-# over files and never linked, so the usual analysis is that neither affects this
-# codebase's licence — but *distributing* them inside an image is a decision for whoever
-# owns the product, and this file cannot make it.
-#
-# What it can do is stop the decision from requiring a code change. `INCLUDE_CREST=false` builds
-# without the GPL-3.0 binary: `calc.crest_cli` already reports unavailable rather than failing, so
-# the image loses conformer sampling and nothing else. The instruction used to be "drop the crest
-# layer", which meant editing a RUN block, which meant the decision was never taken because taking
-# it looked like a patch. It is now a build argument and a row in the backlog naming the owner.
-#
-# The xtb link is resolved by *finding* the extracted binary rather than guessing its directory.
-# The previous form tried `/opt/xtb-dist/bin/xtb` and fell back to `/opt/xtb-${XTB_VERSION}/bin/xtb`
-# — but `ln -s` succeeds when its target does not exist, creating a dangling link, so the `||`
-# fallback could never run and the version check below failed with 127. The 6.6.1 tarball extracts
-# to `xtb-6.6.1/`, i.e. exactly the path the unreachable fallback named, so **this image had never
-# built**. Nothing noticed because the workflow that builds it was stranded under
-# `services/chemclaw/.github/`, where GitHub Actions never reads (both fixed in D-117).
-ARG XTB_VERSION=6.6.1
-ARG CREST_VERSION=3.0.2
-ARG INCLUDE_CREST=true
-RUN set -eux; \
-    curl -fsSL -o /tmp/xtb.tar.xz \
-      "https://github.com/grimme-lab/xtb/releases/download/v${XTB_VERSION}/xtb-${XTB_VERSION}-linux-x86_64.tar.xz"; \
-    tar -xJf /tmp/xtb.tar.xz -C /opt; \
-    xtb_bin="$(find /opt -maxdepth 4 -type f -name xtb -perm -u+x -print -quit)"; \
-    test -n "${xtb_bin}" || { echo "no xtb binary under /opt after extraction" >&2; exit 1; }; \
-    ln -sfn "${xtb_bin}" /usr/local/bin/xtb; \
-    if [ "${INCLUDE_CREST}" = "true" ]; then \
-      curl -fsSL -o /tmp/crest.tar.xz \
-        "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
-      mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
-      install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
-      rm -f /tmp/crest.tar.xz; \
-      crest --version >/dev/null; \
-    fi; \
-    rm -f /tmp/xtb.tar.xz; \
-    xtb --version >/dev/null
+# It also took a licensing decision nobody needed to take any more: xtb is LGPL-3.0 and crest is
+# GPL-3.0, and *distributing* them inside an image is a question for whoever owns the product. The
+# `INCLUDE_CREST` build argument existed to make that decision a flag rather than a patch. Removing
+# the binaries removes the question from this repository entirely — the images that ship them are
+# `Chemclaw3-mcp`'s, where the code that runs them lives.
 
 COPY pyproject.toml uv.lock README.md ./
 # All first-party code, in one COPY. Before D-141 this was eighteen lines, one per top-level

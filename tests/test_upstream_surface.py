@@ -414,6 +414,60 @@ def test_a_checkpointer_can_delete_a_thread_without_naming_its_tables() -> None:
     )
 
 
+def test_both_filesystem_write_verbs_still_take_the_path_as_file_path() -> None:
+    """The argument name a write gate now reads, and the direction its absence fails in.
+
+    `authz.writes_durable_memory` tells a durable `/memories/` write from a turn-local `/scratch/`
+    one by reading `file_path` off the call, because the tool *name* cannot: one verb serves both
+    roots. If upstream renamed the parameter, the lookup would miss, every path would read as
+    unknown, and — because an unreadable path is treated as durable — the gate would fail *closed*,
+    refusing every scratchpad write on a dry run. Loud rather than silent, but still wrong, and
+    this is what says so.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    args = {
+        tool.name: set(tool.args)
+        for tool in FilesystemMiddleware(backend=StateBackend()).tools
+        if tool.name in {"write_file", "edit_file"}
+    }
+    assert set(args) == {"write_file", "edit_file"}, (
+        "a filesystem write verb disappeared; agent/authz.py gates the pair by name"
+    )
+    for name, parameters in args.items():
+        assert "file_path" in parameters, (
+            f"{name} no longer takes `file_path`; agent/authz.writes_durable_memory reads it to "
+            "tell a durable memory write from a turn-local scratchpad one"
+        )
+
+
+def test_the_store_still_names_its_two_version_ledgers_the_way_the_grant_file_does() -> None:
+    """The two table names in this database that are derivable from nothing.
+
+    Every other table LangGraph creates appears in a `CREATE TABLE IF NOT EXISTS` inside one of the
+    `MIGRATIONS` lists, so `tests/test_database_privileges.py` reads it off the installed package.
+    These two do not: `AsyncPostgresStore.setup()` passes them to `_get_version(cur, table=...)` and
+    interpolates them into a `CREATE TABLE` template, so the names exist only as string literals in
+    upstream's source. The grant file has to spell them, which makes a rename a silent un-granting —
+    the store would create `store_schema_version`, the reconciliation would grant nothing on it, and
+    the failure would be an `InsufficientPrivilege` on a schema step during a rolling deploy.
+
+    Asserted against the source text rather than a symbol because upstream exports neither.
+    """
+    import inspect
+    import re
+
+    from langgraph.store.postgres import aio
+
+    source = re.sub(r"\s+", " ", inspect.getsource(aio))
+    for table in ("store_migrations", "vector_migrations"):
+        assert re.search(rf'table\s*=\s*"{table}"', source) or f"INTO {table} " in source, (
+            f"the postgres store no longer names its version ledger {table!r}; "
+            "infra/sql/grants/app_privileges.sql grants INSERT on that name by hand"
+        )
+
+
 def test_custom_middleware_still_replaces_an_upstream_entry_by_name() -> None:
     """The splice rule the whole composition rests on, and the reason `execute` stays off.
 

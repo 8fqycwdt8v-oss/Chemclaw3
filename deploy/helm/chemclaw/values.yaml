@@ -200,9 +200,20 @@ connectors:
     server: true
     replicas: 1
     # The expensive calculations (reaction energies, solvent screens, scans, CREST searches) run
-    # as durable jobs on this bundle's own queue, so it gets a worker Deployment too. Sizing it
-    # separately from core's `hpc` worker is the point: this is the only pod that needs the
-    # `xtb`/`crest` binaries and the CPU to saturate with them.
+    # as durable jobs on this bundle's own queue, so it gets a worker Deployment too.
+    #
+    # **This pod no longer runs any physics, and the sizing note that used to sit here said it
+    # did.** `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the engines to
+    # `Chemclaw3-mcp`'s `servers/calc`; what runs here is the D-011 cache in front of them, the
+    # composition of `compute_thermochemistry` and `predict_logd`, and the calibration ledger. It
+    # is I/O-bound on that wire, not CPU-bound on `xtb`.
+    #
+    # Unlike `chem` and `safety`, the remote server is **not** reached through a connector `url:` —
+    # that field addresses a bundle's own MCP endpoint, which this bundle does serve. The address
+    # of the calculation server is `CHEMCLAW_CALC_SERVER_URL` in `config` below, and the two
+    # operator obligations are the same as those bundles': add its host to
+    # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CALC_TOKEN` if that server enforces
+    # a bearer.
     worker: true
   bo:
     enabled: true
@@ -316,6 +327,12 @@ resources:
 
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
 config:
+  # Where the calculation server lives. **Stated rather than left to the code default**, which is a
+  # loopback address (`http://127.0.0.1:8860/mcp`) chosen for a dev process — so before this key
+  # existed, a `helm install` produced a `calc` bundle whose every tool and all five durable jobs
+  # raised `CalcServerError` against nothing, on a chart that named no host, no token and no egress
+  # rule for the wire every one of those calls now crosses.
+  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
   CHEMCLAW_LLM_PROVIDER: "openai_compatible"
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
   CHEMCLAW_LLM_MODEL: "gpt-oss"

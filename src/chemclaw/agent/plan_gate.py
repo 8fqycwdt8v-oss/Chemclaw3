@@ -35,12 +35,12 @@ session can research and propose and can do nothing else.
 """
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
 
-from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
+from chemclaw.agent.authz import AuthorizationError, side_effecting_call
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import AgentProfile
@@ -112,9 +112,14 @@ def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
     )
 
 
-def gated_call(tool_name: str) -> bool:
-    """Whether this tool is one the plan gate governs at all."""
-    return tool_name in side_effecting_tools()
+def gated_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    """Whether this call is one the plan gate governs at all.
+
+    The call rather than the tool, for the reason `authz.side_effecting_call` gives: `write_file`
+    is durable under `/memories/` and turn-local under `/scratch/`, and refusing both would deny an
+    unapproved turn the scratchpad it needs in order to produce a plan worth approving.
+    """
+    return side_effecting_call(tool_name, arguments)
 
 
 # The autonomy setting that asks for the approval-first posture — the value `harness_autonomy`
@@ -334,7 +339,7 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
             the reason to the model.
     """
     name = request.tool_call["name"]
-    if not gated_call(name):
+    if not gated_call(name, request.tool_call.get("args") or {}):
         return await handler(request)
     session_id = get_current_session_id()
     # No session means no plan to approve and no autonomous loop to gate — a template activity's

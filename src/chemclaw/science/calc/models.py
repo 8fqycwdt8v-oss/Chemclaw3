@@ -736,6 +736,11 @@ class SpeciesEnergy(BaseModel):
     # lowers a free energy, so this is negative when it is present at all.
     conformational_entropy_kcal: float | None = None
     was_cached: bool
+    # The method the *server* reported for this species' optimisation, so a reaction can state the
+    # level of theory it was actually run at. Additive and defaulted because this crosses the
+    # Temporal wire and histories are in flight; empty means a run from before it was recorded, and
+    # `reaction_energy` falls back to the configured name only then.
+    method: str = ""
 
 
 class ReactionEnergyResult(BaseModel):

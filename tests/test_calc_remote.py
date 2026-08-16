@@ -22,6 +22,7 @@ not.
 
 import ast
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,8 @@ from chemclaw.connectors.calc.remote import (
     remote_key,
 )
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
-from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.core.ids import stable_hash
+from chemclaw.science.calc.store import CALCULATION_EPOCH, InMemoryStore
 
 # A version carrying *both* key delimiters, which is not a contrived string: `esol-delaney@2004`
 # is the solubility model's real name and `cal-0.28733:-29.3116` is the pKa calibration pair, both
@@ -145,8 +147,18 @@ def test_a_version_carrying_both_delimiters_round_trips(monkeypatch: pytest.Monk
         assert key is not None
         assert key.calc_version == _AWKWARD_VERSION
         assert key.calc_type == "solubility"
-        # And the flat form still reassembles to what the server would stamp.
-        assert key.as_str() == f"solubility@{_AWKWARD_VERSION}:07010a68dabf6858:a075a6029c28d314"
+        # Three of the four parts are the server's verbatim; `params_hash` is deliberately not.
+        # `CALCULATION_EPOCH` is folded into it here because `CalculationKey.build` — the only
+        # place that ever folded it in — has no `calc` caller left since the physics moved, so a
+        # bump invalidated the DFT rows and nothing else while three documents prescribed it as the
+        # remedy for a changed payload meaning.
+        assert key.as_str().startswith(f"solubility@{_AWKWARD_VERSION}:07010a68dabf6858:")
+        assert key.params_hash != "a075a6029c28d314", (
+            "the epoch is not in the key: bumping CALCULATION_EPOCH would invalidate nothing"
+        )
+        assert key.params_hash == stable_hash(
+            {"epoch": CALCULATION_EPOCH, "remote_params": "a075a6029c28d314"}
+        )
 
     asyncio.run(_run())
 
@@ -394,4 +406,76 @@ def test_no_module_here_derives_a_calc_version(root: Path) -> None:
         + "; ".join(offenders)
         + ". The server returns it on every result and through `calculation_key`; deriving one "
         "here produces a well-formed version matching zero calibration rows, silently."
+    )
+
+
+def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
+    """The function every other test in this file patches away, and what hid inside it.
+
+    `calc_session` is monkeypatched wholesale by every test above — reasonably, since none of them
+    wants a socket — with the consequence that the function is *never executed as written*. Three
+    defects lived there behind that.
+
+    The one this pins is the timeout pair. `connectors/registry.py` records the measurement:
+    `ClientSession(read_timeout_seconds=...)` is the bound that *raises* (`McpError`), while httpx's
+    read timeout is caught by `mcp.client.streamable_http` at debug level with no reconnect — so
+    when the invisible one fires first the answer is lost silently and the caller waits forever.
+    This function had `read_timeout_seconds` unset, which upstream documents as waiting forever, and
+    `timeout=` sets connect/write/pool only — so the only live bound was `sse_read_timeout`'s
+    un-overridden **300 s** default, not the 900 s `calc_server_timeout_seconds` names. A CREST
+    search past five minutes never returned while `durable/heartbeat` kept heartbeating, so Temporal
+    saw a healthy activity and the job burned its full four hours.
+
+    Asserted on the arguments actually handed to the transport and the session, because the values
+    are the whole finding — a test that only checked "a session was opened" would have passed
+    throughout.
+    """
+    import asyncio
+    from datetime import timedelta
+
+    from chemclaw.connectors.calc import remote as remote_module
+    from chemclaw.core.config import settings
+
+    seen: dict[str, Any] = {}
+
+    class _NullSession:
+        """Stands in for `ClientSession`, recording the bound it was constructed with."""
+
+        def __init__(self, _read: Any, _write: Any, read_timeout_seconds: Any = None) -> None:
+            seen["session_read_timeout"] = read_timeout_seconds
+
+        async def __aenter__(self) -> "_NullSession":
+            return self
+
+        async def __aexit__(self, *_: Any) -> bool:
+            return False
+
+        async def initialize(self) -> None:
+            """Accept the handshake without a server."""
+
+    @asynccontextmanager
+    async def _transport(url: str, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        yield (None, None, None)
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(remote_module, "streamablehttp_client", _transport)
+        monkeypatch.setattr(remote_module, "ClientSession", _NullSession)
+
+        async def _run() -> None:
+            async with remote_module.calc_session():
+                pass
+
+        asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    bound = settings.calc_server_timeout_seconds
+    assert seen["session_read_timeout"] == timedelta(seconds=bound), (
+        "the session's own bound is the one that raises; unset means wait forever"
+    )
+    assert seen["sse_read_timeout"] > timedelta(seconds=bound), (
+        "httpx's read timeout must stay strictly behind the session's, or the answer is lost "
+        "silently instead of raising"
     )

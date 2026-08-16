@@ -73,16 +73,29 @@ the pair applies in filename order and neither shadows the other.
 
 ## Three things the shape of this table will not tell you
 
-**Four tables in this database are not in the table above, and cannot be.** `checkpoints`,
+**Six tables in this database are not in the table above, and cannot be.** `checkpoints`,
 `checkpoint_blobs`, `checkpoint_writes` and `checkpoint_migrations` are created by
-`AsyncPostgresSaver.setup()` (`agent/checkpointer.py`), not by a file in this directory, so
+`AsyncPostgresSaver.setup()` (`agent/checkpointer.py`); `store` and `store_migrations` by
+`AsyncPostgresStore.setup()` (`agent/scratchpad.py`), which also creates `store_vectors` and
+`vector_migrations` when it is built with an `index_config` — this deployment builds it without one,
+so those two do not exist here. None is created by a file in this directory, so
 `tests/test_schema_inventory.py` — which pins the table to exactly what the migrations create —
 would call a row for them a phantom. That absence is not free: they hold every session's turn
 state, they are the tables nobody reviews because they appear in no migration, and nothing disposed
-of them for as long as they existed. `durable/retention.py` now prunes them by **thread**
+of them for as long as they existed. `durable/retention.py` now prunes the checkpoints by **thread**
 (`retention_checkpoints_days`) — a checkpoint chains to its parent, so a thread expires whole when
 its newest checkpoint does — and `agent/leaver.py` erases them per actor. `checkpoint_migrations` is
 the checkpointer's own version ledger and is never touched, the standing `schema_migrations` has.
+
+Being outside this directory also kept them outside `grants/app_privileges.sql`, and that one was a
+live second-deploy outage rather than a documentation gap: the reconciliation opens with
+`REVOKE ALL ON ALL TABLES IN SCHEMA public`, which reaches these too and strips even the owning
+role's own DML, while the enumerated re-grants below named none of them. A first install survives
+it — the tables do not exist yet when the file runs — and the *second* `helm upgrade` takes every
+turn down at its first checkpoint write. They are now granted explicitly, each guarded on its own
+existence, and `tests/test_database_privileges.py` derives the same set from the installed
+distributions so a table upstream adds in a minor bump fails the check instead of inheriting
+`GRANT SELECT` and being found as a write outage.
 
 **There are three foreign keys in the whole schema** (`calculation_artifacts` → `artifact_blobs`,
 `bo_suggestions` → `bo_campaigns`, `tool_result_links` → `tool_result_blobs`), each one where a

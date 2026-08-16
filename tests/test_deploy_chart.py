@@ -1399,19 +1399,27 @@ def test_a_clean_audit_passes(tmp_path: Path) -> None:
     assert "SKIPPED" not in result.stdout
 
 
-def test_the_licence_decision_is_a_build_flag_rather_than_an_edit() -> None:
-    """Shipping crest (GPL-3.0) is the product owner's call, not this file's.
+def test_no_calculation_binary_ships_in_this_image() -> None:
+    """The licence decision this repository no longer has to take, and why it stopped needing to.
 
-    The Containerfile's instruction was "drop the crest layer", which means editing a `RUN` block —
-    so taking the decision looked like writing a patch, and it was therefore never taken. It is now
-    `--build-arg INCLUDE_CREST=false`, and `calc.crest_cli` already reports unavailable rather than
-    failing, so the image loses conformer sampling and nothing else.
+    `xtb` (LGPL-3.0) and `crest` (GPL-3.0) were installed here for `calc.xtb_cli` and
+    `calc.crest_cli`, and `--build-arg INCLUDE_CREST=false` existed so that declining to
+    *distribute* the GPL binary was a flag rather than a patch (D-2026-08-01-a-tag-is-a-pointer).
+    Both callers moved to `Chemclaw3-mcp` with the physics, so the layer was building ~200 MB into
+    every image — front door, every worker, every connector pod — for no caller, and taking a
+    redistribution decision on behalf of a product that no longer runs the programs.
+
+    Asserted as an *absence*, so re-adding a binary here has to argue for itself: whatever needs
+    one belongs in the repository whose code invokes it.
     """
     containerfile = (DEPLOY / "Containerfile").read_text()
-    assert "ARG INCLUDE_CREST" in containerfile
-    assert 'if [ "${INCLUDE_CREST}" = "true" ]' in containerfile, (
-        "the crest layer is unconditional, so declining to ship GPL-3.0 needs a code change"
-    )
+    # The declarations and the download URLs, not the words: the comment above the removal explains
+    # what left and why, and a test that forbade naming it would forbid the explanation.
+    for marker in ("ARG INCLUDE_CREST", "grimme-lab/xtb/releases", "crest-lab/crest/releases"):
+        assert marker not in containerfile, (
+            f"{marker!r} is back in the image; no module in src/ invokes a calculation binary, and "
+            "shipping one takes a redistribution decision this repository does not need to take"
+        )
     assert "ARG BASE_IMAGE" in containerfile and "FROM ${BASE_IMAGE}" in containerfile, (
         "the base image cannot be pinned by digest without editing the Containerfile"
     )

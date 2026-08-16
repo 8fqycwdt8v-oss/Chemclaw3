@@ -418,6 +418,17 @@ async def run_turn(
                 retryable=True,
                 correlation_id=correlation_id,
             )
+            # **`return`, not fall through**, which is what this did. `events.py` names
+            # `loop_cap_reached` as the *only* error that shares its turn with an answer, and
+            # falling through broke that for `empty_answer` in three ways at once: the client got an
+            # `AnswerEvent` whose text is `""` (the reference page renders it as an empty assistant
+            # bubble), `build_answer_event` spent a judge call under `verifier_enabled` grading an
+            # empty string, and `answered = True` reached
+            # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user got an
+            # answer for the money" for precisely the silent-death turn this branch exists to name.
+            # The `finally` below still books the spend and the duration, which is right: the turn
+            # cost what it cost.
+            return
         answer = await build_answer_event(
             text,
             tool_trace.outputs,

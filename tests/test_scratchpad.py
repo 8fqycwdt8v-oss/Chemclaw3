@@ -139,3 +139,61 @@ def test_no_first_party_module_writes_to_a_store_directly() -> None:
         "a store is written to directly, bypassing the tool-call chain that audits and authorizes "
         f"every other write: {offenders}"
     )
+
+
+def test_a_memory_write_is_gated_and_a_scratch_write_is_not() -> None:
+    """The claim in this module's docstring that was false: "refused on a dry run".
+
+    Both write gates ask `side_effecting_tools()`, which is built from the tool *registry* —
+    `core/tool_registry`, every connector's `state_changing` declaration, every template launcher.
+    `write_file` and `edit_file` are in none of those, because `FilesystemMiddleware` registers
+    them. So a `dry_run=true` turn under `harness_autonomy="plan_only"` could write a row into the
+    Postgres `store` that outlives the session, past both "nothing was started" and the plan gate.
+
+    The partition in `tests/test_authz.py` could not catch it: it iterates
+    `registered_tool_names()`, and a middleware-registered verb is not in the registry by
+    construction.
+
+    Asserted over the *pair*, because gating `write_file` by name would have been the wrong fix —
+    it would refuse the turn's own scratchpad, which is turn-local state and the thing
+    `D-2026-08-15-a-turn-needs-somewhere-to-put-intermediate-work` added on purpose.
+    """
+    from chemclaw.agent.authz import side_effecting_call
+    from chemclaw.agent.scratchpad import SCRATCH_ROOT
+
+    for verb in ("write_file", "edit_file"):
+        assert side_effecting_call(verb, {"file_path": f"{MEMORY_ROOT}notes.md"}), (
+            f"{verb} under the memory root writes durable Postgres state; the dry-run refusal and "
+            "the plan gate both key off this predicate"
+        )
+        assert not side_effecting_call(verb, {"file_path": f"{SCRATCH_ROOT}working.md"}), (
+            f"{verb} under the scratch root is turn-local; gating it would deny an unapproved turn "
+            "the notepad it needs to produce a plan worth approving"
+        )
+
+
+def test_an_unreadable_path_argument_is_treated_as_durable() -> None:
+    """A gate that a malformed argument walks through is not a gate.
+
+    `file_path` absent, `None`, or a non-string cannot be a scratchpad write — those name a path
+    too — so the only safe reading is the durable one. Written because the opposite default is the
+    easy one to reach for, and it fails *open*.
+    """
+    from chemclaw.agent.authz import side_effecting_call
+
+    for arguments in ({}, {"file_path": None}, {"file_path": 17}, {"file_path": ["/memories/x"]}):
+        assert side_effecting_call("write_file", arguments), arguments
+
+
+def test_write_todos_is_never_gated_by_either_write_gate() -> None:
+    """The deadlock the fix had to avoid, stated as a test rather than left to inference.
+
+    `write_todos` writes the plan. Under `harness_autonomy="plan_only"` a gate that refused it would
+    refuse the only call able to produce a plan for a human to approve, and the turn could never
+    make progress in either direction.
+    """
+    from chemclaw.agent.authz import side_effecting_call
+
+    assert not side_effecting_call(
+        "write_todos", {"todos": [{"content": "step", "status": "pending"}]}
+    )

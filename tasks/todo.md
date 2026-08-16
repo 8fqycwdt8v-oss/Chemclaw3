@@ -1,72 +1,130 @@
-# Post-migration review — nine reviewers over `ab3da835..ad1cb1ef`
+# Deep review of the LangGraph migration, the GxP removal and the tool exodus
 
-Status: **done and merged.** `Chemclaw3#189` (`e7de2bdf`) and `Chemclaw3-mcp#8` (`53c6035b`).
+Range reviewed: `7336f1d..84148a1` — 569 files, +53,599 / −33,521. Four parallel review agents
+(agent core · GxP/persistence · science+connectors after the exodus · front door/evals), each
+required to verify by reading code and running it rather than by reading docstrings.
 
-## What was asked
+## Baseline, measured before any change
 
-Review every line of the capability migration and its neighbours, using subagents heavily. Then,
-on four decisions taken afterwards: restore the artifact path, wire the chart, close four smaller
-gaps, and merge on green.
+Docker, Postgres and Temporal started first, because a local `pytest` without them skips ~157
+Postgres tests and still prints green.
 
-## Steps
+| | result |
+|---|---|
+| `pytest` (infra up) | **3978 passed, 0 skipped, 0 failed** |
+| `ruff check` / `ruff format --check` | clean, 590 files |
+| `mypy --strict` | clean, 590 files |
 
-- [x] Nine scoped reviewers, each told to reproduce rather than reason: the calc client, the durable
-      layer, the safety removal, the connector/chart seam, layer 1, the BO inversion, dangling
-      references, test quality (by hand mutation), and cross-repo consistency.
-- [x] Every headline re-verified independently before reporting it (lessons rule 35).
-- [x] Fixed: the exception relabelling in `calc_session`, the `McpError` classification, five
-      un-heartbeated call sites, 24 dead calculator settings, and six stale claims that a deleted
-      control still runs.
-- [x] Restored the Hessian to the artifact store as `ArrayOffloadingStore`
-      (`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact`).
-- [x] Chart: `CHEMCLAW_CALC_SERVER_URL`, three bearer slots, three egress ports, and the runbook
-      claim that matched the wrong one in `values.yaml`.
-- [x] Deleted `run_cached` and `cached_remote`'s unreachable no-key branch.
-- [x] Measured the verifier against a non-compliant `openai_compatible` server.
-- [x] mcp repo: the logD contract test and the ported ANC unit tests.
+**Every defect below is invisible to that suite.** That is the finding behind the findings: the gate
+was green throughout, so nothing here is a regression the tooling could have caught — each one is a
+gap between what a declaration claims and what the code does.
 
-## Verified
+## Fixed (each proven by reproduction)
 
-`make lint`, `make type` (592 files), every validator, and the full suite with Postgres up:
-**3989 passed, 1 skipped, 0 failed**. CI green on both repos before either merge.
+- [x] **CRITICAL — the grant reconciliation stripped write access to every LangGraph table on the
+      second deploy.** `REVOKE ALL ON ALL TABLES` reaches the six tables `setup()` creates; the
+      enumerated re-grants named none. Reproduced in Postgres 16: the app role *owns* `checkpoints`
+      and still ends with `INSERT=f SELECT=t`. The guard was blind — `_tables()` knew only
+      `infra/sql/*.sql`, so `_DYNAMIC`'s explicit `checkpoints` entry was discarded. ADR
+      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name`.
+- [x] **HIGH — a dry run could write a durable memory.** Fixed with a path-aware predicate rather
+      than by adding names: one verb serves `/memories/` and `/scratch/`.
+- [x] **HIGH — a template step read a tool's refusal as its answer**, and the audit trail booked the
+      refused call as `ok`. Measured: on the plain-args form this path used, a failed MCP tool
+      returns a bare `str`. Invoking with the whole call was tried and rejected — it stringifies a
+      `job` step's dict payload.
+- [x] **HIGH — every failed tool call emitted both `tool_failed` and `tool_result`, and the error
+      text joined the corpus `score_answer` grades grounding against.** `graph_stream` read a
+      `status` that `answered_failure` rewrites to `"success"`; `ToolFailureSignal` now carries
+      `call_id` and the stream suppresses on the turn's own failure set.
+- [x] **HIGH — a subagent's tool calls, results and plan were emitted as the main agent's.** Work
+      below the root is now marked, and its plan withheld rather than relabelled — `PlanEvent` has
+      no `agent` field, so there is nowhere to say whose it is.
+- [x] **HIGH — subject erasure missed the full text of every tool result.** `tool_result_blobs` is
+      now erased by the session its links name. The links themselves are left to the cascade, which
+      is what lets the grant keep withholding DELETE on that table — a conflict the grants test
+      caught.
+- [x] **HIGH — the remote calc client had no session timeout**, so the only live bound was httpx's
+      un-overridden 300 s rather than the 900 s its setting names, and it fires *silently*. Both
+      bounds are now set, session-first.
+- [x] **HIGH — `CALCULATION_EPOCH` reached no calc cache key.** Folded into `remote_key`'s params
+      hash; the three documents that prescribed bumping it now describe something that works.
+- [x] **MEDIUM — a Postgres failure was reported as a calculation-server outage.** The blanket
+      `except` spanned the `yield`, so the caller's `cached_compute` body re-entered it. Narrowed,
+      with `_call` converting its own transport failures.
+- [x] **MEDIUM — a reaction result stamped a locally-configured `method`** describing a calculation
+      this process did not run. `SpeciesEnergy` now carries the server's.
+- [x] **MEDIUM — an empty-answer turn also yielded an empty answer** and booked itself
+      `completed=True` in the cost ledger.
+- [x] **MEDIUM — the reference UI spliced a subagent's prose into the answer bubble.**
+- [x] **MEDIUM — `calc_session` had no test at all**, which is why the three defects in it were
+      invisible to a green suite.
+- [x] **MEDIUM — the image still installed xtb and crest** (~200 MB, and a GPL-3.0 redistribution
+      decision) for two modules that left with the physics; **and nothing in `deploy/` pointed
+      anything at the calculation server**, so `helm install` produced a `calc` bundle failing
+      against loopback.
+- [x] Record drift: `ARCHITECTURE.md`'s specialist team, `science/__init__.py` calling `calc` "the
+      physics", the dead `SafetyRulesError` entry, the unbounded
+      `xtb_minimum_refinement_attempts`, the present-tense handoff docstrings, `CLAUDE.md`'s three
+      non-existent backlog rows, and the one closed `[x]` row.
 
-Live, against a real calc server on 8860: `calculation_key` matched the key stamped on the result
-for **6 of 6** cached tools, and `predict_logd` correctly derived none — which closes the "not
-verified" tranche 4 shipped with.
+Suite after: **3991 passed**, `ruff` and `mypy --strict` clean, seven of eight validators green
+(`helm-validate` needs the `helm` binary, absent here; the chart change is covered by
+`tests/test_helm_chart.py` and `tests/test_deploy_chart.py`).
 
-Each fix carries a test checked **red against the pre-fix code**; the artifact policy's three rules
-were mutated separately, one at a time.
+## Open
+
+Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor.
+
+**Two of the eleven closed before this branch merged**, from `main` rather than here: the dead
+calculator settings went with `main`'s own sweep (this branch removed the one it missed,
+`xtb_engine`, whose comment still described a backend resolution that no longer exists), and
+`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact` gave the artifact store a writer again —
+`connectors/calc/compose.py:216`. Their rows are deleted rather than struck through. The rest:
+
+- **`tblite` is a runtime dependency with no importer**, kept alive by the test that derives
+  `ALPB_SOLVENTS` — a launch gate for four durable jobs — from a local install rather than from the
+  server that now decides it.
+- **The stored-message conversion is a destructive in-place rewrite run as a `pre-upgrade` hook**,
+  against data the previous release is still serving. Needs an ADR, not a patch.
+- **`xtb_geometry_decimals` still shapes half of every remote cache key.**
+- **No live lane in this repo can start**, and the e2e harness does what `calc`'s manifest forbids.
+- **A retrieval leg that raised is indistinguishable from one that found nothing.**
+- **The audit trail's `agent` column can never be non-empty**, and `memory_store()` repeats the
+  cold-start race `checkpointer.py` was fixed for.
+- **Retention's checkpoint `LIMIT` bounds the deletes, not the scan.**
+- **`message_from_row` degrades on one branch and mislabels the speaker on the other.**
+
+## Checked and found sound
+
+Recorded so the next reviewer does not re-derive them. **Auth is not stubbed** — the `entra_*`
+settings that looked reader-less are read via the derived `entra_issuer_url` / `entra_jwks_endpoint`
+(`api/auth.py:124,160`); RS256 is pinned, audience/issuer/exp checked, `kid`-less headers refused,
+JWKS refetch rate-limited, 503 separated from 401. Also verified: no import breakage anywhere; the
+token budget is booked on the disconnect path inside an `await`-free `finally`; audit coverage
+survives the GxP removal intact and no code path issues UPDATE/DELETE on `audit_events`;
+`message_from_row` really is the single deserializer; compaction is non-destructive; content is
+suppressed on all 14 OpenInference `hide_*` paths by default and LangSmith egress is pinned off
+(verified with the adversarial import ordering); no attacker-influenced metric label; the
+admission/budget overshoot bound holds; the Helm chart correctly renders no Deployment for `chem`
+and `safety`; and every tool name in `data/profiles/*.yaml` still resolves.
 
 ## Review
 
-**What went well.** The fan-out earned its cost in one specific way: two reviewers independently
-found the `calc_session` relabelling, from different directions, which is the kind of agreement a
-single pass cannot produce. And the instruction to reproduce rather than reason is what turned
-"24 settings look unused" into a measurement — they were all in `.env.example`, so the parity test
-that existed was green, and the parity nobody had written was the one that mattered.
+**What the instruction to measure bought.** Three claims changed under measurement rather than
+argument. The `astream` tuple-arity coupling looked unpinned and turned out to be exercised by a
+real compiled graph. The `entra_*` settings looked dead and are read through derived properties —
+an auth "critical" that was a grep artefact. And the template-step fix I first wrote (invoke with
+the whole call) was correct about the diagnosis and wrong as a remedy; only running the suite showed
+it stringifying a `job` step's payload.
 
-**What the reviewers got wrong, which is why every headline was re-checked.** One reported "dead
-code: none found" while 24 settings, `run_cached` and `put_all` were all dead. Another reported that
-`langchain_openai` silently downgrades `json_schema` to `function_calling`; reading the upstream
-source showed neither downgrade path can trigger for a Pydantic v2 schema or a non-`gpt-4` model
-name. Reporting either as given would have misled in opposite directions.
+**What was harder than expected.** The grant fix's first draft planned to add `checkpoint_migrations`
+to `CHECKPOINT_TABLES`. That constant is deliberately the conversation-bearing set and feeds
+`DELETE … WHERE thread_id`, which `checkpoint_migrations` has no column for — the change would have
+broken erasure and retention in order to fix a grant. The grant needed its own derivation.
 
-**A failed approach, recorded so it is not retried.** The Hessian restore was first written as a
-bespoke cached path in `compose.py`, mirroring the pre-split `run_cached_hessian`. It needs its own
-MCP session to fetch the key before the lookup, which makes `compose` a *second* module that opens
-one — and `calc_server_fake.install` patches `remote.calc_session` on the stated ground that it is
-the only one. The heartbeat test went red on a real socket immediately. The replacement expresses
-the policy as a `ResultStore` wrapper, which is smaller and leaves every caller untouched. **The
-test failure produced a better design than the plan did.**
-
-**A process defect worth keeping.** One mutation check silently did not apply: `ruff format` had
-reflowed the code I was pattern-matching on, so the replacement was a no-op and the test "passed"
-against an unbroken tree. It only surfaced because the expected failure did not appear. **A mutation
-that does not fail is evidence of nothing until you have confirmed the mutation landed** — assert
-the target text was found, rather than trusting a string replace.
-
-**A claim of mine that needed narrowing.** I reported the two `predict_logd` implementations as
-"identical to every printed digit". GFN2-xTB's SCF is not bit-reproducible run to run here (drift in
-the 9th significant figure), so that was one lucky pair of calls. What holds — and what the contract
-test now pins, against a frozen pKa — is that the two agree exactly *given the same input*. Cache
-keys are unaffected: they name inputs and program versions, never SCF output.
+**A failed approach, recorded so it is not retried.** Grouping the new grants per `setup()` and
+guarding each group once. A `GRANT` on a missing table raises, and a raise anywhere in the `DO`
+block aborts the whole reconciliation — so one interrupted `setup()` would have left *every* table
+in the file ungranted, turning a narrow bug into a total one. Found by running it against a database
+holding only `checkpoints`. Guarded per table instead.
