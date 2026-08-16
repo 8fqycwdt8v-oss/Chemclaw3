@@ -495,15 +495,21 @@ def test_no_grandfathered_edit_outlives_its_reason() -> None:
     Asked through `_statements_changed_since_merge`, the same walk the check itself uses, so the
     exemption cannot be validated against a rule the check no longer applies.
 
-    Skipped rather than failed on a truncated clone, for the reason the check gives at length: on a
-    depth-1 checkout every file compares equal to itself, so *every* exemption would look stale and
-    the red build would be about the CI setting rather than about the tree.
+    Skipped rather than failed on *any* truncated clone, and deliberately not behind the sibling's
+    `compared < 30` conjunct — which is the calibration this test was actually failing on. A
+    truncated clone still compares plenty of files, so that count stays well above 30; what it
+    cannot see is an edit made *before* the graft boundary, because the "original" it diffs against
+    is the grafted version. Both grandfathered edits are early migrations, so they compared equal to
+    themselves and the check reported two live exemptions as stale — a red build about the clone
+    depth rather than about the tree, which is exactly what the skip exists to prevent.
     """
     repo = _MIGRATIONS.parents[1]
     edited, compared = _statements_changed_since_merge()
-    if compared < 30 and _git(repo, "rev-parse", "--is-shallow-repository") == "true":
+    if _git(repo, "rev-parse", "--is-shallow-repository") == "true":
         pytest.skip(
-            "truncated history: every file compares against itself, so nothing looks edited"
+            f"truncated history: {compared} migration(s) compared, but an edit made *before* the "
+            "graft boundary is invisible — the pre-graft version is the grafted one, so the file "
+            "compares equal to itself and a live exemption looks stale. Needs `fetch-depth: 0`."
         )
 
     on_disk = {path.name for path in _migration_files()}
