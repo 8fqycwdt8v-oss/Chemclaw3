@@ -42,6 +42,66 @@ the two disagreeing measurements of the `build_agent` / `*SkillsSource` rename.
 
 ---
 
+## Open — Left by the post-migration review (2026-08-16)
+
+Nine reviewers over `git diff ab3da835..HEAD` — the four capability-migration tranches plus the
+revision measurement — each asked to reproduce rather than reason, and every headline re-verified by
+hand afterwards. What the pass is worth recording for is **the shape the defects shared**: not one of
+them is visible in a diff. Each is a property that held before the split and quietly stopped holding
+after it, while the code that asserted it stayed word for word the same.
+
+**Fixed in the commit that carries this section:**
+
+| Finding | Why it was invisible |
+|---|---|
+| `calc_session` relabelled every exception raised in its `with` body | `@asynccontextmanager` re-injects the caller's exception at the `yield`, and `cached_remote` runs the store's I/O inside that block. A Postgres outage was reported as "the calculation service is not answering", and a `ChemclawError` came back out **retryable** — the exact inversion the two error classes exist to draw. Found independently twice. |
+| An `McpError` was one failure wearing two meanings | FastMCP answers `-32602` for arguments that fail a tool's schema. Classified with transport faults, a durable job retried bad data to exhaustion. Now split on the JSON-RPC code. |
+| `embed_structure` and `combine_structures` bypassed their `RemoteRunner` | Five call sites, all bare, because `run` defaults to `plain` — so forgetting it is silent. A call may run 900 s against a 600 s heartbeat timeout, which is a 300-second window in which Temporal retries a job whose original call is still running. |
+| **24 of 49 calculator settings had no reader** | The physics left; the knobs stayed. `Chemclaw3-mcp` reads the *same* names under the *same* `CHEMCLAW_` prefix, so an operator setting `CHEMCLAW_XTB_OPT_MAX_STEPS` on this deployment changed nothing while the identically-spelled setting on the server decided the calculation. `.env.example` documented all 24, so the existing parity test was green — the parity nothing checked was "does anything read this?" |
+| Five docstrings asserted the retired `kg-validate` hazard gate still screens notes | `3a125828` fixed the identical claim two functions away in the same file. |
+| `science/README.md` described `calc` as "the physics" and listed a deleted `safety` package | `tests/test_repo_map.py` checks a README *exists*, not that it is true. |
+
+**Open, and each named with its anchor:**
+
+- **The Hessian regression is the one that matters** — the two queued rows in `BACKLOG.md` §3 and §4.
+  Matrices moved from the content-addressed artifact store into `HessianPayload.hessian_npy`, a
+  base64 field inside the row `durable/retention.py:69` **refuses to prune**. `put_all` — the store's
+  only writer — has one caller left and it is `tests/test_artifacts.py`. So `artifact_eviction.py`
+  runs daily against a table nothing fills, `list_artifacts`/`fetch_artifact` stay declared tools
+  that return nothing for any post-split calculation, and D-124's design is inverted.
+- **`predict_logd`'s domain-check arithmetic is duplicated across the two repositories with no
+  contract test.** `science/calc/logd.py` against
+  `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/logd.py`. Measured live and identical to
+  every printed digit today (`pka=5.3997777211992215`, `log_d=1.0772808264400353` for pyridine at
+  pH 7.4). `core/chem` and `CalculationKey` are both literal-pinned by contract tests that were run
+  green in this pass (64/64 and 10/10); this one has nothing.
+- **`tests/test_anc.py`'s six unit tests were deleted and replaced nowhere.** The engine lives at
+  `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/anc.py`; no test in that repo mentions
+  `anc`, `model_hessian` or the basis. What survives is integration-level, so a sign error or a
+  broken orthonormality is caught only if it also breaks convergence.
+- **The verifier's `method="json_schema"` binding is unmeasured against `openai_compatible`**, the
+  provider `CLAUDE.md` names as the real target. Both upstream downgrade paths were checked and
+  neither can trigger here (the schema is Pydantic v2 and an internal model name never matches the
+  `gpt-3`/`gpt-4-` test), so the risk is narrower than it first looked: a server that rejects
+  `response_format` outright lands in `verifier.py`'s blanket `except`, and the verifier degrades to
+  the citation gate on *every* call with only `chemclaw_verifier_degraded_total` to say so.
+- **`cached_remote`'s `key is None` branch is unreachable.** All eleven tools this repository passes
+  to it were asked of the live server; every one returns a key. The only tool the server refuses to
+  key is `predict_logd`, which production never routes through `cached_remote` — it composes logD
+  client-side. `run_cached` is dead the same way: zero production callers, kept alive by
+  `tests/test_store.py` calling it directly.
+- **`CALCULATION_EPOCH` is `"1"` on both sides and the only thing holding them together is a
+  hand-copied literal** in `Chemclaw3-mcp:servers/calc/tests/test_key_contract.py`. Nothing forces
+  that literal to be updated in the PR that bumps the epoch.
+
+**What held.** The check the whole design rests on was run against a real server on 8860:
+`calculation_key` matched the key the compute tool stamps for **6 of 6** cached tools, and
+`predict_logd` correctly derived none — closing the "not verified" tranche 4 shipped with. Payload
+models are field-identical across the repositories, the `multiplicity` inversion is fully resolved,
+D-080's "never certifies" invariant is enforced on the server against all three tools, and a
+hand mutation-test of fourteen claims in the changed suites broke every one of them — no vacuous
+test found.
+
 ## Open — Left by the upstream-adoption pass (2026-08-14)
 
 Source: `docs/decisions/D-2026-08-14-the-coupling-is-the-cost-not-the-line-count.md`. That ADR

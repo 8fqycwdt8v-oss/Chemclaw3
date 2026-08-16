@@ -58,7 +58,10 @@ def canonical_condition(species: str) -> str:
     `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` are the same solvent and were three unrelated
     tokens to every lexical and grouping path, so an optimization campaign could be split in two by
     spelling alone. Resolution reuses the one identity table (`chemclaw.core.reagents`), so the
-    vocabulary here cannot drift from the one the hazard screen and the calculators use.
+    vocabulary here cannot drift from the one every other in-process caller uses. That guarantee is
+    now bounded by the process: after `D-2026-08-16-the-physics-leaves-the-cache-stays` the
+    calculators and the hazard screen answer from `Chemclaw3-mcp`, each carrying its own reagent
+    table, and a shared import no longer holds them together.
 
     An unrecognised species folds to its own trimmed, lowercased form rather than being dropped:
     an unknown reagent is still a real condition, and losing it would silently merge campaigns that

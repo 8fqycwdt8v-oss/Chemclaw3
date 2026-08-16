@@ -135,21 +135,31 @@ def radical_multiplicity(smiles: str) -> int:
     return 1 + sum(int(atom.GetNumRadicalElectrons()) for atom in mol.GetAtoms())
 
 
-async def embed(smiles: str) -> Structure:
+async def embed(smiles: str, run: RemoteRunner = plain) -> Structure:
     """The force-field-cleaned starting geometry for one molecule, from the server.
 
     Remote rather than local even though RDKit is installed here, and the reason is the cache: a
     geometry embedded by a different RDKit build is a different `structure_id`, so every relaxation
     and Hessian keyed on it downstream would miss. Embedding on the same side that keys the results
     keeps the two in agreement by construction instead of by a version comparison nobody runs.
+
+    Takes a `run` like every other remote call here, and defaulting it to `plain` is what hid the
+    gap: an activity that forgot to pass one still worked, so all four call sites did. A remote
+    call is bounded by `calc_server_timeout_seconds` (900 s) and an activity by
+    `xtb_job_heartbeat_timeout_seconds` (600 s), so an embed slow enough to sit in that window
+    trips the activity's heartbeat timeout — Temporal retries the job while the original call is
+    still running, which is the exact failure `beating` was extracted to end.
     """
-    payload = await remote_call(
-        "embed_structure",
-        {
-            "smiles": smiles,
-            "multiplicity": radical_multiplicity(smiles),
-            "relax_with_force_field": True,
-        },
+    payload = await run(
+        remote_call(
+            "embed_structure",
+            {
+                "smiles": smiles,
+                "multiplicity": radical_multiplicity(smiles),
+                "relax_with_force_field": True,
+            },
+        ),
+        f"starting geometry for {smiles}",
     )
     return Structure.model_validate(payload)
 
@@ -288,7 +298,7 @@ async def scan_profile(
     if len(atoms) not in _COORDINATES:
         raise ValueError(f"a scan coordinate is 2, 3 or 4 atoms; {len(atoms)} were given")
     coordinate, unit = _COORDINATES[len(atoms)]
-    structure = await embed(smiles)
+    structure = await embed(smiles, run=run)
     if max(atoms) >= len(structure.elements) or min(atoms) < 0:
         raise ValueError(f"scan atom index out of range for {len(structure.elements)} atoms")
 
@@ -361,7 +371,7 @@ async def conformer_ensemble(
             store,
             "search_conformer_ensemble",
             {
-                "structure": (await embed(smiles)).model_dump(mode="json"),
+                "structure": (await embed(smiles, run=run)).model_dump(mode="json"),
                 "search": search,
                 "effort": effort or settings.crest_effort,
                 "solvent": solvent,
@@ -426,18 +436,21 @@ async def interaction(
     smiles_a, smiles_b = _ordered(smiles_a, smiles_b)
     monomers = []
     for smiles in (smiles_a, smiles_b):
-        relaxed, _ = await relax(store, await embed(smiles), solvent, run=run)
+        relaxed, _ = await relax(store, await embed(smiles, run=run), solvent, run=run)
         monomers.append(relaxed)
     # The separation between the two monomers' bounding spheres is the server's own default: it is
     # only a starting point — the wall potential and the search decide where they end up — and it
     # belongs to the geometry builder rather than to this orchestration.
     combined = Structure.model_validate(
-        await remote_call(
-            "combine_structures",
-            {
-                "first": monomers[0].structure.model_dump(mode="json"),
-                "second": monomers[1].structure.model_dump(mode="json"),
-            },
+        await run(
+            remote_call(
+                "combine_structures",
+                {
+                    "first": monomers[0].structure.model_dump(mode="json"),
+                    "second": monomers[1].structure.model_dump(mode="json"),
+                },
+            ),
+            f"starting complex geometry for {smiles_a} and {smiles_b}",
         )
     )
     payload, _ = await run(
@@ -568,7 +581,7 @@ async def _species_energy(
     thermochemistry settings are specialized here rather than handed in ready-made so that the
     stated value and the value actually used cannot disagree.
     """
-    structure = await embed(smiles)
+    structure = await embed(smiles, run=run)
     ensemble_correction = 0.0
     if level == "thorough":
         ensemble, _ = await conformer_ensemble(

@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
 
 from chemclaw.connectors.calc.remote import (
     CalcServerError,
@@ -206,6 +208,135 @@ def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     assert issubclass(CalcToolError, ChemclawError)
     assert issubclass(CalcServerError, SubsystemUnavailableError)
     assert not issubclass(CalcServerError, ChemclawError)
+
+
+class _Wire:
+    """`streamablehttp_client` — an async CM yielding the `(read, write, _)` triple.
+
+    Deliberately a *separate* fake from the session below. Conflating the two is not a hypothetical
+    slip: it fails at the tuple unpack, the connection guard catches that, and every test built on
+    it then passes for the wrong reason — the code under test is never reached at all.
+    """
+
+    def __call__(self, *args: Any, **kwargs: Any) -> "_Wire":
+        return self
+
+    async def __aenter__(self) -> tuple[None, None, None]:
+        return (None, None, None)
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _Transport:
+    """`ClientSession` — the object `calc_session` initializes and yields to its caller."""
+
+    def __init__(self, on_call: BaseException | None = None) -> None:
+        self._on_call = on_call
+
+    def __call__(self, *args: Any, **kwargs: Any) -> "_Transport":
+        return self
+
+    async def __aenter__(self) -> "_Transport":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+    async def initialize(self) -> None:
+        return None
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        if self._on_call is not None:
+            raise self._on_call
+        if name == "calculation_key":
+            return _Result({"key": _KEY})
+        return _Result({"log_s_mol_per_l": -2.1268648})
+
+
+class _RaisingStore:
+    """A store whose every method raises — the local cache failing under a healthy server."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def __getattr__(self, name: str) -> Any:
+        async def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise self._exc
+
+        return _boom
+
+
+def _real_session(monkeypatch: pytest.MonkeyPatch, transport: _Transport) -> None:
+    """Run the genuine `calc_session`, with only its two transport objects faked."""
+    monkeypatch.setattr("chemclaw.connectors.calc.remote.streamablehttp_client", _Wire())
+    monkeypatch.setattr("chemclaw.connectors.calc.remote.ClientSession", transport)
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        # The live one: `core/db.py::connect` re-raises a builtin `ConnectionError`, which is
+        # neither `ChemclawError` nor `SubsystemUnavailableError`.
+        (ConnectionError("postgres refused the connection"), ConnectionError),
+        # The one that inverted a control: relabelled, this came back out *retryable*.
+        (ChemclawError("the stored row is unusable"), ChemclawError),
+        (ValueError("a bug in the composition code"), ValueError),
+    ],
+)
+def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
+    monkeypatch: pytest.MonkeyPatch, raised: BaseException, expected: type[BaseException]
+) -> None:
+    """`calc_session` guards the *connection*, and nothing else — measured, not assumed.
+
+    `@asynccontextmanager` re-injects whatever the caller's block raises back into the generator at
+    its `yield`, so a guard wrapping the yield catches the caller's own exceptions too. That was
+    live: `cached_remote` runs `store.get`/`store.put` inside the block, so a Postgres outage was
+    reported to the chemist as "the calculation service is not answering" — the wrong subsystem
+    entirely — and a `ChemclawError` from the store came back out as `CalcServerError`, which is
+    *retryable*. A durable job then burned `activity_max_attempts` on data no retry could fix,
+    which is precisely the inversion the two error classes exist to prevent.
+    """
+    _real_session(monkeypatch, _Transport())
+
+    async def _run() -> None:
+        with pytest.raises(expected) as caught:
+            await cached_remote(_RaisingStore(raised), "predict_solubility", {"smiles": "c1ccccc1"})
+        assert not isinstance(caught.value, CalcServerError)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("code", "expected", "retryable"),
+    [
+        # FastMCP answers `-32602` for arguments that fail a tool's own schema before its body
+        # runs — the "atom index past the molecule" class, which no retry changes.
+        (INVALID_PARAMS, CalcToolError, False),
+        (METHOD_NOT_FOUND, CalcToolError, False),
+        # The server's own fault, and a retry is the only thing that fixes it.
+        (INTERNAL_ERROR, CalcServerError, True),
+    ],
+)
+def test_a_protocol_error_is_classified_by_who_is_at_fault(
+    monkeypatch: pytest.MonkeyPatch, code: int, expected: type[Exception], retryable: bool
+) -> None:
+    """An `McpError` is two opposite failures wearing one type, told apart by its code.
+
+    `session.call_tool` raises `McpError` identically for a request the server rejected and for a
+    server that broke mid-call. Classified as one, either the durable jobs retry an unparameterised
+    solvent to exhaustion or they give up on a pod restart. The code is the only thing that
+    separates them, so it is what `_call` reads.
+    """
+    _real_session(monkeypatch, _Transport(McpError(ErrorData(code=code, message="refused"))))
+
+    async def _run() -> None:
+        with pytest.raises(expected) as caught:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        # `ChemclawError` is the non-retryable hierarchy `durable/publish.py` matches on.
+        assert isinstance(caught.value, ChemclawError) is not retryable
+
+    asyncio.run(_run())
 
 
 # Every name whose value is or contains a `calc_version`. A local definition of any of these is the

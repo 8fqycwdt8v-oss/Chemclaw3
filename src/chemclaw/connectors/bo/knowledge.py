@@ -62,8 +62,11 @@ def note_from_campaign_result(
     own uncertainty about it inside the prefix that actually gets quoted back.
 
     **The molecules it recommends are written as structures, not as prose** — see `_condition` and
-    `_recommended_molecule`. That is what puts a `bo-candidate` in front of the hazard gate, which
-    could not see one at all before.
+    `_recommended_molecule`. That is what makes a `bo-candidate`'s structures legible to every
+    by-compound path at all — `kg.conflicts`, `find_notes`, and a reviewer reading the PR. (It also
+    put them in front of the `kg-validate` hazard gate, which is why they were written this way;
+    that gate was retired by `D-2026-08-15-safety-is-a-tool-not-a-gate` and the structures are
+    worth writing without it.)
 
     The note carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the
     very PR this opens).
@@ -165,15 +168,14 @@ def _recommended_molecule(by_name: dict[str, Parameter], best: Observation) -> s
     """The molecule this note is *about*, when the recommendation names exactly one.
 
     `compound_smiles` is where every by-compound question starts — `kg.conflicts` groups on
-    `(type, compound_smiles)`, `find_notes` searches it, and the hazard gate reads it first — and
-    a `bo-candidate` carried none, so a recommendation to *make a specific molecule* was invisible
-    to all three.
+    `(type, compound_smiles)` and `find_notes` searches it — and a `bo-candidate` carried none, so
+    a recommendation to *make a specific molecule* was invisible to both.
 
     Only when there is exactly one, for the reason `ingest/eln/note.py::_principal_product` gives
     about the same field: "the molecule this note is about" has no honest answer for a
     recommendation naming a ligand *and* a substrate, and picking one would file the note under a
     compound nobody chose. A wrong `compound_smiles` is worse than none — it is what a by-compound
-    search returns, and it would look right. Nothing is lost for the gate either way: every
+    search returns, and it would look right. Nothing is lost for a reader either way: every
     recommended structure is in the body as a code span.
     """
     named = [
