@@ -248,6 +248,22 @@ topic).
       today (see the ADR below), so this is latent rather than live, and fixing it without a producer
       is a branch no test can reach. The row exists so whoever adds the first interrupt finds it.
 
+- [ ] **The answer judge names no claims on 88% of turns** — [M]. `agent/verifier.py`'s
+      `VerificationResult.claims` is what tells a reader *which* sentence is unsupported, and
+      measured over 51 live turns it was non-empty on **6**. 26 of 39 flagged answers carry an empty
+      `unsupported` list, so `review_required` says "something here is wrong" and nothing else — to
+      a chemist, to a surface, or to any future revision loop. Fix is in the judge's prompt and its
+      structured schema, not in the caller.
+
+- [ ] **The judge's verdict is not reproducible at the threshold** — [M]. Re-scoring 39 unchanged
+      answers cleared **5.1% per roll**, so a `review_required` flip can mean the judge rolled
+      again rather than that anything changed. It is a margin effect, not general noise: two probes
+      on unambiguous fully-grounded answers scored 1.00 six times out of six. But
+      `verifier_confidence_threshold` (0.7) is precisely where the margin is. Either the judge needs
+      to be made deterministic enough to gate on (temperature, a stricter rubric, or best-of-n), or
+      the threshold needs a hysteresis band — and until one of those, no automated consumer should
+      act on a single reading.
+
 - [ ] **A flagged answer is never revised** — [M]. `agent/verifier.py`'s own docstring says a
       low-confidence answer is "marked, not blocked", and nothing routes a `review_required` answer
       back for another pass. **`RubricMiddleware` is not the fix**
@@ -262,8 +278,15 @@ topic).
       carried no information); and of six answers that completed, three were flagged for three
       different reasons, two at *high* judge confidence — including `promised but not called:
       screen_hazards`, which no rewrite of prose can fix, because the remedy is to call the tool.
-      Treat the three flag reasons as three questions. The run itself was cut short by an exhausted
-      model credential, so revision was never attempted.
+      Treat the three flag reasons as three questions.
+
+      **Measured, and the answer is no** (`D-2026-08-16-a-second-judge-…`): 51 probes on Haiku, 39
+      flagged, 39 revised. Revision cleared 10 but **8 of the 10 were deletions**, and the 2 that
+      kept their substance are exactly the number that clear with **no edit at all** when the judge
+      re-rolls. Benefit over doing nothing: zero, at $0.0149 and 3.4 s median per flagged turn.
+      `promised but not called` was "fixed" by deleting the promise 8 times out of 8. This row stays
+      open only for the one experiment that could overturn it — a stronger judge *and* reviser on
+      both legs — and the two rows below are prior to it.
 
 - [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S].
       `durable/retention.py` and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE
