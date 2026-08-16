@@ -138,6 +138,28 @@ _RAW_SYNONYMS: dict[str, tuple[str, str]] = {
     "tbhp": ("CC(C)(C)OO", "tert-butyl hydroperoxide"),
     "oxone": ("[K+].[K+].OOS([O-])(=O)=O.[O-]S(=O)(=O)O", "Oxone"),
     "naio4": ("[Na+].[O-][I](=O)(=O)=O", "sodium periodate"),
+    # Sodium peroxide beside hydrogen peroxide, because the two are one hazard written two ways and
+    # a table holding only the liquid could not express the solid. It is also the molecule whose
+    # SMILES — one-coordinate anions rather than a HO-OH — has now defeated three separate screening
+    # patterns in `Chemclaw3-mcp`'s hazard table, so having it here is what lets a test drive the
+    # screen with the reagent a chemist actually names.
+    "na2o2": ("[Na+].[O-][O-].[Na+]", "sodium peroxide"),
+    "sodiumperoxide": ("[Na+].[O-][O-].[Na+]", "sodium peroxide"),
+    # --- reductants held as salts, whose free-base spelling a screen must not depend on ---
+    #
+    # Hydrazine is the reagent a bench chemist weighs out, and the table held none of it at all —
+    # so the `hydrazine` structural rule and the hydrazine arm of `oxidizer-with-reductant`, both
+    # widened twice for exactly these spellings, could not be exercised against a *named* reagent.
+    # The catalogue forms are the salts, which is why the widening was needed: their nitrogen is
+    # `NX4+`, and a neutral-only pattern passes them.
+    "hydrazine": ("NN", "hydrazine"),
+    "n2h4": ("NN", "hydrazine"),
+    "hydrazinehydrate": ("NN.O", "hydrazine hydrate"),
+    "hydrazinehydrochloride": ("Cl.NN", "hydrazine hydrochloride"),
+    "hydrazinesulfate": ("NN.OS(=O)(=O)O", "hydrazine sulfate"),
+    "udmh": ("CN(C)N", "1,1-dimethylhydrazine"),
+    "1,1-dimethylhydrazine": ("CN(C)N", "1,1-dimethylhydrazine"),
+    "phenylhydrazine": ("NNc1ccccc1", "phenylhydrazine"),
     # --- azides / energetic reagents ---
     "nan3": ("[Na+].[N-]=[N+]=[N-]", "sodium azide"),
     "sodiumazide": ("[Na+].[N-]=[N+]=[N-]", "sodium azide"),

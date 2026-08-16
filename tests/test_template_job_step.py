@@ -369,3 +369,101 @@ def test_every_template_step_activity_is_registered_on_a_worker() -> None:
         f"template step activities missing from the background worker: "
         f"{sorted({'authorize_job_step', 'run_tool_step', 'run_agent_step'} - names)}"
     )
+
+
+def test_a_failed_template_step_wakes_the_session_and_names_which_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template that dies at step 2 of 3 must reach the chemist, and say where it died.
+
+    The exact defect `connector_job` had already been fixed for, one workflow over and never
+    carried across: `TemplateWorkflow.run` reached its `job_completed` push-back only on the success
+    path and had no `except` at all, so a failed run ended in silence. The chemist who launched a
+    procedure was told it had started and then never told anything else; the reason existed only in
+    Temporal's history under an id nobody had kept.
+
+    Three assertions, and the third is the one with teeth. That an event fires is easy to satisfy
+    trivially. That the *step id* is on it is what makes the event worth delivering — "the template
+    failed" is unactionable for a procedure with several steps, and it is the one thing this
+    workflow knows that the failure itself does not. And the run must still fail: a push-back that
+    swallowed the exception would turn a broken procedure into a silently empty result, which is a
+    worse defect than the one being fixed.
+
+    Driven against a real Temporal server rather than by calling `run` directly, because the thing
+    under test is behaviour on the *failure* path of a workflow — where the SDK's own handling of an
+    exception raised in workflow code is exactly what `failure_exception_types` above had to be
+    added for. Skips where the test server cannot be downloaded, like every real-server test here.
+    """
+    import inspect
+    from datetime import timedelta
+
+    from temporalio.client import WorkflowFailureError
+    from temporalio.worker import Worker
+
+    from chemclaw.agent.session_events import record_session_event
+    from chemclaw.durable.notify import record_session_event_activity
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
+    from chemclaw.templates.manifest import Template
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    _QUEUE = "background-jobs"
+    notified: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def _fake_record(*args: Any, **kwargs: Any) -> None:
+        bound = inspect.signature(record_session_event).bind(*args, **kwargs)
+        notified.append(
+            (bound.arguments["session_id"], bound.arguments["kind"], bound.arguments["payload"])
+        )
+
+    monkeypatch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
+    # The push-back runs on the background queue by name, so the one worker here has to *be* that
+    # queue — otherwise the activity is scheduled to a queue nobody polls and the run hangs until
+    # its execution timeout, which is a passing-looking 30-second failure rather than a defect.
+    monkeypatch.setattr("chemclaw.core.config.settings.background_task_queue", _QUEUE)
+
+    # The step names a job no connector declares, which is the same reachable, deterministic
+    # failure `test_a_template_naming_an_unknown_job_fails_rather_than_hanging` uses. The first step
+    # is there so the failure is genuinely mid-procedure rather than at the very first thing tried.
+    template = Template.model_validate(
+        {
+            "name": "fails-midway",
+            "summary": "Fail on the one step it has.",
+            "inputs": [],
+            "steps": [
+                {"id": "first", "kind": "job", "job": "no_such_job_anywhere", "arguments": {}},
+            ],
+        }
+    )
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=_QUEUE,
+                workflows=[TemplateWorkflow],
+                activities=[authorize_job_step, record_session_event_activity],
+            ):
+                with pytest.raises(WorkflowFailureError):
+                    await asyncio.wait_for(
+                        client.execute_workflow(
+                            TemplateWorkflow.run,
+                            TemplateRunInput(
+                                template=template, requested_by="tester", session_id="s-tmpl"
+                            ),
+                            id="template-failure-notify",
+                            task_queue=_QUEUE,
+                            execution_timeout=timedelta(seconds=30),
+                        ),
+                        timeout=30,
+                    )
+
+    asyncio.run(_run())
+
+    assert len(notified) == 1, "a failed template emitted no session event at all — the defect"
+    session_id, kind, payload = notified[0]
+    assert (session_id, kind) == ("s-tmpl", "job_failed")
+    assert payload["step"] == "first", (
+        "which step failed is the one thing this workflow knows that the failure does not"
+    )
+    assert payload["template"] == "fails-midway"

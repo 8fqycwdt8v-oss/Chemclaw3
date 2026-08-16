@@ -538,3 +538,67 @@ def test_optimize_refuses_a_trade_off_before_spending_any_budget() -> None:
     with pytest.raises(ValueError, match="no single best point"):
         asyncio.run(optimize(problem, _evaluate, n_initial=2, n_rounds=1))
     assert calls == 0
+
+
+def test_a_campaign_declaring_the_wrong_direction_is_refused_at_launch() -> None:
+    """The inverted campaign: every number right, the recommendation exactly backwards.
+
+    A campaign carries its direction twice — in `CampaignSpec.problem.objectives[0].direction`,
+    which is what BoFire optimizes, and implicitly in what the *registered* objective means — and
+    nothing compared them. So `objective_name="solubility_max"` with `direction="minimize"` ran to
+    completion, spent the full evaluation budget, wrote a PR-gated `bo-candidate` note, and
+    recommended the **least** soluble molecule in the library as its best point.
+
+    That is the failure a reviewer is least able to catch: nothing in the note is false. The
+    conditions were really evaluated, the objective value really is what the model computed, and
+    the campaign really did find the extremum it was asked for. Only the direction was wrong, and
+    the note does not carry the registry's opinion of which way is better.
+
+    Refused at launch, before an evaluation budget is spent, and the message names the fix.
+    """
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="molecule", categories=["CCO", "CCCO"])],
+        objectives=[Objective(name="log_s", direction="minimize")],
+    )
+    spec = CampaignSpec(problem=problem, objective_name="solubility_max", n_rounds=2)
+
+    with pytest.raises(ValueError, match="backwards"):
+        require_campaign_startable(spec)
+
+
+def test_the_direction_rule_costs_nothing_and_passes_the_agreeing_case() -> None:
+    """The other half, and the reason `registered_direction` is not `get_objective`.
+
+    A campaign whose declared direction agrees with the registry must start — an over-eager rule
+    here would refuse every real campaign, which is the failure mode a one-sided test misses.
+
+    And it is answered *without building the objective*: `solubility_objective` closes over a
+    calculator client this precondition has no business constructing, and `_reizman_suzuki` fits a
+    surrogate from a bundled dataset. A campaign refused — or accepted — for its direction should
+    cost neither. `registered_direction` reads the registry row and stops there, which is what makes
+    this test run in milliseconds rather than fitting a model.
+    """
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="molecule", categories=["CCO", "CCCO"])],
+        objectives=[Objective(name="log_s", direction="maximize")],
+    )
+    require_campaign_startable(CampaignSpec(problem=problem, objective_name="solubility_max"))
+
+
+def test_every_registered_objective_declares_a_direction_the_vocabulary_allows() -> None:
+    """A registry row whose direction is a typo would refuse every campaign naming it.
+
+    The check that keeps the two halves speaking one language: `registered_direction` is compared
+    for *equality* against `ObjectiveSpec.direction`, so a row spelling it `"max"` would make its
+    objective permanently unstartable — and the refusal would blame the caller. Asserted over the
+    registry rather than over a list written here, so a new objective is covered on the day it is
+    added.
+    """
+    from chemclaw.science.bo.objectives import _REGISTRY, registered_direction
+
+    assert _REGISTRY, "an empty registry would make this check vacuous"
+    for name in _REGISTRY:
+        assert registered_direction(name) in {"maximize", "minimize"}, (
+            f"objective {name!r} declares direction {registered_direction(name)!r}, which no "
+            "`ObjectiveSpec` can equal — every campaign naming it would be refused"
+        )

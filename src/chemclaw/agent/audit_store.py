@@ -24,8 +24,8 @@ from chemclaw.core.config import settings
 _INSERT = """
     INSERT INTO audit_events
         (correlation_id, session_id, purpose, actor, agent, tool, arguments, outcome, detail,
-         latency_ms, revision)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         latency_ms, revision, tool_revision)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -57,6 +57,7 @@ class PostgresAuditSink:
                     event.detail,
                     event.latency_ms,
                     event.revision,
+                    event.tool_revision,
                 ),
             )
             await conn.commit()

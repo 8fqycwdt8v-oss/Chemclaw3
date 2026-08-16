@@ -791,6 +791,36 @@ def require_descriptors_distinguish_categories(problem: OptimizationProblem) -> 
             seen[key] = category
 
 
+def require_direction_matches_objective(spec: CampaignSpec) -> None:
+    """The declared direction must be the one its registered objective is actually better in.
+
+    **The import is deferred, and the cycle is the reason.** `science.bo.objectives` imports this
+    module for `OptimizationProblem` and friends, so a module-level import back would not resolve.
+    Putting the check in `objectives` instead is not the alternative it looks like: `connector.yaml`
+    names exactly one `precondition`, and `cli/validate_connectors.py` checks that the named
+    function accepts the params model — so every launch-time rule has to be reachable from here.
+
+    A registered name this deployment does not have raises from `registered_direction` with the
+    known names, which is the same refusal `get_objective` would give one round later and at no
+    cost.
+
+    Raises:
+        ValueError: Naming the objective, both directions, and which one to change.
+    """
+    from chemclaw.science.bo.objectives import registered_direction
+
+    declared = spec.problem.objective.direction
+    registered = registered_direction(spec.objective_name)
+    if declared != registered:
+        raise ValueError(
+            f"this campaign declares `direction={declared!r}` for objective "
+            f"{spec.problem.objective.name!r}, but the registered objective "
+            f"{spec.objective_name!r} is {registered}d — so the search would run backwards and "
+            f"report its worst point as the best one. Set the problem's direction to "
+            f"{registered!r}, or start a campaign over an objective that is {declared}d."
+        )
+
+
 def require_campaign_startable(spec: CampaignSpec) -> None:
     """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
@@ -809,14 +839,25 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
     is refused at launch with a message naming the inline tool that *does* do multi-objective,
     rather than silently optimizing the lead one and reporting a "best" nobody asked for.
 
+    The third is the one that catches an *inverted* campaign: the spec carries a direction and the
+    registry knows which way its named objective is better, and nothing compared them. BoFire
+    optimizes the spec's direction while the registered function supplies the numbers, so
+    `objective_name="solubility_max"` with `direction="minimize"` ran to completion, wrote a
+    PR-gated `bo-candidate`, and recommended the *least* soluble molecule as its best point — every
+    number correct and the recommendation exactly backwards, which is the shape a reviewer reading
+    the note can least easily catch. Checked here rather than on `CampaignSpec` for this section's
+    standing reason: these validators must not re-run at replay, where a registry edit would fail an
+    in-flight campaign's own input.
+
     Raises:
         ValueError: When the round count exceeds `bo_max_rounds`, the problem names more than one
-            objective, a parameter and an objective share a name, or two categories carry the same
-            descriptor row.
+            objective, a parameter and an objective share a name, two categories carry the same
+            descriptor row, or the declared direction disagrees with the registered objective's.
     """
     require_rounds_within_ceiling(spec.n_rounds)
     require_names_do_not_clash(spec.problem)
     require_descriptors_distinguish_categories(spec.problem)
+    require_direction_matches_objective(spec)
     if len(spec.problem.objectives) > 1:
         named = ", ".join(objective.name for objective in spec.problem.objectives)
         raise ValueError(

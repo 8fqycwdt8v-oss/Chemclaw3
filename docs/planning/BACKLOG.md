@@ -137,9 +137,6 @@ topic).
       `agent/authz.py`'s `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained frozenset while every
       manifest already declares which of its tools change state. Two answers to one question, and
       the hand-maintained one is what runs.
-- [ ] **`WarehouseQueryError` embeds the driver's text in a message the model reads** — [S].
-      `ingest/eln/warehouse/snowflake.py:88`. Driver errors quote the statement, so the query shape
-      and column names reach the transcript.
 
 ## 2 — Answers that are wrong without saying so
 
@@ -174,14 +171,6 @@ topic).
       (`core/config/__init__.py:195` refuses `>1`, and the fleet connection-budget arithmetic at
       `:208`/`:214` reads it).
 
-- [ ] **Four hazard-screen rules miss a reagent a chemist would expect them to catch** — [M], one
-      row because they are one defect class: a SMARTS arm written for the common spelling.
-      `peroxide-with-ketone`'s `left` is `[OX2H][OX2H]`, so `Na2O2 + acetone` raises only
-      `peroxide`; `complex-hydride-with-chlorinated-solvent`'s is `[$([AlH4-]),$([BH4-])]`, so NaH
-      raises nothing; `azide-with-dichloromethane`'s `right` is `[CH2](Cl)Cl`, so chloroform is
-      missed; and `core/reagents._TABLE` holds no hydrazine at all, so a hydrazine widening cannot
-      be checked. All four measured through the shipped screen.
-
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M]. `standard_smiles("CCN.C1CCOC1")`
       returns THF: `FragmentParent` keeps the largest fragment. Every downstream key, screen and
       similarity hit then describes the solvent.
@@ -193,20 +182,12 @@ topic).
       disappears from the export is invisible to a cursor-based sync, so the note it produced keeps
       answering as current.
 
-- [ ] **One non-UTF-8 ORD export aborts the entire ELN sync batch** — [M].
-      `ingest/eln/ord_adapter.py:110`, contradicting the adapter's own skip-and-continue contract.
 
 - [ ] **A BO observation naming an undeclared parameter is silently dropped** — [S], and it is a
       *fabrication* vector rather than an error-handling one: the campaign then optimises against a
       history that is missing the observation the chemist thought they recorded.
 
-- [ ] **A durable campaign's declared direction is not checked against its registered objective** —
-      [M]. `CampaignSpec` carries `problem.objectives[0].direction` and the registered objective
-      separately; nothing asserts they agree, so a maximise campaign can minimise.
 
-- [ ] **`evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true** — [S].
-      `evals/live.py:317`. The harness's headline "failed silently" signal can never fire, which
-      makes every live eval run's most important number meaningless.
 
 ## 3 — Work that is lost, dropped or invisible
 
@@ -216,10 +197,6 @@ topic).
 - [ ] **The mid-turn resume drops `user_input_requests`** — [L]. `api/runner.py:780`: an approval
       prompt raised during a resume never reaches the stream, so the turn waits on an answer nobody
       was asked for.
-
-- [ ] **A template workflow's failure is invisible to the chemist** — [S]. `TemplateWorkflow.run`
-      has no `try/except` and reaches `notify_session_best_effort(…, "job_completed", …)` only on
-      the success path.
 
 - [ ] **A pinned template's arguments go unchecked once its bundle stops being ours** — [S].
       `cli/validate_templates.py::_resolvable_signatures` reads a signature from
@@ -257,13 +234,6 @@ topic).
 
 ## 4 — Operating it
 
-- [ ] **`LANGSMITH_TRACING` is pinned false in the Helm chart and nowhere else** — [S]. `langsmith`
-      is in the runtime closure and enables itself from ambient environment: measured,
-      `LANGSMITH_TRACING=true` sends conversation content to `api.smith.langchain.com` with no repo
-      code involved. `deploy/entrypoint.sh:18` now exports a default, which covers the image; `make
-      chat`, `make connectors`, hand-started workers, CI and local dev are still unguarded. Fix at
-      the composition root so it holds regardless of launcher.
-
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. Everything below about backup and retention is downstream
@@ -276,21 +246,6 @@ topic).
       sync, memory synthesis, retention and eval drift, and cannot be scaled because the PR-gate
       checkout lock is host-local (D-069). It needs the distributed lock, which is its own
       `DEFERRED.md` row.
-
-- [ ] **Two migrations share the number `037`, and two share `043`** — [XS]. `infra/sql/` holds
-      `037_bo_suggestion_provenance.sql` and `037_document_index.sql`, plus
-      `043_session_listing.sql` and `043_session_message_shape.sql`. **This row supersedes two
-      earlier filings that reached opposite conclusions** (one asked for a rename, one argued
-      against). The decision: the runner applies by filename and records by filename, so nothing is
-      broken today and a rename would be a destructive edit to merged migrations, which
-      `tests/test_migrations_are_additive.py` refuses. So **do not renumber** — add the collision
-      check to the migration test instead, so the *next* one is caught before merge.
-
-- [ ] **`.github/workflows/ci.yml` checks out with the `actions/checkout@v4` depth-1 default, which
-      makes the migration-immutability check unrunnable in CI** — [S], one line. On a depth-1 clone
-      `git show <graft>:file` is the working tree's own content, so a smuggled `ALTER TABLE`
-      appended to a merged migration reported no edit across all 42 migrations. The test now skips
-      honestly rather than passing; the check itself needs `fetch-depth: 0`.
 
 - [ ] **The image vulnerability scan is written but not merged as a gate** — [M].
       `trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL` exists and does not run.
@@ -307,11 +262,6 @@ topic).
       erasure request currently has no route across the seven tables that hold a conversation.
 
 ## 5 — Upstream capability this stack already has
-
-- [ ] **`PlanEvent` carries no `plan_hash`** — [S], 2026-08-15. A client watching the stream sees the
-      todo list but cannot post `POST /sessions/{id}/plan/decision` without a separate `GET /plan`
-      round-trip for the hash it must echo — which is what `evals/live.py` does. Adding the field is
-      additive to the SSE union, so it needs a `Chemclaw3_ui` change only to *use* it.
 
 - [ ] **A plan refusal is distinguishable only by substring** — [M], 2026-08-15. It reaches the wire
       as a `ToolFailedEvent`, and every consumer tells it apart by matching the refusal sentence

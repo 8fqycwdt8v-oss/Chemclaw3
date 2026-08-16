@@ -19,6 +19,7 @@ not run themselves, so every step is authorized against the same actor, through 
 chat turn.
 """
 
+import contextlib
 from datetime import timedelta
 from typing import Any, cast
 
@@ -32,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         ConnectorJobInput,
         ConnectorJobResult,
         child_workflow_id,
+        failure_reason,
     )
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.template_activities import (
@@ -112,7 +114,19 @@ class TemplateWorkflow:
         results: dict[str, Any] = {}
 
         for step in run.template.steps:
-            result = await self._run_step(step, scope, identity, timeout)
+            try:
+                result = await self._run_step(step, scope, identity, timeout)
+            except BaseException as exc:
+                # The completion push-back below had no counterpart, so a template that failed at
+                # step 3 of 5 told the chemist nothing at all: the workflow ended, the session
+                # stream stayed silent, and the only record was in Temporal's history. The
+                # connector-job workflow already answers this (`connector_job._notify_failure`) and
+                # this is deliberately the same shape and the same best-effort stance — the run is
+                # already failing, and a push-back that failed on top would replace one lost
+                # message with two. Which step, because "the template failed" is unactionable when
+                # a procedure has five of them.
+                await self._notify_failure(run, step, exc)
+                raise
             results[step.id] = result
             scope[f"steps.{step.id}.result"] = result
 
@@ -131,6 +145,28 @@ class TemplateWorkflow:
         # and a caller that wants an earlier stage has every one of them in `steps`.
         last = run.template.steps[-1].id
         return TemplateRunResult(template=run.template.name, steps=results, result=results[last])
+
+    async def _notify_failure(self, run: TemplateRunInput, step: Any, exc: BaseException) -> None:
+        """Tell the session which step failed, before the failure propagates and closes this run.
+
+        Never raises, and that is not defensiveness: this runs on the way out of an already-failing
+        workflow, so an exception here would replace the original failure with a push-back error and
+        lose the reason entirely. `notify_session_best_effort` swallows its own transport failures;
+        the guard is for everything else, including a `cancelled` teardown that reaches this line.
+        """
+        if not run.session_id:
+            return
+        with contextlib.suppress(Exception):
+            await notify_session_best_effort(
+                run.session_id,
+                "job_failed",
+                {
+                    "job_id": workflow.info().workflow_id,
+                    "template": run.template.name,
+                    "step": getattr(step, "id", ""),
+                    "reason": failure_reason(exc),
+                },
+            )
 
     async def _run_step(
         self, step: Any, scope: dict[str, Any], identity: StepIdentity, timeout: timedelta

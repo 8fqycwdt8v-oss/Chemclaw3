@@ -183,8 +183,12 @@ class HeldConnectorSession:
         """
         try:
             async with create_session(self._spec.connection) as session:
-                await session.initialize()
-                self._tools = _allowed(await load_mcp_tools(session), self._spec.allowed_tools)
+                handshake = await session.initialize()
+                self._tools = _stamped(
+                    _allowed(await load_mcp_tools(session), self._spec.allowed_tools),
+                    connector=self._spec.name,
+                    revision=handshake.serverInfo.version,
+                )
                 self._opened.set()
                 await self._stop.wait()
         except (Exception, asyncio.CancelledError) as exc:
@@ -205,3 +209,37 @@ def _allowed(tools: list[BaseTool], allowed: tuple[str, ...] | None) -> list[Bas
         return list(tools)
     keep = set(allowed)
     return [tool for tool in tools if tool.name in keep]
+
+
+#: What `_stamped` writes and `agent/audit.py::_served_by` reads. One constant, because a key
+#: spelled in two files is a provenance field that silently stops being filled the day one of them
+#: is renamed — and a blank provenance column reads exactly like an in-process call.
+SERVED_BY = "chemclaw.served_by"
+
+
+def _stamped(tools: list[BaseTool], *, connector: str, revision: str) -> list[BaseTool]:
+    """Record which server, at which build, answers each of these tools.
+
+    **The audit trail's remaining provenance hole, and this is where the answer is knowable.**
+    `audit_events.revision` names the *orchestrator's* commit, which was the whole story while the
+    chemistry ran in this process. It no longer does: the capability moved to `Chemclaw3-mcp`
+    servers that release on their own cadence, so "which build produced this number" became a fact
+    about a different process — one only the MCP handshake can state.
+
+    `initialize()` returns `serverInfo{name, version}` on every session, which is why nothing new is
+    opened, sent or awaited to learn this. The version is `"unknown"` unless that server's image was
+    built with its revision (`Chemclaw3-mcp` `docs/integration.md`), and recording `"unknown"` is
+    the correct outcome there rather than a reason to omit the field — it says a remote server
+    answered and could not name its build, which is a different fact from an in-process tool, whose
+    stamp is absent entirely because `revision` already covers it.
+
+    Carried on `BaseTool.metadata` rather than threaded through `open_connector_specs`'s return
+    value: it is a fact *about a tool*, and the alternative is a parallel `{name: revision}` map
+    passed through four callers and a builder parameter, duplicating the structure of the list it
+    travels beside — where a tool dropped from one and not the other is a silent misattribution.
+    Merged into whatever metadata the adapter already set, never replacing it.
+    """
+    served = {"connector": connector, "revision": revision}
+    for tool in tools:
+        tool.metadata = {**(tool.metadata or {}), SERVED_BY: served}
+    return tools

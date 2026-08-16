@@ -131,6 +131,39 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
 }
 
+# The two migrations whose statements were edited *before* the guard below could run, kept as named
+# exemptions rather than repaired — because the repair is what would break things now.
+#
+# **They were found the day `fetch-depth: 0` reached CI.** The check below had never actually
+# executed: on `actions/checkout`'s depth-1 default every migration compared
+# equal to itself, so it reported no edit across all 45. Turning the checkout on is what asked the
+# question for the first time, and this is its first answer — which is the check working, not a
+# regression.
+#
+# **The edit was deliberate and is documented in the tree.** `004_fingerprint_definition.sql` says
+# so in its own opening line: "Fresh databases get the column straight from 002/003; this migration
+# brings an existing dev database up to date." Someone added `definition` to both `CREATE TABLE`s
+# *and* wrote the `ALTER` for databases that had already run them. By today's rule
+# (`D-2026-08-04-the-schema-only-goes-forward`) only the second half is allowed. It predates the
+# rule.
+#
+# **Reverting them would break every database that exists to fix one that cannot.** The ledger keys
+# on the checksum recorded when a file was applied, so:
+#
+#   * a database that applied 002 *before* the edit already fails `make db-migrate` today — and it
+#     is unreachable anyway, because that version named the column `smiles`, nothing ever renamed it
+#     to `label`, and no current query would find it. There is no supported database in that state.
+#   * every database created *since* recorded the current checksum. Restoring the old statements
+#     would make `make db-migrate` refuse on all of them — CI, every dev sandbox, every deployment.
+#
+# So the honest move is the one the collision check makes for `037`/`043`: name them, say why, and
+# keep the teeth for everything that comes after. Each entry is checked to still *be* an edit
+# (`test_no_grandfathered_edit_outlives_its_reason`), so an exemption that stops applying fails
+# rather than quietly widening.
+_GRANDFATHERED_EDITS: frozenset[str] = frozenset(
+    {"002_molecule_fingerprints.sql", "003_reaction_fingerprints.sql"}
+)
+
 # Comment stripping is the *runner's* `_statements`, imported rather than reimplemented. Every
 # migration here is heavily commented and several comments discuss what they are careful *not* to
 # drop, so scanning the prose would fail the check on the files that explain the policy best — and
@@ -308,6 +341,44 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout.strip()
 
 
+def _statements_changed_since_merge() -> tuple[list[str], int]:
+    """Which merged migrations differ from the commit that added them, and how many were compared.
+
+    Extracted so the immutability check and its exemption's staleness check ask git the *same*
+    question. A shared module-level cache would make them order-dependent, and a second copy of the
+    walk would let the exemption be validated against a rule the check no longer applies — which is
+    precisely how an exemption outlives its reason.
+
+    `compared` counts only comparisons that **span a commit**: a file introduced by `HEAD` itself
+    has nothing earlier to differ from, and on a truncated clone every file looks introduced by the
+    graft (which *is* `HEAD`), so it is the one number telling a real run from a vacuous one.
+    """
+    repo = _MIGRATIONS.parents[1]
+    head = _git(repo, "rev-parse", "HEAD")
+    edited: list[str] = []
+    compared = 0
+    for path in sorted(_MIGRATIONS.glob("*.sql")):
+        introduced = _git(
+            _MIGRATIONS, "log", "--diff-filter=A", "--format=%H", "--", path.name
+        ).split()
+        if not introduced:
+            continue  # added in the working tree; not merged, so not yet immutable
+        if introduced[-1] == head:
+            continue  # introduced by the commit under test — there is no earlier version to differ
+        original = subprocess.run(
+            ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if original.returncode != 0:
+            continue  # renamed on the way in; `--follow` semantics are not worth the ambiguity
+        compared += 1
+        if _statements(original.stdout) != _statements(path.read_text(encoding="utf-8")):
+            edited.append(path.name)
+    return edited, compared
+
+
 def test_no_merged_migration_had_its_statements_changed() -> None:
     """A merged migration's *statements* are immutable. Its comments are not, and that is the fix.
 
@@ -353,28 +424,7 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
     truncation has eaten every comparison.
     """
     repo = _MIGRATIONS.parents[1]
-    head = _git(repo, "rev-parse", "HEAD")
-    edited: list[str] = []
-    compared = 0
-    for path in sorted(_MIGRATIONS.glob("*.sql")):
-        introduced = _git(
-            _MIGRATIONS, "log", "--diff-filter=A", "--format=%H", "--", path.name
-        ).split()
-        if not introduced:
-            continue  # added in the working tree; not merged, so not yet immutable
-        if introduced[-1] == head:
-            continue  # introduced by the commit under test — there is no earlier version to differ
-        original = subprocess.run(
-            ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-        if original.returncode != 0:
-            continue  # renamed on the way in; `--follow` semantics are not worth the ambiguity
-        compared += 1
-        if _statements(original.stdout) != _statements(path.read_text(encoding="utf-8")):
-            edited.append(path.name)
+    edited, compared = _statements_changed_since_merge()
     if compared < 30 and _git(repo, "rev-parse", "--is-shallow-repository") == "true":
         pytest.skip(
             f"truncated history: only {compared} migration(s) could be compared against an "
@@ -386,8 +436,82 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
         "against the commit that introduced them; the rest had no earlier version to compare "
         "with. This test has just passed without asking its question of anything."
     )
-    assert not edited, (
-        f"migration(s) whose statements changed after being merged: {edited}. The runner keys on a "
-        "checksum of exactly this, so it breaks `make db-migrate` on every database that already "
-        "applied them. Put the change in a new migration."
+    assert not set(edited) - _GRANDFATHERED_EDITS, (
+        f"migration(s) whose statements changed after being merged: "
+        f"{sorted(set(edited) - _GRANDFATHERED_EDITS)}. The runner keys on a checksum of exactly "
+        "this, so it breaks `make db-migrate` on every database that already applied them. Put the "
+        "change in a new migration."
+    )
+
+
+def test_no_two_migrations_claim_one_number() -> None:
+    """Two files with the same prefix are two migrations one number cannot name.
+
+    **This does not ask for the existing collisions to be fixed, and that is the decision it
+    encodes.** `037_bo_suggestion_provenance` / `037_document_index` and `043_session_listing` /
+    `043_session_message_shape` are already merged and applied. The runner orders and records by
+    *filename*, so nothing about them is broken — and renaming a merged migration is exactly the
+    destructive edit `test_no_merged_migration_had_its_statements_changed` refuses, which would also
+    leave every database that already recorded the old name applying the new one a second time.
+
+    So the four are grandfathered by name, and the check exists for the *next* one — caught at
+    review, when a rename is still free. The exemption list is what makes that honest: adding a
+    fifth name to it is a visible act in a diff, where a check that simply excluded duplicates
+    would let the number space keep colliding in silence.
+
+    Grandfathered pairwise rather than by number, so a *third* file claiming `037` still fails.
+    """
+    grandfathered = {
+        frozenset({"037_bo_suggestion_provenance.sql", "037_document_index.sql"}),
+        frozenset({"043_session_listing.sql", "043_session_message_shape.sql"}),
+    }
+    by_number: dict[str, list[str]] = {}
+    for path in _migration_files():
+        number = path.name.split("_", 1)[0]
+        assert number.isdigit(), f"{path.name} does not begin with a migration number"
+        by_number.setdefault(number, []).append(path.name)
+
+    collisions = {
+        number: names
+        for number, names in by_number.items()
+        if len(names) > 1 and frozenset(names) not in grandfathered
+    }
+    assert not collisions, (
+        f"two migrations claim one number: {collisions}. Renumber the new one before merging — "
+        "after it is merged and applied, renaming it is a destructive edit and the number is "
+        "permanently ambiguous in `schema_migrations`"
+    )
+
+
+def test_no_grandfathered_edit_outlives_its_reason() -> None:
+    """Each grandfathered file must still exist and still *be* an edit.
+
+    The sibling of `test_no_exemption_outlives_its_migration`, and it checks the stronger of the two
+    properties an exemption can lose. A name that no longer matches a file is one failure; a name
+    whose file no longer differs from its introducing commit is the quieter one — the exemption
+    stops doing anything and stays granted, so the next edit to *that* file passes unexamined. Both
+    are "a permission nobody can see spent".
+
+    Asked through `_statements_changed_since_merge`, the same walk the check itself uses, so the
+    exemption cannot be validated against a rule the check no longer applies.
+
+    Skipped rather than failed on a truncated clone, for the reason the check gives at length: on a
+    depth-1 checkout every file compares equal to itself, so *every* exemption would look stale and
+    the red build would be about the CI setting rather than about the tree.
+    """
+    repo = _MIGRATIONS.parents[1]
+    edited, compared = _statements_changed_since_merge()
+    if compared < 30 and _git(repo, "rev-parse", "--is-shallow-repository") == "true":
+        pytest.skip(
+            "truncated history: every file compares against itself, so nothing looks edited"
+        )
+
+    on_disk = {path.name for path in _migration_files()}
+    assert not (_GRANDFATHERED_EDITS - on_disk), (
+        f"grandfathered edit(s) naming no migration: {sorted(_GRANDFATHERED_EDITS - on_disk)}"
+    )
+    assert not (_GRANDFATHERED_EDITS - set(edited)), (
+        f"grandfathered edit(s) that no longer differ from the commit that introduced them: "
+        f"{sorted(_GRANDFATHERED_EDITS - set(edited))}. The exemption has nothing left to permit, "
+        "so delete it — leaving it granted means the next edit to that file goes unexamined."
     )

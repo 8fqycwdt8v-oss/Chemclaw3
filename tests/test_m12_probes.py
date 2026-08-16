@@ -498,9 +498,17 @@ def test_an_outage_announced_after_the_answer_has_started_fails() -> None:
     """The regression this suite exists to catch, and which no existing signal could see.
 
     Every field the corpus run reads is identical between this stream and the passing one above —
-    `degraded` names the same capability, `failed_loudly` is true, the turn answers. Only the
+    `degraded` names the same capability, `failed_loudly` reads the same, the turn answers. Only the
     position differs, and to the model a late announcement is indistinguishable from none: it has
     already planned against a surface it will not get.
+
+    `failed_loudly` is **false** on both, and the sameness is the point rather than the value. It
+    used to be true on both, for a reason that turned out to be a defect one layer down: `degraded`
+    counted as a turn failure, so every turn of any broker-less deployment was loudly failed and the
+    silent-death signal could not fire anywhere
+    (`D-2026-08-16-an-announcement-is-not-a-failure`). Separating them left this pair *more*
+    distinguishing, not less — the ordering finding is now the only thing that tells these two
+    streams apart, which is exactly what this suite was built to say.
     """
     outcome = _degraded_outcome(
         {"type": "tool_call", "tool": "compute_reaction_energy", "arguments": "{}"},
@@ -509,7 +517,7 @@ def test_an_outage_announced_after_the_answer_has_started_fails() -> None:
         {"type": "answer", "text": "Running the calculation now."},
     )
     assert outcome.degraded == ["durable-jobs (Temporal)"]
-    assert outcome.failed_loudly is True
+    assert outcome.failed_loudly is False
     findings = {f.check: f for f in degradation_findings(_probe(), outcome)}
     assert findings["the outage was announced"].ok is True
     assert findings["announced before the first token"].ok is False

@@ -23,16 +23,24 @@ from typing import Any, cast
 from langchain.agents.middleware.types import ToolCallRequest
 
 
-def tool_request(name: str, args: dict[str, Any] | None = None, call_id: str = "call-1") -> Any:
+def tool_request(
+    name: str,
+    args: dict[str, Any] | None = None,
+    call_id: str = "call-1",
+    tool: Any = None,
+) -> Any:
     """A `ToolCallRequest` carrying only what a middleware reads.
 
-    `tool=None`, `state={}` and `runtime=None` are what LangChain documents for a request built
-    outside a graph — the middlewares under test read `request.tool_call` and nothing else, which
-    is the property that makes them testable this way at all rather than only through a turn.
+    `state={}` and `runtime=None` are what LangChain documents for a request built outside a graph.
+    `tool` defaults to `None` for the same documented reason and because it is also what `ToolNode`
+    passes for a name the graph does not hold — the governance chain reads `request.tool_call` and,
+    in one observational place, `request.tool`. Pass a tool only where its *metadata* is the thing
+    under test (`agent/audit.py::_served_by`); leaving it `None` is the honest default, not a
+    convenience, since a middleware that needed it would be one that fails open without it.
     """
     return ToolCallRequest(
         tool_call={"name": name, "args": args or {}, "id": call_id, "type": "tool_call"},
-        tool=None,
+        tool=tool,
         state={},
         runtime=cast(Any, None),
     )

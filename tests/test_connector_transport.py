@@ -33,9 +33,11 @@ import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from langchain_core.tools import BaseTool
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 
+from chemclaw.agent.audit import _served_by
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_ROLES,
@@ -51,7 +53,7 @@ from chemclaw.connectors.registry import (
     server_tools_module,
 )
 from chemclaw.connectors.server import connector_app
-from chemclaw.connectors.transport import ConnectorSpec
+from chemclaw.connectors.transport import SERVED_BY, ConnectorSpec, _stamped
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
@@ -628,3 +630,89 @@ def test_an_endpoint_declaring_no_timeout_is_still_bounded() -> None:
         bound = _session_read_bound(spec)
         assert bound == request_timeout_seconds(endpoint)
         assert 0 < bound < 600, f"{type(endpoint).__name__} bound {bound}s is not a usable deadline"
+
+
+def test_a_tool_carries_the_build_of_the_server_that_answers_it() -> None:
+    """The handshake's `serverInfo.version` reaches the tool, which is what the trail records.
+
+    **The provenance the capability migration broke.** `audit_events.revision` names this process's
+    commit, and while the chemistry ran here that reproduced a result. It no longer does: a
+    `Chemclaw3-mcp` server computes the number and releases on its own cadence, so the build that
+    actually produced it was recorded nowhere. `initialize()` already answers the question — every
+    session reads `serverInfo` — so nothing new is opened, sent or awaited to close it.
+
+    Driven through `open_connector_specs` against a real served app rather than a stubbed session,
+    because the stamp is applied inside `HeldConnectorSession._hold` and every claim here is about
+    what survives the real path: the allow-list filter, the holder task, and the adapter's own
+    metadata. A double could only show the double agrees with itself.
+
+    The version is set the way the fleet sets it (`mcp_server_kit.app._stamp_revision` assigns
+    `FastMCP._mcp_server.version`), which is why this doubles as the cross-repository contract test:
+    the private attribute those five servers reach through is the one this reads back out.
+    """
+    server = FastMCP("revision-probe")
+    server._mcp_server.version = "sha-9f3c1d"
+
+    @server.tool()
+    async def echo() -> str:
+        """A trivial tool, so the session has something to advertise."""
+        return "ok"
+
+    port = _free_port()
+
+    async def _discover() -> list[BaseTool]:
+        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="revision-probe")), endpoint
+        )
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable, "the probe server did not connect"
+            return tools
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    with _Server(connector_app(server, name="revision-probe"), port):
+        tools = asyncio.run(_discover())
+
+    assert [tool.name for tool in tools] == ["echo"]
+    assert (tools[0].metadata or {})[SERVED_BY] == {
+        "connector": "revision-probe",
+        "revision": "sha-9f3c1d",
+    }
+    assert _served_by(SimpleNamespace(tool=tools[0])) == "revision-probe@sha-9f3c1d"
+
+
+def test_a_server_that_cannot_name_its_build_says_so_rather_than_reporting_the_sdk() -> None:
+    """An unstamped server must be distinguishable from an in-process tool, not blend into it.
+
+    Two failures are being kept apart, and neither is the other's severity. An in-process tool has
+    no server revision because there is no server — `revision` already covers its build, and an
+    empty stamp is a complete answer. An image built without `--build-arg CHEMCLAW_REVISION` is a
+    deployment mistake someone can fix, and it must read as one.
+
+    What makes this non-obvious is the value in between: left alone, `FastMCP` reports the **MCP
+    SDK's** release, so the column would fill with a real-looking version string that names the
+    client library rather than the build. The fleet's `server_revision` defaults to `"unknown"`
+    precisely to avoid that, and this asserts the reading end agrees — a tool stamped `"unknown"`
+    is recorded as `<connector>@unknown`, which is neither empty nor a plausible-looking lie.
+    """
+    stamped = _stamped([_probe_tool()], connector="calc", revision="unknown")
+    assert _served_by(SimpleNamespace(tool=stamped[0])) == "calc@unknown"
+
+    # The in-process case, which is what every LangGraph request outside a connector looks like:
+    # `ToolNode` also passes `tool=None` for a name the graph does not hold, and both must be the
+    # same empty string rather than a fabricated `@unknown`.
+    assert _served_by(SimpleNamespace(tool=_probe_tool())) == ""
+    assert _served_by(SimpleNamespace(tool=None)) == ""
+
+
+def _probe_tool() -> BaseTool:
+    """An unstamped `BaseTool`, standing in for an in-process capability."""
+    from langchain_core.tools import tool as make_tool
+
+    @make_tool
+    def probe() -> str:
+        """A trivial in-process tool."""
+        return "ok"
+
+    return probe

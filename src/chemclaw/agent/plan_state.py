@@ -9,8 +9,11 @@ session and the harness kept its todo list inside it. That object is gone: `Todo
 owns `todos`, and where it *lives* between turns is the checkpointer, keyed by the session id as
 `thread_id`. So the read is a checkpointer read, and this module is the one place that knows that.
 
-**One place, because the identity must not be computed twice.** `plan_identity` hashes the rendered
-todo lines, and a durable approval row is keyed on that hash. If the route derived the plan
+**One place, because the identity must not be computed twice.** `plan_identity` hashes each todo's
+bare `content` — *not* the rendered line, which is what this sentence said until a `plan_hash` on
+`PlanEvent` was nearly derived from `api/graph_stream._todo_titles`'s checkbox form on the strength
+of it. That would have shipped a hash matching no decision, on every plan, while looking
+authoritative. A durable approval row is keyed on this hash. If the route derived the plan
 differently from the gate — a different field, a different order, bookkeeping rows included — a
 chemist's approval would hash to something the gate never asks about, and every write would be
 refused with the plan visibly approved on screen. That is not hypothetical: it is the shape of the

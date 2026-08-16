@@ -432,3 +432,47 @@ def test_a_reagent_note_lists_the_spellings_of_its_own_compound_only() -> None:
         shipped = _shipped(name)
         by_compound.setdefault(compound_id(shipped), set()).add(display_name(shipped))
     assert [names for names in by_compound.values() if len(names) > 1] == []
+
+
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [
+        # Hydrazine, every way a catalogue sells it. The free base is a liquid nobody stores; the
+        # salts are what is weighed out, and their SMILES is the reason the hazard rule needed
+        # widening at all.
+        ("hydrazine", "hydrazine"),
+        ("N2H4", "hydrazine"),
+        ("hydrazine hydrate", "hydrazine hydrate"),
+        ("hydrazine hydrochloride", "hydrazine hydrochloride"),
+        ("hydrazine sulfate", "hydrazine sulfate"),
+        ("UDMH", "1,1-dimethylhydrazine"),
+        ("phenylhydrazine", "phenylhydrazine"),
+        # The solid peroxide, beside the liquid the table already had.
+        ("Na2O2", "sodium peroxide"),
+        ("sodium peroxide", "sodium peroxide"),
+    ],
+)
+def test_a_reagent_the_hazard_rules_were_widened_for_can_be_named(
+    spelling: str, expected: str
+) -> None:
+    """The table held no hydrazine at all, so a rule written for it could not be checked by name.
+
+    `Chemclaw3-mcp`'s `hydrazine` rule and the hydrazine arm of `oxidizer-with-reductant` were each
+    widened twice — once for the `NX4+` of a salt, once to drop an H requirement for UDMH — and both
+    widenings could only ever be pinned by SMILES. That is half a path. A chemist writes "hydrazine
+    sulfate" in an ELN or asks about it in a turn, and whether the screen sees a protonated or a
+    neutral spelling is the *source's* choice; the reagent table is what turns the name into either.
+    With no entry, the name resolved to nothing and the screen was never reached.
+
+    Asserted here; the screening half is asserted in
+    `Chemclaw3-mcp:servers/safety/tests/test_pairs.py`
+    (`test_the_hydrazine_arm_fires_on_every_form_a_catalogue_sells`), because the two repositories
+    own the two halves and neither can state the whole claim alone.
+
+    Sodium peroxide is the same shape one motif over: the table had hydrogen peroxide and not the
+    solid, and the solid is the molecule whose one-coordinate-anion SMILES has now defeated three
+    separate screening patterns.
+    """
+    resolved = resolve_compound_name(spelling)
+    assert resolved is not None, f"{spelling!r} resolves to nothing"
+    assert resolved.name == expected

@@ -41,6 +41,13 @@ def test_postgres_audit_sink_persists_an_event() -> None:
             outcome="ok",
             detail="job qm-1 started",
             latency_ms=12.5,
+            revision="orchestrator-abc123",
+            # The two provenance fields are read back together, because the mistake they guard
+            # against is one being written into the other's column: the `_INSERT` column list and
+            # the value tuple are positional, so a field appended to `AuditEvent` and forgotten in
+            # one of the two lands every later value one column to the left — silently, since both
+            # are `TEXT NOT NULL DEFAULT ''`.
+            tool_revision="calc@server-9f3c1d",
         )
         await PostgresAuditSink().record(event)
 
@@ -48,7 +55,8 @@ def test_postgres_audit_sink_persists_an_event() -> None:
         conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
         try:
             cursor = await conn.execute(
-                "SELECT actor, tool, arguments, outcome, detail, latency_ms "
+                "SELECT actor, tool, arguments, outcome, detail, latency_ms, revision, "
+                "tool_revision "
                 "FROM audit_events WHERE correlation_id = %s ORDER BY id DESC LIMIT 1",
                 (correlation_id,),
             )
@@ -63,6 +71,8 @@ def test_postgres_audit_sink_persists_an_event() -> None:
         assert row[3] == "ok"
         assert row[4] == "job qm-1 started"
         assert float(row[5]) == 12.5
+        assert row[6] == "orchestrator-abc123"
+        assert row[7] == "calc@server-9f3c1d"
 
     asyncio.run(_run())
 

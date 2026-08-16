@@ -1,0 +1,31 @@
+-- Record which *server build* answered a tool call, beside the orchestrator's own revision
+-- (D-2026-08-16-the-handshake-already-says-which-build-answered).
+--
+-- Migration 010 added `revision` when it was the whole story: the prompt, the routing and the
+-- chemistry were one image, so one Git SHA reproduced a result. The capability migration
+-- (D-2026-08-16-the-physics-leaves-the-cache-stays) ended that. A `predict_pka` row now names the
+-- commit of the orchestrator that *asked*, while the physics ran in a `Chemclaw3-mcp` server that
+-- releases on another repository's cadence — and the trail had no column for it, so the half of the
+-- provenance a reproduction actually needs was the half that had silently stopped being recorded.
+--
+-- **Why not overwrite `revision`.** Both facts are wanted and neither substitutes: a prompt change
+-- and a solver change produce different numbers for the same question, and a trail carrying one SHA
+-- cannot say which moved. That is migration 044's argument in a second place — two questions, two
+-- columns — and the same reason `purpose` is not spent on it.
+--
+-- The value is `<connector>@<revision>`, read off the MCP `initialize()` handshake's `serverInfo`
+-- (`connectors/transport.py::_stamped`). One column rather than two because the pair is only ever
+-- read together: a revision with no server named is meaningless, and the connector alone is already
+-- derivable from `tool` via the manifests.
+--
+-- '' is a complete answer, not a missing one, which is why the column is `NOT NULL DEFAULT ''` and
+-- no backfill is needed: it means no out-of-process server was involved, so `revision` covers the
+-- build — true of every in-process tool, and true of every row written before the physics left.
+-- `<connector>@unknown` is the third state and deliberately distinct from both: a remote server
+-- answered and could not name its build, which means its image was built without
+-- `--build-arg CHEMCLAW_REVISION` and is a fixable deployment mistake rather than a normal one.
+--
+-- No index, for migration 044's reason: this is a filter on a reconstruction already scoped by
+-- `session_id` or `correlation_id`, both indexed, and an append-only table pays an index's write
+-- cost on every row.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS tool_revision TEXT NOT NULL DEFAULT '';

@@ -41,6 +41,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
+from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.state import turn_input
 from chemclaw.api.events import (
     ApprovalRequestEvent,
@@ -310,7 +311,15 @@ async def _from_update(
             # its list rather than a plan worth rendering.
             todos[:] = plan
             if plan:
-                yield PlanEvent(todos=plan)
+                # **Hashed over the bare contents, not over `plan` — the two are different
+                # strings and only one of them is the identity.** `plan` carries `_todo_titles`'s
+                # checkbox rendering, while `plan_identity` is fed `plan_state.session_todos`,
+                # which returns `content` alone. Hashing what is displayed would emit a
+                # `plan_hash` that no decision could ever match, and it would look authoritative
+                # while being wrong on every plan — worse than the missing field it replaces.
+                # Non-empty by construction: `plan_identity` returns `None` only for an empty
+                # plan, which this branch has already excluded.
+                yield PlanEvent(todos=plan, plan_hash=plan_identity(_todo_contents(update)) or "")
         logger.debug("graph node %r produced %d event source(s)", node, len(update))
 
 
@@ -364,6 +373,23 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
         f"[{'x' if todo.get('status') == 'completed' else ' '}] {todo.get('content', '')}"
         for todo in todos
         if isinstance(todo, dict)
+    ]
+
+
+def _todo_contents(update: dict[str, Any]) -> list[str]:
+    """The plan's bare step text — what a decision is hashed against, not what is displayed.
+
+    The sibling of `_todo_titles`, and the pair exists because the two answers differ by exactly the
+    checkbox. `agent/plan_state.session_todos` — which is what the gate and the decision route feed
+    to `plan_identity` — returns `content` alone, so an identity derived from the rendered lines
+    would agree with nothing. Written as its own function rather than by stripping the prefix off
+    `_todo_titles`, because a strip is a second, weaker copy of the rendering rule: it goes wrong
+    silently the day the rendering changes, where reading the field cannot.
+    """
+    return [
+        str(todo["content"])
+        for todo in update.get("todos") or []
+        if isinstance(todo, dict) and "content" in todo
     ]
 
 

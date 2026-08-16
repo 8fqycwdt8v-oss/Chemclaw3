@@ -212,6 +212,11 @@ def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -
         "detail": "",
         "latency_ms": event.latency_ms,
         "revision": settings.deployment_revision,
+        # The second widening this guards, and it is written in rather than excluded: an exclude
+        # set that grows with each new field is a guard that checks less every time it is updated.
+        # Empty because `find_notes` ran in this process — see the two tests at the end of the file
+        # for why that is a complete answer and not a gap.
+        "tool_revision": "",
     }
     # And the binding is scoped to the subgraph, not leaked into the turn that followed it.
     token = set_current_specialist("safety")
@@ -454,3 +459,65 @@ def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     asyncio.run(_run())
 
     assert [event.outcome for event in sink.events] == ["cancelled"]
+
+
+def test_the_row_names_the_server_build_beside_the_orchestrator_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two revisions, two columns — the fix for what the capability migration broke.
+
+    `revision` used to reproduce a result on its own, because the prompt, the routing and the
+    chemistry were one image. They are not: `predict_pka` now runs in a `Chemclaw3-mcp` server on
+    another repository's release cadence, so a row carrying only this process's SHA cannot say
+    whether a changed number came from a changed prompt or a changed solver.
+
+    Both are asserted in one test deliberately. The failure worth catching is not that either field
+    is absent — it is one being written into the other, which is the shape of the mistake migration
+    044 was written against, and which a test checking one field at a time passes straight over.
+    """
+    monkeypatch.setattr(settings, "deployment_revision", "orchestrator-abc123")
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-tr", actor="a", sink=sink)
+    served = _served_tool("predict_pka", connector="calc", revision="server-9f3c1d")
+
+    _drive_mw(mw, tool_request("predict_pka", {"smiles": "CCO"}, tool=served), _ok)
+
+    event = sink.events[0]
+    assert event.revision == "orchestrator-abc123"
+    assert event.tool_revision == "calc@server-9f3c1d"
+
+
+def test_an_in_process_tool_records_no_server_build_rather_than_a_fabricated_one() -> None:
+    """Empty is the complete answer here, and `"unknown"` would be a false alarm.
+
+    An in-process tool's build *is* `revision`, so a stamp would be a second copy of one fact. The
+    distinction is load-bearing rather than tidy: `<connector>@unknown` means an image shipped
+    without its revision build argument, which someone should fix, and filling that same value in
+    for every `write_todos` call would bury the real cases under noise.
+    """
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-ip", actor="a", sink=sink)
+
+    _drive_mw(mw, tool_request("write_todos", {}), _ok)
+
+    assert sink.events[0].tool_revision == ""
+
+
+def _served_tool(name: str, *, connector: str, revision: str) -> Any:
+    """A tool stamped the way `connectors/transport.py::_stamped` stamps a connector's tools.
+
+    Built through `_stamped` rather than by writing the metadata dict here, so this test cannot
+    keep passing against a key the transport has stopped writing — which is the whole failure mode
+    a provenance field has, and the reason the key is one shared constant.
+    """
+    from langchain_core.tools import tool as make_tool
+
+    from chemclaw.connectors.transport import _stamped
+
+    @make_tool
+    def _probe() -> str:
+        """A trivial stand-in for a connector tool."""
+        return "ok"
+
+    _probe.name = name
+    return _stamped([_probe], connector=connector, revision=revision)[0]

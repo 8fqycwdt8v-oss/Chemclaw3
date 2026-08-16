@@ -29,10 +29,32 @@ class QueuedEvent(BaseModel):
 
 
 class PlanEvent(BaseModel):
-    """The agent's current plan/todo list (harness mode) — rendered as a checklist."""
+    """The agent's current plan/todo list (harness mode) — rendered as a checklist.
+
+    **`plan_hash` is here because without it this event cannot be acted on.**
+    `POST /sessions/{id}/plan/decision` requires the hash of the exact plan the human was shown —
+    that binding is the whole of D-167's fix, so a plan which changed after being displayed cannot
+    be approved by a decision aimed at the old one. A client watching the stream had the todo list
+    and not the hash, so the only way to answer the plan it had just rendered was a second
+    `GET /sessions/{id}/plan` round trip — which races the very change the binding exists to catch:
+    between the render and the fetch the agent may have revised the plan, and the client would then
+    post back a hash for a plan its user never saw.
+
+    Produced by `plan_gate.plan_identity`, the same function the gate consults and the decision
+    route records against. Not a second hashing rule: an approval valid under one spelling and
+    unrecognised under the other would be a *durable* row that outlives the turn that wrote it.
+
+    Always a non-empty string here, and that is a property of the emitter rather than of this model
+    — `plan_identity` returns `None` for an empty plan (hashing "nothing" yields a constant every
+    session in every deployment also proposes), and `graph_stream` does not emit an empty plan.
+    """
 
     type: Literal["plan"] = "plan"
     todos: list[str]
+    # Defaulted so a stored or replayed event from before this field cannot fail to parse. An empty
+    # string means "this event predates the hash", which a client must treat as "fetch it" rather
+    # than as a hash — never as one that will match.
+    plan_hash: str = ""
 
 
 # Which agent raised an event, when it was not the one the chemist is talking to (M9).

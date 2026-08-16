@@ -317,3 +317,68 @@ either be omitted from the request or re-applied locally after the cache.
     Reporting either number alone would have been misleading — "the judge is unreliable" overstates
     it, "I could not reproduce it" buries it. The characterization that survives contact with both
     observations is narrower and more useful than either.
+
+36. **"Run the full suite" is per repository, and the second repository is the one you forget.**
+    Adding `revision` to the mcp fleet's `/healthz` payload, I ran `ruff`, `make type` and
+    `uv run pytest -q tests` — the fleet directory, where my new tests lived. CI went red on five
+    per-server `test_healthz_answers_and_names_the_server`, each an exact dict comparison, all of
+    which a bare `uv run pytest -q` would have shown in 40 seconds.
+
+    This is not lesson 29 (a `tail` swallowing an exit code) or lesson 30 (skipping `make type`).
+    It is narrower and it is specific to this family of four repos: I had *just* run the full
+    Chemclaw3 suite, and the discipline did not transfer across the `cd`. The path-scoped run is
+    also what made it feel complete — the subset I chose was exactly the subset containing my new
+    tests, which is the least informative one available.
+
+    **The rule: a change to shared infrastructure gets the repository's whole default test command,
+    unscoped, before the commit — and when the change touches a payload, a signature or a schema,
+    assume the assertions that break are in files you have never opened.** `packages/` in that repo
+    is imported by all five servers, so "I edited one file in `packages/`" is exactly the case where
+    a scoped run proves the least.
+
+37. **`git checkout <file>` is how you lose a mutation-check's subject.** Verifying a fix by
+    reverting it and watching a test go red is the right discipline, and I used `cp` to a backup for
+    four of five checks. For the fifth I reached for `git checkout src/.../live.py` to restore — and
+    the file's fix was *uncommitted*, so the checkout restored HEAD and silently deleted the work
+    the mutation was testing. The follow-up "restore" script then found no mutation to undo and
+    printed success anyway.
+
+    The tell was there and I nearly missed it: the test stayed red after the "restore". Had the
+    assertion been weaker, the defect would have gone back into the branch under a green line.
+
+    **The rule: restore a mutation from a copy you made yourself (`cp file /tmp/x.bak` → `cp back`),
+    never from git, unless the file is committed.** And a restore script must *assert* it found what
+    it was undoing — print-on-success outside the conditional is how a no-op reports as a fix. The
+    same assert-the-target rule already applies to applying a mutation (a ruff reflow once made one
+    silently not apply); it applies just as hard to undoing one.
+
+38. **A test with a timeout is a timing measurement, and running two repositories' suites at once
+    invalidates it.** `tests/test_reizman.py::test_bo_campaign_finds_high_yield` failed on a
+    `Timeout` in a full run. I had started `Chemclaw3-mcp`'s suite concurrently on the same four
+    cores. Alone, the same test passes in 68 s.
+
+    `tasks/todo.md` already carried this as a failed approach — "a wall-clock number taken while the
+    test suite is running is not a measurement" — recorded after two abandoned background pytest runs
+    made a 0.8 s calculation look like 147 s. What is new is only that it now reaches *test outcomes*
+    rather than reported timings, and that the contending load came from a sibling repository, where
+    I was not thinking about this machine's cores at all.
+
+    **The rule: before treating a timeout or a slow-test failure as a finding, check `uptime` and
+    re-run it alone.** And do not start a second repository's full suite while one is running — the
+    time saved is not real, and a false failure costs more than the wait.
+
+39. **A check that has never run is not a passing check, and turning it on is a change with
+    findings.** I added `fetch-depth: 0` as a one-line CI fix — the migration-immutability test could
+    not run on a depth-1 clone, where every file compares equal to itself. My local suite stayed
+    green because *this sandbox's clone is also shallow*, so the test skipped here too and I never
+    saw its first real execution.
+
+    CI did, and it found two migrations whose `CREATE TABLE` had been edited after merge. That is the
+    check working on its first run, not a regression — but I had shipped the enabling line as though
+    it were free, and it was not: it was a change whose whole purpose was to surface something, and I
+    did not go looking for what.
+
+    **The rule: when you enable a check that was previously inert, run it locally under the
+    conditions that make it real *before* pushing** — here, `git fetch --unshallow` first. And expect
+    a finding: a guard nobody has been able to violate-and-fail against has, in this repo's
+    experience, always had something behind it.

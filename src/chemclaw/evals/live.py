@@ -148,6 +148,19 @@ class ProbeOutcome(BaseModel):
     unanswered turn with a `tool_failed` or `error` event is a system that broke *visibly*, which
     a user can act on; an unanswered turn with neither is the silent death that the last live pass
     found and that no passing test could see.
+
+    **`degraded` is deliberately not part of `failed_loudly`, and folding it in destroyed the
+    signal for a whole class of deployment.** A degradation announcement is made *before the turn
+    runs anything* — it names a capability the turn will not have, which is the system working. A
+    turn failure is something that went wrong while doing the work. Once the runner began probing
+    Temporal per turn, any deployment without a broker announced `durable-jobs (Temporal)` on every
+    single turn, so `failed_loudly` was true for all of them and "answered nothing and said nothing"
+    could not be observed anywhere — the harness's most important number, reported as a clean zero.
+
+    Nothing is lost by separating them: `degraded` and `first_degraded_index` are their own fields,
+    and `_degradation_findings` already grades the announcement on its own terms. A turn that
+    announces an outage and then dies producing nothing is exactly the silent death this looks for,
+    not an exception to it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -550,7 +563,10 @@ async def run_turn(
     outcome.latency_seconds = round(time.monotonic() - started, 2)
     outcome.event_counts = counts
     outcome.answered = bool(outcome.answer.strip())
-    outcome.failed_loudly = bool(outcome.tools_failed or outcome.error_code or outcome.degraded)
+    # `degraded` is not read here — see `ProbeOutcome`. A pre-turn capability announcement is not
+    # this turn's work failing, and while it counted as one no broker-less deployment could ever
+    # record a silent failure.
+    outcome.failed_loudly = bool(outcome.tools_failed or outcome.error_code)
     outcome.uncited_note_ids = _score_citations(outcome.answer, returned_ids)
     outcome.verified_numbers = _verified_numbers(outcome.answer, returned_values)
     outcome.asked_clarifying_in_prose = _asked_in_prose(outcome)
