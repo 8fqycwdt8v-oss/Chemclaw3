@@ -51,6 +51,7 @@ from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel
 
+from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     get_current_actor,
@@ -127,6 +128,21 @@ class AuditEvent(BaseModel):
     # result to the exact prompt/skill/config version that produced it. "unknown" until a deployment
     # sets `deployment_revision`.
     revision: str = "unknown"
+    # The build of the *out-of-process server* that answered, when one did:
+    # `<connector>@<revision>`, read off the MCP handshake (`connectors/transport.py::_stamped`).
+    #
+    # **Beside `revision`, because since the migration they answer different questions.** `revision`
+    # named the whole system while the chemistry ran in this process. It now names the orchestrator
+    # only: a `predict_pka` row records which commit of the *prompt and the routing* asked, and says
+    # nothing about the build of the server that did the physics — which releases on another
+    # repository's cadence and is the half a reproduction actually needs.
+    #
+    # Empty means no server was involved: an in-process tool's build *is* `revision`, so a stamp
+    # would be a second copy of one fact. `<connector>@unknown` is the third case and a real one —
+    # a remote server answered and could not name its build — deliberately distinguishable from
+    # both, because an image built without its revision argument is a fixable mistake and an
+    # in-process call is not a mistake at all.
+    tool_revision: str = ""
 
 
 @runtime_checkable
@@ -207,6 +223,28 @@ def returned_failure(result: object) -> ToolMessage | None:
     return None
 
 
+def _served_by(request: Any) -> str:
+    """`"<connector>@<revision>"` when an out-of-process server answers this call, else `""`.
+
+    The framework-facing half of `tool_revision`, kept here rather than in `_recording` for the same
+    reason the `ToolMessage` test is: what crosses that boundary is a decision — a plain string —
+    never a library object, so the trail's contents cannot come to depend on which engine ran.
+
+    **The only place in either governance chain that reads `request.tool`, and it is safe here in a
+    way it is not one middleware over.** `ToolNode` passes `tool=None` for a name the graph does not
+    hold, deliberately, so interceptors can short-circuit an unregistered call — which is why
+    `tool_authz` states that nothing in its chain reads this. A refusal that depended on the field
+    would fail *open* on exactly the calls it exists to stop. This one is observational: `None`
+    means no tool object, which means no connector, which means no server revision, which is the
+    same empty string an in-process tool yields. The degenerate case is already the right answer.
+    """
+    metadata = getattr(getattr(request, "tool", None), "metadata", None) or {}
+    served = metadata.get(SERVED_BY)
+    if not isinstance(served, dict):
+        return ""
+    return f"{served.get('connector', '')}@{served.get('revision', '') or 'unknown'}"
+
+
 def make_audit_middleware(
     *,
     correlation_id: str,
@@ -238,6 +276,7 @@ def make_audit_middleware(
             correlation_id=correlation_id,
             sink=audit_sink,
             revision=revision,
+            tool_revision=_served_by(request),
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)
@@ -278,6 +317,7 @@ async def _recording(
     correlation_id: str,
     sink: AuditSink,
     revision: str,
+    tool_revision: str = "",
 ) -> AsyncIterator[_Recorded]:
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
@@ -323,6 +363,7 @@ async def _recording(
             detail=detail,
             latency_ms=elapsed_ms,
             revision=revision,
+            tool_revision=tool_revision,
         )
 
     recorded = _Recorded()
