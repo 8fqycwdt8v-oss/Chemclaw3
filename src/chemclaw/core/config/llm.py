@@ -51,6 +51,23 @@ class LlmSettings(BaseSettings):
     # than a hardcoded `True` because upstream's caution is real: an endpoint that rejects
     # `stream_options` needs a way out that is not a code change.
     llm_stream_usage: bool = True
+
+    # **A second endpoint to try when the first one is down** (AG-12). Empty — the default — means
+    # no failover at all, so an existing deployment is unchanged and the whole mechanism is off
+    # until somebody has a second endpoint to name.
+    #
+    # This is the one gap in the audit's agentic-engine list whose failure is total rather than
+    # degraded: with a single endpoint, one outage fails *every* turn for the whole fleet once
+    # `llm_max_retries` is spent, and neither the admission control nor the budget guard helps —
+    # both assume the endpoint answers. Every other open row costs a worse answer; this one costs
+    # the product.
+    #
+    # Only the base URL is required. The model and the credential fall back to the primary's,
+    # because the common case is a second replica of the same internal deployment rather than a
+    # different vendor — and a config that forced all three would make the cheap case verbose.
+    llm_fallback_base_url: str = ""
+    llm_fallback_model: str = ""
+    llm_fallback_api_key: str = ""
     # Unset by default, and that default is load-bearing: current frontier models (the shipped
     # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
     # `400 invalid_request_error: temperature is deprecated for this model` — so a config that

@@ -49,6 +49,45 @@ attenuation and restating it.
 
 from typing import Any
 
+from chemclaw.core.errors import ChemclawError
+
+
+def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return `specs` unchanged, or raise if any of them is one upstream would assemble itself.
+
+    **The one build-time assertion this module can honestly make**, and the reason it can is that
+    it is not about attenuation. The module docstring explains why comparing a helper's profile with
+    its caller's could never turn red under a one-name roster; this checks something else entirely —
+    that every entry is a `CompiledSubAgent` carrying a `runnable` *we* built, rather than a
+    declarative `SubAgent` upstream would assemble from `spec["middleware"]` alone.
+
+    That distinction is the whole governance boundary. `create_deep_agent` uses a compiled runnable
+    as provided, but builds a declarative spec itself — and the middleware it uses is upstream's,
+    which carries none of this repository's audit trail, authorization gate, dry-run refusal or plan
+    gate. `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` recorded what
+    that looks like from outside: **"nothing would fail while it did."**
+
+    Today `_subagents` returns one hand-built entry and the property holds by construction, so this
+    raises for nobody. It exists because the *next* helper is the risk: a second name added as a
+    dict — which is how upstream's own documentation shows subagents being declared, and the
+    obvious thing to write — is ungoverned and silent, and the failure appears in production as a
+    tool call with no audit row rather than as a red test. A guard that costs one comparison is
+    cheaper than the review that would otherwise have to catch it.
+
+    Raises:
+        ChemclawError: A spec carries no `runnable`, so upstream would assemble it.
+    """
+    for spec in specs:
+        if not spec.get("runnable"):
+            raise ChemclawError(
+                f"subagent {spec.get('name', '<unnamed>')!r} was declared without a compiled "
+                "runnable, so `create_deep_agent` would assemble it from upstream's middleware — "
+                "with no audit trail, no authorization gate and no plan gate. Compile it with "
+                "`build_langgraph_agent(helper=True)` and wrap it in a spec, as "
+                "`general_purpose_helper` does."
+            )
+    return specs
+
 
 def general_purpose_helper(runnable: Any) -> dict[str, Any]:
     """The one helper spec, as a `CompiledSubAgent` claiming upstream's default name.

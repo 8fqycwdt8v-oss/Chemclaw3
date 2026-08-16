@@ -55,8 +55,51 @@ def build_chat_model(task: str = "agent") -> Any:
     """
     model = settings.model_routes.get(task)
     if settings.llm_provider == "openai_compatible":
-        return _openai_compatible_model(model)
+        primary = _openai_compatible_model(model)
+        return _with_failover(primary, model)
     return _anthropic_model(model)
+
+
+def _with_failover(primary: Any, model: str | None) -> Any:
+    """`primary`, or a runnable that tries a second endpoint when the first one is *down* (AG-12).
+
+    Returns `primary` unchanged when no fallback is configured, which is the default — so this is
+    inert until an operator names a second endpoint, and no existing deployment changes shape.
+
+    **Only transport failures fail over, and that is the whole design.** `with_fallbacks` defaults
+    to catching every `Exception`, which would send a malformed request to the second endpoint to
+    be rejected identically — twice the latency for the same answer, and a 400 laundered into
+    something that looks like an outage. The distinction is the one `connectors/calc/remote.py`
+    already draws between a refused request and an unreachable service: a retry fixes exactly one
+    of them. So the handled set is connection, timeout and 5xx, and a `BadRequestError` or a 401
+    still fails immediately on the endpoint that produced it.
+
+    **`bind_tools` survives this, measured rather than assumed** — the obvious worry is that
+    wrapping a chat model in a `RunnableWithFallbacks` loses the tool surface `create_agent`
+    binds. It does not: `bind_tools` on the wrapper returns a `RunnableWithFallbacks` whose
+    primary *and* fallback both carry the tools, so the failover answer can still call them. A
+    fallback that answered without tools would be worse than no fallback, because it would look
+    like a working degraded mode while quietly being unable to do the work.
+    """
+    if not settings.llm_fallback_base_url:
+        return primary
+    return primary.with_fallbacks(
+        [_openai_compatible_model(model, fallback=True)],
+        exceptions_to_handle=_failover_exceptions(),
+    )
+
+
+def _failover_exceptions() -> tuple[type[BaseException], ...]:
+    """The failures that mean *this endpoint is down* rather than *this request is wrong*.
+
+    Imported lazily and by name so this module stays the only one that knows a provider SDK exists.
+    `APIConnectionError` covers `APITimeoutError` (its subclass) and every DNS/TLS/refused-socket
+    case; `InternalServerError` is the 5xx family. Everything else — 400, 401, 404, 422 — is about
+    the request and is left to fail where it was made.
+    """
+    from openai import APIConnectionError, InternalServerError
+
+    return (APIConnectionError, InternalServerError)
 
 
 class _CachingDisabled(AgentMiddleware):
@@ -171,7 +214,7 @@ def prompt_caching_middleware() -> list[Any]:
     return [AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")]
 
 
-def _openai_compatible_model(model: str | None = None) -> Any:
+def _openai_compatible_model(model: str | None = None, *, fallback: bool = False) -> Any:
     """`ChatOpenAI` against the internal endpoint — same base URL, credential and transport.
 
     `http_async_client` is where the private-CA bundle goes: `ChatOpenAI` builds its own
@@ -201,12 +244,18 @@ def _openai_compatible_model(model: str | None = None) -> Any:
     from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
 
+    # The fallback endpoint reuses the primary's model and credential unless it names its own:
+    # the common case is a second replica of one internal deployment, not a different vendor.
+    base_url = settings.llm_fallback_base_url if fallback else settings.llm_base_url
+    chosen = model or (settings.llm_fallback_model if fallback else "") or settings.llm_model
+    key = (settings.llm_fallback_api_key if fallback else "") or settings.llm_api_key
+
     return ChatOpenAI(
-        model=model or settings.llm_model,
-        base_url=settings.llm_base_url,
+        model=chosen,
+        base_url=base_url,
         # `ChatOpenAI` takes the credential as a `SecretStr`, which keeps the key out of a repr
         # and out of any log line that prints the model object.
-        api_key=SecretStr(settings.llm_api_key or _KEYLESS_PLACEHOLDER),
+        api_key=SecretStr(key or _KEYLESS_PLACEHOLDER),
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         http_async_client=_tls_http_client(),

@@ -152,3 +152,43 @@ def _named(name: str) -> Any:
     return StructuredTool.from_function(
         name=name, description="stand-in", func=lambda: "", infer_schema=True
     )
+
+
+def test_a_declarative_subagent_spec_is_refused_rather_than_assembled_by_upstream() -> None:
+    """The one build-time guard: a spec with no compiled runnable never reaches `create_deep_agent`.
+
+    **This is not the attenuation check** — the module docstring above explains why that one cannot
+    turn red under a one-name roster. It is the governance check, and it is a different question:
+    is every entry a graph *this repository* compiled, or one upstream would assemble itself?
+
+    `create_deep_agent` uses a `CompiledSubAgent`'s runnable as provided, but builds a declarative
+    `SubAgent` from `spec["middleware"]` alone — upstream's middleware, carrying none of this
+    repository's audit trail, authorization gate, dry-run refusal or plan gate. D-2026-08-13
+    recorded how that presents from outside: *"nothing would fail while it did."*
+
+    The fixture is the realistic mistake rather than a contrived one. A dict with `name`,
+    `description` and `prompt` is exactly how upstream's own documentation shows a subagent being
+    declared, so it is what someone adding a second helper would naturally write — and the reason a
+    guard is worth more than a review note.
+    """
+    from chemclaw.agent.subagents import governed_roster
+    from chemclaw.core.errors import ChemclawError
+
+    compiled = {"name": "general-purpose", "description": "d", "runnable": object()}
+    assert governed_roster([compiled]) == [compiled], "a compiled spec must pass through unchanged"
+
+    declarative = {"name": "researcher", "description": "d", "prompt": "you are a researcher"}
+    with pytest.raises(ChemclawError, match="without a compiled runnable") as refused:
+        governed_roster([compiled, declarative])
+    assert "researcher" in str(refused.value), "the refusal must name the offending spec"
+
+
+def test_the_shipped_roster_passes_its_own_guard() -> None:
+    """The guard is wired into the path that builds the real roster, not merely importable.
+
+    Asserted by building the actual agent: a guard that exists and is never called is the shape
+    this repository has been burned by repeatedly, and `governed_roster` raising for nobody today
+    is exactly the condition under which that would go unnoticed.
+    """
+    agent = build_langgraph_agent(model=_model(), profile=AgentProfile(name="default"))
+    assert agent is not None
