@@ -39,9 +39,30 @@ The resolution for all three is the same and is why the architecture is stated a
   no resumption. Temporal on this side owns durability. Anything on that side that wants to
   persist is a signal it belongs on this side.
 
+## The cross-repo key contract, verified live (2026-08-16)
+
+`Chemclaw3-mcp#5` is merged. With its `calc` server running on 8860 and Chemclaw3 deriving the same
+values locally, the identities are **byte-identical**:
+
+| | server | here |
+|---|---|---|
+| `xtb.sp` key | `xtb.sp@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:389b625b3220108a:b41312b0cdc59ab7` | identical |
+| `pka` version | `…/cal-0.28733:-29.3116/base-0.241396:-22.1843/u-1.6:1.0/opt-…` | identical |
+| `solubility` version | `esol-delaney@2004/rdkit-2026.3.5/u-0.75` | identical |
+| `developability` version | `rdkit-2026.3.5` | identical |
+| `structure_id` for `CCO` | `st_739a222f45be0c3a` | identical |
+
+and `calculation_key(tool, args)` returns exactly what the compute tool stamps on its result, checked
+on four tools over the wire. **This is the property the cache depends on**: one byte of disagreement
+and every lookup misses forever while `calculator_trust` reports a confident `UNCALIBRATED`.
+
+The strings also settle why the key comes back as a structured object rather than a flat string —
+`esol-delaney@2004` carries an `@` and `cal-0.28733:-29.3116` carries a `:`, so a client splitting
+the flat form on either delimiter would build a key that never matches.
+
 ## Steps
 
-- [ ] mcp: expose the primitives — `optimize_geometry`, `compute_hessian` (new; multi-MB `.npy`
+- [x] mcp: expose the primitives — `optimize_geometry`, `compute_hessian` (new; multi-MB `.npy`
       blobs must cross the wire), single-point/properties, the scan *step*, and the CREST search
       whole (it cannot be decomposed). `calculation_key` covers every one.
 - [ ] mcp: port `reaction`, `xtb_scan`, `conformers`, `complexes`, `crest_cli` engines.
