@@ -123,28 +123,6 @@ def test_private_state_attr_is_still_where_the_skills_state_reaches_for_it() -> 
     )
 
 
-def test_the_model_call_limit_keeps_its_per_run_counter_unreadable() -> None:
-    """The reason `ChemclawState.loop_capped` exists at all.
-
-    `CappedModelCallLimit` delegates counting to upstream and records only the *fact*, because
-    upstream's per-run counter is `UntrackedValue` (never checkpointed) **and** `PrivateStateAttr`
-    (stripped from what the run returns). If upstream ever makes it readable, the first-party field
-    becomes redundant and should go.
-    """
-    from langchain.agents.middleware.model_call_limit import ModelCallLimitState
-
-    # `repr` of the whole annotation rather than `__metadata__`: the field is
-    # `NotRequired[Annotated[...]]`, so the metadata hangs off the *inner* `Annotated` and reading
-    # it from the outer `NotRequired` silently returns nothing — which would make this assertion
-    # pass for the wrong reason the day upstream dropped either marker.
-    hints = get_type_hints(ModelCallLimitState, include_extras=True)
-    annotation = repr(hints["run_model_call_count"])
-    assert "UntrackedValue" in annotation and "OmitFromSchema" in annotation, (
-        "ModelCallLimitMiddleware's run counter is now readable from a finished run; "
-        "agent/state.ChemclawState.loop_capped exists only because it was not"
-    )
-
-
 def test_create_agent_still_bakes_a_recursion_limit_this_repo_overrides() -> None:
     """`turn_config` chooses the step ceiling because upstream's choice is effectively no ceiling.
 
@@ -301,8 +279,9 @@ def test_the_filesystem_tool_surface_is_still_the_eight_names_the_gate_answers_f
         "grep",
         "execute",
     }, (
-        "the filesystem tool surface changed; agent/langgraph_agent._filesystem_middleware "
-        "allow-lists it by name and chemclaw_agent.available_tool_names must answer for every verb"
+        "the filesystem tool surface changed; agent/langgraph_agent._middleware allow-lists it by "
+        "name (via agent/scratchpad.scratchpad_tools) and chemclaw_agent.available_tool_names must "
+        "answer for every verb"
     )
 
 
@@ -330,53 +309,63 @@ def test_the_filesystem_middleware_still_offloads_oversized_tool_results() -> No
     )
 
 
-def test_a_filesystem_permission_still_has_the_three_modes_the_rules_use() -> None:
+def test_a_filesystem_permission_still_has_the_two_modes_the_rules_use() -> None:
     """`deny` is what keeps the scratchpad out of the skills tree.
 
     The permission rules are the second half of the narrowing the allow-list starts: the model may
     write, but not under `/skills/`, because a turn that can rewrite judgment decides what the next
-    turn is able to load. `interrupt` is the third mode and is what Phase 4's approvals ride on.
+    turn is able to load. `agent/scratchpad.filesystem_permissions` spells exactly two modes —
+    `allow` under the two writable roots, then a blanket `deny` behind them.
+
+    **`interrupt` is deliberately not asserted, and this test used to assert it.** Its name said
+    "the three modes the rules use" and its docstring said `interrupt` "is what Phase 4's approvals
+    ride on" — but no rule in `src/` has ever declared one, and nothing in this tree emits an
+    interrupt at all (`docs/planning/BACKLOG.md` carries `graph_stream._from_update` dropping
+    `__interrupt__` as *latent*, precisely because there is no producer). A third mode named by a
+    test and by nothing else is a claim that a capability is wired up. Pinning what the rules
+    actually declare is what makes this file's failure message true when it fires.
     """
     from deepagents import FilesystemPermission
 
     mode = FilesystemPermission.__annotations__["mode"]
-    for expected in ("allow", "deny", "interrupt"):
+    for expected in ("allow", "deny"):
         assert expected in repr(mode), (
             f"FilesystemPermission no longer supports mode={expected!r}; "
-            "agent/langgraph_agent._filesystem_permissions declares rules in all three"
+            "agent/scratchpad.filesystem_permissions declares rules in both"
         )
 
 
-def test_the_interrupt_config_still_carries_a_when_predicate() -> None:
-    """The shape the plan gate became.
+def test_the_interrupt_on_predicate_is_still_synchronous() -> None:
+    """The **restart condition** for `HumanInTheLoopMiddleware`, asserted as the absence it is.
 
-    `enforce_plan_approval` was a first-party `wrap_tool_call` that asked "does this call need an
-    approved plan, and is the plan behind it the one that was approved". `InterruptOnConfig.when`
-    is that question as an upstream predicate, which is why the gate could stop being first-party.
-    Lose it and the approval either fires on every tool or on none.
+    Nothing in `src/` imports any of this: plan approval stays a first-party `wrap_tool_call`
+    (`agent/plan_gate.enforce_plan_approval`), declined on four measurements by
+    `D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-the-question`. That
+    ADR is explicit that the declination is not permanent and names exactly one thing that would
+    lift its first finding: **an async `when`**. The gate's own predicates
+    (`gate_applies`, `plan_gate._plan_behind`) read the durable approval store, which is `await`.
+
+    So the assertion is that `when` is still declared as a *plain* `Callable[..., bool]` — an
+    absence, in the shape `test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout` uses, so
+    that upstream lifting the constraint turns this red and the deferral gets re-read instead of
+    outliving its reason. Asserting merely that `when` *exists* would be the opposite: green
+    forever, and describing an adoption that never happened.
+
+    The other three findings in that ADR stand regardless, so a red build here is a prompt to
+    re-measure, never an instruction to migrate.
     """
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
 
+    when = repr(InterruptOnConfig.__annotations__["when"])
     assert "when" in InterruptOnConfig.__annotations__, (
-        "InterruptOnConfig lost its `when` predicate; the plan approval gate is expressed as one"
+        "InterruptOnConfig lost its `when` predicate entirely; "
+        "D-2026-08-15-the-plan-gate-stays-a-refusal names it as the restart condition's subject"
     )
-
-
-def test_the_rubric_middleware_still_bounds_its_revision_loop() -> None:
-    """An unbounded critic is a runaway turn, and the bound has to be upstream's.
-
-    `RubricMiddleware` re-enters the *same* run to revise, so its iterations are counted by
-    `CappedModelCallLimit`'s `run_limit` — the cap and the critic share a budget. `max_iterations`
-    is what keeps the critic's share of it finite; without it the two guards fight and the cap wins
-    by truncating an answer mid-revision.
-    """
-    import inspect
-
-    from deepagents import RubricMiddleware
-
-    assert "max_iterations" in inspect.signature(RubricMiddleware.__init__).parameters, (
-        "RubricMiddleware no longer bounds its revision loop; agent/verifier.py delegates to it "
-        "and agent/loop_cap.py counts its iterations against the turn"
+    assert "Awaitable" not in when and "Coroutine" not in when, (
+        f"InterruptOnConfig.when is now {when} — an async predicate lifts the first of the four "
+        "findings that declined HumanInTheLoopMiddleware for plan approval. Re-read "
+        "docs/decisions/D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-"
+        "ask-the-question.md; the other three still stand."
     )
 
 
@@ -547,7 +536,6 @@ def test_the_general_purpose_subagent_is_still_displaced_by_claiming_its_name() 
     ("module", "name", "reader"),
     [
         ("deepagents", "create_deep_agent", "agent/langgraph_agent.build_langgraph_agent"),
-        ("deepagents", "RubricMiddleware", "the in-loop answer critic"),
         ("deepagents.middleware.subagents", "SubAgentMiddleware", "the subagent seam"),
         ("deepagents.middleware.subagents", "CompiledSubAgent", "the subagent seam"),
         ("deepagents.middleware.skills", "SkillsMiddleware", "agent/langgraph_agent.py"),
