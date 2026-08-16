@@ -257,6 +257,13 @@ topic).
       **ungraded** answer with only a log line. What would move this row is a measurement, not a
       library: revise the answers `score_answer` already flags and score the revisions. If revision
       helps, build the loop first-party on the one judge that reads the turn's own tool results.
+      **Two things found while trying to run it.** The judge never ran at all until the
+      `method="json_schema"` fix (every non-empty answer was flagged unconditionally, so the signal
+      carried no information); and of six answers that completed, three were flagged for three
+      different reasons, two at *high* judge confidence — including `promised but not called:
+      screen_hazards`, which no rewrite of prose can fix, because the remedy is to call the tool.
+      Treat the three flag reasons as three questions. The run itself was cut short by an exhausted
+      model credential, so revision was never attempted.
 
 - [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S].
       `durable/retention.py` and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE

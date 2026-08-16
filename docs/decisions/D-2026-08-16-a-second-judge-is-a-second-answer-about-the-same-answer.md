@@ -66,9 +66,49 @@ already flags, revise them, and score the revisions. If revision helps, the loop
 **first-party** on `score_answer`, so there is one judge reading the turn's own tool results, and
 its failure mode is chosen here rather than inherited.
 
+## What trying to run the measurement found first
+
+The measurement this ADR asks for **did not complete** — the environment's model credential hit a
+hard usage limit 92 seconds into the probe run (135 of 230 probes attempted, 6 answered). No
+revision was attempted, so there is still **no evidence either way** on whether revision helps.
+
+But getting far enough to try surfaced a defect that changes the question, and it is in the judge
+this ADR was defending rather than in the middleware it declined:
+
+**With `verifier_enabled` on, the LLM judge never ran, and every non-empty answer was flagged.**
+`verify_answer` bound the model with `with_structured_output(VerificationResult)` — the default
+`method="function_calling"`. `convert_to_openai_tool` drops any field carrying a default out of
+`required`, so `claims` (`default_factory=list`) and `verified_by` disappeared and the provider was
+asked to enforce `confidence` alone, types included. Measured 8 of 8 against a live model: the
+judge either omitted `confidence` or returned the whole verdict as a JSON *string* inside `claims`,
+both failing `VerificationResult` validation inside `verify_answer`'s `try`, both degrading to the
+citation gate — after which `score_answer`'s third rule appends *"verified by the citation gate
+only; the judge did not run"* and sets `review_required`. So the signal a revision loop would have
+consumed carried **no information at all** in the shipped configuration.
+
+That is D-2026-08-16's own point 2 — a silent, non-mutating failure whose only evidence is a log
+line — present in the first-party judge. Declining `RubricMiddleware` for having that shape while
+shipping it here would have been the wrong lesson to draw, so it is recorded here rather than left
+in a measurement note.
+
+Fixed by binding with `method="json_schema"` (13 of 13 with no other change). `tests/test_verifier.py`
+pins both halves: that the loose rendering exists, and that the caller does not use it — either
+alone passes while the feature is broken.
+
+**A second finding, at n=6 and worth carrying:** of the six answers that did complete, three were
+flagged for three *different* reasons, and two of those at high judge confidence (0.833 and 0.923)
+— a shape-gate hit on an ungrounded `wavelength: 270 nm`, and `promised but not called:
+screen_hazards`. **The second cannot be fixed by revising prose at all**: the remedy is to call the
+tool. A one-shot text reviser could only clear it by deleting the sentence that promised the tool —
+exactly the degenerate fix the agreed criterion was designed to catch, visible before a single
+revision was run. Whoever resumes this should treat the three flag reasons as three questions, not
+one.
+
 ## Consequences
 
-- `agent/verifier.py` is unchanged and remains the only judge.
+- `agent/verifier.py` remains the only judge, and now actually runs: the `method="json_schema"`
+  binding is the one code change this ADR carries, and it is a prerequisite for the measurement
+  rather than a part of the declined design.
 - The `BACKLOG.md` row is rewritten to say what was learned, rather than deleted: the gap survives,
   the proposed fix does not.
 - If anyone reaches for `RubricMiddleware` again, points 1 and 2 are the two things to check first
