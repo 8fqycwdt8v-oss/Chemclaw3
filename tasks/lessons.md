@@ -351,3 +351,18 @@ either be omitted from the request or re-applied locally after the cache.
     it was undoing — print-on-success outside the conditional is how a no-op reports as a fix. The
     same assert-the-target rule already applies to applying a mutation (a ruff reflow once made one
     silently not apply); it applies just as hard to undoing one.
+
+38. **A test with a timeout is a timing measurement, and running two repositories' suites at once
+    invalidates it.** `tests/test_reizman.py::test_bo_campaign_finds_high_yield` failed on a
+    `Timeout` in a full run. I had started `Chemclaw3-mcp`'s suite concurrently on the same four
+    cores. Alone, the same test passes in 68 s.
+
+    `tasks/todo.md` already carried this as a failed approach — "a wall-clock number taken while the
+    test suite is running is not a measurement" — recorded after two abandoned background pytest runs
+    made a 0.8 s calculation look like 147 s. What is new is only that it now reaches *test outcomes*
+    rather than reported timings, and that the contending load came from a sibling repository, where
+    I was not thinking about this machine's cores at all.
+
+    **The rule: before treating a timeout or a slow-test failure as a finding, check `uptime` and
+    re-run it alone.** And do not start a second repository's full suite while one is running — the
+    time saved is not real, and a false failure costs more than the wait.

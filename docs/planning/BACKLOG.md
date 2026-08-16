@@ -171,14 +171,6 @@ topic).
       (`core/config/__init__.py:195` refuses `>1`, and the fleet connection-budget arithmetic at
       `:208`/`:214` reads it).
 
-- [ ] **Four hazard-screen rules miss a reagent a chemist would expect them to catch** — [M], one
-      row because they are one defect class: a SMARTS arm written for the common spelling.
-      `peroxide-with-ketone`'s `left` is `[OX2H][OX2H]`, so `Na2O2 + acetone` raises only
-      `peroxide`; `complex-hydride-with-chlorinated-solvent`'s is `[$([AlH4-]),$([BH4-])]`, so NaH
-      raises nothing; `azide-with-dichloromethane`'s `right` is `[CH2](Cl)Cl`, so chloroform is
-      missed; and `core/reagents._TABLE` holds no hydrazine at all, so a hydrazine widening cannot
-      be checked. All four measured through the shipped screen.
-
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M]. `standard_smiles("CCN.C1CCOC1")`
       returns THF: `FragmentParent` keeps the largest fragment. Every downstream key, screen and
       similarity hit then describes the solvent.
