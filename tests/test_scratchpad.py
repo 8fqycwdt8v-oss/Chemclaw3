@@ -9,20 +9,27 @@ is simply written with no record that it was.
 """
 
 import ast
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from deepagents.backends import CompositeBackend, StateBackend
+from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from chemclaw.agent import checkpointer as ckpt
 from chemclaw.agent.scratchpad import (
     MEMORY_ROOT,
+    close_memory_store,
     filesystem_permissions,
     memory_namespace,
     memory_prefix,
+    memory_store,
     scratchpad_backend,
     scratchpad_tools,
 )
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
@@ -196,4 +203,54 @@ def test_write_todos_is_never_gated_by_either_write_gate() -> None:
 
     assert not side_effecting_call(
         "write_todos", {"todos": [{"content": "step", "status": "pending"}]}
+    )
+
+
+def test_concurrent_first_turns_get_one_migrated_store() -> None:
+    """`memory_store()`'s own version of `checkpointer`'s `test_concurrent_first_turns_...`.
+
+    `memory_store()` used to publish `_store` before awaiting `setup()`, and call
+    `_checkpoint_pool()` with no lock held — the pool's own docstring says that is safe only
+    because its *one* caller (`checkpointer()`) already holds `_init_lock`. Two coroutines racing
+    this function unguarded could each pass `_checkpoint_pool`'s `if _pool is None` check and
+    construct a distinct `AsyncConnectionPool` against the same DSN: only one survives in the
+    module global, and the other is opened and never closed. Slowing `setup()` widens the window
+    the same way the checkpointer's own test does, so a second caller is observed arriving *inside*
+    the first one's await rather than hoping to race it at real speed.
+    """
+    migrated: dict[str, bool] = {"done": False}
+    original = AsyncPostgresStore.setup
+
+    async def _slow_setup(self: Any) -> None:
+        """Stand in for the store's real migrations, widened so the window is observable."""
+        await asyncio.sleep(0.05)
+        await original(self)
+        migrated["done"] = True
+
+    async def _run() -> list[tuple[bool, int]]:
+        await migrated_db_or_skip()
+        await close_memory_store()
+        await ckpt.close_checkpointer()
+
+        async def _take(_index: int) -> tuple[bool, int]:
+            store = await memory_store()
+            return migrated["done"], id(store)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(AsyncPostgresStore, "setup", _slow_setup)
+        try:
+            return list(await asyncio.gather(*(_take(index) for index in range(4))))
+        finally:
+            monkeypatch.undo()
+            await close_memory_store()
+            await ckpt.close_checkpointer()
+
+    results = asyncio.run(_run())
+    assert all(done for done, _ in results), (
+        "a caller got a memory store before its setup() had finished"
+    )
+    ids = {store_id for _, store_id in results}
+    assert len(ids) == 1, (
+        f"{len(ids)} distinct store(s) were handed out; two stores means two setup() runs and "
+        "two connection pools opened for one process, with only one ever closed"
     )

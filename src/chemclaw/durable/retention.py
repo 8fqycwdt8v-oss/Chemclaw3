@@ -220,42 +220,72 @@ async def prune_expired_rows() -> RetentionOutcome:
 
     The cutoff is computed in SQL (`now() - interval`) so the app clock and the database clock
     cannot disagree about what "expired" means.
+
+    **One table's failure does not stop the sweep from reaching the others.** The tables in
+    `_PRUNABLE` are independent — nothing here reads from more than one of them — so a
+    `statement_timeout` or a bad row confined to `session_messages` used to end the whole pass
+    before `tool_result_blobs` or `checkpoints` were even attempted: the loop had no `try/except`,
+    so an exception from one table's block propagated straight out of this function. Against a
+    deployment where that one table has a persistent problem (an oversized session, a malformed
+    row), every *other* table would never be pruned again until the first was fixed, and nothing in
+    the job's own result said so — only Temporal's activity-failure log, which is not where an
+    operator reading a retention report looks. Each table's block is now caught, logged and rolled
+    back on its own, so its neighbours still get their turn in the same pass; the first exception is
+    re-raised once every table has been attempted, so the activity still fails and Temporal still
+    retries — the same outcome as before for the table that actually failed, with the isolation as
+    the only change. The rollback matters beyond tidiness: an uncaught error leaves the connection
+    in Postgres's aborted-transaction state, where every later statement on it fails too, so without
+    it the "still attempt the rest" half of this fix would not work at all.
     """
     outcome = RetentionOutcome(deleted={}, skipped=[])
+    first_error: BaseException | None = None
     async with connection(settings.postgres_dsn) as conn:
         for table, (column, disposable) in _PRUNABLE.items():
             days = _window_days(table)
             if days <= 0:
                 outcome.skipped.append(f"{table} (retention disabled)")
                 continue
-            if table == "session_messages":
-                # Not a single sweeping DELETE: a conversation row's disposability depends on rows
-                # that may not be expiring (see the module docstring). Per session, through the
-                # pairing closure — and committing per session, which is why no `commit()` follows
-                # this call.
-                deleted, deferred = await _prune_session_messages(conn, days)
-                outcome.deleted[table] = deleted
-                outcome.sessions_deferred = deferred
-                continue
-            if table == "checkpoints":
-                # Three tables, one thread, one transaction — see `_prune_checkpoints`. It reports
-                # each table separately because that is what an operator can go and look at, and it
-                # commits itself, which is why no `commit()` follows this call either.
-                counts, skipped, deferred = await _prune_checkpoints(conn, days)
-                outcome.deleted.update(counts)
-                outcome.skipped.extend(skipped)
-                outcome.threads_deferred = deferred
-                continue
-            async with conn.cursor() as cur:
-                # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
-                # so the interpolation cannot carry untrusted input; the *value* is bound.
-                await cur.execute(
-                    f"DELETE FROM {table} "
-                    f"WHERE {disposable} AND {column} < now() - make_interval(days => %s)",
-                    (days,),
+            try:
+                if table == "session_messages":
+                    # Not a single sweeping DELETE: a conversation row's disposability depends on
+                    # rows that may not be expiring (see the module docstring). Per session, through
+                    # the pairing closure — and committing per session, which is why no `commit()`
+                    # follows this call.
+                    deleted, deferred = await _prune_session_messages(conn, days)
+                    outcome.deleted[table] = deleted
+                    outcome.sessions_deferred = deferred
+                    continue
+                if table == "checkpoints":
+                    # Three tables, one thread, one transaction — see `_prune_checkpoints`. It
+                    # reports each table separately because that is what an operator can go and look
+                    # at, and it commits itself, which is why no `commit()` follows this call
+                    # either.
+                    counts, skipped, deferred = await _prune_checkpoints(conn, days)
+                    outcome.deleted.update(counts)
+                    outcome.skipped.extend(skipped)
+                    outcome.threads_deferred = deferred
+                    continue
+                async with conn.cursor() as cur:
+                    # Table and column come from the closed `_PRUNABLE` map above, never from a
+                    # caller, so the interpolation cannot carry untrusted input; the *value* is
+                    # bound.
+                    await cur.execute(
+                        f"DELETE FROM {table} "
+                        f"WHERE {disposable} AND {column} < now() - make_interval(days => %s)",
+                        (days,),
+                    )
+                    outcome.deleted[table] = cur.rowcount
+                await conn.commit()
+            except Exception as exc:  # isolated per table; re-raised once every table is tried
+                await conn.rollback()
+                logger.exception(
+                    "retention sweep failed for table %s; the other tables are still attempted",
+                    table,
                 )
-                outcome.deleted[table] = cur.rowcount
-            await conn.commit()
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise first_error
     return outcome
 
 

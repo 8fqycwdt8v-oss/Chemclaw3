@@ -153,6 +153,15 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
             max_size=settings.pg_pool_max_size,
             max_idle=settings.pg_pool_max_idle_seconds,
             timeout=settings.pg_pool_timeout_seconds,
+            # `max_idle` only governs when the pool itself decides a connection has sat unused long
+            # enough to close — it does nothing about one that was already killed out from under the
+            # pool by something the pool cannot see: a managed-Postgres vendor's idle limit, a
+            # stateful load balancer's NAT timeout, `idle_in_transaction_session_timeout`. Without
+            # this, the first query on such a connection is handed straight to a caller and fails
+            # with a raw connection-reset error instead of the pool quietly replacing it before
+            # anyone borrows it. `check_connection` runs `SELECT 1` on a connection the background
+            # health-check loop is about to keep, so a dead one is caught and swapped there instead.
+            check=AsyncConnectionPool.check_connection,
             # Opened by the caller below: constructing with `open=True` schedules the background
             # workers from `__init__`, which psycopg_pool warns about outside a running loop.
             open=False,

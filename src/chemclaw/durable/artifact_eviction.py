@@ -3,14 +3,24 @@
 `durable/retention.py` prunes by age and explicitly refuses to touch `calculation_results`,
 because D-011 ("never compute twice") is a correctness and cost guarantee and an age cutoff is the
 wrong instrument for a cache. That refusal stands and this job does not weaken it: **nothing here
-deletes a result.** It reclaims *blobs* — the by-products in `artifact_blobs` — and a reclaimed
-blob costs at most a recomputation of something the system already knows how to recompute, while
-the answer itself stays cached forever.
+deletes a `calculation_results` row.** It reclaims *blobs* — the by-products in `artifact_blobs` —
+and for a result whose row holds the whole answer with only a by-product offloaded, a reclaimed
+blob costs at most a recomputation of the by-product, while the answer itself stays cached.
 
-That distinction is what makes an eviction policy expressible at all. A result row is the answer;
-an artifact is an optimization on top of it, and `chemclaw.science.calc.artifacts` states in its
-own contract that an artifact may be absent — a reader that finds a blob gone treats it as a miss
-and recomputes, so this job can reclaim space without any reader having to learn about it.
+That is not every calculation, though, and the one exception is exactly the reason this store
+exists: `science.calc.artifacts.ArrayOffloadingStore` (built for `hessian()`, D-124) stores *only*
+a content hash for each packed array in the row and treats a missing blob as a full cache miss —
+`ArrayOffloadingStore.get` returns `None`, not a partial result — so reclaiming that blob evicts
+the answer along with it, not merely a by-product of it. "The answer itself stays cached forever"
+is the design for a row that carries its answer inline; it is not what this job's own contract
+promises for a row whose answer *is* an offloaded array.
+
+A result row is the answer; an ordinary artifact is an optimization on top of it, and
+`chemclaw.science.calc.artifacts` states in its own contract that such an artifact may be absent —
+a reader that finds one gone treats it as a miss and recomputes, so this job can reclaim space
+without any reader having to learn about it. `ArrayOffloadingStore` is the one place that contract
+is load-bearing for the answer rather than for an optimization, and it is a deliberate, accepted
+trade (D-2026-08-16, "the physics leaves, the cache stays") rather than an oversight here.
 
 **Its largest producer left, and the policy is unchanged by that.**
 `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the Hessians — the multi-megabyte blobs this

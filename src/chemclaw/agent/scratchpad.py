@@ -141,18 +141,33 @@ async def memory_store() -> AsyncPostgresStore:
     applies to this store's own `setup()` for the same reason. A second pool against the same DSN
     would double the connection budget to buy nothing.
 
+    **Published only once it is usable, under the checkpointer's own `_init_lock`.** This used to
+    publish `_store` before awaiting `setup()`, so a second turn arriving inside that await saw a
+    non-`None` global and got a store whose tables had not been created yet — the same cold-start
+    race `checkpointer()` was built to close. It also called `_checkpoint_pool()` with no lock held
+    at all, which that function's own docstring says is safe only because its *one* caller holds
+    `_init_lock` first; two coroutines racing this function unguarded could each pass the pool's
+    `if _pool is None` check and construct a distinct `AsyncConnectionPool` against the same DSN —
+    only one survives in the global, and the other is opened and never closed. Taking the same lock
+    `checkpointer()` takes serializes both entry points against that one shared pool, closing both
+    the store race and the pool leak with it.
+
     Returns:
         A ready store over this process's session pool.
     """
     global _store
-    if _store is None:
-        # Imported here rather than at module scope: `checkpointer` imports `state`, which imports
-        # config, and a module-scope import would put this module in that cycle for one call.
-        from chemclaw.agent.checkpointer import _checkpoint_pool
+    if _store is not None:
+        return _store
+    # Imported here rather than at module scope: `checkpointer` imports `state`, which imports
+    # config, and a module-scope import would put this module in that cycle for one call.
+    from chemclaw.agent.checkpointer import _checkpoint_pool, _initialization_lock
 
-        _store = AsyncPostgresStore(await _checkpoint_pool())
-        await _store.setup()
-        logger.info("memory store ready (%d tables)", len(STORE_TABLES))
+    async with _initialization_lock():
+        if _store is None:
+            store = AsyncPostgresStore(await _checkpoint_pool())
+            await store.setup()
+            _store = store
+            logger.info("memory store ready (%d tables)", len(STORE_TABLES))
     return _store
 
 

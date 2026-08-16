@@ -76,12 +76,6 @@ topic).
       the human" is false in the data. Either wire it at the one place a helper is invoked (and add
       the column to `cli/explain.py:37`'s select), or delete the producers and the claim.
 
-- [ ] **`memory_store()` repeats the cold-start race `checkpointer.py` was fixed for** — [S].
-      `agent/scratchpad.py:137` publishes `_store` before awaiting `setup()` and calls
-      `_checkpoint_pool()` without `_init_lock`, which that function documents as being held by its
-      only caller. `close_memory_store()` has no caller, `close_checkpointer()` does not clear
-      `scratchpad._store`, and `api/app.py`'s lifespan calls neither.
-
 - [ ] **Retention's checkpoint `LIMIT` bounds the deletes, not the scan** — [S].
       `durable/retention.py:138` aggregates the whole `checkpoints` table on an unindexed expression
       before `LIMIT` can discard anything, under a per-statement `statement_timeout` — so a first
@@ -186,6 +180,42 @@ topic).
 - [ ] **A BO observation naming an undeclared parameter is silently dropped** — [S], and it is a
       *fabrication* vector rather than an error-handling one: the campaign then optimises against a
       history that is missing the observation the chemist thought they recorded.
+
+- [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
+      [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
+      `calculation_results` primary key as `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`
+      (`infra/sql/001_calculation_results.sql:7`), and `calc_version` is not guaranteed free of `@`
+      or `:` — `docs/decisions/D-2026-08-16-the-physics-leaves-the-cache-stays.md` gives real
+      examples (`esol-delaney@2004`, `cal-0.28733:-29.3116`). Two different `(calc_type,
+      calc_version)` pairs can serialise to the identical string (`calc_type="a", calc_version="b@c"`
+      vs. `calc_type="a@b", calc_version="c"`); if the hash pair also matched, one calculator's
+      `ON CONFLICT (key) DO UPDATE` (`science/calc/postgres_store.py:32`) would silently overwrite
+      another calculator's cached row with a different `result`. The fix — deriving the key from
+      `stable_hash` over the four components as a mapping, the way `molecule_hash`/`input_hash`
+      already do — changes every existing row's key, which under D-011 ("never recomputed") is a
+      full-cache invalidation on deploy; that trade needs an ADR and a migration plan, not a quiet
+      change to `as_str`.
+
+- [ ] **`session_owners` and `session_turns` grow without any age-based disposal** — [S].
+      `infra/sql/README.md`'s own `session_owners` row already flags this ("survives its session's
+      pruned history; BACKLOG") but no row existed here to match it — this closes that dangling
+      cross-reference. Neither table is in `durable/retention.py`'s `_PRUNABLE` set, and the only
+      `DELETE` against either is `agent/leaver.py`'s manual, actor-scoped erasure — so every session a
+      client ever created (the companion UI creates one on the first keystroke, before any message is
+      sent) leaves a `session_owners` row forever, even after `session_messages` for that session is
+      fully pruned by age. Needs a policy decision — prune once a session has no remaining
+      `session_messages` and is past the retention window, or explicitly accept unbounded growth and
+      say so — not a code change made unilaterally.
+
+- [ ] **`observations_status_idx` does not cover the query it was built for** — [S].
+      `infra/sql/025_observations.sql:50` indexes `(status, last_seen DESC)`, with a comment saying
+      "the retrieval bucket wants open observations newest-first" — but `memory/observations.py:122`
+      (`_SELECT_OPEN`) actually sorts `ORDER BY cardinality(evidence_note_ids) DESC, last_seen DESC`,
+      an expression the index does not cover. The index serves the `status='open'` filter only; every
+      read still sorts all open rows in memory by an unindexed expression. Whether the fix is an
+      expression index matching the real sort or a correction to which one is authoritative is a
+      product call — the migration's stated rationale and the code that ships disagree about what the
+      "newest and most-evidenced first" bucket actually orders by.
 
 
 
