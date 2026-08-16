@@ -87,9 +87,9 @@ class IngestSummary(BaseModel):
     until a human merges it. That is the operator-facing claim, and it is deliberately the
     one a single run can actually establish: whether the entry was proposed before is not
     knowable from here (a late-landing export file lands in the same window on its first
-    sync), but whether it is coming back is. A PR the `kg-validate` hazard gate blocks and
-    a PR nobody has looked at both live here, indefinitely, and without this an operator
-    sees a healthy steady ingest count with no sign that the same entries are going round.
+    sync), but whether it is coming back is. A PR `kg-validate` fails and a PR nobody has
+    looked at both live here, indefinitely, and without this an operator sees a healthy
+    steady ingest count with no sign that the same entries are going round.
     A subset rather than a fourth disjoint bucket because the work really did happen — the
     run paid for the ingest — it just may not have accomplished anything new.
     """
@@ -242,8 +242,8 @@ async def sync_entries(
     )
     if awaiting_merge:
         # WARNING, not INFO, and on every run: this is the one outcome nothing else reports. These
-        # entries were proposed into a review queue that has not moved — nobody is working it, or a
-        # `kg-validate` hazard gate is refusing the branch — so the next run proposes them again,
+        # entries were proposed into a review queue that has not moved — nobody is working it, or
+        # `kg-validate` is failing the branch — so the next run proposes them again,
         # while the ingest count above reads as steady progress.
         logger.warning(
             "eln sync proposed %d entry/entries whose notes are still unmerged; they will be "

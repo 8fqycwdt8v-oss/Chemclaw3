@@ -8,6 +8,7 @@ than raised, and a cache hit does not re-store what is already there.
 import asyncio
 import logging
 import random
+from typing import Any
 
 import pytest
 
@@ -24,6 +25,7 @@ from chemclaw.science.calc.artifacts import (
 from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
+    StoredResult,
     cached_compute,
 )
 
@@ -169,5 +171,142 @@ def test_cached_compute_records_what_a_miss_cost() -> None:
         again = await store.get(key)
         assert again is not None
         assert again.compute_seconds == stored.compute_seconds
+
+    asyncio.run(_run())
+
+
+# --- the offloading store: the matrix stays out of the row it cannot be pruned from -------------
+
+
+def _packed(size: int) -> str:
+    """A base64 `.npy` array of `size`x`size`, the shape a Hessian payload carries."""
+    import base64
+    import io
+
+    import numpy as np
+
+    buffer = io.BytesIO()
+    np.save(buffer, np.eye(size, dtype=float))
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+_PAYLOAD = {
+    "structure_id": "st_1",
+    "method": "GFN2-xTB",
+    "solvent": "water",
+    "atom_count": 3,
+    "electronic_energy_hartree": -76.4,
+    "hessian_npy": _packed(9),
+    "dipole_derivatives_npy": _packed(3),
+    "ir_intensities": None,
+}
+_KEY = CalculationKey.build("xtb.hess", "v1", {"structure": "st_1"}, {"solvent": "water"})
+
+
+def _offloading() -> tuple[Any, InMemoryStore, InMemoryArtifactStore]:
+    """An `ArrayOffloadingStore` over fresh in-memory backends, with both backends visible."""
+    from chemclaw.science.calc.artifacts import HESSIAN_ARRAYS, ArrayOffloadingStore
+
+    results, blobs = InMemoryStore(), InMemoryArtifactStore()
+    return ArrayOffloadingStore(results, blobs, HESSIAN_ARRAYS), results, blobs
+
+
+def test_the_matrix_does_not_land_in_the_row_it_can_never_be_pruned_from() -> None:
+    """The whole point: `calculation_results` keeps an address, the artifact store keeps the bytes.
+
+    `durable/retention.py` refuses to prune `calculation_results` because D-011 says a persisted
+    result is never recomputed. A megabyte-scale matrix stored inline is therefore a row nothing can
+    ever reclaim, in the one table with no reclaim path — which is exactly what
+    `durable/artifact_eviction.py` and D-124 exist to prevent. So the assertion is on what the
+    *underlying* row contains, not on what the caller gets back.
+    """
+
+    async def _run() -> None:
+        store, results, blobs = _offloading()
+        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+
+        row = await results.get(_KEY)
+        assert row is not None
+        assert "hessian_npy" not in row.result, "the matrix was stored in the unprunable row"
+        assert "dipole_derivatives_npy" not in row.result
+        assert row.result["hessian_artifact"], "the row does not address the matrix"
+        # And the bytes really are in the store the eviction sweep walks.
+        assert await blobs.open(str(row.result["hessian_artifact"])) is not None
+
+    asyncio.run(_run())
+
+
+def test_a_hit_comes_back_byte_identical_to_what_was_stored() -> None:
+    """Offloading is invisible to the caller, or it is not a cache."""
+
+    async def _run() -> None:
+        store, _, _ = _offloading()
+        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+
+        hit = await store.get(_KEY)
+        assert hit is not None
+        assert hit.result == _PAYLOAD
+
+    asyncio.run(_run())
+
+
+def test_an_evicted_matrix_is_a_miss_to_recompute_from_and_never_an_error() -> None:
+    """The trade D-124 makes: a cold matrix is reclaimed, and the next caller pays a recompute.
+
+    Every reason a blob is absent is ordinary — the store disabled, the sweep reclaimed it, a
+    database restored without its artifact table. Raising here would turn a routine eviction into a
+    failed calculation; returning the row without its matrix would be worse still, because the
+    caller would validate a payload with no arrays in it.
+    """
+
+    async def _run() -> None:
+        store, results, blobs = _offloading()
+        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+        blobs._blobs.clear()  # the eviction sweep, or a restore without the artifact table
+
+        assert await store.get(_KEY) is None, "an evicted matrix must read as a miss"
+        assert await results.get(_KEY) is not None, "the row itself is untouched by eviction"
+
+    asyncio.run(_run())
+
+
+def test_a_row_is_never_written_addressing_an_artifact_that_did_not_land() -> None:
+    """Ordering is the design, not an implementation detail.
+
+    A row whose `hessian_artifact` points at nothing would be served as a hit forever and rejected
+    on every read — strictly worse than not caching, because it converts one recomputation into a
+    permanent one. So the blobs go first and the row is written only once they are retrievable.
+    Losing a by-product costs a future recomputation and never the calculation in hand.
+    """
+
+    class _Refusing(InMemoryArtifactStore):
+        async def put(self, *args: Any, **kwargs: Any) -> None:
+            return None  # over the cap, or the store is disabled
+
+    from chemclaw.science.calc.artifacts import HESSIAN_ARRAYS, ArrayOffloadingStore
+
+    async def _run() -> None:
+        results = InMemoryStore()
+        store = ArrayOffloadingStore(results, _Refusing(), HESSIAN_ARRAYS)
+        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+
+        assert await results.get(_KEY) is None, "a row was written addressing nothing"
+        assert await store.get(_KEY) is None
+
+    asyncio.run(_run())
+
+
+def test_a_payload_carrying_no_arrays_is_stored_unchanged() -> None:
+    """Wrapping a store must never be lossy for a result that has nothing to offload."""
+
+    async def _run() -> None:
+        store, results, _ = _offloading()
+        plain = {"structure_id": "st_1", "electronic_energy_hartree": -76.4}
+        await store.put(StoredResult(key=_KEY, result=dict(plain), compute_seconds=1.0))
+
+        row = await results.get(_KEY)
+        assert row is not None and row.result == plain
+        hit = await store.get(_KEY)
+        assert hit is not None and hit.result == plain
 
     asyncio.run(_run())

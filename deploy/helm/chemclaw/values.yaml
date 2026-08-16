@@ -146,8 +146,12 @@ knowledge:
 # unaffected, since durable jobs run on our own Temporal queue whoever serves the tools.
 #
 # Two things an operator must do themselves for such a connector, because the chart cannot:
-#   * add its host to `networkPolicy.egressDestinations` below (the egress rule already permits
-#     `egressPorts.https`, but the destination list is empty by default);
+#   * add its host to `networkPolicy.egressDestinations` below (empty by default) AND confirm
+#     `networkPolicy.egressPorts` already names the port it actually answers on. This used to claim
+#     the egress rule "already permits `egressPorts.https`" — wrong for every bundle documented
+#     here: `chem`/`safety`/`calc` are plain HTTP on 8858/8859/8860, not 443, and a NetworkPolicy
+#     egress rule restricts by port independently of the `to:` peer list, so a destination with no
+#     matching port in `egressPorts` still drops the connection;
 #   * give it a credential. A bundle reached across the network with `auth: mode: none` in its
 #     manifest is refused at load — see `chemclaw/connectors/manifest.py`.
 #
@@ -360,6 +364,20 @@ config:
   CHEMCLAW_HPC_PIPELINE_NAME: "chemclaw-qm"
   CHEMCLAW_HPC_PIPELINE_VERSION: "1.0.0"
   CHEMCLAW_HPC_ARTIFACT_STORE_URL: "https://artifacts.internal/chemclaw"
+  # Where the calc physics server lives (`Chemclaw3-mcp`'s `servers/calc`,
+  # D-2026-08-16-the-physics-leaves-the-cache-stays). `calc_server_url` is a `CalculatorSettings`
+  # field `connectors/calc/remote.py::calc_session` dials directly for EVERY calculation — every
+  # SMILES-in tool and every durable calc job — so it belongs in this ConfigMap rather than in the
+  # `connectors:` block above: `chemclaw.connectorUrls` only ever computes an address for a bundle
+  # this release runs or names with `url:`, and this is neither — `calc`'s own connector pods below
+  # keep the D-011 cache and the orchestration, and this is the address *they*, and every durable
+  # job's activity, reach out to for the arithmetic itself. Left unset, the code default
+  # (`http://127.0.0.1:8860/mcp`) stands in-cluster and every calculation dials a port nothing
+  # listens on — silently, because the pod's own `/healthz` never touches it and the probes stay
+  # green. Named `chemclaw3-mcp-calc` for the same reason `connectors.chem.url` /
+  # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
+  # its `calc` server in this namespace.
+  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
@@ -495,6 +513,23 @@ secrets:
     # the envelope tag is derived from the empty string — predictable, which is the weakness this
     # slot exists to let an operator close, not a new one it introduces.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
+    # The `chem`, `safety` and `calc` bearer tokens `connectors/identity.py::_EnvBearerAuth` reads
+    # per request (`connectors/chem/connector.yaml` and `connectors/safety/connector.yaml`'s
+    # `token_env`) and `connectors/calc/remote.py` reads via `settings.calc_server_token_env`. They
+    # land here for the *upgrade* reason `framingEnvelopeSecret` does, not the capability one:
+    # `chemclaw.env` renders `secrets.keys` as a **required** `secretKeyRef` included by every
+    # Deployment in the chart, so a required entry would take the front door and every worker into
+    # `CreateContainerConfigError` on `helm upgrade` — not just the pods that call these bundles.
+    #
+    # Unlike `framingEnvelopeSecret`, though, "optional" here says nothing about whether the
+    # capability tolerates being unset. It does not: `_EnvBearerAuth` raises
+    # `MissingConnectorCredential` on the very first call with no token present, and for `calc` that
+    # is every SMILES-in tool and every durable calc job, not a degraded corner. `optional: true`
+    # only protects the pods that never reach these bundles from a Secret edit they have nothing to
+    # do with; the operator still has to set all three before `chem`, `safety` or `calc` works.
+    chemToken: "CHEMCLAW_CHEM_TOKEN"
+    safetyToken: "CHEMCLAW_SAFETY_TOKEN"
+    calcToken: "CHEMCLAW_CALC_TOKEN"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the
@@ -603,6 +638,19 @@ networkPolicy:
     https: 443
     llm: 8000
     otel: 4317
+    # The `chem`, `safety` and `calc` sibling servers (`connectors.chem.url`,
+    # `connectors.safety.url`, `config.CHEMCLAW_CALC_SERVER_URL` above) — plain HTTP on their own
+    # ports rather than 443, so `egressPorts.https` does not cover them (the misreading this chart
+    # used to ship is fixed at the comment above `connectors.chem`). Three separate values, not one,
+    # because each sibling server is free to land on a different port in the deployer's namespace
+    # and a shared number would only be right by coincidence. Distinct from `connectorPort` below,
+    # which is the port *this release's own* connector pods listen on: `chem` and `safety` render
+    # no Service at all here (an external `url:` suppresses it), and `calc`'s own pods — the D-011
+    # cache and orchestration, not the physics — are already on `connectorPort` and reached via
+    # that egress rule; this is only the wire out to the sibling that runs the arithmetic.
+    chem: 8858
+    safety: 8859
+    calc: 8860
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
   # permitted. That is the shipped default only because the addresses are deployment-specific and

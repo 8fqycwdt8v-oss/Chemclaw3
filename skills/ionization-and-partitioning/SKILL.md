@@ -20,7 +20,9 @@ would invert.
 ## The two rules, before anything else
 
 **1. Rank with it. Never set a pH with it.** Benchmarked against 12 experimental values
-(`tests/test_pka.py`): the *ordering* is reliable (Spearman ρ 0.965), individual values
+(the calibration and its per-class Spearman figures now live with the engine, in
+`Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/pka.py`): the *ordering* is reliable
+(Spearman ρ 0.965), individual values
 miss by up to **2.1 units**, and the reported uncertainty is ±1.6. Process rules of thumb
 — "extract two units below the pKa", "ΔpKa > 2–3 for a stable salt" — turn on exactly
 that margin, so a plausible-looking prediction can invert the decision. If a pH, a salt

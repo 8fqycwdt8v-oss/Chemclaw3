@@ -391,9 +391,13 @@ on who hosts it); only the deployment differs, per D-2026-08-09-a-connector-we-d
 2. In `values.yaml`, set `connectors.<name>.url` to its address. That bundle gets **no** Deployment
    and **no** Service, and the front door dials what you gave instead of an in-cluster name.
    `server: true` still mirrors the manifest's `endpoint:` and says nothing about who runs it.
-3. Add the host to `networkPolicy.egressDestinations` (the rule already permits
-   `egressPorts.https`, but the destination list is empty by default), and put the token in the
-   secret set the pods already mount.
+3. Add the host to `networkPolicy.egressDestinations` **and its port to `networkPolicy.egressPorts`**,
+   then put the token in the secret set the pods already mount. Both halves are needed and the
+   second is the one that gets missed: a NetworkPolicy egress rule restricts by port independently
+   of the destination list, so a server on its own port is dropped no matter what you add to
+   `egressDestinations`. Only assume `egressPorts.https` covers it if the server really is on 443 —
+   the three bundles `Chemclaw3-mcp` serves are plain HTTP on 8858/8859/8860, and each needed its
+   own entry.
 
 The tools such a server exposes are still read/compute only, still narrowed by `tools:`, and still
 carry the turn's identity headers as *advisory* context — a connector outside our trust boundary
@@ -418,7 +422,9 @@ calculators and the calibration ledger), `bo` (Bayesian optimization) and `qm` (
 run behind the Nextflow launcher) — plus `chem` (bench chemistry over RDKit) and `safety` (the
 hazard screen), which this release **declares but does not run**: both are served by
 `Chemclaw3-mcp`, so each needs its host in `networkPolicy.egressDestinations` and its bearer
-(`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`) provided, or every call to them is refused.
+(`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`) provided, or every call to them is refused. The
+physics behind `calc` is served there too — `CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_CALC_TOKEN` —
+even though the `calc` bundle's own tools, cache and durable jobs stay in this release.
 
 **`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
 `servers/chem` on port 8858, so this release renders no Deployment and no Service for it and dials

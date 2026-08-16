@@ -93,3 +93,47 @@ def test_a_remote_hessian_inside_a_reaction_beats_while_it_runs(
     # And the per-species progress line is still there beside it: the two are complementary,
     # "how far" and "alive".
     assert any(beat.startswith("species ") for beat in beats)
+
+
+def test_no_remote_call_in_the_composites_bypasses_its_runner() -> None:
+    """The wiring, checked over the source, because the gap was two calls nobody thought about.
+
+    The behavioural tests above each drive *one* job and prove its timer fires. That is the right
+    check for the calls they cover and it says nothing about the ones they do not: `embed_structure`
+    and `combine_structures` were awaited bare — in four and one place respectively — while every
+    neighbouring call in the same functions went through `run`. Nothing was red, because a geometry
+    build is normally fast.
+
+    Normally is not the bound that matters. A remote call may run for
+    `calc_server_timeout_seconds` (900 s) and an activity is declared dead after
+    `xtb_job_heartbeat_timeout_seconds` (600 s), so any un-heartbeated call has a 300-second window
+    in which Temporal retries the job while the original call is still running — the exact failure
+    `beating` was extracted to end, reintroduced by a default argument that made forgetting silent.
+
+    Static rather than behavioural, and deliberately: the defect is *a call site that was never
+    written to heartbeat*, so the test has to see every call site rather than the ones a fixture
+    happens to reach. `remote_version` is exempt — it is a metadata probe on the trust path, not a
+    calculation, and no durable job calls it.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "src/chemclaw/connectors/calc/compose.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    bare: list[str] = []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            if not (isinstance(node, ast.Await) and isinstance(node.value, ast.Call)):
+                continue
+            called = node.value.func
+            name = getattr(called, "id", getattr(called, "attr", ""))
+            if name in {"remote_call", "cached_remote"}:
+                bare.append(f"compose.py:{node.lineno} awaits {name} directly in {function.name}()")
+
+    assert not bare, (
+        "a remote call bypasses its `RemoteRunner`, so a durable job holding it reports no "
+        "heartbeat while it runs: " + "; ".join(bare)
+    )
