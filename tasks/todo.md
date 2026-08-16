@@ -1,130 +1,98 @@
-# Deep review of the LangGraph migration, the GxP removal and the tool exodus
+# Hardening session — the non-agentic job seam, the quick path, the slow path
 
-Range reviewed: `7336f1d..84148a1` — 569 files, +53,599 / −33,521. Four parallel review agents
-(agent core · GxP/persistence · science+connectors after the exodus · front door/evals), each
-required to verify by reading code and running it rather than by reading docstrings.
+**Goal:** maximum robustness of everything between an agent tool call and a durable result,
+with the *lowest possible* configuration and maintenance burden. Both halves are the task; a
+fix that buys robustness by adding a setting nobody will get right is not a fix.
 
-## Baseline, measured before any change
+## Plan
 
-Docker, Postgres and Temporal started first, because a local `pytest` without them skips ~157
-Postgres tests and still prints green.
+- [x] Start the local stack (dockerd, `make up`, `make db-migrate`) so Postgres-backed tests
+      actually run — a local suite without it silently skips ~157 of them.
+- [x] Baseline `make lint type` (green) and a full `make test` (green, exit 0).
+- [x] Fan out five read-only reviewers, one per seam, each told to measure rather than argue.
+- [x] Triage: confirm each finding myself before acting on it.
+- [x] Implement the confirmed fixes, smallest sufficient change each, with a test that fails
+      without the fix.
+- [x] Two ADRs for the changes that alter a rule rather than fix a bug.
+- [x] `BACKLOG.md` rows for what was found and deliberately not fixed.
+- [ ] Re-run `make lint type test` with infra up; report what was skipped.
+- [x] Review section below.
 
-| | result |
-|---|---|
-| `pytest` (infra up) | **3978 passed, 0 skipped, 0 failed** |
-| `ruff check` / `ruff format --check` | clean, 590 files |
-| `mypy --strict` | clean, 590 files |
+## What was fixed, and how each was confirmed
 
-**Every defect below is invisible to that suite.** That is the finding behind the findings: the gate
-was green throughout, so nothing here is a regression the tooling could have caught — each one is a
-gap between what a declaration claims and what the code does.
+Every item was measured before being believed — against the live Temporal broker, the live
+Postgres, or the companion mock launcher driven through the real adapter code.
 
-## Fixed (each proven by reproduction)
+**Silent wrong science**
+- `pipeline_name` was in neither the DFT cache key nor `qm_job_key`, so two pipelines tagged
+  `1.0.0` produced the byte-identical key and served each other's energies, with a `calc_refs`
+  stamp naming the pipeline that had not run it. Added to both, only when configured, so `mock`
+  keys are untouched and exactly the ambiguous rows are invalidated.
 
-- [x] **CRITICAL — the grant reconciliation stripped write access to every LangGraph table on the
-      second deploy.** `REVOKE ALL ON ALL TABLES` reaches the six tables `setup()` creates; the
-      enumerated re-grants named none. Reproduced in Postgres 16: the app role *owns* `checkpoints`
-      and still ends with `INSERT=f SELECT=t`. The guard was blind — `_tables()` knew only
-      `infra/sql/*.sql`, so `_DYNAMIC`'s explicit `checkpoints` entry was discarded. ADR
-      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name`.
-- [x] **HIGH — a dry run could write a durable memory.** Fixed with a path-aware predicate rather
-      than by adding names: one verb serves `/memories/` and `/scratch/`.
-- [x] **HIGH — a template step read a tool's refusal as its answer**, and the audit trail booked the
-      refused call as `ok`. Measured: on the plain-args form this path used, a failed MCP tool
-      returns a bare `str`. Invoking with the whole call was tried and rejected — it stringifies a
-      `job` step's dict payload.
-- [x] **HIGH — every failed tool call emitted both `tool_failed` and `tool_result`, and the error
-      text joined the corpus `score_answer` grades grounding against.** `graph_stream` read a
-      `status` that `answered_failure` rewrites to `"success"`; `ToolFailureSignal` now carries
-      `call_id` and the stream suppresses on the turn's own failure set.
-- [x] **HIGH — a subagent's tool calls, results and plan were emitted as the main agent's.** Work
-      below the root is now marked, and its plan withheld rather than relabelled — `PlanEvent` has
-      no `agent` field, so there is nowhere to say whose it is.
-- [x] **HIGH — subject erasure missed the full text of every tool result.** `tool_result_blobs` is
-      now erased by the session its links name. The links themselves are left to the cascade, which
-      is what lets the grant keep withholding DELETE on that table — a conflict the grants test
-      caught.
-- [x] **HIGH — the remote calc client had no session timeout**, so the only live bound was httpx's
-      un-overridden 300 s rather than the 900 s its setting names, and it fires *silently*. Both
-      bounds are now set, session-first.
-- [x] **HIGH — `CALCULATION_EPOCH` reached no calc cache key.** Folded into `remote_key`'s params
-      hash; the three documents that prescribed bumping it now describe something that works.
-- [x] **MEDIUM — a Postgres failure was reported as a calculation-server outage.** The blanket
-      `except` spanned the `yield`, so the caller's `cached_compute` body re-entered it. Narrowed,
-      with `_call` converting its own transport failures.
-- [x] **MEDIUM — a reaction result stamped a locally-configured `method`** describing a calculation
-      this process did not run. `SpeciesEnergy` now carries the server's.
-- [x] **MEDIUM — an empty-answer turn also yielded an empty answer** and booked itself
-      `completed=True` in the cost ledger.
-- [x] **MEDIUM — the reference UI spliced a subagent's prose into the answer bubble.**
-- [x] **MEDIUM — `calc_session` had no test at all**, which is why the three defects in it were
-      invisible to a green suite.
-- [x] **MEDIUM — the image still installed xtb and crest** (~200 MB, and a GPL-3.0 redistribution
-      decision) for two modules that left with the physics; **and nothing in `deploy/` pointed
-      anything at the calculation server**, so `helm install` produced a `calc` bundle failing
-      against loopback.
-- [x] Record drift: `ARCHITECTURE.md`'s specialist team, `science/__init__.py` calling `calc` "the
-      physics", the dead `SafetyRulesError` entry, the unbounded
-      `xtb_minimum_refinement_attempts`, the present-tense handoff docstrings, `CLAUDE.md`'s three
-      non-existent backlog rows, and the one closed `[x]` row.
+**Work lost permanently**
+- `ConnectorJobWorkflow` declared no `failure_exception_types`, so a non-envelope child result
+  parked the parent in an unbounded workflow-task-failure loop: RUNNING forever, no push-back,
+  `get_durable_job_status` answering "running" for a job that will never finish. Same hole in all
+  three bundle workflows. Fixed on the job path, guarded by a test over the *registry*.
+- `fetch_artifacts` sat outside the poll's error tolerance, so a few seconds of 503 at the artifact
+  store burned all five Temporal attempts in 1.51 s and discarded a finished multi-hour run.
+- A failed run's `Idempotency-Key` was the science alone, so a re-drive got the old dead run id
+  back and the molecule stayed unrunnable for the launcher's key-retention window.
 
-Suite after: **3991 passed**, `ruff` and `mypy --strict` clean, seven of eight validators green
-(`helm-validate` needs the `helm` binary, absent here; the chart change is covered by
-`tests/test_helm_chart.py` and `tests/test_deploy_chart.py`).
+**Retry classification inverted**
+- Every infrastructure fault on the calc server (`"an internal error occurred"`, which is the path
+  `CliError` takes *by design*) arrived as `CalcToolError` — registered non-retryable — so an xtb
+  timeout failed a durable job on attempt 1 with the retry budget untouched.
+- The child call's `BAD_DATA_RETRY` cannot classify anything at a child boundary: measured 5 child
+  executions for one `ValueError`, i.e. five DFT submissions for one bad basis set.
 
-## Open
+**Green while doing nothing**
+- Every `helm upgrade` resumed any Schedule an operator had paused (measured: pause → True,
+  re-apply → False).
+- A dropped fan-out child had no metric, so a dead PR-gate credential reads as "zero proposals",
+  indistinguishable from an idle system.
+- `notify_session_best_effort` set `start_to_close` only, which never fires for a task no worker
+  picks up: measured still RUNNING at 75 s against an unserved queue.
+- `eln-sync` fired hourly with no ELN configured; `retention_enabled` scheduled a sweep whose four
+  windows all default to 0.
 
-Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor.
+**Fails late instead of early**
+- `hpc_api_token` was the one `nextflow` input the startup validator omitted, so a secret that
+  failed to mount produced green pods and a 401 five attempts into the first DFT job.
+- Nothing checked that a manifest's `workflow:` names a workflow the bundle registers — a typo cost
+  25 h of "running" and passed every other gate. Now `make connector-validate` names the fix.
 
-**Two of the eleven closed before this branch merged**, from `main` rather than here: the dead
-calculator settings went with `main`'s own sweep (this branch removed the one it missed,
-`xtb_engine`, whose comment still described a backend resolution that no longer exists), and
-`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact` gave the artifact store a writer again —
-`connectors/calc/compose.py:216`. Their rows are deleted rather than struck through. The rest:
-
-- **`tblite` is a runtime dependency with no importer**, kept alive by the test that derives
-  `ALPB_SOLVENTS` — a launch gate for four durable jobs — from a local install rather than from the
-  server that now decides it.
-- **The stored-message conversion is a destructive in-place rewrite run as a `pre-upgrade` hook**,
-  against data the previous release is still serving. Needs an ADR, not a patch.
-- **`xtb_geometry_decimals` still shapes half of every remote cache key.**
-- **No live lane in this repo can start**, and the e2e harness does what `calc`'s manifest forbids.
-- **A retrieval leg that raised is indistinguishable from one that found nothing.**
-- **The audit trail's `agent` column can never be non-empty**, and `memory_store()` repeats the
-  cold-start race `checkpointer.py` was fixed for.
-- **Retention's checkpoint `LIMIT` bounds the deletes, not the scan.**
-- **`message_from_row` degrades on one branch and mislabels the speaker on the other.**
-
-## Checked and found sound
-
-Recorded so the next reviewer does not re-derive them. **Auth is not stubbed** — the `entra_*`
-settings that looked reader-less are read via the derived `entra_issuer_url` / `entra_jwks_endpoint`
-(`api/auth.py:124,160`); RS256 is pinned, audience/issuer/exp checked, `kid`-less headers refused,
-JWKS refetch rate-limited, 503 separated from 401. Also verified: no import breakage anywhere; the
-token budget is booked on the disconnect path inside an `await`-free `finally`; audit coverage
-survives the GxP removal intact and no code path issues UPDATE/DELETE on `audit_events`;
-`message_from_row` really is the single deserializer; compaction is non-destructive; content is
-suppressed on all 14 OpenInference `hide_*` paths by default and LangSmith egress is pinned off
-(verified with the adversarial import ordering); no attacker-influenced metric label; the
-admission/budget overshoot bound holds; the Helm chart correctly renders no Deployment for `chem`
-and `safety`; and every tool name in `data/profiles/*.yaml` still resolves.
+**Configuration burden removed rather than added**
+- The launch POST raced its own activity timeout, and the poll's heartbeat gap was mis-measured.
+  Both are now *derived* (`hpc_submit_timeout_seconds`, `hpc_effective_heartbeat_timeout_seconds`)
+  rather than validated, because the validator I wrote first **refused the shipped chart** — see
+  `D-2026-08-16-arithmetic-about-a-loop-is-derived-not-configured`.
+- Net settings added by this session: **zero**.
 
 ## Review
 
-**What the instruction to measure bought.** Three claims changed under measurement rather than
-argument. The `astream` tuple-arity coupling looked unpinned and turned out to be exercised by a
-real compiled graph. The `entra_*` settings looked dead and are read through derived properties —
-an auth "critical" that was a grep artefact. And the template-step fix I first wrote (invoke with
-the whole call) was correct about the diagnosis and wrong as a remedy; only running the suite showed
-it stringifying a `job` step's payload.
+**What went well.** Five parallel reviewers with one seam each, all told to measure rather than
+argue, produced ~35 findings of which the ones acted on here were reproducible without exception.
+Two reviewers independently found the missing `hpc_api_token` check and the missing
+`workflow:`-name check, which is the useful kind of redundancy — it raised confidence in both
+before either was verified.
 
-**What was harder than expected.** The grant fix's first draft planned to add `checkpoint_migrations`
-to `CHECKPOINT_TABLES`. That constant is deliberately the conversation-bearing set and feeds
-`DELETE … WHERE thread_id`, which `checkpoint_migrations` has no column for — the change would have
-broken erasure and retention in order to fix a grant. The grant needed its own derivation.
+**Where I was wrong, twice, and the measurement caught it.**
+1. I wrote in a code comment that adding `pipeline_name` "keeps every `mock` key byte-identical".
+   `CalculationKey.build` hashes the params mapping whole, so a `None`-valued key changes the hash;
+   the claim was false until the field was made conditional. My own test failed on it.
+2. I added a validator requiring `2 * hpc_http_timeout < qm_activity_timeout`. It was correct about
+   the defect and it refused the shipped chart — the exact trade this session was told not to make.
+   The ADR records it rather than deleting it silently, because the next person to see those two
+   knobs will reach for the same validator.
 
-**A failed approach, recorded so it is not retried.** Grouping the new grants per `setup()` and
-guarding each group once. A `GRANT` on a missing table raises, and a raise anywhere in the `DO`
-block aborts the whole reconciliation — so one interrupted `setup()` would have left *every* table
-in the file ungranted, turning a narrow bug into a total one. Found by running it against a database
-holding only `checkpoints`. Guarded per table instead.
+**Process defect worth keeping.** I ran `make lint type 2>&1 | tail -3 && git commit`, which commits
+on a *failing* gate: the pipeline's exit status is `tail`'s, not `make`'s. One commit had to be
+amended for formatting. Run the gate as its own command and read its exit code.
+
+**What I did not fix, and why.** The digest writes to a mailbox with no reader (a route is a design
+decision about who reads a digest, not a bug fix); the chart's `enabled` flag never reaching
+`CHEMCLAW_CONNECTORS_ENABLED` and the two connector-health gaps (Helm work, and `helm` is not in
+this sandbox to verify a render); widening `failure_exception_types` to the sixteen periodic
+workflows (a different trade for runs nobody is waiting on). All four are `BACKLOG.md` rows carrying
+the measurement, so the next session starts from evidence rather than from a hunch.

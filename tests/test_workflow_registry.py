@@ -153,3 +153,53 @@ def test_describe_names_what_a_worker_serves() -> None:
     line = describe(bundle_queue("qm"))
     assert "workflows=[QMJobWorkflow]" in line
     assert "parse_qm_output" in line
+
+
+def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
+    """A plain exception in workflow code must fail the run, not park it forever.
+
+    The SDK treats an exception raised in workflow *code* as a suspected bug: it suspends the run
+    in an internal workflow-task-failure loop that ignores the retry policy and never gives up.
+    That is a defensible default for a workflow nobody is waiting on. It is the wrong one for this
+    path, where a chemist has already been told the job is running and the only way they ever hear
+    otherwise is a push-back the run must reach in order to send.
+
+    Both halves were measured against a live broker before this test existed. A bundle workflow
+    returning something that is not the envelope left `ConnectorJobWorkflow` RUNNING indefinitely,
+    its history repeating `workflow_task_failed: "Failed decoding arguments"` every ~10 s with the
+    worker re-polling the poisoned task forever; and a child reading an absent optional key from
+    its payload hung the child, the parent, and the session's expectation with it. Neither parent
+    carries an `execution_timeout` of its own, so nothing ends either one.
+
+    Scoped to the job path rather than to every registered workflow, deliberately: these are the
+    runs a person is waiting on, and widening the same declaration to the sixteen periodic
+    workflows would change how a redeploy bug behaves for jobs nobody is watching — a separate
+    decision, recorded in `docs/planning/BACKLOG.md` rather than smuggled in here.
+
+    The check is over the *registry* rather than a list of names, so a bundle added later is
+    covered without editing this file — which is the property the seam claims and the reason the
+    hole existed at all: nothing checked it.
+    """
+    import chemclaw.connectors.bo.workflows
+    import chemclaw.connectors.calc.workflows
+    import chemclaw.connectors.qm.workflows  # noqa: F401 — registration
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import discovered
+    from chemclaw.durable.connector_job import ConnectorJobWorkflow
+
+    on_the_job_path: list[type] = [ConnectorJobWorkflow]
+    for name in discovered():
+        on_the_job_path.extend(registered_workflows(bundle_queue(name)))
+
+    undeclared = [
+        cls.__name__
+        for cls in on_the_job_path
+        if not getattr(
+            getattr(cls, "__temporal_workflow_definition", None), "failure_exception_types", ()
+        )
+    ]
+    assert not undeclared, (
+        f"{undeclared} raise plain exceptions into an unbounded workflow-task-failure loop instead "
+        "of failing: add `@workflow.defn(failure_exception_types=[Exception])`. A job that hangs "
+        "while the chemist is told it is running is the failure this prevents."
+    )

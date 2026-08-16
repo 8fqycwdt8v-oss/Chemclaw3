@@ -87,6 +87,18 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
         ),
         task_queue=settings.background_task_queue,
         start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+        # **`start_to_close` alone is not a bound on this call, and that is what made "best effort"
+        # able to block a finished job forever.** It runs only once a worker has *picked the task
+        # up*; a task nobody polls — the background fleet scaled to zero, a rolling update, a queue
+        # named in config but served by no pod — simply waits. Measured: a workflow calling
+        # `notify_session_best_effort` against an unserved queue was still RUNNING after 75 s with
+        # this timeout at 30. So the caller whose contract is "never fail the job whose scientific
+        # result is already done" was instead holding it open indefinitely, and the `except
+        # ActivityError` below was unreachable in precisely the case it exists for.
+        #
+        # Doubled rather than a new setting: the wait is one small insert plus whatever queue delay
+        # a healthy fleet has, and a second knob would be one more pair to keep in step.
+        schedule_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds * 2),
         retry_policy=BAD_DATA_RETRY,
     )
 

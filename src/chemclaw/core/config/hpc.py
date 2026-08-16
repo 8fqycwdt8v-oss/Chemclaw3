@@ -99,15 +99,49 @@ class HpcSettings(BaseSettings):
             raise ValueError(
                 "hpc_poll_interval_seconds must be smaller than qm_poll_heartbeat_timeout_seconds"
             )
-        if (
-            self.hpc_launch_interface == "nextflow"
-            and self.hpc_poll_interval_seconds >= self.hpc_run_heartbeat_timeout_seconds
-        ):
-            raise ValueError(
-                "hpc_poll_interval_seconds must be smaller than hpc_run_heartbeat_timeout_seconds "
-                "when hpc_launch_interface='nextflow'"
-            )
         return self
+
+    @property
+    def hpc_submit_timeout_seconds(self) -> float:
+        """How long the launch activity gets: its own HTTP bound, twice, or the generic budget.
+
+        **Derived rather than validated, because the alternative was a second knob to get wrong.**
+        `submit_to_hpc` is bounded by `qm_activity_timeout_seconds` and the POST inside it by
+        `hpc_http_timeout_seconds`, and at the shipped defaults both are 30 s — so a slow launcher
+        races its own start-to-close. Measured: start-to-close cancelling a launch in flight lost
+        the run id, Temporal retried, and the cluster ended up with **two** runs, one of which
+        nothing will ever poll, cancel or bill to a job.
+
+        A validator demanding `2 * http < activity` would have caught it and refused the shipped
+        chart at boot, making every `nextflow` deployment tune a pair of unrelated knobs to say
+        something the code already knows. The relation is not a policy an operator holds an opinion
+        about; it is arithmetic. So the activity's bound follows its own HTTP bound: doubled, so the
+        POST can time out *and* the activity still has room to report that it did.
+
+        Raising `hpc_http_timeout_seconds` for a sluggish launcher therefore needs no second edit,
+        and the generic short-activity budget still applies to every other QM activity.
+        """
+        return max(self.qm_activity_timeout_seconds, self.hpc_http_timeout_seconds * 2 + 5.0)
+
+    @property
+    def hpc_effective_heartbeat_timeout_seconds(self) -> float:
+        """The poll's heartbeat timeout, floored by the real gap between two of its heartbeats.
+
+        Derived for the same reason as `hpc_submit_timeout_seconds`. `_poll_nextflow` beats once at
+        the top of each loop and then makes an HTTP call bounded by `hpc_http_timeout_seconds`
+        before sleeping `hpc_poll_interval_seconds`, so the true interval between beats is their
+        sum — while `_poll_faster_than_heartbeat` compares only the sleep. Measured as accepted at
+        startup: `hpc_http_timeout_seconds=300` against the shipped 120 s heartbeat timeout leaves
+        302 s between beats, so Temporal declares a healthy worker dead, retries the poll elsewhere
+        while the first is still polling, and burns the attempt budget on a run that is fine.
+
+        A floor rather than a refusal, because the configured value is a real preference (how fast a
+        genuinely dead worker is noticed) and only becomes wrong when it drops below what the loop
+        can physically achieve. Slack of one whole interval, so a single slow round trip does not
+        sit exactly on the boundary.
+        """
+        floor = self.hpc_http_timeout_seconds + self.hpc_poll_interval_seconds * 2
+        return max(self.hpc_run_heartbeat_timeout_seconds, floor)
 
     @model_validator(mode="after")
     def _hpc_launch_config(self) -> Self:
@@ -131,6 +165,16 @@ class HpcSettings(BaseSettings):
                 ("hpc_pipeline_name", self.hpc_pipeline_name),
                 ("hpc_pipeline_version", self.hpc_pipeline_version),
                 ("hpc_artifact_store_url", self.hpc_artifact_store_url),
+                # **The credential belongs in this list, and its absence was the one silent hole
+                # left in it.** `_auth_headers()` returns `{}` for an empty token rather than
+                # refusing, so a secret that failed to mount produced green pods, green probes and a
+                # first DFT job that died five retried attempts deep on `launch failed: 401` — which
+                # is verbatim the outcome this validator's docstring says it exists to prevent.
+                # Measured as ACCEPTED at startup before this line. It was excluded because the
+                # token was said to arrive "via the HPC bridge"; that bridge was deleted with
+                # workload-identity federation (D-2026-08-15), so a mounted secret is the only path
+                # and nothing else checks it.
+                ("hpc_api_token", self.hpc_api_token),
             )
             missing = [name for name, value in required if not value]
             if missing:

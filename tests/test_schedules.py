@@ -10,7 +10,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from temporalio.client import (
@@ -18,6 +18,7 @@ from temporalio.client import (
     Schedule,
     ScheduleAlreadyRunningError,
     ScheduleOverlapPolicy,
+    ScheduleState,
     ScheduleUpdate,
 )
 
@@ -36,6 +37,7 @@ from chemclaw.durable.schedules import (
     PlannedSchedule,
     _build_schedule,
     _jitter,
+    _preserving_pause,
     apply_schedules,
     describe_schedules,
     planned_schedules,
@@ -228,10 +230,93 @@ def test_retention_schedule_is_added_only_when_a_policy_is_stated(
     assert RetentionWorkflow not in {p.workflow for p in planned_schedules()}
     monkeypatch.setattr(settings, "retention_enabled", True)
     monkeypatch.setattr(settings, "retention_schedule_minutes", 60)
+    monkeypatch.setattr(settings, "retention_session_events_days", 90)
     plan = planned_schedules()
     retention = next(p for p in plan if p.workflow is RetentionWorkflow)
     assert retention.schedule_id == "retention"
     assert retention.interval == timedelta(minutes=60)
+
+
+def test_retention_needs_a_window_and_not_only_the_boolean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy is the windows; the boolean alone produced a job that swept nothing.
+
+    The condition lived in two files and they disagreed: `retention_enabled` turned the *Schedule*
+    on, `retention_*_days > 0` turned the *work* on, and all four windows default to 0. An operator
+    who did the documented thing got a job firing on its cadence forever, reporting
+    `skipped: [... (retention disabled)]` for every table, and showing perfectly healthy in
+    `describe_schedules`. Asking for both here makes "on but inert" unrepresentable.
+    """
+    monkeypatch.setattr(settings, "retention_enabled", True)
+    monkeypatch.setattr(settings, "retention_session_events_days", 0)
+    monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+    monkeypatch.setattr(settings, "retention_tool_results_days", 0)
+    monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
+
+    assert RetentionWorkflow not in {p.workflow for p in planned_schedules()}
+
+    monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+    assert RetentionWorkflow in {p.workflow for p in planned_schedules()}
+
+
+def test_the_eln_sync_is_planned_only_where_there_is_an_eln_to_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one periodic job that was planned unconditionally, asked the same question as its peers.
+
+    With no ingest source configured — the default — this was an hourly Schedule firing a workflow
+    whose first act is to enumerate zero sources and merge an empty list. `document-sync` already
+    asks the registry rather than a second setting; so does this now.
+    """
+    from chemclaw.durable import schedules as schedules_module
+
+    monkeypatch.setattr(schedules_module, "active_ingest_source_names", list)
+    assert ElnSyncWorkflow not in {p.workflow for p in planned_schedules()}
+
+    monkeypatch.setattr(schedules_module, "active_ingest_source_names", lambda: ["eln"])
+    plan = planned_schedules()
+    assert ElnSyncWorkflow in {p.workflow for p in plan}
+    assert len({p.schedule_id for p in plan}) == len(plan)
+
+
+def test_a_re_apply_does_not_resume_a_schedule_an_operator_paused() -> None:
+    """A reconcile restates this repository's spec; it must not undo an operator's hand.
+
+    `_build_schedule` returns a fresh `Schedule` whose `state` defaults to `paused=False`, and the
+    chart runs the applier as a `post-install,post-upgrade` hook — so pausing `document-sync`
+    because a share is broken, or `retention` during an incident, survived exactly until the next
+    unrelated `helm upgrade`, silently. Measured against a live Temporal server before the fix:
+    pause → `True`, re-apply → `False`.
+
+    Asserted on the update callback rather than through the fake client, because the callback *is*
+    the fix: it is handed the live description and used to ignore it.
+    """
+    job = PlannedSchedule("document-sync", NoteReindexWorkflow, timedelta(minutes=30))
+    paused = ScheduleState(note="operator paused: share is broken", paused=True)
+    described = SimpleNamespace(schedule=SimpleNamespace(state=paused))
+
+    update = _preserving_pause(job)(cast(Any, SimpleNamespace(description=described)))
+
+    assert update.schedule is not None
+    assert update.schedule.state.paused is True
+    assert update.schedule.state.note == "operator paused: share is broken"
+    # The rest is still declarative — the spec, the action and the overlap policy are this
+    # repository's to restate, and re-applying them is the whole point of the hook.
+    assert update.schedule.policy.overlap is ScheduleOverlapPolicy.SKIP
+    assert update.schedule.spec.intervals[0].every == timedelta(minutes=30)
+
+
+def test_a_running_schedule_stays_running_across_a_re_apply() -> None:
+    """The other direction: preserving state must not accidentally pause a healthy Schedule."""
+    job = PlannedSchedule("eln-sync", ElnSyncWorkflow, timedelta(minutes=60))
+    running = ScheduleState(paused=False)
+    described = SimpleNamespace(schedule=SimpleNamespace(state=running))
+
+    update = _preserving_pause(job)(cast(Any, SimpleNamespace(description=described)))
+
+    assert update.schedule is not None
+    assert update.schedule.state.paused is False
 
 
 def test_schedule_health_reports_a_planned_job_that_was_never_created() -> None:

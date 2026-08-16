@@ -191,8 +191,45 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **A failed durable job is dropped from the mid-turn resume** — [L]. `agent/job_results.py:83`,
-      and the function's own docstring says it is not. The chemist is told nothing.
+- [ ] **The digest is written to a mailbox with no reader, and the watermark advances anyway** —
+      [L]. `durable/digest.py:146-166` writes to `session_events` under session id `digest-<owner>`
+      with `kind="digest"`, and the only consumer in the tree is `GET /sessions/{id}/events`, which
+      claims `kinds=("job_completed","job_failed")` and sits behind `resolve_session` — so it 404s
+      that id and would filter the kind out anyway. Measured: the route's exact claim against a real
+      `digest` row returned `[]` and left it unconsumed. `notify_session_best_effort` returns `True`
+      on a successful *insert*, so `acknowledge_digest` fires and `mark_reported` moves the
+      watermark past notes the subscriber will never see; `_is_new` can never re-qualify them, and
+      `retention.py:122` (`consumed_at IS NOT NULL`) makes the orphaned rows immortal. The same
+      dead end exists for `system-eval-drift`, whose must-deliver stance therefore guarantees
+      delivery to nobody. Needs a route (`GET /digests` claiming `kinds=("digest",)`) — and until
+      one exists, `digest_enabled` should plan no Schedule, since shipping the ack without the
+      reader loses matches permanently rather than merely not delivering them.
+
+- [ ] **A rejoined durable run never reaches the second chemist** — [M].
+      `connectors/jobs.py:386-403`: on `WorkflowAlreadyStartedError` the launcher returns the id and
+      deliberately emits no `record_job_started`, and the running workflow's `session_id` belongs to
+      the *first* launcher. So chemist B gets no turn-stream `job_started`, no `job_completed`, and
+      `agent/job_results.py` cannot wait on it either — they are told "in progress" and must poll by
+      hand forever. The comment justifies the silence with "it may already be finished";
+      `handle.describe()` answers exactly that question, so the ~3-line fix is to describe once on
+      the rejoin path and announce it when the status is RUNNING. Full push-back to a second session
+      is the larger change behind it.
+
+- [ ] **The sixteen periodic workflows can still hang instead of failing** — [M]. The job path now
+      declares `failure_exception_types` and `tests/test_workflow_registry.py` holds it
+      (`D-2026-08-16-a-job-that-cannot-fail-is-a-job-that-hangs`), scoped deliberately: for a run
+      nobody is waiting on, parking a redeploy bug until someone ships a fix is a defensible trade
+      and the opposite of the one taken there. Decide it per workflow rather than by widening the
+      test — retention and the memory jobs are the ones worth arguing about, since a parked run
+      there is invisible in exactly the way the fan-out drop was.
+
+- [ ] **`connector_job_timeout_seconds` bounds a 20-second job and a 24-hour job identically** —
+      [M]. `core/config/connectors.py:71`: one global 90,000 s ceiling is the child's
+      `execution_timeout` for every bundle, so if the `calc` worker is down a 20 s xTB job sits
+      `running` for a day with no signal, while the setting is sized entirely by the QM path. An
+      optional `JobSpec.timeout_seconds` applied as `min(declared, setting)` would let a bundle
+      lower its own ceiling while the deployment keeps the maximum, leaving
+      `_the_job_ceiling_covers_the_poll_it_bounds` untouched.
 
 - [ ] **The mid-turn resume drops `user_input_requests`** — [L]. `api/runner.py:780`: an approval
       prompt raised during a resume never reaches the stream, so the turn waits on an answer nobody
@@ -233,6 +270,36 @@ topic).
       has the same shape with no timeout at all.
 
 ## 4 — Operating it
+
+- [ ] **`connectors.<name>.enabled` in the chart never reaches the agent** — [M].
+      `values.yaml:135` says "CHEMCLAW_CONNECTORS_ENABLED in `config` below decides which bundles
+      the agent loads at all" — and that key is in none of the 33 `config` entries. The chart derives
+      `CHEMCLAW_CONNECTOR_URLS`, `SERVICE_FLEET_REPLICAS` and `PG_FLEET_POOLED_PROCESSES` from
+      `.Values.connectors` and not the enable list, so `enabled: false` removes the pods and leaves
+      the tool on the agent's surface: the launcher starts the wrapper on the polled queue and its
+      child on `connector-qm`, which nobody polls, and the chemist is told "running" until the 25 h
+      ceiling. Latent today (all seven shipped entries are `enabled: true`); it fires the first time
+      someone uses the switch the file documents. Fix is a `chemclaw.connectorsEnabled` helper
+      mirroring `connectorUrls`, plus deleting the sentence that points at the absent key.
+
+- [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
+      derives its target from `health_url(manifest)`, which is `None` for a bundle with no
+      `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
+      `chemclaw_connectors_unhealthy` counts only `unreachable`, and `check_connectors_at_startup`
+      raises only on `unreachable`. The fail-fast posture an operator opts into is structurally
+      blind to the failure with the largest blast radius. `describe_task_queue(bundle_queue(name))`
+      in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
+      of the manifest check `connector-validate` now does — and it catches the row above too.
+
+- [ ] **One `replicas` knob drives two differently-shaped Deployments** — [S].
+      `templates/deployment-connectors.yaml:35` and `:98` both read `$cfg.replicas`, so scaling
+      `calc`'s MCP server to 4 also scales its Temporal worker to 4, and `pooledProcesses` counts it
+      twice against the `pg_fleet_max_connections` startup ceiling. Worse, the guard requires
+      `replicas` only when there is no `url`, while the worker block is deliberately not conditioned
+      on `url` — so a `url:` bundle that owns durable work renders an empty `replicas` (Kubernetes
+      defaults to 1) and contributes `nil | int` = 0 to the declared fleet. Split into
+      `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
+      require it whenever `worker` is set.
 
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
