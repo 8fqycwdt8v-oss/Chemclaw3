@@ -525,3 +525,45 @@ def test_a_probe_that_needed_a_job_and_called_no_job_tool_is_still_flagged() -> 
 
     assert "du-03" in report
     assert "ran none" in report
+
+
+def test_an_announced_outage_does_not_hide_a_silent_death() -> None:
+    """The harness's most important signal, and it could not fire on any broker-less deployment.
+
+    `capability_degraded` is announced *before the turn runs anything* — it names what this turn
+    will not have, which is the system working. Once the runner began probing Temporal per turn,
+    every deployment without a broker announced `durable-jobs (Temporal)` on every single turn, so
+    `failed_loudly` was true everywhere and "answered nothing, said nothing went wrong" became
+    unobservable. A run would report zero silent failures and mean it as a fact about the harness.
+
+    The stream here is exactly that shape: an outage announced, and then nothing at all. That is
+    the silent death this signal exists to find, not an exception to it.
+    """
+    outcome = _run(
+        _probe(),
+        {"type": "capability_degraded", "connectors": ["durable-jobs (Temporal)"]},
+    )
+
+    assert outcome.degraded == ["durable-jobs (Temporal)"], "the announcement is still recorded"
+    assert not outcome.answered
+    assert not outcome.failed_loudly, (
+        "a pre-turn capability announcement is not this turn's work failing; counting it as one "
+        "is what made every broker-less run report a clean zero"
+    )
+
+
+def test_a_turn_whose_tool_failed_is_still_loud_beside_an_outage() -> None:
+    """The other direction, so the fix above cannot have simply turned the signal off.
+
+    Same announced outage, plus a tool that actually fell over. `failed_loudly` must still be true:
+    what changed is which events count as a failure, not whether any do.
+    """
+    outcome = _run(
+        _probe(),
+        {"type": "capability_degraded", "connectors": ["durable-jobs (Temporal)"]},
+        {"type": "tool_failed", "tool": "predict_pka", "message": "connection refused"},
+        {"type": "answer", "text": "I could not compute that."},
+    )
+
+    assert outcome.tools_failed == ["predict_pka"]
+    assert outcome.failed_loudly

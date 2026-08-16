@@ -335,3 +335,19 @@ either be omitted from the request or re-applied locally after the cache.
     assume the assertions that break are in files you have never opened.** `packages/` in that repo
     is imported by all five servers, so "I edited one file in `packages/`" is exactly the case where
     a scoped run proves the least.
+
+37. **`git checkout <file>` is how you lose a mutation-check's subject.** Verifying a fix by
+    reverting it and watching a test go red is the right discipline, and I used `cp` to a backup for
+    four of five checks. For the fifth I reached for `git checkout src/.../live.py` to restore — and
+    the file's fix was *uncommitted*, so the checkout restored HEAD and silently deleted the work
+    the mutation was testing. The follow-up "restore" script then found no mutation to undo and
+    printed success anyway.
+
+    The tell was there and I nearly missed it: the test stayed red after the "restore". Had the
+    assertion been weaker, the defect would have gone back into the branch under a green line.
+
+    **The rule: restore a mutation from a copy you made yourself (`cp file /tmp/x.bak` → `cp back`),
+    never from git, unless the file is committed.** And a restore script must *assert* it found what
+    it was undoing — print-on-success outside the conditional is how a no-op reports as a fix. The
+    same assert-the-target rule already applies to applying a mutation (a ruff reflow once made one
+    silently not apply); it applies just as hard to undoing one.

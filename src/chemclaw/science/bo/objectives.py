@@ -10,6 +10,7 @@ expensive (e.g. fitting a surrogate).
 """
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import cache
 
 from chemclaw.core.chem import require_canonical_smiles
@@ -85,13 +86,38 @@ def _reizman_suzuki() -> Objective:
     return objective
 
 
-# Name → factory. Every factory takes the calculator seam, so the registry has one shape even
-# though the benchmark objective — a surrogate fitted from a bundled dataset — needs no calculator
-# at all. A per-entry signature would push the branch into `get_objective` and make adding a
-# calculator-backed objective a change to the resolver rather than a row here.
-_REGISTRY: dict[str, Callable[[LogSFor], Objective]] = {
-    "reizman_suzuki": lambda _log_s_for: _reizman_suzuki(),
-    "solubility_max": solubility_objective,
+@dataclass(frozen=True, slots=True)
+class RegisteredObjective:
+    """A named objective a durable campaign can run: how to build it, and which way is better.
+
+    **The direction is here because it is a property of the objective, not of the request.** A
+    campaign carries the direction twice — once in `CampaignSpec.problem.objectives[0].direction`,
+    which is what BoFire optimizes, and once implicitly in what the registered function *means* —
+    and nothing compared them. A caller pairing `solubility_max` with `direction="minimize"` got a
+    campaign that ran to completion, wrote a `bo-candidate` note, and recommended the **least**
+    soluble molecule in the library as its best point. Every number in it is correct; the
+    recommendation is inverted, which is the class of wrongness a reviewer is least able to catch
+    from the note alone.
+
+    So the registry states it, `require_campaign_startable` checks it, and the mismatch becomes a
+    refusal at launch instead of a plausible answer hours later.
+    """
+
+    factory: Callable[[LogSFor], Objective]
+    #: `"maximize"` or `"minimize"` — the same vocabulary `ObjectiveSpec.direction` uses, because
+    #: the whole point is that the two are compared as equals.
+    direction: str
+
+
+# Name → the objective it stands for. Every factory takes the calculator seam, so the registry has
+# one shape even though the benchmark objective — a surrogate fitted from a bundled dataset — needs
+# no calculator at all. A per-entry signature would push the branch into `get_objective` and make
+# adding a calculator-backed objective a change to the resolver rather than a row here.
+_REGISTRY: dict[str, RegisteredObjective] = {
+    # Reaction yield: more is better.
+    "reizman_suzuki": RegisteredObjective(lambda _log_s_for: _reizman_suzuki(), "maximize"),
+    # Predicted log S. The name says `_max` and the direction says it again, checkably.
+    "solubility_max": RegisteredObjective(solubility_objective, "maximize"),
 }
 
 
@@ -101,7 +127,21 @@ def get_objective(name: str, log_s_for: LogSFor) -> Objective:
     `log_s_for` is the calculator a calculator-backed objective evaluates through; see `LogSFor`
     for why it arrives as an argument rather than as an import.
     """
-    factory = _REGISTRY.get(name)
-    if factory is None:
+    registered = _REGISTRY.get(name)
+    if registered is None:
         raise ValueError(f"unknown objective {name!r}; known: {sorted(_REGISTRY)}")
-    return factory(log_s_for)
+    return registered.factory(log_s_for)
+
+
+def registered_direction(name: str) -> str:
+    """Which way this registered objective is better, or raise with the known names.
+
+    Split from `get_objective` because the caller that needs it — the launch-time precondition —
+    must answer the question *without building the objective*: `solubility_objective` closes over a
+    calculator client the precondition has no business constructing, and `_reizman_suzuki` fits a
+    surrogate. A campaign refused for a direction mismatch should cost nothing.
+    """
+    registered = _REGISTRY.get(name)
+    if registered is None:
+        raise ValueError(f"unknown objective {name!r}; known: {sorted(_REGISTRY)}")
+    return registered.direction

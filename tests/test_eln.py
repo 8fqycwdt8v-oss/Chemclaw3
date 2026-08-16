@@ -1676,3 +1676,49 @@ def test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note() -> Non
     # The tail of the same note is past the cut — which is where a scale figure appended after
     # the procedure would have sat, invisible to every hit on a detailed run.
     assert "Step 12" in note.body and "Step 12" not in excerpt
+
+
+def test_one_non_utf8_ord_export_does_not_abort_the_directory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file the codec cannot read is skipped, like every other unreadable export.
+
+    The sibling of `test_ord_malformed_entry_does_not_abort_the_sync_batch`, one layer lower and
+    with a cause the enumerated `except` genuinely did not cover. `UnicodeDecodeError` derives from
+    `ValueError`, so it is a *sibling* of `json.JSONDecodeError` rather than a child, and it is not
+    an `OSError` — the file opens and reads fine; the bytes are simply not UTF-8. One export written
+    by a tool that emitted latin-1 therefore escaped the handler and aborted the whole fetch,
+    contradicting the method's own skip-and-continue contract.
+
+    The ordering is what makes this a real check: the bad file sorts *first*, so under the defect
+    the good one is never reached at all and the assertion below fails on an empty list rather than
+    on a warning that did not appear.
+    """
+    (tmp_path / "a-bad.json").write_bytes(
+        '{"reaction_id": "bad", "notes": {"procedure_details": "caf\xe9"}}'.encode("latin-1")
+    )
+    (tmp_path / "b-good.json").write_text(
+        json.dumps(
+            {
+                "reaction_id": "ord-good",
+                "provenance": {"record_created": {"time": {"value": "2026-06-01T00:00:00Z"}}},
+                "inputs": {},
+                "outcomes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _run() -> None:
+        with caplog.at_level(logging.WARNING):
+            entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(
+                datetime(2026, 1, 1, tzinfo=UTC)
+            )
+        assert [entry.entry_id for entry in entries] == ["ord-good"], (
+            "the unreadable export must cost itself and nothing else"
+        )
+        assert any("a-bad.json" in record.getMessage() for record in caplog.records), (
+            "a skipped export is skipped loudly — silence here is the same loss with no record"
+        )
+
+    asyncio.run(_run())

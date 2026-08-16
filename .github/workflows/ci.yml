@@ -65,7 +65,16 @@ jobs:
     env:
       CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@localhost:5432/chemclaw
     steps:
+      # **Full history, because one test needs commits rather than files.**
+      # `test_no_merged_migration_had_its_statements_changed` asks git which commit introduced each
+      # migration and reads the file *as it was then*. On the action's depth-1 default that commit
+      # is the graft, which is `HEAD`, so `git show <introduced>:file` returns the working tree's
+      # own content and every migration compares equal to itself — the check reported no edit
+      # across all 42 while a smuggled `ALTER TABLE` appended to a merged file would have passed.
+      # It now skips honestly instead of passing, and this is what makes it actually run.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

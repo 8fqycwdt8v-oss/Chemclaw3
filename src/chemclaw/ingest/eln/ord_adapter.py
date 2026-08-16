@@ -107,7 +107,12 @@ class OrdJsonAdapter:
                 # amended in place and `record_created` does not move, so creation time alone can
                 # never bring a correction back into the fetch window.
                 modified = _modified_at(payload)
-            except (OSError, json.JSONDecodeError, OrdFormatError) as exc:
+            # `UnicodeDecodeError` is listed explicitly and is not covered by anything else here.
+            # It derives from `ValueError`, not from `OSError`, and `json.JSONDecodeError` is a
+            # *sibling* subclass rather than a parent — so one export written by a tool that emitted
+            # latin-1 aborted the whole batch, contradicting this method's own skip-and-continue
+            # contract and losing every later file in the directory along with it.
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, OrdFormatError) as exc:
                 logger.warning("skipping unreadable ORD export %s: %s", path.name, exc)
                 continue
             if entry_window(created, modified) >= since:

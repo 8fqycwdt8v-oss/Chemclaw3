@@ -28,6 +28,7 @@ fan-out for the duration of a warehouse query.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -36,6 +37,8 @@ from cryptography.hazmat.primitives import serialization
 
 from chemclaw.ingest.eln.warehouse.binding import BindingError
 from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
+
+logger = logging.getLogger(__name__)
 
 
 def _client() -> Any:
@@ -85,7 +88,22 @@ class _SnowflakeCursor:
         except self._client.errors.ProgrammingError as exc:
             # A relation or column the binding names and the warehouse does not have. Identical on
             # every retry, so it is `WarehouseQueryError` (non-retryable) rather than a transient.
-            raise WarehouseQueryError(f"warehouse rejected the query: {exc}") from exc
+            #
+            # **The driver's text stays in the log and out of the exception**, because these two
+            # strings travel to different places. A `WarehouseQueryError` raised inside a durable
+            # job is marked non-retryable by class name (`durable/publish.py`) and its message
+            # reaches the session — and Snowflake's `ProgrammingError` quotes the failing statement,
+            # so the site's table names, its column names and the shape of the query the binding
+            # built would land in a chemist's transcript and in the model's context. What replaces
+            # it is what an operator actually needs to find the statement in the warehouse's own
+            # query history: the error number and the query id, which name the incident without
+            # reproducing it. The full text is one `logger.exception` away, on the pod.
+            logger.exception("warehouse rejected a statement")
+            raise WarehouseQueryError(
+                "the warehouse rejected the query "
+                f"(error {getattr(exc, 'errno', '?')}, query {getattr(exc, 'sfqid', '?')}); "
+                "the statement and the warehouse's own message are in this pod's log"
+            ) from exc
         except self._client.errors.OperationalError as exc:
             # Network, session or timeout. Transient by nature, so `ConnectionError` — which
             # Temporal retries — exactly as `chemclaw.core.db` splits the same two cases.

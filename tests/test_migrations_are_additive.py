@@ -391,3 +391,42 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
         "checksum of exactly this, so it breaks `make db-migrate` on every database that already "
         "applied them. Put the change in a new migration."
     )
+
+
+def test_no_two_migrations_claim_one_number() -> None:
+    """Two files with the same prefix are two migrations one number cannot name.
+
+    **This does not ask for the existing collisions to be fixed, and that is the decision it
+    encodes.** `037_bo_suggestion_provenance` / `037_document_index` and `043_session_listing` /
+    `043_session_message_shape` are already merged and applied. The runner orders and records by
+    *filename*, so nothing about them is broken — and renaming a merged migration is exactly the
+    destructive edit `test_no_merged_migration_had_its_statements_changed` refuses, which would also
+    leave every database that already recorded the old name applying the new one a second time.
+
+    So the four are grandfathered by name, and the check exists for the *next* one — caught at
+    review, when a rename is still free. The exemption list is what makes that honest: adding a
+    fifth name to it is a visible act in a diff, where a check that simply excluded duplicates
+    would let the number space keep colliding in silence.
+
+    Grandfathered pairwise rather than by number, so a *third* file claiming `037` still fails.
+    """
+    grandfathered = {
+        frozenset({"037_bo_suggestion_provenance.sql", "037_document_index.sql"}),
+        frozenset({"043_session_listing.sql", "043_session_message_shape.sql"}),
+    }
+    by_number: dict[str, list[str]] = {}
+    for path in _migration_files():
+        number = path.name.split("_", 1)[0]
+        assert number.isdigit(), f"{path.name} does not begin with a migration number"
+        by_number.setdefault(number, []).append(path.name)
+
+    collisions = {
+        number: names
+        for number, names in by_number.items()
+        if len(names) > 1 and frozenset(names) not in grandfathered
+    }
+    assert not collisions, (
+        f"two migrations claim one number: {collisions}. Renumber the new one before merging — "
+        "after it is merged and applied, renaming it is a destructive edit and the number is "
+        "permanently ambiguous in `schema_migrations`"
+    )
