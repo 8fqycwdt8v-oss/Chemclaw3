@@ -400,3 +400,128 @@ def test_record_failure_refuses_an_end_date_before_the_note_began(
     with pytest.raises(ChemclawError, match="only became valid on 2026-05-01"):
         asyncio.run(record_failure("playbook-pd", "no good", held_until=date(2026, 3, 1)))
     assert fake.submissions == []
+
+
+def _seed_typed(tmp_path: Path) -> None:
+    """A refuted note, its refutation, its replacement, and one plain citation.
+
+    Modelled on what `record_failure` actually writes: a `failure-mode` note carrying a
+    `contradicts` edge back at the note it refutes.
+    """
+    (tmp_path / "old.md").write_text(
+        "---\nid: playbook-old\ntype: playbook\n---\nUse DCM. See [[compound-a]].\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "fail.md").write_text(
+        "---\nid: failure-dcm\ntype: failure-mode\n"
+        "relations:\n  - rel: contradicts\n    to: playbook-old\n---\nIt did not couple.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "new.md").write_text(
+        "---\nid: playbook-new\ntype: playbook\n"
+        "relations:\n  - rel: supersedes\n    to: playbook-old\n---\nUse THF instead.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "a.md").write_text(
+        "---\nid: compound-a\ntype: compound\n---\nA molecule.\n", encoding="utf-8"
+    )
+
+
+def test_expand_note_reports_the_typed_edge_and_its_direction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A neighbour that contradicts or supersedes this note arrives legible as one.
+
+    D-134 put `rel` on every edge and `_assemble_graph` has carried it since; no reader in this
+    repository read it. So `record_failure` wrote a `contradicts` edge for the express purpose that
+    a refuted note "arrives marked as disputed", and `expand_note` returned that neighbour
+    indistinguishable from an ordinary citation.
+
+    Direction is asserted separately because it is the claim: `relations_in` on `playbook-old` says
+    the *neighbours* supersede and contradict *it*, and the opposite reading is a different fact
+    about which note is current.
+    """
+    _seed_typed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    view = asyncio.run(expand_note("playbook-old", hops=1))
+    by_id = {neighbor.id: neighbor for neighbor in view.neighbors}
+
+    assert by_id["failure-dcm"].relations_in == ["contradicts"]
+    assert by_id["failure-dcm"].relations_out == []
+    assert by_id["playbook-new"].relations_in == ["supersedes"]
+    assert by_id["playbook-new"].relations_out == []
+
+    # Seen from the other end, the same edge is an outgoing claim.
+    replacement = asyncio.run(expand_note("playbook-new", hops=1))
+    assert {n.id: n.relations_out for n in replacement.neighbors} == {
+        "playbook-old": ["supersedes"]
+    }
+
+
+def test_expand_note_leaves_a_plain_citation_untyped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `[[wikilink]]` reports no relation — `cites` is what every untyped link already means.
+
+    Reporting it would put the word on the majority of neighbours while saying nothing the
+    neighbourhood does not already say, and would drown the edges an author typed on purpose.
+    """
+    _seed_typed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    view = asyncio.run(expand_note("playbook-old", hops=1))
+    cited = next(neighbor for neighbor in view.neighbors if neighbor.id == "compound-a")
+    assert cited.relations_out == []
+    assert cited.relations_in == []
+
+
+def test_expand_note_two_hop_neighbour_asserts_no_relation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A note reached in two hops is adjacent in the neighbourhood and linked to by nothing here.
+
+    Empty rather than inferred: there is no edge between the anchor and it, and inventing one from
+    a path would be this layer asserting a relation no author wrote.
+    """
+    _seed_typed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "graph_max_hops", 2)
+    view = asyncio.run(expand_note("playbook-new", hops=2))
+    two_hops = next(neighbor for neighbor in view.neighbors if neighbor.id == "compound-a")
+    assert two_hops.relations_out == []
+    assert two_hops.relations_in == []
+
+
+def test_find_notes_ignores_a_dangling_link_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep is over notes, so an id nothing defines can never be returned as a match.
+
+    `find_notes` used to iterate the assembled graph's nodes, which include link targets that have
+    no note behind them; they were skipped one line later, so this pins the behaviour rather than a
+    change to it — and pins that reading `load_notes` instead of `build_graph` kept it.
+    """
+    (tmp_path / "r.md").write_text(
+        "---\nid: reaction-r\ntype: reaction\ntags: [target]\n---\nrests on [[compound-pending]]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    assert [ref.id for ref in asyncio.run(find_notes("target"))] == ["reaction-r"]
+    # The dangling id is findable as *text in a body*, which is right — it is in that note's
+    # haystack. What it must never be is a hit in its own right, a reference to a note that has no
+    # body, type or provenance to report.
+    assert [ref.id for ref in asyncio.run(find_notes("compound-pending"))] == ["reaction-r"]
+
+
+def test_find_notes_truncates_in_id_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap keeps the lowest ids, which is what its warning tells the operator it does.
+
+    Load order is path order and the cap is applied while iterating, so the two must not be
+    conflated: the files here are laid down in the reverse of their id order.
+    """
+    for index, note_id in enumerate(["compound-d", "compound-c", "compound-b", "compound-a"]):
+        (tmp_path / f"{index}.md").write_text(
+            f"---\nid: {note_id}\ntype: compound\ntags: [target]\n---\nbody\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "graph_max_results", 2)
+    assert [ref.id for ref in asyncio.run(find_notes("target"))] == ["compound-a", "compound-b"]

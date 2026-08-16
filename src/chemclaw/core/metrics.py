@@ -163,6 +163,16 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_notes_unparseable_total": (
         "Note files skipped by the indexer because they failed to parse; they are not retrievable."
     ),
+    # The same defect wearing a different disguise, and the one that used to leave no trace at all:
+    # two files claiming one note id. The indexer keeps the first in path order and drops the
+    # second, so one of two curated notes is unreachable by every query — previously decided by
+    # which directory sorted last, and reported nowhere. Like the counter above this is a corpus
+    # problem rather than a traffic one, and it names the state an rsync that lands a renamed note
+    # before removing the old one leaves behind.
+    "chemclaw_notes_duplicate_id_total": (
+        "Note files skipped by the indexer because another file already claimed their id; "
+        "one of the two is not retrievable."
+    ),
     # The counterpart to the line above, and the reason it could not stand alone: a best-effort
     # publish that fails is logged inside a workflow and swallowed, because the science is already
     # durable and a dead git remote must not fail a completed job. That is the right call about the

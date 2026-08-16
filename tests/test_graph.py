@@ -1,7 +1,9 @@
 """Behavioral tests for the NetworkX indexer and validation (plan steps 2.3, 2.4)."""
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import networkx as nx
@@ -362,3 +364,150 @@ def test_note_file_fingerprints_drops_a_deleted_note(tmp_path: Path) -> None:
 
     (tmp_path / "b.md").unlink()
     assert set(graph.note_file_fingerprints(tmp_path)) == {"a"}
+
+
+def test_concurrent_cold_reads_parse_the_corpus_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Threads that miss the cache together wait for one parse instead of each doing their own.
+
+    The defect this pins was measured rather than reasoned about: on a 2,000-note corpus a single
+    cold `load_notes` cost 198 ms, four concurrent ones 2,521 ms and eight 6,219 ms — 31x the work
+    for 8x the callers, because eight parses of one tree contend on the GIL as well as duplicating
+    each other. It is reachable on every process start and after every `invalidate_cache`, with a
+    `gather_evidence` sweep offloading `load_notes` to a thread per source.
+
+    Counted rather than timed: a wall-clock assertion would be a flaky machine-speed test, while
+    "how many times was the corpus parsed" is the thing that was wrong.
+    """
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 60.0)
+    graph.invalidate_cache()
+    for index in range(20):
+        (tmp_path / f"n{index}.md").write_text(_note(f"n{index}", []), encoding="utf-8")
+
+    parses = {"count": 0}
+    real_parse = graph._parse_notes
+    started = threading.Barrier(8)
+
+    def _slow_counting(notes_dir: Path) -> list:  # type: ignore[type-arg]
+        parses["count"] += 1
+        time.sleep(0.05)  # widen the window a duplicate parse would slip into
+        return real_parse(notes_dir)
+
+    monkeypatch.setattr(graph, "_parse_notes", _slow_counting)
+
+    def _read() -> int:
+        started.wait()
+        return len(graph.load_notes(tmp_path))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        counts = list(pool.map(lambda _: _read(), range(8)))
+
+    assert counts == [20] * 8  # every caller got the whole corpus
+    assert parses["count"] == 1  # and exactly one of them paid for it
+
+
+def test_concurrent_cold_builds_assemble_the_graph_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The assembly is shared by the same lock as the parse, not merely the parse.
+
+    `build_graph` holds the corpus lock across `cached_notes` *and* `_assemble_graph`, which is why
+    that lock is re-entrant. Without the outer hold, eight cold builders would share one parse and
+    then each assemble their own graph.
+    """
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 60.0)
+    graph.invalidate_cache()
+    (tmp_path / "a.md").write_text(_note("a", ["b"]), encoding="utf-8")
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+
+    assemblies = {"count": 0}
+    real_assemble = graph._assemble_graph
+    started = threading.Barrier(8)
+
+    def _slow_counting(notes: list) -> object:  # type: ignore[type-arg]
+        assemblies["count"] += 1
+        time.sleep(0.05)
+        return real_assemble(notes)
+
+    monkeypatch.setattr(graph, "_assemble_graph", _slow_counting)
+
+    def _build() -> int:
+        started.wait()
+        nodes: int = build_graph(tmp_path).number_of_nodes()
+        return nodes
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        sizes = list(pool.map(lambda _: _build(), range(8)))
+
+    assert sizes == [2] * 8
+    assert assemblies["count"] == 1
+
+
+def test_cache_disabled_still_lets_every_caller_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With caching off the corpus lock is not taken — nobody is filling a cache to share.
+
+    Pinned because the lock is skipped by an explicit branch in `_corpus_lock`, and a branch that
+    silently stopped skipping would turn "always re-parse" into "re-parse, one at a time" — a
+    different contract from the one `graph_cache_enabled=false` states.
+    """
+    monkeypatch.setattr(settings, "graph_cache_enabled", False)
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    parses = {"count": 0}
+    real_parse = graph._parse_notes
+
+    def _counting(notes_dir: Path) -> list:  # type: ignore[type-arg]
+        parses["count"] += 1
+        return real_parse(notes_dir)
+
+    monkeypatch.setattr(graph, "_parse_notes", _counting)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: graph.load_notes(tmp_path), range(4)))
+    assert parses["count"] == 4
+
+
+def test_duplicate_note_id_keeps_the_first_file_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two files claiming one id resolve to the first in path order, loudly.
+
+    Both notes used to be returned and `add_node` then let whichever file sorted *last* replace the
+    other — so one of two curated notes was unreachable by every query, the winner decided by a
+    directory name, and nothing anywhere said so. `kg-validate` fails a duplicate in the repository;
+    this is about the tree a pod is serving, where an rsync landing a rename before removing the old
+    file produces exactly this.
+    """
+    (tmp_path / "compound").mkdir()
+    (tmp_path / "reaction").mkdir()
+    (tmp_path / "compound" / "x.md").write_text(_note("x", [], "compound"), encoding="utf-8")
+    (tmp_path / "reaction" / "x.md").write_text(_note("x", [], "reaction"), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        notes = graph.load_notes(tmp_path)
+
+    assert [note.id for note in notes] == ["x"]
+    assert notes[0].type == "compound"  # first in path order, not last-writer-wins
+    assert any("already defined by" in record.getMessage() for record in caplog.records)
+    assert build_graph(tmp_path).nodes["x"]["note"].type == "compound"
+
+
+def test_note_file_fingerprints_agrees_with_the_parse_on_a_duplicate(tmp_path: Path) -> None:
+    """The stat scan and the parse name the *same* file when two claim one id.
+
+    They disagreed: the parse kept both notes and the graph kept the last, while this scan was a
+    dict comprehension whose last entry won. `reindex_notes` diffs one against the other, so a
+    disagreement meant embedding one file's text under the other's id.
+    """
+    (tmp_path / "compound").mkdir()
+    (tmp_path / "reaction").mkdir()
+    (tmp_path / "compound" / "x.md").write_text(_note("x", [], "compound"), encoding="utf-8")
+    time.sleep(0.01)  # a distinct mtime, so the two files' fingerprints cannot coincide
+    (tmp_path / "reaction" / "x.md").write_text(_note("x", [], "reaction"), encoding="utf-8")
+
+    fingerprints = graph.note_file_fingerprints(tmp_path)
+    first = (tmp_path / "compound" / "x.md").stat()
+    assert fingerprints["x"] == f"{first.st_mtime_ns}:{first.st_size}"

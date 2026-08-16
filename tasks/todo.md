@@ -1,130 +1,122 @@
-# Deep review of the LangGraph migration, the GxP removal and the tool exodus
+# Deep review of knowledge management (layer 4 + its read paths)
 
-Range reviewed: `7336f1d..84148a1` — 569 files, +53,599 / −33,521. Four parallel review agents
-(agent core · GxP/persistence · science+connectors after the exodus · front door/evals), each
-required to verify by reading code and running it rather than by reading docstrings.
+Scope: `src/chemclaw/kg/` and everything that reads it on a hot path —
+`agent/graph_tools.py`, `retrieval/retrievers.py`, `durable/digest.py`.
+
+Every item below was **measured before being called a defect**, on a synthetic
+programme-shaped corpus (2,000 notes, 3.91 MB of body, 7 substrates, 16 note types)
+built by `tasks/live-test/`-style generation rather than argued from the code.
 
 ## Baseline, measured before any change
 
-Docker, Postgres and Temporal started first, because a local `pytest` without them skips ~157
-Postgres tests and still prints green.
+Docker, Postgres and Temporal started first (`sudo -n dockerd`, `make up`, `make db-migrate`),
+because a local `pytest` without them skips ~157 Postgres tests and still prints green.
 
 | | result |
 |---|---|
-| `pytest` (infra up) | **3978 passed, 0 skipped, 0 failed** |
-| `ruff check` / `ruff format --check` | clean, 590 files |
-| `mypy --strict` | clean, 590 files |
+| `pytest tests/test_{graph,note,note_search,conflicts,crosslink,graph_tools,note_proposals}.py` | 148 passed |
+| cold `load_notes`, 1 thread | 198 ms |
+| cold `load_notes`, 4 threads | **2,521 ms** |
+| cold `load_notes`, 8 threads | **6,219 ms** |
+| `collect_digests` match loop, 50 subscriptions | 352 ms |
 
-**Every defect below is invisible to that suite.** That is the finding behind the findings: the gate
-was green throughout, so nothing here is a regression the tooling could have caught — each one is a
-gap between what a declaration claims and what the code does.
+## The findings
 
-## Fixed (each proven by reproduction)
+- [x] **K1 — concurrent cold reads of the corpus each parse it in full.** `kg/graph.py`'s
+      double-checked caches release `_CACHE_LOCK` before `_dir_fingerprint`/`_parse_notes`, so
+      every thread that misses together parses the whole tree. Measured 198 ms at one thread,
+      **2,521 ms at four, 6,219 ms at eight** — 31× the work for 8× the callers, because the
+      duplicated parses contend on the GIL. Reachable on every process start and after every
+      `invalidate_cache()` (the PR-gate's `_repair_parked_checkout` and the note reindex both
+      call it), with three retrieval sources and the report harness all offloading `load_notes`
+      to threads at once. `kg/conflicts.py` already holds its lock across the computation and
+      argues exactly this ("a second caller waiting is strictly better than a second caller
+      duplicating"); its sibling in `graph.py` did not.
+      **Fix:** a per-directory computation lock, so one caller computes and the rest wait.
 
-- [x] **CRITICAL — the grant reconciliation stripped write access to every LangGraph table on the
-      second deploy.** `REVOKE ALL ON ALL TABLES` reaches the six tables `setup()` creates; the
-      enumerated re-grants named none. Reproduced in Postgres 16: the app role *owns* `checkpoints`
-      and still ends with `INSERT=f SELECT=t`. The guard was blind — `_tables()` knew only
-      `infra/sql/*.sql`, so `_DYNAMIC`'s explicit `checkpoints` entry was discarded. ADR
-      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name`.
-- [x] **HIGH — a dry run could write a durable memory.** Fixed with a path-aware predicate rather
-      than by adding names: one verb serves `/memories/` and `/scratch/`.
-- [x] **HIGH — a template step read a tool's refusal as its answer**, and the audit trail booked the
-      refused call as `ok`. Measured: on the plain-args form this path used, a failed MCP tool
-      returns a bare `str`. Invoking with the whole call was tried and rejected — it stringifies a
-      `job` step's dict payload.
-- [x] **HIGH — every failed tool call emitted both `tool_failed` and `tool_result`, and the error
-      text joined the corpus `score_answer` grades grounding against.** `graph_stream` read a
-      `status` that `answered_failure` rewrites to `"success"`; `ToolFailureSignal` now carries
-      `call_id` and the stream suppresses on the turn's own failure set.
-- [x] **HIGH — a subagent's tool calls, results and plan were emitted as the main agent's.** Work
-      below the root is now marked, and its plan withheld rather than relabelled — `PlanEvent` has
-      no `agent` field, so there is nowhere to say whose it is.
-- [x] **HIGH — subject erasure missed the full text of every tool result.** `tool_result_blobs` is
-      now erased by the session its links name. The links themselves are left to the cascade, which
-      is what lets the grant keep withholding DELETE on that table — a conflict the grants test
-      caught.
-- [x] **HIGH — the remote calc client had no session timeout**, so the only live bound was httpx's
-      un-overridden 300 s rather than the 900 s its setting names, and it fires *silently*. Both
-      bounds are now set, session-first.
-- [x] **HIGH — `CALCULATION_EPOCH` reached no calc cache key.** Folded into `remote_key`'s params
-      hash; the three documents that prescribed bumping it now describe something that works.
-- [x] **MEDIUM — a Postgres failure was reported as a calculation-server outage.** The blanket
-      `except` spanned the `yield`, so the caller's `cached_compute` body re-entered it. Narrowed,
-      with `_call` converting its own transport failures.
-- [x] **MEDIUM — a reaction result stamped a locally-configured `method`** describing a calculation
-      this process did not run. `SpeciesEnergy` now carries the server's.
-- [x] **MEDIUM — an empty-answer turn also yielded an empty answer** and booked itself
-      `completed=True` in the cost ledger.
-- [x] **MEDIUM — the reference UI spliced a subagent's prose into the answer bubble.**
-- [x] **MEDIUM — `calc_session` had no test at all**, which is why the three defects in it were
-      invisible to a green suite.
-- [x] **MEDIUM — the image still installed xtb and crest** (~200 MB, and a GPL-3.0 redistribution
-      decision) for two modules that left with the physics; **and nothing in `deploy/` pointed
-      anything at the calculation server**, so `helm install` produced a `calc` bundle failing
-      against loopback.
-- [x] Record drift: `ARCHITECTURE.md`'s specialist team, `science/__init__.py` calling `calc` "the
-      physics", the dead `SafetyRulesError` entry, the unbounded
-      `xtb_minimum_refinement_attempts`, the present-tense handoff docstrings, `CLAUDE.md`'s three
-      non-existent backlog rows, and the one closed `[x]` row.
+- [x] **K2 — two notes with one id collapse in the served tree, silently.** Measured: a corpus
+      with `reaction/rxn-1.md` and `compound/rxn-1.md` yields 5 parsed notes and 5 graph nodes;
+      whichever file sorts last wins `add_node`, and the other note is unreachable by every
+      query. `kg-validate` catches it in the repository, which is not the tree a pod serves — the
+      same argument that made `chemclaw_notes_unparseable_total` exist. Worse, the winner
+      *disagreed* between readers: `_parse_notes` (list, both present) and
+      `note_file_fingerprints` (dict, last-wins) named different files, so the reindex could
+      embed one note's text under the other's id.
+      **Fix:** one deterministic winner (first in path order, matching `kg/validate.py`'s
+      `id_to_path`), applied in both scans, with a WARNING and
+      `chemclaw_notes_duplicate_id_total`.
 
-Suite after: **3991 passed**, `ruff` and `mypy --strict` clean, seven of eight validators green
-(`helm-validate` needs the `helm` binary, absent here; the chart change is covered by
-`tests/test_helm_chart.py` and `tests/test_deploy_chart.py`).
+- [x] **K3 — `find_knowledge_gaps` reports notes that do not exist as the graph's top hubs.**
+      Measured: on a corpus where four notes cite a still-pending `compound-pending`, `analyze`
+      returns it as the **most-cited note in the graph**. `_hubs` ranks every node by in-degree,
+      and `build_graph` deliberately keeps a dangling target as a node with no `note` attribute.
+      D-018 makes this the normal state, not a corruption: a fingerprint-indexed reaction whose
+      note is still in PR-gate review is cited before it exists. The agent is told to check that
+      hub first and `expand_note` then raises.
+      **Fix:** rank only nodes that carry a note; dangling targets keep their own field.
 
-## Open
+- [x] **K4 — the digest re-tokenizes its query once per note.** `durable/digest.py::_matches`
+      calls `query_terms(subscription.query)` inside the per-note loop: for 50 subscriptions over
+      2,000 notes that is 100,000 regex splits of a string that never changes. Measured
+      **352 ms → 225 ms** by hoisting it, on an hourly activity.
 
-Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor.
+- [x] **K5 — typed edges reach no reader.** D-134 put `rel`, `confidence` and per-edge validity
+      on the graph; `Relation`, `outgoing_relations` and `graph.related` all work. But
+      `expand_note` returns neighbours as bare `NoteRef`s, so the model cannot tell a
+      `contradicts` neighbour from a `cites` one — including the `contradicts` edge
+      `record_failure` writes for the express purpose that a refuted note "arrives marked as
+      disputed". Direction is load-bearing here: "A supersedes B" and "B supersedes A" are
+      opposite claims.
+      **Fix (feature):** neighbours carry the typed edges that connect them to the anchor, with
+      the two directions kept apart.
 
-**Two of the eleven closed before this branch merged**, from `main` rather than here: the dead
-calculator settings went with `main`'s own sweep (this branch removed the one it missed,
-`xtb_engine`, whose comment still described a backend resolution that no longer exists), and
-`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact` gave the artifact store a writer again —
-`connectors/calc/compose.py:216`. Their rows are deleted rather than struck through. The rest:
+- [x] **K6 — `find_notes` assembles a graph it never traverses.** It calls `build_graph` for a
+      pure substring sweep over note metadata, so a cold call pays node/edge insertion for
+      nothing, and the sweep then iterates dangling ids that can never match.
+      **Fix:** read `load_notes`, sort by id (the order the cap warning already claims).
 
-- **`tblite` is a runtime dependency with no importer**, kept alive by the test that derives
-  `ALPB_SOLVENTS` — a launch gate for four durable jobs — from a local install rather than from the
-  server that now decides it.
-- **The stored-message conversion is a destructive in-place rewrite run as a `pre-upgrade` hook**,
-  against data the previous release is still serving. Needs an ADR, not a patch.
-- **`xtb_geometry_decimals` still shapes half of every remote cache key.**
-- **No live lane in this repo can start**, and the e2e harness does what `calc`'s manifest forbids.
-- **A retrieval leg that raised is indistinguishable from one that found nothing.**
-- **The audit trail's `agent` column can never be non-empty**, and `memory_store()` repeats the
-  cold-start race `checkpointer.py` was fixed for.
-- **Retention's checkpoint `LIMIT` bounds the deletes, not the scan.**
-- **`message_from_row` degrades on one branch and mislabels the speaker on the other.**
+## Verification plan
 
-## Checked and found sound
-
-Recorded so the next reviewer does not re-derive them. **Auth is not stubbed** — the `entra_*`
-settings that looked reader-less are read via the derived `entra_issuer_url` / `entra_jwks_endpoint`
-(`api/auth.py:124,160`); RS256 is pinned, audience/issuer/exp checked, `kid`-less headers refused,
-JWKS refetch rate-limited, 503 separated from 401. Also verified: no import breakage anywhere; the
-token budget is booked on the disconnect path inside an `await`-free `finally`; audit coverage
-survives the GxP removal intact and no code path issues UPDATE/DELETE on `audit_events`;
-`message_from_row` really is the single deserializer; compaction is non-destructive; content is
-suppressed on all 14 OpenInference `hide_*` paths by default and LangSmith egress is pinned off
-(verified with the adversarial import ordering); no attacker-influenced metric label; the
-admission/budget overshoot bound holds; the Helm chart correctly renders no Deployment for `chem`
-and `safety`; and every tool name in `data/profiles/*.yaml` still resolves.
+- [x] A regression test per finding, each proving the *behaviour*, not the shape:
+      concurrent cold parses count one parse; a duplicate id logs, counts and resolves the same
+      way in both scans; a dangling hub is absent from `most_cited` and present in
+      `dangling_links`; `_matches` is unchanged for every query; a `contradicts` neighbour is
+      reported with its direction; `find_notes` returns exactly what it returned before.
+- [x] Re-measure K1 and K4 after the change and record the numbers.
+- [x] `make lint type test` green with infrastructure up (no skipped Postgres tests).
 
 ## Review
 
-**What the instruction to measure bought.** Three claims changed under measurement rather than
-argument. The `astream` tuple-arity coupling looked unpinned and turned out to be exercised by a
-real compiled graph. The `entra_*` settings looked dead and are read through derived properties —
-an auth "critical" that was a grep artefact. And the template-step fix I first wrote (invoke with
-the whole call) was correct about the diagnosis and wrong as a remedy; only running the suite showed
-it stringifying a `job` step's payload.
+**Shipped.** `make lint` and `make type` clean over 593 files; `make test` with Postgres and
+Temporal up: **4,051 passed, 1 failed**. That one failure,
+`test_no_grandfathered_edit_outlives_its_reason`, **reproduces on the unmodified tree** (verified by
+stashing) — this environment's clone is shallow with 170 commits, so the test's `compared < 30` skip
+guard never fires while its history diff finds nothing edited. An environment coupling in that
+guard, left for the module that owns it. 12 new tests, each verified to fail without its fix.
 
-**What was harder than expected.** The grant fix's first draft planned to add `checkpoint_migrations`
-to `CHECKPOINT_TABLES`. That constant is deliberately the conversation-bearing set and feeds
-`DELETE … WHERE thread_id`, which `checkpoint_migrations` has no column for — the change would have
-broken erasure and retention in order to fix a grant. The grant needed its own derivation.
+| measurement | before | after |
+|---|---|---|
+| cold `load_notes`, 4 concurrent threads | 2,521 ms | **201 ms** (12.5×) |
+| cold `load_notes`, 8 concurrent threads | 6,219 ms | **252 ms** (24.7×) |
+| corpus parses for 8 concurrent cold readers | 8 | **1** |
+| graph assemblies for 8 concurrent cold builders | 8 | **1** |
+| `collect_digests` match loop, 50 subscriptions | 352 ms | **220 ms** (1.6×) |
+| cold `find_notes` | 220 ms + sweep | **192 ms** |
 
-**A failed approach, recorded so it is not retried.** Grouping the new grants per `setup()` and
-guarding each group once. A `GRANT` on a missing table raises, and a raise anywhere in the `DO`
-block aborts the whole reconciliation — so one interrupted `setup()` would have left *every* table
-in the file ungranted, turning a narrow bug into a total one. Found by running it against a database
-holding only `checkpoints`. Guarded per table instead.
+The decision record is
+[`D-2026-08-16-a-cache-that-lets-every-caller-miss-together.md`](../docs/decisions/D-2026-08-16-a-cache-that-lets-every-caller-miss-together.md).
+
+**What was considered and deliberately not done**, so it is not re-derived:
+
+- *Caching the lowered search haystack per note.* Measured 4.48 ms → 2.02 ms on an interactive
+  query over 2,000 notes. Real, and not worth a fourth fingerprint-keyed cache layer plus ~4 MB
+  of duplicated text held live; K4's hoist took the part that was free.
+- *Validating that a note's file sits in a `<type>/` directory.* The layout is a convention the
+  code does not depend on — only `path.stem` is an index key — and the suite writes note trees
+  flat in `tmp_path` in dozens of places. A check would enforce a rule nothing reads.
+- *Clearing `conflicts._INDEX_CACHE` from `graph.invalidate_cache`.* It is already correct: the
+  conflict index re-derives its fingerprint through `cached_notes`, so a bust upstream
+  invalidates it downstream. A registration hook for two caches is an abstraction with no third
+  caller.
+- *Making `analytics._DISTILLED_TYPES` connector-extensible.* Consistent with the `note_types:`
+  seam in principle, with no bundle today declaring a type that distils anything.

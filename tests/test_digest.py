@@ -23,10 +23,11 @@ import pytest
 
 from chemclaw.agent.subscriptions import Subscription
 from chemclaw.core.config import settings
-from chemclaw.durable.digest import _is_new, collect_digests
+from chemclaw.durable.digest import _is_new, _matches, collect_digests
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
 from chemclaw.kg.render import render_note
+from chemclaw.kg.search import query_terms
 
 
 def _note(note_id: str, valid_from: date | None) -> Any:
@@ -129,3 +130,38 @@ def test_the_digest_reads_the_tree_the_notes_are_actually_written_to(
 async def _resolved(value: Any) -> Any:
     """An awaitable of an already-known value — `all_subscriptions` is async, this test is not."""
     return value
+
+
+def test_matching_is_unchanged_by_tokenizing_the_query_once_per_subscription() -> None:
+    """The query's terms are hoisted out of the per-note loop without changing a single verdict.
+
+    `_matches` called `query_terms(subscription.query)` itself, once for every note in the corpus:
+    50 subscriptions over 2,000 notes was 100,000 regex splits of a string that never varies, and
+    hoisting it measured 352 ms to 225 ms on an hourly activity. Correctness is the thing at risk
+    in a refactor like that, so the cases pinned here are the ones where the tokenizer does
+    something other than split on spaces — stopwords, punctuation-bearing chemistry, a query that
+    survives filtering as nothing, and the type filter that short-circuits ahead of the terms.
+    """
+    # A real `Note`, not the freshness tests' stub: `_matches` reads the whole searchable haystack
+    # (`kg.search.search_text`), and a stub with two attributes would prove nothing about it.
+    note = Note(
+        id="reaction-1",
+        type="reaction",
+        body="a Pd(OAc)2 catalysed biaryl coupling in the flask",
+    )
+    for query, expected in [
+        ("biaryl", True),
+        ("the biaryl", True),  # the stopword must not be required as a term
+        ("Pd(OAc)2", True),  # punctuation splits into parts the body holds
+        ("biaryl nonexistentword", False),
+        # Nothing survives filtering, so the whole query becomes the one term and is matched
+        # literally — "a search for `the` is still a search" (`query_terms`). The body has one.
+        ("the", True),
+        ("the nonexistentword", False),  # and the fallback does not weaken the all-terms rule
+        ("", False),  # a blank query asks for nothing and gets nothing
+    ]:
+        subscription = Subscription(id=1, owner="c", query=query, last_seen_at=None)
+        assert _matches(note, subscription, query_terms(query)) is expected, query
+
+    typed = Subscription(id=1, owner="c", query="biaryl", last_seen_at=None, note_type="playbook")
+    assert _matches(note, typed, query_terms("biaryl")) is False
