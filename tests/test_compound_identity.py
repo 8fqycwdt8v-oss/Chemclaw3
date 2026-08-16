@@ -464,9 +464,10 @@ def test_a_reagent_the_hazard_rules_were_widened_for_can_be_named(
     neutral spelling is the *source's* choice; the reagent table is what turns the name into either.
     With no entry, the name resolved to nothing and the screen was never reached.
 
-    Asserted here and the screening half asserted there
-    (`servers/safety/tests/test_pairs.py::test_the_hydrazine_arm_fires_on_every_form_a_catalogue_sells`),
-    because the two repositories own the two halves and neither can state the whole claim alone.
+    Asserted here; the screening half is asserted in
+    `Chemclaw3-mcp:servers/safety/tests/test_pairs.py`
+    (`test_the_hydrazine_arm_fires_on_every_form_a_catalogue_sells`), because the two repositories
+    own the two halves and neither can state the whole claim alone.
 
     Sodium peroxide is the same shape one motif over: the table had hydrogen peroxide and not the
     solid, and the solid is the molecule whose one-coordinate-anion SMILES has now defeated three

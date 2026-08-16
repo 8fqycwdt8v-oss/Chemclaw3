@@ -234,13 +234,6 @@ topic).
 
 ## 4 — Operating it
 
-- [ ] **`LANGSMITH_TRACING` is pinned false in the Helm chart and nowhere else** — [S]. `langsmith`
-      is in the runtime closure and enables itself from ambient environment: measured,
-      `LANGSMITH_TRACING=true` sends conversation content to `api.smith.langchain.com` with no repo
-      code involved. `deploy/entrypoint.sh:18` now exports a default, which covers the image; `make
-      chat`, `make connectors`, hand-started workers, CI and local dev are still unguarded. Fix at
-      the composition root so it holds regardless of launcher.
-
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. Everything below about backup and retention is downstream
@@ -269,11 +262,6 @@ topic).
       erasure request currently has no route across the seven tables that hold a conversation.
 
 ## 5 — Upstream capability this stack already has
-
-- [ ] **`PlanEvent` carries no `plan_hash`** — [S], 2026-08-15. A client watching the stream sees the
-      todo list but cannot post `POST /sessions/{id}/plan/decision` without a separate `GET /plan`
-      round-trip for the hash it must echo — which is what `evals/live.py` does. Adding the field is
-      additive to the SSE union, so it needs a `Chemclaw3_ui` change only to *use* it.
 
 - [ ] **A plan refusal is distinguishable only by substring** — [M], 2026-08-15. It reaches the wire
       as a `ToolFailedEvent`, and every consumer tells it apart by matching the refusal sentence

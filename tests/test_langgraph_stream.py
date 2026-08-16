@@ -493,3 +493,49 @@ def test_work_from_below_the_root_is_marked_and_its_plan_withheld() -> None:
     assert [event.type for event in root if event.type == "plan"] == ["plan"], (
         "the root's own plan must still be emitted, or this gate has simply turned plans off"
     )
+
+
+def test_a_streamed_plan_carries_the_hash_a_decision_must_be_posted_against() -> None:
+    """Without it, answering the plan you were just shown needs a round trip that races the plan.
+
+    `POST /sessions/{id}/plan/decision` requires the hash of the *exact* plan the human saw — that
+    binding is D-167's fix, so a plan revised after being displayed cannot be approved by a decision
+    aimed at the old one. The stream carried the todo list and not the hash, so a client's only
+    route to one was `GET /sessions/{id}/plan`. That fetch races the very change the binding exists
+    to catch: the agent may revise between the render and the fetch, and the client then posts a
+    hash for a plan its user never saw — a decision that is *valid* and about the wrong thing.
+
+    The assertion is against `plan_identity` rather than a literal, and that is the point rather
+    than convenience. A second hashing rule here would produce approvals valid under one spelling
+    and unrecognised under the other, in a durable row (`plan_approvals`) that outlives the turn
+    that wrote it. Equal strings is the only form of "one identity" a test can hold.
+    """
+    from chemclaw.agent.plan_gate import plan_identity
+    from chemclaw.api.graph_stream import _from_update
+
+    titles = ["screen the reagents", "compute the barrier", "write it up"]
+    update = {
+        "agent": {"todos": [{"content": title, "status": "pending"} for title in titles]},
+    }
+
+    async def _collect() -> list[Any]:
+        trace = ToolCallTrace()
+        return [
+            event
+            async for event in _from_update(update, agent="", emit_plan=True, trace=trace, todos=[])
+        ]
+
+    plans = [event for event in asyncio.run(_collect()) if event.type == "plan"]
+    assert len(plans) == 1
+    assert plans[0].plan_hash, "an empty hash is not something a client can post back"
+    assert plans[0].plan_hash == plan_identity(titles)
+
+    # **The displayed list and the hashed list are different strings, and that is the trap.**
+    # `todos` carries `_todo_titles`'s checkbox rendering — status is a thing a surface must not
+    # have to infer — while the gate and the decision route hash `content` alone
+    # (`plan_state.session_todos`). The first version of this hashed `plan` and produced a
+    # `plan_hash` no decision could ever match: authoritative-looking and wrong on every plan,
+    # which is worse than the missing field it replaces. Asserting both here is what keeps them
+    # from being quietly collapsed into one.
+    assert plans[0].todos == [f"[ ] {title}" for title in titles]
+    assert plans[0].plan_hash != plan_identity(plans[0].todos)
