@@ -48,7 +48,12 @@ from chemclaw.durable.registry import durable_workflow
 
 
 @durable_workflow(bundle_queue("qm"))
-@workflow.defn
+# Its failures must be able to *be* failures: without this the SDK parks a plain exception raised
+# in workflow code in an unbounded workflow-task-failure loop, so the parent
+# `ConnectorJobWorkflow` waits forever and the chemist is told "running" indefinitely. Measured on
+# a child reading an absent optional key from its payload (`exclude_none=True` drops one) — child
+# RUNNING forever, parent waiting, session never told. See `durable/connector_job.py` for the trade.
+@workflow.defn(failure_exception_types=[Exception])
 class QMJobWorkflow:
     """Run one QM calculation durably and return it in the connector envelope."""
 

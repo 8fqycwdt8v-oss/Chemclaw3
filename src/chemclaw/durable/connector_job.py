@@ -45,7 +45,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio import workflow
-from temporalio.common import WorkflowIDReusePolicy
+from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
@@ -249,7 +249,25 @@ def job_record_for(
 # connector's own queue and waits — so it belongs with the many light workers, not the few
 # heavy ones. The *capability* is heavy; this is not (D-006).
 @durable_workflow("background")
-@workflow.defn
+# **`failure_exception_types` because without it this workflow cannot fail — it hangs.** The
+# Temporal SDK treats a plain exception raised in workflow *code* as a suspected bug and suspends
+# the run in an internal workflow-task-failure loop that ignores the retry policy and never gives
+# up. This wrapper raises plain exceptions of its own: chiefly the `result_type=ConnectorJobResult`
+# decode of whatever the bundle's workflow returned. Measured against a live broker: a child
+# returning a non-envelope left the parent RUNNING indefinitely — history repeating
+# `workflow_task_failed: "Failed decoding arguments"` every ~10 s, the worker re-polling the
+# poisoned task forever, no `job_failed` push-back, and `get_durable_job_status` answering
+# "running" for a job that will never finish. The parent carries no `execution_timeout` of its own,
+# so nothing ends it.
+#
+# `TemplateWorkflow` already fixed exactly this (REV-13) and `durable/orchestrator.py` documents the
+# trap (D-093); the one wrapper *every* connector job runs through had neither.
+#
+# The trade this makes explicit: a genuine code bug in a redeploy now fails the in-flight jobs
+# instead of parking them until someone ships a fix. That is the right way round here — a job that
+# hangs forever while telling a chemist it is running is the worse failure, and the same judgement
+# was already made one module over.
+@workflow.defn(failure_exception_types=[Exception])
 class ConnectorJobWorkflow:
     """Run one connector-owned workflow as a child, then publish and notify on its behalf."""
 
@@ -279,17 +297,24 @@ class ConnectorJobWorkflow:
         started_at = workflow.now()
         try:
             result = await self._run_child(job)
-        except (ChildWorkflowError, ActivityError) as exc:
-            # One clause rather than two identical ones. `_run_child` awaits only
-            # `execute_child_workflow`, and the parent-side failure converter decodes a child
-            # failure exclusively as `ChildWorkflowError` (`temporalio/converter`, case
-            # `child_workflow_execution_failure_info`).
-            # `ActivityError` is produced only from `activity_failure_info`, which this frame never
-            # sees. It stays in the tuple because the day this workflow awaits an activity directly
-            # is the day the notification would silently stop happening, and a tuple costs nothing.
+            return await self._finish(job, result, started_at)
+        except BaseException as exc:
+            # **Every way this run can end badly, not only a failing child.** The clause used to be
+            # `except (ChildWorkflowError, ActivityError)` around the child call alone, which is a
+            # correct account of *the child* failing and covers nothing else: the envelope decode,
+            # `job_record_for`, `note_with_run_provenance` and the two best-effort steps all raise
+            # outside it. So the moment `failure_exception_types` above turns the measured hang into
+            # a real failure, that failure would arrive at the chemist as silence — the same
+            # `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` defect through a door
+            # the narrow clause does not cover. A job that outlives its turn has already been
+            # announced as running, and the only path back is this notification.
+            #
+            # `BaseException` rather than `Exception` so a cancellation is announced too (measured:
+            # the parent reaches CANCELED and the session gets `job_failed reason="Cancelled"`),
+            # and `_notify_failure` never raises, so a broken push-back cannot replace the real
+            # reason with its own.
             await self._notify_failure(job, exc)
             raise
-        return await self._finish(job, result, started_at)
 
     async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
         """Start the bundle's own workflow on its queue and wait for its result."""
@@ -315,7 +340,20 @@ class ConnectorJobWorkflow:
             # execution a duplicate id is a bug, and across executions the id differs so a failed
             # parent can genuinely re-run. See `child_workflow_id` for the retry this used to block.
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-            retry_policy=BAD_DATA_RETRY,
+            # **One attempt, because a workflow-level retry here can only duplicate compute.**
+            # `BAD_DATA_RETRY` cannot classify anything at this boundary: Temporal matches
+            # `non_retryable_error_types` against the *outermost* failure, and a child that failed
+            # through its own activity surfaces as `ActivityFailure` — a name deliberately absent
+            # from `_BAD_DATA_TYPES`, since that list names the errors themselves. Measured: the
+            # identical `ValueError` costs 1 attempt at an activity boundary and **5 child
+            # executions** here, 15.4 s of backoff, six executions under one parent id. On `qm`
+            # that is five DFT submissions for one unparameterised basis set, and the D-011 cache
+            # cannot help because a failed run stores nothing.
+            #
+            # Nothing is lost by dropping it: the child's own activities already carry
+            # `BAD_DATA_RETRY`, so genuine transients are retried where they can be classified, and
+            # a worker that dies mid-child is re-delivered by Temporal without any workflow retry.
+            retry_policy=RetryPolicy(maximum_attempts=1),
             execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
         )
         return result
