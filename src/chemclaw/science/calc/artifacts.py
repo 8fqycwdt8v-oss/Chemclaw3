@@ -27,14 +27,23 @@ for tests and a Postgres backend for real (`science/calc/postgres_artifacts.py`)
 `default_artifact_store()` seam that tests monkeypatch at the importing module.
 """
 
+import base64
 import hashlib
 import logging
 import zlib
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from chemclaw.core.config import settings
+from chemclaw.science.calc.store import (
+    CalculationKey,
+    CalculationQuery,
+    ResultStore,
+    StoredResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,3 +255,129 @@ _MEDIA_TYPES: dict[str, str] = {
 def media_type_for(name: str) -> str:
     """The media type for a captured file, by its producer-given name."""
     return _MEDIA_TYPES.get(name, "application/octet-stream")
+
+
+# Which fields of a Hessian payload are packed arrays, and the artifact name each is stored under.
+# Both names were already reserved in `_MEDIA_TYPES` for exactly this role, which is why they carry
+# the `.npy` suffix that table keys on.
+HESSIAN_ARRAYS: Mapping[str, str] = MappingProxyType(
+    {"hessian_npy": "hessian.npy", "dipole_derivatives_npy": "dipole_derivatives.npy"}
+)
+
+
+class ArrayOffloadingStore:
+    """A `ResultStore` that keeps a payload's packed arrays here instead of in the result row.
+
+    **Why this exists as a store rather than as a second caching path.** One calculation in this
+    system returns megabytes where every other returns numbers: a Hessian is 99x99 doubles at 33
+    atoms and about 1.4 MB at 120. `durable/retention.py` refuses to prune `calculation_results`
+    outright, because D-011 says a persisted result is never recomputed — so a matrix stored inline
+    is a row that can never be reclaimed, in the one table that has no reclaim path. D-124 answered
+    this before the capability migration and the answer still holds: the arrays belong in the
+    content-addressed artifact store, which `durable/artifact_eviction.py` sweeps by cost and idle
+    time, and the row keeps their content hashes. Evicting a cold matrix costs a recomputation,
+    which is the trade that policy exists to make.
+
+    Expressing it as a `ResultStore` is what keeps `cached_remote` — and every caller of it —
+    unchanged: the decision "is this a hit?" already lives behind `get`, and "is this worth
+    caching?" already lives behind `put`. A caller wraps its store and nothing else about the call
+    site moves.
+
+    Two rules carry the whole design, and both are the pre-split implementation's, kept because the
+    reasoning behind them did not change:
+
+    1. **A hit is a hit only if the blobs come back.** Every reason they might not — the store
+       disabled, the matrix evicted as cold, a database restored without its artifact table — is an
+       ordinary one, so a missing blob is a *miss to recompute from*, never an error.
+    2. **The blobs are written first, and the row only if they all landed.** A row addressing an
+       artifact that does not exist would be served as a hit forever and rejected on every read,
+       which is strictly worse than not caching. Losing a by-product costs a future recomputation
+       and never the calculation in hand, which the caller already holds — so a store that refuses
+       is a debug line and an uncached result, not a raise.
+    """
+
+    def __init__(
+        self, results: ResultStore, artifacts: ArtifactStore, fields: Mapping[str, str]
+    ) -> None:
+        """Wrap `results`, offloading each payload field in `fields` to `artifacts`."""
+        self._results = results
+        self._artifacts = artifacts
+        self._fields = fields
+
+    async def get(self, key: CalculationKey) -> StoredResult | None:
+        """Return the result with its arrays put back, or `None` if any of them is gone."""
+        stored = await self._results.get(key)
+        if stored is None:
+            return None
+
+        payload = dict(stored.result)
+        for field, name in self._fields.items():
+            content_hash = payload.pop(_address(name), None)
+            if content_hash is None:
+                # This field was absent when the row was written — `dipole_derivatives_npy` is
+                # populated by one backend and not the other — so there is nothing to restore.
+                continue
+            blob = await self._artifacts.open(str(content_hash))
+            if blob is None:
+                logger.info("%s is cached but its %s is gone; recomputing", key.as_str(), name)
+                return None
+            payload[field] = base64.b64encode(blob).decode("ascii")
+        return stored.model_copy(update={"result": payload})
+
+    async def put(self, stored: StoredResult) -> None:
+        """Write the arrays, then the row — and skip the row entirely if any array did not land."""
+        payload = dict(stored.result)
+        files: dict[str, bytes] = {}
+        for field, name in self._fields.items():
+            encoded = payload.get(field)
+            if encoded is None:
+                continue
+            files[name] = base64.b64decode(str(encoded))
+
+        if not files:
+            # Nothing to offload: store it as it is, so wrapping a store is never lossy for a
+            # payload that happens to carry no arrays.
+            await self._results.put(stored)
+            return
+
+        try:
+            refs = await put_all(
+                self._artifacts,
+                stored.key.as_str(),
+                files,
+                compute_seconds=stored.compute_seconds,
+            )
+        except Exception:
+            logger.warning(
+                "could not store arrays for %s, so it is not cached",
+                stored.key.as_str(),
+                exc_info=True,
+            )
+            return
+
+        by_name = {ref.name: ref for ref in refs}
+        if any(name not in by_name for name in files):
+            logger.debug("an array for %s was not stored, so it is not cached", stored.key.as_str())
+            return
+
+        for field, name in self._fields.items():
+            if name not in files:
+                continue
+            payload.pop(field)
+            payload[_address(name)] = by_name[name].content_hash
+        await self._results.put(stored.model_copy(update={"result": payload}))
+
+    async def find(self, query: CalculationQuery) -> list[StoredResult]:
+        """Delegate, deliberately without restoring anything.
+
+        `find` answers "which calculations exist", which `find_calculations` renders as a listing.
+        Rehydrating megabytes per row to build a table nobody reads the matrices from would make a
+        listing the most expensive call in the system. The rows come back naming their artifacts,
+        which is what `fetch_artifact` takes.
+        """
+        return await self._results.find(query)
+
+
+def _address(name: str) -> str:
+    """The row field that holds an artifact's content hash, from the artifact's name."""
+    return f"{name.removesuffix('.npy')}_artifact"

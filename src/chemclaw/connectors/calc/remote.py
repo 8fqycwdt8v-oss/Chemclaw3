@@ -36,6 +36,8 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared.exceptions import McpError
+from mcp.types import INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -78,6 +80,12 @@ class CalcToolError(ChemclawError):
     """
 
 
+# The JSON-RPC codes that blame the request rather than the server. Named here rather than inline
+# because the classification they drive — retry or do not retry — is the whole reason
+# `CalcToolError` and `CalcServerError` are two classes.
+_REQUEST_FAULT_CODES = frozenset({PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS})
+
+
 @asynccontextmanager
 async def calc_session() -> AsyncIterator[ClientSession]:
     """Open one MCP session to the calculation server, with our bearer attached.
@@ -88,6 +96,11 @@ async def calc_session() -> AsyncIterator[ClientSession]:
     """
     token = _token()
     headers = {"Authorization": f"Bearer {token}"} if token else None
+    # `@asynccontextmanager` re-injects whatever the caller's `async with` body raises back into
+    # this generator at the `yield`. So the guard below must know whether it is looking at a
+    # *connection* failure or at the caller's own exception travelling through — see the flag's
+    # own comment at the yield.
+    connected = False
     try:
         async with streamablehttp_client(
             settings.calc_server_url,
@@ -96,10 +109,21 @@ async def calc_session() -> AsyncIterator[ClientSession]:
         ) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+                # Past this point every exception arriving here came *out of the caller's block*,
+                # not out of the connection. Relabelling those was a live defect: `cached_remote`
+                # runs the store's own I/O inside this block, so a Postgres outage
+                # (`core/db.py::connect` raises a builtin `ConnectionError`) was reported to the
+                # chemist as "the calculation service is not answering" — the wrong subsystem —
+                # and, worse, a `ChemclawError` from the store came back out as a
+                # `CalcServerError`, which is *retryable*. That inverts the one distinction
+                # `CalcToolError` exists to draw, so a durable job burned its whole retry budget
+                # on bad data. Transport faults that happen *during* a call are still classified,
+                # but by `_call`, which is the only place that knows a call was in flight.
+                connected = True
                 yield session
-    except (CalcServerError, CalcToolError):
-        raise
     except Exception as exc:
+        if connected:
+            raise
         raise CalcServerError(
             "the calculation service is not answering, so no calculation was run. This is an "
             "outage rather than a problem with what was asked; the same request will work once "
@@ -127,8 +151,30 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
     A refused tool call is a `CalcToolError` — the server was reached and said no, which no retry
     changes — and it carries the server's own message, because that message is the whole content of
     the refusal (which solvent is unparameterised, which atom index is out of range).
+
+    This is also the one place that can classify a failure of the call *itself*, because it is the
+    only place that knows a call was in flight — `calc_session`'s guard deliberately stops at the
+    connection. Two shapes arrive here and they are opposites. A JSON-RPC error whose code blames
+    the *request* (`-32700`/`-32600`/`-32601`/`-32602`) is bad data by the same test as any other
+    refusal: FastMCP answers `-32602` for arguments that fail a tool's own schema before its body
+    ever runs, which is exactly the "atom index past the molecule" class. Everything else —
+    `-32603`, a dropped socket, a read timeout — is the server, and retrying is the only thing that
+    fixes it.
     """
-    result = await session.call_tool(tool, arguments)
+    try:
+        result = await session.call_tool(tool, arguments)
+    except McpError as exc:
+        if exc.error.code in _REQUEST_FAULT_CODES:
+            raise CalcToolError(f"{tool} was refused: {exc.error.message}") from exc
+        raise CalcServerError(
+            f"the calculation service failed while running {tool}, so no result was produced. "
+            "This is an outage rather than a problem with what was asked."
+        ) from exc
+    except Exception as exc:
+        raise CalcServerError(
+            f"the calculation service stopped answering during {tool}, so no result was produced. "
+            "This is an outage rather than a problem with what was asked."
+        ) from exc
     if result.isError:
         raise CalcToolError(f"{tool} failed: {_text(result.content)}")
     text = _text(result.content)
@@ -148,10 +194,12 @@ async def remote_key(
 ) -> CalculationKey | None:
     """The `CalculationKey` this tool would stamp on its result, without computing anything.
 
-    `None` when the server reports the calculation has no derivable key — `predict_logd` is the
-    one such tool, because it never had a cache row of its own: its expensive half is a *cached*
-    pKa and the rest is a Crippen sum. A caller that gets `None` computes without looking up,
-    which is what happened before the split too.
+    `None` when the server reports the calculation has no derivable key. Exactly one tool answers
+    that way — the server's own `predict_logd`, which has no cache row because its expensive half
+    is a *cached* pKa and the rest is a Crippen sum. This repository never calls it: it composes
+    logD client-side from those same two parts, so in practice every tool that reaches here is
+    keyed. `cached_remote` therefore treats a `None` as a miswiring and refuses, rather than
+    computing uncached forever.
 
     The key comes back as its four parts rather than as the flat `type@version:input:params`
     string, and the reason is measured rather than stylistic: a real `calc_version` contains both
@@ -238,14 +286,23 @@ async def cached_remote(
     (`connectors.identity`). On a hit the compute call is never made, so a hit costs one
     `calculation_key` round trip.
 
-    A tool with no derivable key (`predict_logd`) computes every time and stores nothing, exactly
-    as it did in-process — its cost was always the pKa underneath it, and that pKa is cached on the
-    server's own key like everything else.
+    **A tool the server will not key is a caller error here, not a silent uncached compute.** This
+    used to fall through to computing every time, on the reasoning that `predict_logd` had no cache
+    row of its own. That reasoning was right and the branch was still wrong: `predict_logd` is
+    composed *client-side* from a cached remote pKa plus a local Crippen sum, so it never reaches
+    this function — measured, every one of the eleven tools production actually passes here returns
+    a key, and the server refuses to key exactly one tool, which is the one that never arrives. A
+    branch that cannot execute is not a safety net; it is a place for a future miswiring to land
+    quietly and recompute forever.
     """
     async with calc_session() as session:
         key = await remote_key(session, tool, arguments)
         if key is None:
-            return await remote_compute(session, tool, arguments), False
+            raise CalcToolError(
+                f"{tool} has no derivable cache key, so it cannot be routed through the cache. "
+                "Either it is composed here from keyed primitives (as predict_logd is), or it "
+                "should be called with remote_call."
+            )
 
         async def _compute() -> ResultPayload:
             return await remote_compute(session, tool, arguments)

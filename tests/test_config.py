@@ -656,3 +656,48 @@ def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() 
         _env_file=None, embedding_dim=768, data_sources="graph", note_reindex_enabled=False
     )
     assert settings.embedding_dim == 768
+
+
+def test_no_calculator_setting_is_declared_without_a_reader() -> None:
+    """A calculator knob nobody reads is not tidiness — it is a control that does not exist.
+
+    When the physics moved to `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`),
+    twenty-four fields stayed declared here: the binaries, the optimizer's convergence thresholds,
+    the Hessian displacement and atom ceiling, the CREST budget, and both pKa calibration pairs.
+    Every one of them still had a `.env.example` row, so the parity test above was green — the
+    parity that was broken is the one nothing checked.
+
+    What makes it a defect rather than clutter is that the server reads the *same* names under the
+    *same* `CHEMCLAW_` prefix. An operator who set `CHEMCLAW_XTB_OPT_MAX_STEPS` on this deployment
+    got no error, no warning and no effect, while the identically-spelled setting on the calculation
+    server was the one that actually decided the calculation.
+
+    Scoped to this one section deliberately. Elsewhere a field with no first-party reader can be
+    legitimate — something a library or a chart consumes. Here it cannot: this section exists to
+    configure code in this repository, and after the split that code is orchestration.
+    """
+    import ast
+
+    section = Path(__file__).resolve().parent.parent / "src/chemclaw/core/config/calculators.py"
+    declared = [
+        node.target.id
+        for node in ast.walk(ast.parse(section.read_text(encoding="utf-8")))
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    ]
+    assert declared, "the section parsed to no fields at all, so this test proves nothing"
+
+    src = Path(__file__).resolve().parent.parent / "src"
+    sources = [
+        path.read_text(encoding="utf-8")
+        for path in src.rglob("*.py")
+        if "core/config/" not in path.as_posix()
+    ]
+    unread = sorted(name for name in declared if not any(name in source for source in sources))
+
+    assert not unread, (
+        "declared in `calculators.py` and read nowhere in `src/`: "
+        + ", ".join(unread)
+        + ". The calculation server reads these same names under the same env prefix, so a "
+        "field left here is a knob an operator can set on the wrong deployment and watch do "
+        "nothing. Delete it here, or give it a reader."
+    )
