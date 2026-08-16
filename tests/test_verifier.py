@@ -741,7 +741,7 @@ def test_the_judge_is_bound_with_json_schema_enforcement(
     client = _FakeVerifierClient(VerificationResult(claims=[], confidence=0.9, verified_by="judge"))
 
     async def _run() -> None:
-        await verify_answer("an answer", ["a tool result"], client=client)
+        await verify_answer("an answer", [_chunk("a tool result")], client=client)
 
     asyncio.run(_run())
     assert client.methods == ["json_schema"], client.methods
