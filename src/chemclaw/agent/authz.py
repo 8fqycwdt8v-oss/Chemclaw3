@@ -20,6 +20,9 @@ runs without a tenant. Both defer the same role-membership predicate to `_has_re
 two gates can never drift in how "does this user hold an allowed role?" is decided (DRY).
 """
 
+from collections.abc import Mapping
+from typing import Any
+
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 
@@ -184,6 +187,63 @@ def side_effecting_tools() -> frozenset[str]:
         | frozenset(state_changing_tool_names())
         | frozenset(template_tool_names())
     )
+
+
+# The filesystem verbs that can reach the durable memory store. `delete` is not among them because
+# `scratchpad_tools()` withholds it; `execute` for the same reason. Both of the two take the path as
+# `file_path`, which is what makes one predicate able to read either.
+_MEMORY_WRITE_VERBS: frozenset[str] = frozenset({"write_file", "edit_file"})
+
+
+def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
+    """Whether this *call* writes a person's durable memories, as opposed to the turn's scratchpad.
+
+    **Why a call and not a tool.** Every other write this system gates is a tool whose name settles
+    the question. `write_file` is not: one name serves two roots, and they could hardly be less
+    alike. `/scratch/` resolves to `StateBackend` and dies with the turn — it is where a turn puts
+    intermediate work, which is the whole reason `D-2026-08-15-a-turn-needs-somewhere-to-put-
+    intermediate-work` added it. `/memories/` resolves to `StoreBackend` over Postgres and outlives
+    the session, the process and the deployment. Gating by name would refuse both, and a dry run
+    that denies the agent its own notepad is not a dry run of anything.
+
+    So the argument has to be read. `file_path` is the parameter both verbs spell it with — asserted
+    against upstream in `tests/test_upstream_surface.py`, because a rename here would silently stop
+    the gate matching and fail *open*.
+
+    A missing or non-string `file_path` counts as durable. It cannot be a scratchpad write, since
+    those name a path too; treating an unreadable argument as the ungated case is how a gate
+    becomes bypassable by malformed input.
+
+    Args:
+        name: The tool being called.
+        arguments: That call's arguments, as the model supplied them.
+
+    Returns:
+        `True` when this call would write under the memory root.
+    """
+    from chemclaw.agent.scratchpad import MEMORY_ROOT
+
+    if name not in _MEMORY_WRITE_VERBS:
+        return False
+    path = arguments.get("file_path")
+    if not isinstance(path, str):
+        return True
+    return path.startswith(MEMORY_ROOT)
+
+
+def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:
+    """Whether this call changes something outside the turn — the question both write gates ask.
+
+    `side_effecting_tools()` answers it for every tool whose *name* decides it. This adds the one
+    case where the name does not, and exists so the dry-run refusal and the plan gate cannot drift
+    apart on it: they were two readers of one set, and the fix had to leave them two readers of one
+    predicate rather than giving each its own path test.
+
+    `write_todos` is deliberately not covered by either half. It writes the plan, and a gate that
+    refused it under an unapproved plan would refuse the only call that can produce a plan to
+    approve — the deadlock is the reason this is worth stating rather than leaving to inference.
+    """
+    return name in side_effecting_tools() or writes_durable_memory(name, arguments)
 
 
 def expensive_actions() -> frozenset[str]:

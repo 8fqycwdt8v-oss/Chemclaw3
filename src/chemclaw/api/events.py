@@ -410,10 +410,10 @@ class HandoffEvent(BaseModel):
     `reason` is the supervisor's own stated reason where it gave one; it is prose for a human and
     nothing branches on it.
 
-    **Raised by `agent/team.running_specialist`**, the contextmanager that already brackets the
-    interval the audit trail attributes to a specialist — so the span a surface draws and the span
-    the durable record claims are the same `try`/`finally` rather than two things that can disagree.
-    It shipped for one release as a declared member nothing produced
+    **Nothing raises it.** It was raised by `agent/team.running_specialist`, the contextmanager
+    that bracketed the interval the audit trail attributed to a specialist, so the span a surface
+    drew and the span the record claimed were one `try`/`finally`. That module went with the
+    specialist team (D-2026-08-15). It shipped for one release as a declared member nothing produced
     (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
 
     Like every other signal-borne event, emitted only where a consumer is draining the graph's

@@ -976,11 +976,10 @@ helm upgrade --install chemclaw deploy/helm/chemclaw \
   --set image.digest="sha256:<the digest from step 2>"
 ```
 
-**Building without crest.** Redistributing a GPL-3.0 binary inside a product image is a licensing
-decision, not an engineering one. `--build-arg INCLUDE_CREST=false` builds without it;
-`calc.crest_cli` reports unavailable rather than failing, so the image loses conformer sampling and
-nothing else. xtb (LGPL-3.0) is not affected by the same question — both are invoked as separate
-processes over files and never linked, so this is about distribution, not licence compatibility.
+**No calculation binaries.** This image once installed xtb (LGPL-3.0) and crest (GPL-3.0), with a
+build flag for declining to redistribute the second. Neither ships now: the physics moved to
+`Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`), so nothing in `src/` invokes
+either binary and the redistribution question belongs to the repository whose code runs them.
 
 **A private registry.** `image.pullSecrets` is a list of `{name: <secret>}` applied to every pod
 spec. Before it existed, an operator whose registry needed authentication had no field to set and

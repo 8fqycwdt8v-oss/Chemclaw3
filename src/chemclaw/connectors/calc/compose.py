@@ -623,6 +623,7 @@ async def _species_energy(
             gibbs_free_energy_hartree=None,
             is_minimum=None,
             was_cached=cached,
+            method=optimization.method,
         )
     at_sigma = thermo.model_copy(
         update={"symmetry_number": 1 if symmetry_number is None else symmetry_number}
@@ -645,6 +646,7 @@ async def _species_energy(
         ),
         is_minimum=result.is_minimum,
         was_cached=cached,
+        method=minimum.method,
     )
 
 
@@ -766,7 +768,15 @@ async def reaction_energy(
     return ReactionEnergyResult(
         reactants=reactants,
         products=products,
-        method=settings.xtb_method,
+        # **The server's method, not this deployment's configured name.** `settings.xtb_method`
+        # describes a calculation this process no longer runs: the physics is `Chemclaw3-mcp`'s
+        # since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and a deployment whose env says
+        # `GFN2-xTB` while the server runs GFN1 published a `ReactionEnergyResult` — a Temporal wire
+        # type, PR-gated into the knowledge graph — asserting the wrong level of theory. The
+        # neighbouring composites (`scan_profile`, `solvent_comparison`) already read it off the
+        # result; this one did not. The fallback is for histories written before `SpeciesEnergy`
+        # carried the field, never for a live run.
+        method=species[0].method or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature,
         level=level,

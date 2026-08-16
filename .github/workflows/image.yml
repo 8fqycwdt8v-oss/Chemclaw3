@@ -9,7 +9,7 @@
 # by `tests/test_deploy_chart.py`; what only an image can prove is that the closure installs and
 # imports under an arbitrary high UID, which is what this does.
 #
-# Deliberately NOT on every branch push: the build fetches the xtb and crest release tarballs and
+# Deliberately NOT on every branch push: the build resolves the whole locked dependency set and
 # the full dependency closure, so it costs minutes. Pull requests and `main` are where it matters.
 #
 # The registry push and cluster rollout are not here. The stranded workflow carried them as a job
@@ -118,7 +118,7 @@ jobs:
         # produced this audit record" answerable at all.
         #
         # `syft` rather than a hand-rolled `pip list`: the image carries an OS package set (git,
-        # rsync) and two downloaded binaries (xtb, crest) that no Python-level inventory can see,
+        # rsync) that no Python-level inventory can see,
         # and those are exactly the components a Python-level scan would miss.
         env:
           SYFT_VERSION: v1.35.0

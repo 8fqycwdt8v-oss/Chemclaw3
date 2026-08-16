@@ -15,14 +15,19 @@ still recorded as an `error` outcome before the exception surfaces.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
 from chemclaw.agent.audit import returned_failure
-from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
+from chemclaw.agent.authz import (
+    AuthorizationError,
+    authorize_tool,
+    side_effecting_call,
+    side_effecting_tools,
+)
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.turn_signals import record_tool_failure
@@ -87,9 +92,14 @@ class UndeclaredWriteRefusal(AuthorizationError):
 # changes when a library does, and the policy is the part that must not.
 
 
-def dry_run_refusal(name: str) -> DryRunRefusal | None:
-    """The refusal a side-effecting tool earns on a dry-run turn, or `None` to let it through."""
-    if is_dry_run() and name in side_effecting_tools():
+def dry_run_refusal(name: str, arguments: Mapping[str, Any]) -> DryRunRefusal | None:
+    """The refusal a side-effecting call earns on a dry-run turn, or `None` to let it through.
+
+    Takes the arguments as well as the name because one of the calls it must refuse cannot be
+    recognised from the name — `write_file` under `/memories/` is durable and the same verb under
+    `/scratch/` is not. See `authz.side_effecting_call`.
+    """
+    if is_dry_run() and side_effecting_call(name, arguments):
         return DryRunRefusal(
             f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
             "Nothing was started; re-ask without dry-run to do it."
@@ -262,7 +272,7 @@ def refuse_undeclared_writes(held: frozenset[str]) -> Any:
 @wrap_tool_call
 async def refuse_writes_on_dry_run(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Refuse any side-effecting tool while the turn is a dry run (`refuse_writes_on_dry_run`)."""
-    refusal = dry_run_refusal(request.tool_call["name"])
+    refusal = dry_run_refusal(request.tool_call["name"], request.tool_call.get("args") or {})
     if refusal is not None:
         raise refusal
     return await handler(request)
@@ -351,9 +361,15 @@ async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) ->
     try:
         result = await handler(request)
     except Exception as exc:
-        record_tool_failure(request.tool_call["name"], failure_detail(exc))
+        record_tool_failure(
+            request.tool_call["name"], failure_detail(exc), str(request.tool_call.get("id") or "")
+        )
         raise
     failed = returned_failure(result)
     if failed is not None:
-        record_tool_failure(request.tool_call["name"], returned_failure_detail(failed))
+        record_tool_failure(
+            request.tool_call["name"],
+            returned_failure_detail(failed),
+            str(request.tool_call.get("id") or ""),
+        )
     return result

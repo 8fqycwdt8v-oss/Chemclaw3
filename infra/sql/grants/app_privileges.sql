@@ -98,6 +98,64 @@ BEGIN
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
         'artifact_blobs, document_files, document_chunks, tool_result_blobs TO %I', app_role);
 
+    -- The tables LangGraph creates for itself, which no migration in `infra/sql` declares and which
+    -- therefore fell through every enumeration above until they were named here.
+    --
+    -- **Why this block has to exist, and why it is guarded.** `REVOKE ALL ON ALL TABLES` two dozen
+    -- lines up is indiscriminate — it reaches these too — and `GRANT SELECT ON ALL TABLES` then
+    -- hands back read and nothing else. The first install survives that because the tables do not
+    -- exist yet when this file runs: the app pods create them lazily, as owner, on first turn. The
+    -- *second* `helm upgrade` re-runs this file (`migrate-job.yaml`, every release, deliberately)
+    -- with the tables present, and the REVOKE materialises an ACL that strips even the owner's own
+    -- DML. Every turn then fails at its first checkpoint write, and so do `agent/leaver`'s erasure
+    -- and `durable/retention`'s checkpoint sweep. It is a second-deploy outage that a first deploy
+    -- cannot reveal, which is exactly why it is written down here rather than left to the REVOKE.
+    --
+    -- Guarded on existence rather than granted unconditionally, because a fresh database really
+    -- does not have them yet and a `GRANT` on a missing table aborts the whole block. That makes
+    -- this the one group whose grant lands on the *second* run — the same run that first needs it.
+    --
+    -- The verbs are upstream's, read off the installed distributions rather than assumed:
+    -- `checkpoints`/`checkpoint_writes`/`store`/`store_vectors` upsert (`ON CONFLICT … DO UPDATE`),
+    -- `checkpoint_blobs` does not (`DO NOTHING`), and the three `*_migrations` version tables are
+    -- append-only ledgers `setup()` writes one row into per schema step. The DELETEs are ours:
+    -- retention prunes by thread and erasure clears a departed person's turn state.
+    -- `tests/test_database_privileges.py` derives the same table set from upstream and fails if this
+    -- list drifts from it, in either direction.
+    -- Guarded **per table**, not per `setup()` group. The tables of one group are created together
+    -- in practice, so a group guard would usually do — but "usually" is the wrong standard here: a
+    -- `GRANT` naming a table that does not exist raises, and a raise anywhere in this block aborts
+    -- the whole reconciliation, so one interrupted `setup()` would leave *every* table in this file
+    -- ungranted. The vector pair genuinely is absent on this deployment (the store is built with no
+    -- `index_config`), which makes the independent guard load-bearing rather than defensive.
+    --
+    -- The table names are spelled literally rather than looped over, so the same regex that reads
+    -- every other grant in this file reads these too.
+    IF to_regclass('public.checkpoints') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT, UPDATE, DELETE ON checkpoints TO %I', app_role);
+    END IF;
+    IF to_regclass('public.checkpoint_writes') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT, UPDATE, DELETE ON checkpoint_writes TO %I', app_role);
+    END IF;
+    IF to_regclass('public.checkpoint_blobs') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT, DELETE ON checkpoint_blobs TO %I', app_role);
+    END IF;
+    IF to_regclass('public.checkpoint_migrations') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT ON checkpoint_migrations TO %I', app_role);
+    END IF;
+    IF to_regclass('public.store') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT, UPDATE, DELETE ON store TO %I', app_role);
+    END IF;
+    IF to_regclass('public.store_migrations') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT ON store_migrations TO %I', app_role);
+    END IF;
+    IF to_regclass('public.store_vectors') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT, UPDATE, DELETE ON store_vectors TO %I', app_role);
+    END IF;
+    IF to_regclass('public.vector_migrations') IS NOT NULL THEN
+        EXECUTE format('GRANT INSERT ON vector_migrations TO %I', app_role);
+    END IF;
+
     -- Sequences for every table the role may INSERT into (BIGSERIAL needs USAGE on its sequence).
     -- All of them rather than a list: a sequence confers no read of any table's rows, and an
     -- enumerated list would be a third place the table set is written down.

@@ -297,7 +297,7 @@ def test_a_dry_run_refuses_a_side_effecting_tool(monkeypatch: pytest.MonkeyPatch
         content = _tool_result(_run(graph))
         # Inside the dry run, because `dry_run_refusal` reads the ambient flag — asking it outside
         # returns `None`, which is the correct answer to a different question.
-        expected = dry_run_refusal(write_tool)
+        expected = dry_run_refusal(write_tool, {})
     finally:
         reset_dry_run(token)
 

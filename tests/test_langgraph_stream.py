@@ -18,6 +18,7 @@ import asyncio
 from typing import Any, cast
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -414,3 +415,81 @@ def test_a_capped_turn_actually_stops_and_says_so(monkeypatch: pytest.MonkeyPatc
     assert kinds.count("tool_call") == 1, f"the loop did not stop at the cap: {kinds}"
     codes = [event.code for event in events if event.type == "error"]
     assert "loop_cap_reached" in codes, kinds
+
+
+def test_a_failed_tool_call_produces_one_event_and_no_evidence() -> None:
+    """`events.py` calls the result/failure pair exhaustive. It was not, for every failed call.
+
+    `agent/tool_authz.answered_failure` rewrites a returned failure's `status` to `"success"` before
+    the stream sees it — deliberately, so a provider does not read `is_error` as an invitation to
+    retry — and its docstring names this module as the reader that therefore needs a
+    status-independent test of "did this call fail". This module kept reading `status`.
+
+    Two things went wrong, and the second is the one that changes an answer. A failed call emitted
+    `tool_failed` *and* `tool_result`, so a consumer had to choose which to believe. And
+    `trace.returned` appends to `ToolCallTrace.outputs`, which is the corpus `score_answer` grades
+    an answer's grounding against — so "Error: nope is not a valid tool, try one of [...]" was fed
+    to the citation gate as though it were something a tool had retrieved.
+
+    Driven through a real compiled graph rather than a hand-built `ToolMessage`, because the whole
+    defect is a disagreement between what the engine emits and what this module expected.
+    """
+    events, trace, _ = _drive([{"name": "definitely_not_a_tool", "args": {}}, "done"])
+
+    kinds = [event.type for event in events if event.type in {"tool_failed", "tool_result"}]
+    assert kinds == ["tool_failed"], (
+        f"a failed call must produce exactly one of the pair, got {kinds}"
+    )
+    assert not trace.outputs, (
+        "a failed call left its error text in the corpus the answer gate scores grounding "
+        f"against: {trace.outputs}"
+    )
+
+
+def test_work_from_below_the_root_is_marked_and_its_plan_withheld() -> None:
+    """`agent=""` means the main agent, so emitting a helper's work that way is a false statement.
+
+    `agent` is threaded from the handoff pair, and nothing has raised a handoff since the specialist
+    team was deleted — so it is permanently empty. `updates` payloads from a nested Pregel were then
+    handled identically to the root's: a helper's tool calls and results joined
+    `ToolCallTrace.outputs` and the parent session's fetchable refs indistinguishably from the
+    supervisor's own work, and its `write_todos` surfaced as a root `PlanEvent` that *replaced* the
+    supervisor's. Under `harness_autonomy="plan_only"` that is the checklist a chemist approves.
+
+    **What this covers and what it does not.** The messages and the update shape are the
+    engine's own (`AIMessage`/`ToolMessage`, and the `todos` key `TodoListMiddleware` writes), so
+    the branch is
+    driven with real types. What is *not* driven end-to-end is a genuine nested subagent emitting
+    them — the scripted model cannot stand in for a helper's own model. The caller's namespace test
+    is one line (`bool(namespace)`) and the token branch above has applied the same rule since M9.
+    """
+    from chemclaw.api.graph_stream import _from_update
+
+    update = {
+        "helper": {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "find_notes", "args": {}, "id": "c-9"}]),
+                ToolMessage(content="two notes", tool_call_id="c-9"),
+            ],
+            "todos": [{"content": "the helper's own step", "status": "pending"}],
+        }
+    }
+
+    async def _collect(**kwargs: Any) -> list[Any]:
+        trace = ToolCallTrace()
+        return [event async for event in _from_update(update, **kwargs, trace=trace, todos=[])]
+
+    below = asyncio.run(_collect(agent="subagent", emit_plan=False))
+    assert not [event for event in below if event.type == "plan"], (
+        "a helper's todo list was emitted as the turn's plan; `PlanEvent` carries no `agent` "
+        "field, so it cannot say whose it is and must not be shown as the supervisor's"
+    )
+    marked = {event.agent for event in below if event.type in {"tool_call", "tool_result"}}
+    assert marked == {"subagent"}, (
+        "work from below the root must not arrive attributed to the main agent"
+    )
+
+    root = asyncio.run(_collect(agent="", emit_plan=True))
+    assert [event.type for event in root if event.type == "plan"] == ["plan"], (
+        "the root's own plan must still be emitted, or this gate has simply turned plans off"
+    )

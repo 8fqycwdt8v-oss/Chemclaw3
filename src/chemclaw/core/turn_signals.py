@@ -100,6 +100,14 @@ class ToolFailureSignal(BaseModel):
 
     tool: str
     message: str
+    # The call this failure belongs to, so a consumer can match it to the `tool_call` event rather
+    # than to the tool *name*. Additive and defaulted, because a signal shape is a contract two
+    # other repositories read; empty means "not attributed", never "the first call to this tool".
+    #
+    # It exists because matching by name is wrong in the one case that matters: a model may issue
+    # two calls to the same tool in a single batch, and suppressing the result of both because one
+    # failed loses a real answer.
+    call_id: str = ""
 
 
 class HandoffSignal(BaseModel):
@@ -210,9 +218,9 @@ def record_approval_request(prompt: str, approval_id: str) -> None:
     _emit(ApprovalSignal(prompt=prompt, approval_id=approval_id))
 
 
-def record_tool_failure(tool: str, message: str) -> None:
-    """Note that `tool` raised. A no-op where nothing is streaming."""
-    _emit(ToolFailureSignal(tool=tool, message=message))
+def record_tool_failure(tool: str, message: str, call_id: str = "") -> None:
+    """Note that `tool` failed, by raising or by answering. A no-op where nothing is streaming."""
+    _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id))
 
 
 def record_handoff(to: str, reason: str = "") -> None:

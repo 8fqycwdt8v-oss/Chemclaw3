@@ -32,6 +32,68 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **`tblite` is a runtime dependency with no importer, and the solvent gate is derived from
+      it** — [M]. `pyproject.toml:152`; no module in `src/` imports it, and
+      `tests/test_third_party_layering.py:144` forbids one. It survives because
+      `tests/test_solvents.py` re-derives `ALPB_SOLVENTS` against the installed copy — but that gate
+      launches four durable jobs and the parameterisation that decides it is now the *server's*, so
+      the two can diverge in both directions. Removing the dependency needs a replacement source for
+      the list, which is a cross-repo contract.
+
+- [ ] **The stored-message conversion is a destructive in-place rewrite, run as a pre-upgrade
+      hook** — [M]. `agent/message_migration.py:242` overwrites `session_messages.message` while its
+      own docstring and `043_session_message_shape.sql:22` both promise the original stays readable.
+      `migrate-job.yaml:10` runs it *before* any new pod exists, so it rewrites data the previous
+      release is still serving with a reader that raises `TypeError` on the new shape — and
+      `helm rollback` stays broken. Needs an ADR: preserved-original column, post-upgrade hook, or a
+      read-side shim.
+
+- [ ] **A local env var shapes half of every remote cache key** — [M].
+      `science/calc/models.py:105` rounds coordinates to `settings.xtb_geometry_decimals` before the
+      structure crosses the wire, so it is the bytes the server derives `input_hash` from. Changing
+      it in one deployment makes every relaxation, Hessian, scan point and CREST search miss
+      forever, silently. `tests/test_calc_remote.py:213` guards only the version half of the key.
+
+- [ ] **No live lane in this repo can start** — [M]. `infra/live/processes.sh:47` pins
+      `CHEMCLAW_CONNECTORS_REQUIRED=true` while chem, safety and calc are dialled and never started;
+      `cli/connectors_dev.py:78` emits URLs only for bundles with a local app, so those three keep
+      their loopback defaults. `make live-e2e-full-stack` starts only `props` and `rxnpredict`. Also
+      `infra/live/e2e-full-stack/up.sh:185` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`,
+      which `connectors/calc/connector.yaml:13` explicitly forbids — it survives only on
+      `registry.py:_bundle_dirs` being first-dir-wins, which nothing pins.
+
+- [ ] **A retrieval leg that raised is indistinguishable from one that found nothing** — [M].
+      `retrieval/fanout.py:100` swallows to `chunks = []` and reports `chunks: 0`, which
+      `EvidenceSourceEvent` promises distinguishes "nothing to say" from "crowded out" — and
+      distinguishes neither from "broken". `chemclaw_evidence_source_failures_total` carries no
+      `source` label while the chunks counter does, so the two cannot be joined. This is
+      `D-2026-08-01-a-cap-that-starves-a-source` again. No per-leg timeout either.
+
+- [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:310` reads
+      `get_current_specialist()`, and nothing in `src/` calls `set_current_specialist` —
+      `core/turn_signals.record_handoff` has no caller at all. So every subagent tool call is
+      recorded identically to the supervisor's, and `D-2026-08-10`'s "records the specialist beside
+      the human" is false in the data. Either wire it at the one place a helper is invoked (and add
+      the column to `cli/explain.py:37`'s select), or delete the producers and the claim.
+
+- [ ] **`memory_store()` repeats the cold-start race `checkpointer.py` was fixed for** — [S].
+      `agent/scratchpad.py:137` publishes `_store` before awaiting `setup()` and calls
+      `_checkpoint_pool()` without `_init_lock`, which that function documents as being held by its
+      only caller. `close_memory_store()` has no caller, `close_checkpointer()` does not clear
+      `scratchpad._store`, and `api/app.py`'s lifespan calls neither.
+
+- [ ] **Retention's checkpoint `LIMIT` bounds the deletes, not the scan** — [S].
+      `durable/retention.py:138` aggregates the whole `checkpoints` table on an unindexed expression
+      before `LIMIT` can discard anything, under a per-statement `statement_timeout` — so a first
+      pass on a large table is cancelled, retried, and never progresses. `scratchpad.py:74` also
+      claims retention prunes the memory tables; `_PRUNABLE` contains none of them.
+
+- [ ] **`message_from_row` degrades on one branch and mislabels the speaker on the other** — [S].
+      `agent/session_store.py:84` guards only the MAF branch, so a bad `langchain` row fails the
+      whole transcript; the fallback at `:96` always returns `AIMessage`, so a chemist's own
+      question can render as something the agent said. A malformed `contents` raises
+      `AttributeError` past both callers' handlers (`message_migration.py:82`).
+
 - [ ] **Four of the six endpoint-serving connectors are unauthenticated** — [M]. `bo`, `calc`,
       `molfp` and `rxnfp` ship `auth: mode: none`. The NetworkPolicy is the only thing between a pod
       in the namespace and a tool that starts durable work. This row used to read "six of seven, and
@@ -317,20 +379,6 @@ topic).
       current driver books ~30 — making "drop the connection just before the answer" a free bypass
       of the token budget. *Restart when v3 emits usage per content block, or exposes the raw
       `(chunk, metadata)` stream alongside the content-block one.* Full measurement in the archive.
-
-- [x] **Nothing checks that a symbol named in prose still exists — closed 2026-08-15.**
-      `tests/test_docstring_paths.py` now checks two forms: a path with an optional `::symbol`
-      suffix, and a fully-qualified `chemclaw.*` name. It found **19 stale pointers on the first
-      run, with no false positives** — including `chemclaw.durable.py`, the blind-substitution
-      artifact the gate's own docstring had described since D-149 but could not catch, and
-      `chemclaw.agent.session_context`/`identity_context`, which moved to `core/` and were still
-      cited in `agent/turn_flags.py`. The `::symbol` half closed a hole that had let two pointers to
-      a deleted module survive the commit whose subject was deleting it.
-      **Scope was measured, not chosen**: checking every backticked bare identifier flags 1,077 of
-      3,351 (`None`, `ValueError`, `await`, SQL table names, upstream types), and `module.symbol`
-      flags 426 of 528 because the same shape spells attribute access, a filename and a subpackage.
-      The qualified form flags 30 of 764, which is small enough to read one by one. Non-vacuity
-      proven by mutation on four classes of dangling reference.
 
 - [ ] **`logging.handleError` prints a malformed record's raw `msg`/`args` to stderr, unredacted** —
       [S]. The deliberate design is that `SecretRedactingFilter.filter` never raises and lets
