@@ -47,9 +47,14 @@ into the schema, and there is no longer a way to spell the mistake.
 
 `ModelCallLimitMiddleware` upstream declares its own per-run counter exactly this way
 (`run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]`), which is
-where the shape comes from — and, since M14, where the *count itself* comes from:
-`agent/loop_cap.py` subclasses that middleware rather than counting again, and the one field left
-here is the record `PrivateStateAttr` makes upstream unable to leave behind.
+where the shape comes from — and the shape is *all* that was taken. M14 briefly delegated the count
+itself to that middleware; `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
+reverted it, so both fields below are first-party and `agent/loop_cap.py` subclasses nothing.
+
+**This paragraph is why the reversion is spelled out rather than merely undone in code.** For a day
+the delegated design survived here in prose after the code went back: the two comments on the
+fields below disagreed with each other, one describing a subclass that no longer existed and the
+other describing the counter that had returned. A reader had no way to tell which half was current.
 """
 
 from typing import Annotated, Any, NotRequired
@@ -73,16 +78,15 @@ class ChemclawState(PlanningState):
     read it. `loop_cap.loop_capped(state)` is that reader: it takes "the turn's final graph state",
     which callers get from `ainvoke`, and hiding the field from the output would leave it with
     nothing to read — a capped turn unreportable again, which is the defect `agent/loop_cap.py`
-    exists to fix. It is exactly why the count itself is *not* declared here any more: upstream's
-    `run_model_call_count` carries `PrivateStateAttr`, so it is unreadable by the time anyone asks,
-    and this field is the answer to that rather than a second counter beside it.
+    exists to fix. Upstream's own `run_model_call_count` does carry `PrivateStateAttr` and is
+    therefore unreadable by the time anyone asks, which is why neither field below delegates to it.
     """
 
-    # Whether the runaway guard stopped this turn. The *count* belongs to
-    # `ModelCallLimitMiddleware` (`run_model_call_count`, an `UntrackedValue` channel this
-    # declaration was copied from); what upstream cannot leave behind is the fact, because that
-    # counter is stripped from the run's output by `PrivateStateAttr` and never checkpointed.
-    # `loop_cap.CappedModelCallLimit.before_model` writes this on the branch that fires.
+    # Whether the runaway guard stopped this turn — the *fact*, beside the count in `model_calls`
+    # below. Both are first-party: `loop_cap.enforce_loop_cap` reads the count in `before_model` and
+    # writes this on the branch that fires, in the same hook, so the two cannot disagree about
+    # whether a cap was reached. The `UntrackedValue` shape is copied from upstream's
+    # `run_model_call_count`; the counting is not (see the module docstring).
     #
     # Untracked, because a session whose third turn hit the cap would otherwise report every later
     # turn as capped, marking complete answers partial forever. The cost is that
