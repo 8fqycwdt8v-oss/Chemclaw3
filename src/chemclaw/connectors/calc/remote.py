@@ -37,7 +37,6 @@ from typing import Any
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
 
@@ -98,8 +97,9 @@ _REQUEST_FAULT_CODES = frozenset({PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND
 # **Matching it is the difference between a retry and a dead job.** FastMCP turns *every* exception
 # in a tool body into `isError=True`, so an xtb subprocess timeout, a non-zero exit, a full scratch
 # directory and an OOM all arrive here looking exactly like an unparameterised solvent — and
-# `CalcToolError` is registered non-retryable in `durable/publish.py`. Traced: `engine/xtb_cli.py`
-# makes `CliError` a `RuntimeError` *deliberately* so it takes the sanitized path, which means the
+# `CalcToolError` is registered non-retryable in `durable/publish.py`. Traced:
+# `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/xtb_cli.py` makes `CliError` a
+# `RuntimeError` *deliberately* so it takes the sanitized path, which means the
 # single most likely infrastructure fault on that server (a loaded pod timing out one Hessian in a
 # six-species reaction job) failed the whole durable job on attempt 1 with `activity_max_attempts`
 # untouched. That is the exact inversion `CalcServerError` was split out to prevent, reached through
@@ -133,17 +133,27 @@ def _short_connect_client(
 
     The read bound is untouched — it is the one the session's own bound must beat, and getting that
     ordering wrong is the measured hang `calc_session` documents.
+
+    **The client is built here rather than delegated to `mcp.shared._httpx_utils`**, which is the
+    SDK's own factory and a *private* module. `tests/test_third_party_layering.py` keeps its
+    private-import allow-list deliberately empty — the two rows it once held were removed rather
+    than re-blessed — and a row here would have been the third. What that factory adds over a plain
+    client is `follow_redirects=True`, so that is what is restated, next to the reason: an MCP
+    endpoint behind an ingress that redirects `/mcp` to `/mcp/` is ordinary, and httpx does not
+    follow by default. `connectors/registry.py` builds its own client for every other connector for
+    the same reason.
     """
     bound = timeout if timeout is not None else httpx.Timeout(settings.calc_server_timeout_seconds)
-    return create_mcp_http_client(
+    return httpx.AsyncClient(
         headers=headers,
+        auth=auth,
+        follow_redirects=True,
         timeout=httpx.Timeout(
             bound.read,
             connect=_CONNECT_TIMEOUT_SECONDS,
             write=bound.write,
             pool=bound.pool,
         ),
-        auth=auth,
     )
 
 

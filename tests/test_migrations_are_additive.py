@@ -341,6 +341,22 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout.strip()
 
 
+def _shallow_boundaries(repo: Path) -> frozenset[str]:
+    """The commits where this checkout's history was truncated, or empty for a full clone.
+
+    `.git/shallow` is the file git itself keeps for this, one commit id per line. Read directly
+    because there is no porcelain that answers it — `rev-parse --is-shallow-repository` says only
+    *whether* the history is truncated, not *where*, and "where" is the whole question when the
+    graft sits in the middle rather than at `HEAD`.
+
+    Missing file (a full clone) yields the empty set, so every caller behaves exactly as before.
+    """
+    marker = repo / ".git" / "shallow"
+    if not marker.is_file():
+        return frozenset()
+    return frozenset(marker.read_text(encoding="utf-8").split())
+
+
 def _statements_changed_since_merge() -> tuple[list[str], int]:
     """Which merged migrations differ from the commit that added them, and how many were compared.
 
@@ -352,9 +368,27 @@ def _statements_changed_since_merge() -> tuple[list[str], int]:
     `compared` counts only comparisons that **span a commit**: a file introduced by `HEAD` itself
     has nothing earlier to differ from, and on a truncated clone every file looks introduced by the
     graft (which *is* `HEAD`), so it is the one number telling a real run from a vacuous one.
+
+    **A graft boundary is not an introducing commit, and the aggregate count cannot see that.** The
+    reasoning above assumed the graft equals `HEAD`, which holds only at `--depth=1`. At any deeper
+    truncation the graft is somewhere in the middle: the *newer* migrations still span a real
+    earlier commit and count normally, while the oldest ones are reported as "introduced by" the
+    graft — whose content is the truncated snapshot, so each is compared against itself and can
+    never look edited. Measured in this repository's own sandbox checkout (shallow at 175 commits):
+    `compared` reached 47, comfortably past the floor, while `002_molecule_fingerprints.sql` and
+    `003_reaction_fingerprints.sql` — the two files that *are* edits, and the reason
+    `_GRANDFATHERED_EDITS` exists — silently compared equal, so
+    `test_no_grandfathered_edit_outlives_its_reason` failed and asked for a real exemption to be
+    deleted on the strength of a comparison that never happened.
+
+    So a file whose introducing commit is a shallow graft is skipped exactly like one introduced by
+    `HEAD`: in both cases there is no earlier version in this checkout to differ from. That keeps
+    `compared` honest — it counts only comparisons that really spanned something — and it is why
+    the floor and the two callers need no separate correction.
     """
     repo = _MIGRATIONS.parents[1]
     head = _git(repo, "rev-parse", "HEAD")
+    grafts = _shallow_boundaries(repo)
     edited: list[str] = []
     compared = 0
     for path in sorted(_MIGRATIONS.glob("*.sql")):
@@ -363,8 +397,8 @@ def _statements_changed_since_merge() -> tuple[list[str], int]:
         ).split()
         if not introduced:
             continue  # added in the working tree; not merged, so not yet immutable
-        if introduced[-1] == head:
-            continue  # introduced by the commit under test — there is no earlier version to differ
+        if introduced[-1] == head or introduced[-1] in grafts:
+            continue  # nothing earlier in this checkout to differ from — see the docstring
         original = subprocess.run(
             ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
             cwd=repo,

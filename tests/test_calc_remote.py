@@ -243,7 +243,8 @@ def test_the_servers_internal_error_is_an_outage_not_bad_data(
     This is the door the split above did not cover. FastMCP turns *every* exception in a tool body
     into `isError=True`, and `Chemclaw3-mcp`'s `mcp_server_kit.app._sanitize_tool_errors` replaces
     anything that is not a deliberate `ValueError` with the literal "an internal error occurred" —
-    which is the path `engine/xtb_cli.py` takes *by design*, since `CliError` is a `RuntimeError`.
+    which is the path `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/xtb_cli.py` takes
+    *by design*, since `CliError` is a `RuntimeError`.
 
     So an xtb subprocess timeout, a non-zero exit, a full scratch directory and an OOM all looked
     exactly like an unparameterised solvent, and `CalcToolError` is registered non-retryable: the
