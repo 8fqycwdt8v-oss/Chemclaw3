@@ -19,14 +19,27 @@ import pytest
 from temporalio.testing import ActivityEnvironment
 
 from chemclaw.connectors.qm import activities as qm_activities
-from chemclaw.connectors.qm.cache import UNVERSIONED, calculation_key, version_slug
+from chemclaw.connectors.qm.cache import (
+    CALC_TYPE,
+    UNVERSIONED,
+    calc_version,
+    calculation_key,
+    version_slug,
+)
 from chemclaw.connectors.qm.knowledge import note_from_qm_result
-from chemclaw.connectors.qm.specs import QmCacheLookup, QMJobInput, QMJobResult, QmJobSpec
+from chemclaw.connectors.qm.specs import (
+    QmCacheLookup,
+    QMJobInput,
+    QMJobResult,
+    QmJobSpec,
+    qm_job_key,
+)
+from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.kg.crosslink import cited_calculations
 from chemclaw.kg.note import Note, parse_note
 from chemclaw.kg.render import render_note
-from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.store import CalculationKey, InMemoryStore
 
 _SPEC = QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")
 
@@ -100,6 +113,75 @@ def test_versions_that_slug_alike_still_key_apart(monkeypatch: pytest.MonkeyPatc
     coloned = calculation_key(_SPEC)
     assert spaced.calc_version == coloned.calc_version == "mock-pipe-1"
     assert spaced != coloned
+
+
+def test_two_pipelines_at_one_version_do_not_share_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fork and its upstream, both tagged `1.0.0`, must not read each other's energies.
+
+    The version-bump test above proves a *bump* is a miss; it says nothing about two pipelines that
+    never bump. Measured before `pipeline_name` entered the key: `nf-core/qm-dft` and an internal
+    fork, both at `1.0.0`, produced the byte-identical key
+    `dft@nextflow-1.0.0:a7d334ebee616d78:2f253b746a0fcd8d`, so every molecule computed under one was
+    served from the store under the other — carrying a `calc_refs` stamp naming the pipeline that
+    had not run it.
+
+    `1.0.0` is the likeliest tag on both sides of a fork, so version pinning cannot cover this: the
+    name is the only field that distinguishes them.
+    """
+    monkeypatch.setattr(settings, "hpc_pipeline_version", "1.0.0")
+    monkeypatch.setattr(settings, "hpc_pipeline_name", "nf-core/qm-dft")
+    upstream = calculation_key(_SPEC)
+    monkeypatch.setattr(settings, "hpc_pipeline_name", "acme/qm-dft-fork")
+    fork = calculation_key(_SPEC)
+
+    assert upstream.calc_version == fork.calc_version == "mock-1.0.0"
+    assert upstream != fork
+
+
+def test_two_pipelines_at_one_version_do_not_share_a_note_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same collision on `qm_job_key`, where the cost is a note rather than a number.
+
+    `qm_job_key` is the result note's id (`connectors.qm.knowledge`), so two pipelines sharing it
+    means the second pipeline's finding proposes an *edit* to the first's note instead of a new
+    one — a silent overwrite of provenance at the PR-gate, where a reviewer sees a diff rather than
+    a new result.
+    """
+    monkeypatch.setattr(settings, "hpc_pipeline_version", "1.0.0")
+    monkeypatch.setattr(settings, "hpc_pipeline_name", "nf-core/qm-dft")
+    upstream = qm_job_key(_SPEC)
+    monkeypatch.setattr(settings, "hpc_pipeline_name", "acme/qm-dft-fork")
+
+    assert qm_job_key(_SPEC) != upstream
+
+
+def test_an_unconfigured_pipeline_name_leaves_the_key_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding the name must not invalidate the rows of a deployment that has no pipeline at all.
+
+    `mock` deployments (dev, CI, every offline test) configure neither name nor version, so both
+    fields fold to `None`/absent and the key is byte-identical to the one this repository has been
+    writing. The invalidation is scoped to exactly the rows whose identity was ambiguous.
+    """
+    monkeypatch.setattr(settings, "hpc_launch_interface", "mock")
+    monkeypatch.setattr(settings, "hpc_pipeline_version", "")
+    monkeypatch.setattr(settings, "hpc_pipeline_name", "")
+
+    # The identity this repository wrote *before* `pipeline_name` existed, rebuilt through the same
+    # `build` (so the epoch fold and the hashing rule are the ones under test, not a second copy).
+    previously = CalculationKey.build(
+        calc_type=CALC_TYPE,
+        calc_version=calc_version(),
+        inputs={"smiles": require_canonical_smiles(_SPEC.molecule_smiles)},
+        params={
+            "method": _SPEC.method,
+            "basis_set": _SPEC.basis_set,
+            "pipeline_version": None,
+        },
+    )
+    assert calculation_key(_SPEC) == previously
 
 
 def test_a_mock_energy_is_never_served_to_a_real_cluster(monkeypatch: pytest.MonkeyPatch) -> None:

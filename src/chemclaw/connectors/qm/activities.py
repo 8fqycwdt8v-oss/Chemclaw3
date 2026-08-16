@@ -71,9 +71,16 @@ async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     inputs-derived id (reproducible in tests) after a short sleep that models submission latency so
     the step is visibly distinct in the Temporal UI. The handle shape is identical either way, so
     the workflow is agnostic.
+
+    The run id of the *current* execution is handed to the launcher as the idempotency scope — see
+    `nextflow.launch_run` for the failed-job-poisoning this prevents. It is read here rather than
+    there because this is the frame that has an activity context; the adapter stays free of
+    `temporalio`, which is what lets the whole launch/poll/fetch lifecycle be exercised offline.
     """
     if settings.hpc_launch_interface == "nextflow":
-        return await nextflow.launch_run(job)
+        # `or ""` because the SDK types the run id as optional; empty degrades to the
+        # science-only key, which is the pre-existing behaviour rather than a new failure mode.
+        return await nextflow.launch_run(job, run_scope=activity.info().workflow_run_id or "")
     await asyncio.sleep(settings.hpc_mock_submit_seconds)
     return HpcJobHandle(scheduler_job_id=f"mock-{qm_job_key(job)}")
 
@@ -117,6 +124,20 @@ async def _poll_nextflow(handle: HpcJobHandle) -> str:
         activity.heartbeat(f"{handle.scheduler_job_id}: polling")
         try:
             state = await nextflow.poll_run(handle)
+            if state is nextflow.RunState.SUCCEEDED:
+                # **The fetch is inside the tolerance, because a finished run is the most expensive
+                # thing this system holds.** It used to sit below the `except`, so the poll got
+                # `hpc_poll_max_consecutive_errors` attempts at a blip and the fetch got none:
+                # measured, an artifact store returning 503 for a few seconds while it published the
+                # object burned all five of Temporal's activity attempts in 1.51 s and failed the
+                # job. The cluster had computed the energy; nothing persisted it; the next identical
+                # request paid for the whole run again. A store is not more reliable than the
+                # launcher in front of it — it is usually a different service with its own restarts
+                # — so treating a fetch blip as fatal while absorbing a poll blip had it backwards.
+                #
+                # Re-polling on the retry is deliberate rather than wasteful: it costs one cheap GET
+                # and it re-confirms the run is still SUCCEEDED before fetching again.
+                return await nextflow.fetch_artifacts(handle)
         except (nextflow.NextflowError, httpx.HTTPError) as exc:
             consecutive_errors += 1
             if consecutive_errors >= settings.hpc_poll_max_consecutive_errors:
@@ -130,8 +151,6 @@ async def _poll_nextflow(handle: HpcJobHandle) -> str:
             await asyncio.sleep(settings.hpc_poll_interval_seconds)
             continue
         consecutive_errors = 0
-        if state is nextflow.RunState.SUCCEEDED:
-            return await nextflow.fetch_artifacts(handle)
         if state is nextflow.RunState.FAILED:
             raise ApplicationError(
                 f"run {handle.scheduler_job_id} failed",
