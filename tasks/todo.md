@@ -74,15 +74,17 @@ Suite after: **3991 passed**, `ruff` and `mypy --strict` clean, seven of eight v
 
 ## Open
 
-Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor. The largest are:
+Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor.
 
-- **~25 calculator settings with no reader**, seven of which look like live pKa/solubility
-  calibration but are baked into the *server's* `calc_version`.
+**Two of the eleven closed before this branch merged**, from `main` rather than here: the dead
+calculator settings went with `main`'s own sweep (this branch removed the one it missed,
+`xtb_engine`, whose comment still described a backend resolution that no longer exists), and
+`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact` gave the artifact store a writer again —
+`connectors/calc/compose.py:216`. Their rows are deleted rather than struck through. The rest:
+
 - **`tblite` is a runtime dependency with no importer**, kept alive by the test that derives
   `ALPB_SOLVENTS` — a launch gate for four durable jobs — from a local install rather than from the
   server that now decides it.
-- **`list_artifacts`/`fetch_artifact` read a store with no writer**, alongside a live eviction
-  schedule, eight settings and a migration.
 - **The stored-message conversion is a destructive in-place rewrite run as a `pre-upgrade` hook**,
   against data the previous release is still serving. Needs an ADR, not a patch.
 - **`xtb_geometry_decimals` still shapes half of every remote cache key.**

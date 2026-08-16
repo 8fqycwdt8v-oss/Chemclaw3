@@ -32,14 +32,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **~25 calculator settings have no reader, and seven of them look like live calibration** —
-      [M]. `core/config/calculators.py`: every `xtb_*`, `crest_*` and `pka_*` field plus
-      `solubility_rmse_log`. The physics moved to `Chemclaw3-mcp`, and the *server* bakes the pKa
-      and solubility constants into its `calc_version` — so an operator editing
-      `CHEMCLAW_PKA_CALIBRATION_SLOPE` changes nothing while `.env.example:223` presents it as the
-      predictor's calibration. `.env.example:153` and `:199` also state cache-key behaviour that no
-      longer exists. Delete the fields and the rows together.
-
 - [ ] **`tblite` is a runtime dependency with no importer, and the solvent gate is derived from
       it** — [M]. `pyproject.toml:152`; no module in `src/` imports it, and
       `tests/test_third_party_layering.py:144` forbids one. It survives because
@@ -47,13 +39,6 @@ topic).
       launches four durable jobs and the parameterisation that decides it is now the *server's*, so
       the two can diverge in both directions. Removing the dependency needs a replacement source for
       the list, which is a cross-repo contract.
-
-- [ ] **`list_artifacts` and `fetch_artifact` read a store with no writer** — [M].
-      `ArtifactStore.put` has no caller in `src/` outside its two implementations; the writers went
-      with the physics. Both tools can only ever return `[]` or raise, while their docstrings
-      (`connectors/calc/server/tools.py:313`) tell the model to use them for relaxed coordinates and
-      vibrational spectra. `durable/schedules.py:143` still registers `ArtifactEvictionWorkflow`
-      over the empty table, and eight `artifact_*` settings and `019_artifact_store.sql` go with it.
 
 - [ ] **The stored-message conversion is a destructive in-place rewrite, run as a pre-upgrade
       hook** — [M]. `agent/message_migration.py:242` overwrites `session_messages.message` while its

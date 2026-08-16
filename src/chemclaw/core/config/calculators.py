@@ -37,12 +37,6 @@ class CalculatorSettings(BaseSettings):
     this paragraph replaced it.
     """
 
-    # Which backend runs an xTB task (plan X5). "tblite" is the in-process library;
-    # "xtb" is the binary, which brings ANCopt (measured 9-11x faster on drug-sized
-    # molecules) and GFN-FF. "auto" prefers the binary when it is installed and falls
-    # back, so a deployment without it still works — the *resolved* name goes into the
-    # cache key, never "auto", so two deployments never share an entry they disagree on.
-    xtb_engine: Literal["auto", "tblite", "xtb"] = "auto"
     # How many media a solvent screen evaluates at once (`connectors/calc/compose.py`).
     #
     # **Default 1 — today's behaviour exactly — and that is a measurement waiting to be taken
