@@ -55,6 +55,16 @@ the store is `write_file`/`edit_file`/`delete`, which are *tools* — they cross
 `wrap_tool_call` chain as every other call, so they are audited, authorized, refused on a dry run
 and counted by the repeat guard. `tests/test_scratchpad.py` asserts that no first-party module calls
 `aput`/`adelete` on a store directly, so the property is enforced rather than described.
+
+**Three of those four were true when written and the fourth was not**, which is worth keeping
+because the reason generalises. Auditing, authorization and the repeat guard key on the tool *name*
+and so covered these the day they were registered. The dry-run refusal and the plan gate key on
+`side_effecting_tools()`, which is assembled from the tool registry, every connector's
+`state_changing` declaration and every template launcher — and `FilesystemMiddleware` registers its
+verbs with none of those, so a `dry_run=true` turn could write a durable row past a promise that
+nothing had been started. The fix is not a name added to that set: `write_file` is durable under
+`/memories/` and turn-local under `/scratch/`, so gating the name would deny a turn its own notepad.
+`authz.side_effecting_call` reads the call's `file_path` instead, and both gates ask it.
 """
 
 import logging

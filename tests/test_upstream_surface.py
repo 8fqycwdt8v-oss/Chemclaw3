@@ -414,6 +414,34 @@ def test_a_checkpointer_can_delete_a_thread_without_naming_its_tables() -> None:
     )
 
 
+def test_both_filesystem_write_verbs_still_take_the_path_as_file_path() -> None:
+    """The argument name a write gate now reads, and the direction its absence fails in.
+
+    `authz.writes_durable_memory` tells a durable `/memories/` write from a turn-local `/scratch/`
+    one by reading `file_path` off the call, because the tool *name* cannot: one verb serves both
+    roots. If upstream renamed the parameter, the lookup would miss, every path would read as
+    unknown, and — because an unreadable path is treated as durable — the gate would fail *closed*,
+    refusing every scratchpad write on a dry run. Loud rather than silent, but still wrong, and
+    this is what says so.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    args = {
+        tool.name: set(tool.args)
+        for tool in FilesystemMiddleware(backend=StateBackend()).tools
+        if tool.name in {"write_file", "edit_file"}
+    }
+    assert set(args) == {"write_file", "edit_file"}, (
+        "a filesystem write verb disappeared; agent/authz.py gates the pair by name"
+    )
+    for name, parameters in args.items():
+        assert "file_path" in parameters, (
+            f"{name} no longer takes `file_path`; agent/authz.writes_durable_memory reads it to "
+            "tell a durable memory write from a turn-local scratchpad one"
+        )
+
+
 def test_the_store_still_names_its_two_version_ledgers_the_way_the_grant_file_does() -> None:
     """The two table names in this database that are derivable from nothing.
 
