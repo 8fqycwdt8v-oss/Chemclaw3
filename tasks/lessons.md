@@ -383,12 +383,17 @@ either be omitted from the request or re-applied locally after the cache.
     a finding: a guard nobody has been able to violate-and-fail against has, in this repo's
     experience, always had something behind it.
 
-40. **This sandbox's clone is shallow, and one test fails here for that reason alone — recognize it
-    instead of re-diagnosing it.** `tests/test_migrations_are_additive.py::test_no_grandfathered_edit_outlives_its_reason`
-    reports `002_molecule_fingerprints.sql` / `003_reaction_fingerprints.sql` as exemptions with
-    nothing left to permit. The cause is lesson 39's, seen from the other side: the clone is shallow
-    *and* has 170 commits, so the test's `compared < 30` skip guard does not fire while its history
-    diff finds nothing edited. It reproduces on an unmodified tree.
+40. **This sandbox's clone is shallow, and the migration-immutability check reads that as a
+    finding — recognize it instead of re-diagnosing it.**
+    `tests/test_migrations_are_additive.py::test_no_grandfathered_edit_outlives_its_reason` reported
+    `002_molecule_fingerprints.sql` / `003_reaction_fingerprints.sql` as exemptions with nothing left
+    to permit. The cause is lesson 39's, seen from the other side: nothing differs from the commit
+    that introduced it when the history is not there.
+
+    **What makes it easy to misread is that it presents two ways depending on how deep the clone
+    happens to be.** At 170 commits the `compared < 30` skip guard did not fire, so it *failed*.
+    After merging `origin/main`, only 8 migrations could be compared, the guard fired, and the same
+    check *skipped*. Same cause, opposite symptom, and neither is about the code under review.
 
     **The rule: when a suite comes back with exactly one failure that is nowhere near what you
     touched, stash and re-run before reading a line of the diff.** It cost me one round here and it
