@@ -194,10 +194,12 @@ async def remote_key(
 ) -> CalculationKey | None:
     """The `CalculationKey` this tool would stamp on its result, without computing anything.
 
-    `None` when the server reports the calculation has no derivable key — `predict_logd` is the
-    one such tool, because it never had a cache row of its own: its expensive half is a *cached*
-    pKa and the rest is a Crippen sum. A caller that gets `None` computes without looking up,
-    which is what happened before the split too.
+    `None` when the server reports the calculation has no derivable key. Exactly one tool answers
+    that way — the server's own `predict_logd`, which has no cache row because its expensive half
+    is a *cached* pKa and the rest is a Crippen sum. This repository never calls it: it composes
+    logD client-side from those same two parts, so in practice every tool that reaches here is
+    keyed. `cached_remote` therefore treats a `None` as a miswiring and refuses, rather than
+    computing uncached forever.
 
     The key comes back as its four parts rather than as the flat `type@version:input:params`
     string, and the reason is measured rather than stylistic: a real `calc_version` contains both
@@ -284,14 +286,23 @@ async def cached_remote(
     (`connectors.identity`). On a hit the compute call is never made, so a hit costs one
     `calculation_key` round trip.
 
-    A tool with no derivable key (`predict_logd`) computes every time and stores nothing, exactly
-    as it did in-process — its cost was always the pKa underneath it, and that pKa is cached on the
-    server's own key like everything else.
+    **A tool the server will not key is a caller error here, not a silent uncached compute.** This
+    used to fall through to computing every time, on the reasoning that `predict_logd` had no cache
+    row of its own. That reasoning was right and the branch was still wrong: `predict_logd` is
+    composed *client-side* from a cached remote pKa plus a local Crippen sum, so it never reaches
+    this function — measured, every one of the eleven tools production actually passes here returns
+    a key, and the server refuses to key exactly one tool, which is the one that never arrives. A
+    branch that cannot execute is not a safety net; it is a place for a future miswiring to land
+    quietly and recompute forever.
     """
     async with calc_session() as session:
         key = await remote_key(session, tool, arguments)
         if key is None:
-            return await remote_compute(session, tool, arguments), False
+            raise CalcToolError(
+                f"{tool} has no derivable cache key, so it cannot be routed through the cache. "
+                "Either it is composed here from keyed primitives (as predict_logd is), or it "
+                "should be called with remote_call."
+            )
 
         async def _compute() -> ResultPayload:
             return await remote_compute(session, tool, arguments)

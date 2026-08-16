@@ -58,6 +58,17 @@ spec:
                containers actually listen on — one value, no drift. */}}
         - protocol: TCP
           port: {{ .Values.connectorPort }}
+        {{- /* The `chem`/`safety`/`calc` sibling servers this release dials but does not run —
+               plain HTTP on their own ports, not `egressPorts.https`. Without these, an operator
+               who follows `values.yaml`'s own instruction to add the host to
+               `egressDestinations` still has every packet dropped, because a NetworkPolicy egress
+               rule restricts by port independently of the destination list. */}}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.chem }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.safety }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.calc }}
 ---
 {{- /* The front door's own ingress, which did not exist. `policyTypes` listed only `Egress`, so any
        pod in any namespace could open a connection to `chemclaw-service:8080`. This is the rule

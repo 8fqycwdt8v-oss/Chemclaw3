@@ -61,14 +61,29 @@ after it, while the code that asserted it stayed word for word the same.
 | Five docstrings asserted the retired `kg-validate` hazard gate still screens notes | `3a125828` fixed the identical claim two functions away in the same file. |
 | `science/README.md` described `calc` as "the physics" and listed a deleted `safety` package | `tests/test_repo_map.py` checks a README *exists*, not that it is true. |
 
+**Fixed in the follow-up pass, after the four open questions were decided:**
+
+- **The Hessian went back to the artifact store**
+  (`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact`). Expressed as a `ResultStore`
+  wrapper rather than a second caching path, so `cached_remote` and every caller of it are
+  untouched. Writing it the other way was tried first and reverted on evidence: a bespoke path has
+  to open its own session for the key, which made `compose` a second module that opens one, and
+  `calc_server_fake.install` patches `remote.calc_session` on the stated ground that it is the only
+  one — the heartbeat test went red on a real socket immediately.
+- **The chart now reaches all three bundles**: `CHEMCLAW_CALC_SERVER_URL` in the config map, three
+  bearer names in `secrets.optionalKeys` (optional for *upgrade* safety, not because absence is
+  capability-safe — `_EnvBearerAuth` still raises on first use), and 8858/8859/8860 in
+  `networkPolicy.egressPorts`. `helm` is absent from this sandbox, so the render itself is still
+  unverified; the offline chart tests are green at 85.
+- **`run_cached` and `cached_remote`'s unreachable no-key branch are deleted.** The branch now
+  raises a `CalcToolError` naming the tool, because an unreachable fallthrough is not a safety net —
+  it is where a future miswiring lands silently and recomputes forever.
+- **The runbook's egress instruction was wrong in the same way `values.yaml` was** and is corrected:
+  a NetworkPolicy restricts by port independently of the destination list, so adding a host without
+  its port drops the connection anyway.
+
 **Open, and each named with its anchor:**
 
-- **The Hessian regression is the one that matters** — the two queued rows in `BACKLOG.md` §3 and §4.
-  Matrices moved from the content-addressed artifact store into `HessianPayload.hessian_npy`, a
-  base64 field inside the row `durable/retention.py:69` **refuses to prune**. `put_all` — the store's
-  only writer — has one caller left and it is `tests/test_artifacts.py`. So `artifact_eviction.py`
-  runs daily against a table nothing fills, `list_artifacts`/`fetch_artifact` stay declared tools
-  that return nothing for any post-split calculation, and D-124's design is inverted.
 - **`predict_logd`'s domain-check arithmetic is duplicated across the two repositories with no
   contract test.** `science/calc/logd.py` against
   `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/logd.py`. Measured live and identical to
@@ -85,11 +100,6 @@ after it, while the code that asserted it stayed word for word the same.
   `gpt-3`/`gpt-4-` test), so the risk is narrower than it first looked: a server that rejects
   `response_format` outright lands in `verifier.py`'s blanket `except`, and the verifier degrades to
   the citation gate on *every* call with only `chemclaw_verifier_degraded_total` to say so.
-- **`cached_remote`'s `key is None` branch is unreachable.** All eleven tools this repository passes
-  to it were asked of the live server; every one returns a key. The only tool the server refuses to
-  key is `predict_logd`, which production never routes through `cached_remote` — it composes logD
-  client-side. `run_cached` is dead the same way: zero production callers, kept alive by
-  `tests/test_store.py` calling it directly.
 - **`CALCULATION_EPOCH` is `"1"` on both sides and the only thing holding them together is a
   hand-copied literal** in `Chemclaw3-mcp:servers/calc/tests/test_key_contract.py`. Nothing forces
   that literal to be updated in the PR that bumps the epoch.

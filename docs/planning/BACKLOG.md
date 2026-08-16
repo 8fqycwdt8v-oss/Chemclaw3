@@ -133,22 +133,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **Every Hessian is now stored where nothing can ever reclaim it, and the artifact tools return
-      nothing** — [M]. `science/calc/models.py:492` makes `hessian_npy` a base64 `.npy` *inside* the
-      result payload, so it lands in `calculation_results.result` — the table
-      `durable/retention.py:69` explicitly refuses to prune, because D-011 says a persisted result is
-      never recomputed. Before the split the matrix lived in the content-addressed artifact store and
-      `durable/artifact_eviction.py` reclaimed it by cost and idle time (D-124). That store now has
-      **no writer**: `science/calc/artifacts.py:192`'s `put_all` has exactly one caller left and it is
-      `tests/test_artifacts.py`. Three consequences, all silent — the daily `ArtifactEvictionWorkflow`
-      runs against a table nothing fills; `list_artifacts`/`fetch_artifact` stay declared in
-      `connectors/calc/connector.yaml:45-46,81-82` and answer nothing for any calculation done after
-      the split; and `calculation_results` grows by megabytes per Hessian with pruning disabled by
-      design. Decide the direction before patching: either the Hessian goes back to the artifact
-      store and the payload carries a reference, or the store, the eviction job and the two tools are
-      retired together. Whichever wins, `run_cached` (`science/calc/store.py:323`, zero production
-      callers) goes with it.
-
 - [ ] **A failed durable job is dropped from the mid-turn resume** — [L]. `agent/job_results.py:83`,
       and the function's own docstring says it is not. The chemist is told nothing.
 
@@ -195,18 +179,6 @@ topic).
       has the same shape with no timeout at all.
 
 ## 4 — Operating it
-
-- [ ] **The chart cannot reach any of the three bundles it declares but does not run** — [M]. All
-      three failures are independent and each is enough on its own. `calc_server_url`
-      (`core/config/calculators.py`) appears **nowhere** in `deploy/`, so the dev default
-      `http://127.0.0.1:8860/mcp` stands in-cluster and every calculation dials a port nothing
-      listens on. `CHEMCLAW_CHEM_TOKEN`/`CHEMCLAW_SAFETY_TOKEN` appear in `values.yaml:170,190` only
-      as *comments telling the operator to provide them*, while `secrets.keys`/`optionalKeys`
-      (`values.yaml:455-480`) have no slot — and `tests/test_helm_chart.py:251-259` pins that exact
-      set, so adding one means editing the test. `networkPolicy.egressPorts` (`values.yaml:583-587`)
-      lists 5432/7233/443/8000/4317, and the templates add `connectorPort` 8080; the declared URLs
-      are on 8858/8859/8860, which nothing permits. None of this surfaced because the OpenShift path
-      has never run against a cluster — which is also why it should be fixed before it first does.
 
 - [ ] **`LANGSMITH_TRACING` is pinned false in the Helm chart and nowhere else** — [S]. `langsmith`
       is in the runtime closure and enables itself from ambient environment: measured,

@@ -143,6 +143,29 @@ def _rendered_derived_values() -> dict[str, str]:
     }
 
 
+def _connector_token_envs() -> set[str]:
+    """`CHEMCLAW_*` bearer-token names read directly by name, never through a `Settings` field.
+
+    `chem`'s and `safety`'s manifests name their bearer with `token_env`
+    (`connectors/manifest.py::BearerAuth`), and `connectors/identity.py::_EnvBearerAuth` reads it
+    from `os.environ` per request rather than through the typed `Settings` object — so
+    `_field_for("CHEMCLAW_CHEM_TOKEN")` is never going to be in `Settings.model_fields`, and the
+    generic orphan check below would otherwise flag every one of these as a key nothing reads. The
+    `calc` sibling server's bearer is the same shape one step removed: its name is a *setting's
+    value* (`settings.calc_server_token_env`) rather than a manifest field, because `calc`'s own
+    manifest must stay off `CHEMCLAW_CONNECTORS_DIR`
+    (`D-2026-08-16-the-physics-leaves-the-cache-stays`).
+
+    Reused from `chemclaw.cli.validate_prose_contract`, the module that already has to solve this
+    exact problem for operator prose, rather than re-deriving it: both readers need "is this name
+    genuinely consumed", and a second implementation is a second place for the two to drift as a
+    fourth connector brings its own token.
+    """
+    from chemclaw.cli.validate_prose_contract import _connector_token_envs as _declared_names
+
+    return {f"CHEMCLAW_{name.upper()}" for name in _declared_names()}
+
+
 def _chart_env_keys() -> set[str]:
     """Every `CHEMCLAW_*` env name the chart puts into a pod, from all sources."""
     return (
@@ -157,16 +180,19 @@ def _chart_env_keys() -> set[str]:
 
 
 def test_chart_config_keys_have_a_consumer() -> None:
-    """Every `CHEMCLAW_*` key the chart injects is read by `Settings` or by a deploy script.
+    """Every `CHEMCLAW_*` key the chart injects has a reader.
 
-    A key that is neither is accepted silently by pydantic-settings when it arrives as an
+    A `Settings` field, a deploy script, or a connector's own bearer-token lookup — a key that is
+    none of those is accepted silently by pydantic-settings when it arrives as an
     environment variable, so the operator who sets it gets no error and no effect. This is the only
     place that mistake can be caught.
     """
     orphans = {
         key
         for key in _chart_env_keys()
-        if _field_for(key) not in Settings.model_fields and key not in _SHELL_CONSUMED_ENV
+        if _field_for(key) not in Settings.model_fields
+        and key not in _SHELL_CONSUMED_ENV
+        and key not in _connector_token_envs()
     }
     assert not orphans, f"chart sets env nothing reads: {sorted(orphans)}"
 
@@ -245,6 +271,19 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     slot (not a `config` entry, which would render into a ConfigMap the `view` role can read) and an
     `optional: true` reference.
 
+    The `chem`, `safety` and `calc` bearer tokens are the seventh through ninth, and they land in
+    `optionalKeys` for the same *upgrade* reason the framing key does, not because their absence is
+    harmless — it is not. `connectors/identity.py::_EnvBearerAuth` raises
+    `MissingConnectorCredential` on the very first call with no token present, and for `calc` that
+    first call is every SMILES-in tool and every durable calc job. They fit the "required is right"
+    sentence above by that test alone; they are not `keys` anyway, because `chemclaw.env` is
+    included by every Deployment the chart renders, not just the pods that call these three
+    bundles, so a required entry would take the front door and every worker into
+    `CreateContainerConfigError` on `helm upgrade` for a Secret edit that has nothing to do with
+    them. `optionalKeys` is therefore doing two different jobs across its four members: for the
+    framing key, "optional" describes the capability; for these three, it describes only the
+    upgrade, and an operator still has to set all three before the bundle they gate works at all.
+
     Both maps are asserted, because "which secrets does this chart name" is one question and
     splitting the answer across two values is exactly how a key comes to be in neither.
     """
@@ -257,6 +296,9 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     }
     assert set(_VALUES["secrets"]["optionalKeys"].values()) == {
         "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
+        "CHEMCLAW_CHEM_TOKEN",
+        "CHEMCLAW_SAFETY_TOKEN",
+        "CHEMCLAW_CALC_TOKEN",
     }
 
 

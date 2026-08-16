@@ -38,6 +38,11 @@ from rdkit import Chem
 from chemclaw.connectors.calc.remote import cached_remote, remote_call
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
+from chemclaw.science.calc.artifacts import (
+    HESSIAN_ARRAYS,
+    ArrayOffloadingStore,
+    ArtifactStore,
+)
 from chemclaw.science.calc.models import (
     ConformerEnsemble,
     CrestEffort,
@@ -56,6 +61,7 @@ from chemclaw.science.calc.models import (
     Structure,
     ThermochemistryResult,
 )
+from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 from chemclaw.science.calc.store import ResultStore
 from chemclaw.science.calc.thermo import (
     HARTREE_TO_KCAL,
@@ -188,6 +194,7 @@ async def hessian(
     structure: Structure,
     solvent: str | None,
     *,
+    artifacts: ArtifactStore | None = None,
     run: RemoteRunner = plain,
 ) -> tuple[HessianPayload, bool]:
     """Take the second derivatives at one geometry, cached under the server's key.
@@ -195,10 +202,21 @@ async def hessian(
     Keyed on what can move the matrix and nothing else — geometry, method, solvent — so a second
     thermochemistry question about the same minimum at another temperature is a hit here and a
     millisecond of `science/calc/thermo.py` arithmetic after it.
+
+    **The one calculation whose result does not fit in its row.** A Hessian is megabytes where every
+    other payload is numbers — 33 atoms is 99x99 doubles, 120 atoms about 1.4 MB — and
+    `durable/retention.py` refuses to prune `calculation_results` at all, because D-011 says a
+    persisted result is never recomputed. Storing the matrix inline therefore builds a table that
+    grows without bound and has no reclaim path by design, which is exactly what D-124 built the
+    content-addressed artifact store to avoid. So the store this hands to `cached_remote` is
+    wrapped: the packed arrays go to the artifact store and the row keeps their content hashes.
+    Nothing else about the call changes, which is the point of expressing the policy as a
+    `ResultStore` rather than as a second caching path.
     """
+    blobs = artifacts if artifacts is not None else default_artifact_store()
     payload, cached = await run(
         cached_remote(
-            store,
+            ArrayOffloadingStore(store, blobs, HESSIAN_ARRAYS),
             "compute_hessian",
             {"structure": structure.model_dump(mode="json"), "solvent": solvent},
         ),

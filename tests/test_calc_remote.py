@@ -151,25 +151,34 @@ def test_a_version_carrying_both_delimiters_round_trips(monkeypatch: pytest.Monk
     asyncio.run(_run())
 
 
-def test_a_tool_with_no_derivable_key_computes_every_time_and_stores_nothing(
+def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_recomputed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`predict_logd` never had a cache row; the split must not invent one for it.
+    """An unkeyable tool reaching the cache is a miswiring, and it now says so.
 
-    Its expensive half is a *cached* pKa on the server's own key, and the rest is a Crippen sum —
-    so computing twice costs two cheap calls, not two calculations. Storing under a fabricated key
-    would be worse than not storing: it would serve a logD computed at one pH for a request at
-    another.
+    This used to fall through and compute every time, on the reasoning that `predict_logd` has no
+    cache row of its own — which is true, and was still the wrong branch. `predict_logd` is composed
+    *client-side* from a cached remote pKa plus a local Crippen sum, so it never arrives here at
+    all: measured against the running server, every one of the eleven tools production passes to
+    `cached_remote` returns a key, and the single tool the server refuses to key is the one that
+    never comes. So the fallthrough was unreachable, and an unreachable fallthrough is not a safety
+    net — it is where a future miswiring lands silently and recomputes an expensive calculation on
+    every call, forever.
+
+    The refusal is a `CalcToolError` because that is what it is: the server was reached and said
+    this has no identity. Non-retryable, so a durable job fails fast and names the tool instead of
+    paying for the same answer three more times.
     """
     fake = _FakeSession(None, {"logd": 0.65})
     _session(monkeypatch, fake)
 
     async def _run() -> None:
-        store = InMemoryStore()
-        _, first = await cached_remote(store, "predict_logd", {"smiles": "c1ccncc1"})
-        _, second = await cached_remote(store, "predict_logd", {"smiles": "c1ccncc1"})
-        assert (first, second) == (False, False)
-        assert fake.compute_calls == 2
+        with pytest.raises(CalcToolError, match="no derivable cache key") as refused:
+            await cached_remote(InMemoryStore(), "predict_logd", {"smiles": "c1ccncc1"})
+        # It names the tool and what to do instead, because the reader is whoever miswired it.
+        assert "predict_logd" in str(refused.value)
+        assert "remote_call" in str(refused.value)
+        assert fake.compute_calls == 0, "a tool with no key must not be computed anyway"
 
     asyncio.run(_run())
 
