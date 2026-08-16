@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+from chemclaw.connectors.calc.remote import cached_remote
 from chemclaw.connectors.qm.specs import QmJobSpec, qm_job_key
 from chemclaw.core.chem import (
     InvalidSmilesError,
@@ -18,10 +19,8 @@ from chemclaw.core.chem import (
     require_standard_smiles,
 )
 from chemclaw.core.ids import stable_hash
-from chemclaw.science.calc.pka import PkaInput, run_cached_pka
-from chemclaw.science.calc.solubility import SolubilityInput, run_cached_solubility
 from chemclaw.science.calc.store import CalculationKey, InMemoryStore
-from chemclaw.science.calc.xtb import XtbInput, run_cached_xtb
+from tests.calc_server_fake import FakeCalcServer, install
 
 
 def test_stable_hash_is_order_independent() -> None:
@@ -138,29 +137,35 @@ def test_calc_cache_key_collapses_equivalent_smiles() -> None:
 
 
 @pytest.mark.parametrize(
-    ("run_cached", "make_input"),
+    ("tool", "pair"),
     [
-        (run_cached_xtb, lambda s: XtbInput(smiles=s)),
-        (run_cached_pka, lambda s: PkaInput(smiles=s)),
-        (run_cached_solubility, lambda s: SolubilityInput(smiles=s)),
+        ("compute_xtb_energy", ("CCO", "OCC")),
+        # pKa needs an acidic S-H/O-H site; ethanol is inert to the predictor, so use a thiol.
+        ("predict_pka", ("CCS", "SCC")),
+        ("predict_solubility", ("CCO", "OCC")),
     ],
 )
-def test_run_cached_serves_equivalent_smiles_from_store(run_cached, make_input) -> None:  # type: ignore[no-untyped-def]
+def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_store(
+    tool: str, pair: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every calculator computes once for a molecule, then serves the other spelling.
 
-    `CCO` misses and computes; `OCC` (the same molecule) is a store hit, proving the
-    canonical cache key defeats duplicate compute across SMILES spellings. Ethanethiol
-    (`CCS`/`SCC`) is the pKa case — ethanol has no acidic O-H site the predictor treats.
+    `CCO` misses and computes; `OCC` (the same molecule) is a store hit, proving the canonical cache
+    key defeats duplicate compute across SMILES spellings. Since
+    `D-2026-08-16-the-physics-leaves-the-cache-stays` the canonicalization happens where the key is
+    derived — on the calculation server — so what this pins now is that the property **survived the
+    wire**: two spellings still reach one row, and a client that canonicalized differently on this
+    side would produce a second key that misses forever with nothing raising.
     """
+    server = install(monkeypatch, FakeCalcServer())
 
     async def _run() -> None:
         store = InMemoryStore()
-        # pKa needs an acidic S-H/O-H site; ethanol is inert to it, so use a thiol.
-        pair = ("CCS", "SCC") if run_cached is run_cached_pka else ("CCO", "OCC")
-        first_smiles, second_smiles = pair
-        _, cached_first = await run_cached(store, make_input(first_smiles))
-        _, cached_second = await run_cached(store, make_input(second_smiles))
+        first, second = pair
+        _, cached_first = await cached_remote(store, tool, {"smiles": first})
+        _, cached_second = await cached_remote(store, tool, {"smiles": second})
         assert cached_first is False
         assert cached_second is True
 
     asyncio.run(_run())
+    assert server.count(tool) == 1

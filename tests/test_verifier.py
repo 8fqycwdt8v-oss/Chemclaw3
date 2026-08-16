@@ -48,10 +48,17 @@ class _FakeVerifierClient:
     def __init__(self, value: Any) -> None:
         self._value = value
         self.response_formats: list[Any] = []
+        self.methods: list[str | None] = []
 
-    def with_structured_output(self, schema: Any) -> "_FakeVerifierClient":
-        """Record the schema the judge was bound to and keep replaying the preset value."""
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> "_FakeVerifierClient":
+        """Record the schema the judge was bound to and keep replaying the preset value.
+
+        `**kwargs` carries `method="json_schema"`, which the caller passes so the provider
+        enforces every field rather than only the ones without defaults — see
+        `test_the_judges_schema_requires_every_field`.
+        """
         self.response_formats.append(schema)
+        self.methods.append(kwargs.get("method"))
         return self
 
     async def ainvoke(self, prompt: str) -> Any:
@@ -120,7 +127,7 @@ def test_an_unreachable_judge_does_not_certify_an_uncited_answer(
     monkeypatch.setattr(settings, "verifier_enabled", True)
 
     class _Broken:
-        def with_structured_output(self, _schema: object) -> "_Broken":
+        def with_structured_output(self, _schema: object, **_kwargs: object) -> "_Broken":
             return self
 
         async def ainvoke(self, *_args: object, **_kwargs: object) -> object:
@@ -690,3 +697,51 @@ def test_a_hostile_chunk_cannot_close_the_envelope_it_is_placed_in() -> None:
     assert "IGNORE THE ABOVE" not in _outside_envelopes(evidence), (
         "the tool output escaped its envelope"
     )
+
+
+def test_the_function_calling_rendering_demands_only_confidence() -> None:
+    """The trap, pinned: the default rendering asks the provider to enforce almost nothing.
+
+    `convert_to_openai_tool` drops any field carrying a default out of `required`, so `claims`
+    (`default_factory=list`) and `verified_by` disappear and the emitted tool schema demands
+    `confidence` alone. Under `method="function_calling"` that is *all* the provider enforces —
+    types included — so a model returning the whole verdict as a JSON string inside `claims` is
+    accepted at the wire and only fails when `VerificationResult` validates it locally, inside
+    `verify_answer`'s `try`. Measured against a live model: 8 of 8 calls degraded that way, and
+    `score_answer`'s third rule then appends "the judge did not run" and flags — so switching
+    `verifier_enabled` on flagged **every** non-empty answer, with a log line as the only evidence.
+
+    Pinned rather than fixed, because it is upstream's rendering and correct on its own terms: a
+    field with a default *is* optional. The fix is on the caller, asserted below.
+    """
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    rendered = convert_to_openai_tool(VerificationResult)["function"]["parameters"]
+    assert set(rendered["required"]) == {"confidence"}, (
+        "the function-calling rendering changed; if it now requires `claims`, this test's premise "
+        "is stale and the `method=` argument below may no longer be load-bearing"
+    )
+
+
+def test_the_judge_is_bound_with_json_schema_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`verify_answer` asks for strict schema enforcement, so a malformed verdict never validates.
+
+    What `json_schema` buys is *provider-side* enforcement of the whole model — types included —
+    rather than a looser tool call the client validates afterwards. That is the difference between
+    a wrong-typed field being rejected at the wire and it arriving, failing validation locally, and
+    silently degrading. Confirmed end to end at 13 of 13 against a live model; asserted here as the
+    binding, because the confirmation needs a credential and this must not.
+
+    Paired with the test above deliberately: that one shows the loose rendering exists, this one
+    shows the caller does not use it. Either alone would pass while the feature stayed broken.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    client = _FakeVerifierClient(VerificationResult(claims=[], confidence=0.9, verified_by="judge"))
+
+    async def _run() -> None:
+        await verify_answer("an answer", [_chunk("a tool result")], client=client)
+
+    asyncio.run(_run())
+    assert client.methods == ["json_schema"], client.methods

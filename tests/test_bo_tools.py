@@ -30,6 +30,7 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
 )
 from chemclaw.science.calc.store import InMemoryStore
+from tests.calc_server_fake import FakeCalcServer, install
 
 
 def _problem() -> OptimizationProblem:
@@ -187,11 +188,14 @@ def test_matching_observations_are_unaffected() -> None:
 def test_the_descriptor_bearing_path_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression guard on the `structures` path, which the boundary check now runs ahead of.
 
-    Featurization rewrites the *parameters* (it fills `descriptors`) but never their names, so
-    the check has to sit before it and still agree with what BoFire is finally handed. Real xTB
-    through an in-memory store, so this exercises the whole path rather than a stubbed one.
+    Featurization rewrites the *parameters* (it fills `descriptors`) but never their names, so the
+    check has to sit before it and still agree with what BoFire is finally handed. The whole path
+    is exercised rather than a stubbed one: a real `cached_remote` over an in-memory store, with
+    `tests/calc_server_fake.py` where the xTB engine used to be
+    (`D-2026-08-16-the-physics-leaves-the-cache-stays`).
     """
     monkeypatch.setattr(bo_tools, "default_store", InMemoryStore)
+    install(monkeypatch, FakeCalcServer())
     problem = OptimizationProblem(
         parameters=[
             ContinuousParameter(name="temperature", lower=20.0, upper=120.0),

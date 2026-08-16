@@ -1,21 +1,24 @@
-"""The `calc` bundle's durable job activity threads its request through to the science (D-118).
+"""The `calc` bundle's durable job activity threads its request through to the composition (D-118).
 
-`run_xtb_calculation` is the only caller of `compute_reaction_energy`/`compare_solvent_effects` on
-the durable path, and it dispatches on a `XtbJobSpec` member whose fields it copies across by hand.
-So a field that exists in the science signature and not in the spec — or exists in both and is not
+`run_xtb_calculation` is the only caller of the reaction and solvent-screen composites on the
+durable path, and it dispatches on an `XtbJobSpec` member whose fields it copies across by hand. So
+a field that exists in the composite's signature and not in the spec — or exists in both and is not
 copied — is invisible: the job runs, returns a well-formed result, and quietly answers a smaller
 question than the one that was asked.
 
-That is exactly what happened to `symmetry_numbers`. `compute_reaction_energy` grew it as the input
-a free energy is not computed without, `ReactionJobSpec`/`SolventScreenJobSpec` did not, and both
-call sites were positional up to `level` — so nothing broke and the durable
-`compute_reaction_energy` and `compare_solvents` jobs simply stopped reporting a free energy at
-all. A chemist who ran the job instead of the inline tool got ΔE, and no indication that the ΔG
-they asked for had been withheld for a reason they could have fixed.
+That is exactly what happened to `symmetry_numbers`. The composite grew it as the input a free
+energy is not computed without, `ReactionJobSpec`/`SolventScreenJobSpec` did not, and both call
+sites were positional up to `level` — so nothing broke and the durable `compute_reaction_energy` and
+`compare_solvents` jobs simply stopped reporting a free energy at all. A chemist who ran the job
+instead of the inline tool got ΔE, and no indication that the ΔG they asked for had been withheld
+for a reason they could have fixed.
 
-Real GFN2 calculations against an in-memory store, on the smallest reaction that can show the
-effect: a stub of the science would pin only that this module calls a function. Diatomics keep
-that honest and still cheap — every Hessian here is over two atoms.
+**The physics is a fake and that is now the honest choice**, where before this file ran real GFN2 on
+diatomics. The calculations left this repository
+(`D-2026-08-16-the-physics-leaves-the-cache-stays`); what the activity is responsible for is the
+passthrough, the summary line and the heartbeating, and every one of those is visible against
+`tests/calc_server_fake.py`. What a fake cannot check — that the numbers are chemistry — is checked
+in the repository that computes them.
 """
 
 import asyncio
@@ -27,54 +30,57 @@ from temporalio import activity
 from chemclaw.connectors.calc import activities
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
+    ComplexJobSpec,
+    EnsembleJobSpec,
     ReactionJobSpec,
+    ScanJobSpec,
     SolventScreenJobSpec,
+    XtbJobSpec,
 )
 from chemclaw.science.calc.store import InMemoryStore
+from tests.calc_server_fake import FakeCalcServer, install
 
-# H2 + Cl2 -> 2 HCl. Every species is a closed-shell diatomic, so a Hessian is a dozen single
-# points and the whole file stays inside this repo's per-test budget — while still being the shape
-# that matters: the two homonuclear reactants are D∞h (sigma=2) and the product is C∞v (sigma=1), so
-# sigma does *not* cancel across the arrow and the map has to reach the calculation to change
-# anything. The three distinct values also pin the map key by key rather than as a whole.
+# H2 + Cl2 -> 2 HCl. Every species is a closed-shell diatomic, and the shape that matters: the two
+# homonuclear reactants are D∞h (sigma=2) and the product is C∞v (sigma=1), so sigma does *not*
+# cancel across the arrow and the map has to reach the calculation to change anything. The three
+# distinct values also pin the map key by key rather than as a whole.
 _REACTANTS = ["[H][H]", "ClCl"]
 _PRODUCTS = ["Cl", "Cl"]
 _SIGMAS = {"[H][H]": 2, "ClCl": 2, "Cl": 1}
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def store() -> InMemoryStore:
-    """One store for the module, so the species shared between these jobs are computed once.
-
-    The same discipline the jobs themselves rely on (D-011), and here it is also what keeps a
-    Hessian-bearing test file to seconds.
-    """
+    """One store per test, so a job's own species-sharing is what the cache counts show."""
     return InMemoryStore()
 
 
-@pytest.fixture(autouse=True)
-def _durable_context(monkeypatch: pytest.MonkeyPatch, store: InMemoryStore) -> Iterator[None]:
-    """Run the activity outside Temporal: its own store, and a heartbeat that goes nowhere.
+@pytest.fixture
+def server(monkeypatch: pytest.MonkeyPatch, store: InMemoryStore) -> Iterator[FakeCalcServer]:
+    """Run the activity outside Temporal: its own store, a fake server, a heartbeat going nowhere.
 
     `activity.heartbeat` raises outside an activity context, and it is passed down as the progress
-    callback, so this is what makes the real function callable at all from a test.
+    callback *and* used by the shared heartbeat timer, so this is what makes the real function
+    callable at all from a test.
     """
     monkeypatch.setattr(activities, "default_store", lambda: store)
     monkeypatch.setattr(activity, "heartbeat", lambda *args: None)
-    yield
+    yield install(monkeypatch, FakeCalcServer())
 
 
-def _run(spec: ReactionJobSpec | SolventScreenJobSpec) -> XtbJobResult:
+def _run(spec: XtbJobSpec) -> XtbJobResult:
     """Run one durable xTB job to completion, as its worker would."""
     return asyncio.run(activities.run_xtb_calculation(spec))
 
 
-def test_a_reaction_job_that_states_its_symmetry_numbers_gets_a_free_energy() -> None:
+def test_a_reaction_job_that_states_its_symmetry_numbers_gets_a_free_energy(
+    server: FakeCalcServer,
+) -> None:
     """The passthrough, proven by the number that only exists when it works.
 
-    `symmetry_number` per species is asserted alongside ΔG because it pins the map *key by key*:
-    a passthrough that dropped the values and passed an empty map would still yield None, but one
-    that mismatched Cl2's 2 onto HCl would not be visible in ΔG alone.
+    `symmetry_number` per species is asserted alongside ΔG because it pins the map *key by key*: a
+    passthrough that dropped the values and passed an empty map would still yield None, but one that
+    mismatched Cl2's 2 onto HCl would not be visible in ΔG alone.
     """
     spec = ReactionJobSpec(reactants=_REACTANTS, products=_PRODUCTS, symmetry_numbers=_SIGMAS)
     result = _run(spec)
@@ -88,7 +94,9 @@ def test_a_reaction_job_that_states_its_symmetry_numbers_gets_a_free_energy() ->
     assert "dG" in result.summary
 
 
-def test_a_reaction_job_without_symmetry_numbers_withholds_the_free_energy() -> None:
+def test_a_reaction_job_without_symmetry_numbers_withholds_the_free_energy(
+    server: FakeCalcServer,
+) -> None:
     """Omitting them is honest, not free: ΔE and ΔH stand, ΔG does not, and the warning says why.
 
     The state that must never come back is a third one — a ΔG computed at sigma=1 for symmetric
@@ -105,7 +113,25 @@ def test_a_reaction_job_without_symmetry_numbers_withholds_the_free_energy() -> 
     assert "dE" in result.summary
 
 
-def test_a_solvent_screen_threads_the_same_map_through_every_solvent() -> None:
+def test_the_repeated_product_is_computed_once(server: FakeCalcServer) -> None:
+    """HCl appears twice in the equation and is one calculation, which is the cache doing its job.
+
+    Four stoichiometric entries, three distinct species. The reaction is a subtraction over
+    per-species entries that are keyed individually — which is why there is deliberately no
+    reaction-level cache row.
+    """
+    result = _run(
+        ReactionJobSpec(reactants=_REACTANTS, products=_PRODUCTS, symmetry_numbers=_SIGMAS)
+    )
+    assert result.reaction is not None
+    assert len(result.reaction.species) == 4
+    assert server.count("relax_structure") == 3
+    assert server.count("compute_hessian") == 3
+
+
+def test_a_solvent_screen_threads_the_same_map_through_every_solvent(
+    server: FakeCalcServer,
+) -> None:
     """One map covers the whole screen, and without it the ranking silently drops to ΔE.
 
     The screen is the call where the loss was widest: it runs the reaction once per medium, so a
@@ -121,3 +147,51 @@ def test_a_solvent_screen_threads_the_same_map_through_every_solvent() -> None:
     assert [effect.solvent for effect in comparison.effects].count(None) == 1
     assert all(effect.delta_g_kcal is not None for effect in comparison.effects)
     assert not [w for w in comparison.warnings if "symmetry number" in w]
+
+
+def test_a_scan_job_threads_its_coordinate_and_summarizes_the_profile(
+    server: FakeCalcServer,
+) -> None:
+    """A scan job threads its coordinate through and summarizes the profile it got back.
+
+    Atoms, values and solvent all have to reach the composition, or the profile is a different
+    question answered confidently. The summary names the coordinate the result reports, not the one
+    the request asked for.
+    """
+    result = _run(
+        ScanJobSpec(smiles="CCCC", atoms=[0, 1, 2, 3], values=[0.0, 60.0, 120.0], solvent="water")
+    )
+    assert result.scan is not None
+    assert result.scan.coordinate == "dihedral"
+    assert [point.value for point in result.scan.points] == [0.0, 60.0, 120.0]
+    assert server.count("scan_point") == 3
+    assert all(args["solvent"] == "water" for args in server.arguments("scan_point"))
+    assert "dihedral scan of CCCC" in result.summary
+
+
+def test_an_ensemble_job_reports_the_populations_it_weighted(server: FakeCalcServer) -> None:
+    """One search, weighted here — the summary quotes the lowest member's population.
+
+    The search is the cached half and the weighting is not, because populations depend on a
+    temperature the search never saw.
+    """
+    result = _run(EnsembleJobSpec(smiles="CCCC", search="conformers", effort="quick"))
+    assert result.ensemble is not None
+    assert result.ensemble.total_found == 3
+    assert server.count("search_conformer_ensemble") == 1
+    assert "conformers of CCCC: 3 found" in result.summary
+
+
+def test_a_complex_job_names_the_pair_the_calculation_actually_ran_on(
+    server: FakeCalcServer,
+) -> None:
+    """The summary names the pair the calculation actually ran on.
+
+    Named from the result, not the request: the pair is canonically ordered so that either direction
+    is one cache entry, and the summary should describe what ran.
+    """
+    result = _run(ComplexJobSpec(smiles_a="CO", smiles_b="O"))
+    assert result.interaction is not None
+    assert (result.interaction.smiles_a, result.interaction.smiles_b) == ("CO", "O")
+    assert result.summary.startswith("CO + O:")
+    assert server.count("search_binding_modes") == 1

@@ -12,6 +12,7 @@ import pytest
 from pydantic import BaseModel
 
 from chemclaw.science.calc import store as store_module
+from chemclaw.science.calc.models import Structure
 from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
@@ -19,8 +20,6 @@ from chemclaw.science.calc.store import (
     cached_compute,
     run_cached,
 )
-from chemclaw.science.calc.structure import Structure
-from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 def test_identical_calculation_computed_once() -> None:
@@ -101,17 +100,21 @@ def test_an_earlier_epoch_cannot_be_served_to_a_later_one() -> None:
 def test_the_epoch_reaches_every_calculator_not_just_the_one_that_needed_it() -> None:
     """Folded in by `build`, so no calculator has to remember to name it (D-011).
 
-    The xTB family is the case that proves it: `XtbSpec.calc_version` is entirely other people's
-    version numbers, and an `xtb.hess` row would otherwise outlive any fix of ours.
+    The xTB family is the case that proves it: an `xtb.hess` version is entirely other people's
+    version numbers — a tblite build, an RDKit build — so such a row would otherwise outlive any
+    fix of ours. Since `D-2026-08-16-the-physics-leaves-the-cache-stays` those keys are built on
+    the calculation server, which is why `CALCULATION_EPOCH` is the one constant both repositories
+    must change in the same PR; what is checked here is that `build` still folds it in, for the
+    keys this repository does derive (the QM job's, `connectors/qm/cache.py`).
     """
-    spec = XtbSpec(task="hess", engine="tblite")
     structure = Structure(
         elements=[1, 1], positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]], smiles="[H][H]"
     )
-    before = spec.cache_key(structure)
+    inputs = {"structure": structure.structure_id, "charge": 0, "multiplicity": 1}
+    before = CalculationKey.build("xtb.hess", "GFN2-xTB+tblite-0.7.0", inputs=inputs)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(store_module, "CALCULATION_EPOCH", "next")
-        after = spec.cache_key(structure)
+        after = CalculationKey.build("xtb.hess", "GFN2-xTB+tblite-0.7.0", inputs=inputs)
     assert after != before
 
 

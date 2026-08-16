@@ -27,7 +27,6 @@ from typing import Any
 import pytest
 
 from chemclaw.science.calc.store import InMemoryStore
-from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 def _thread_recording(target: Any, seen: list[int]) -> Any:
@@ -40,31 +39,36 @@ def _thread_recording(target: Any, seen: list[int]) -> Any:
     return _spy
 
 
-def test_electronic_properties_embed_and_key_off_the_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Embedding the molecule and deriving its cache key are both blocking, and both were on-loop.
+def test_the_rrho_arithmetic_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 3N x 3N eigendecomposition is blocking work, and this coroutine shares its loop.
 
-    The key matters as much as the embed: `calc_version()` shells out to `xtb --version` on its
-    first call in a process, so a cold worker paid a `subprocess.run` on the loop that serves
-    every Temporal task poll and heartbeat.
+    The two blocking steps this test used to cover — embedding a molecule and deriving a cache key
+    that shelled out to `xtb --version` — both left with the engines
+    (`D-2026-08-16-the-physics-leaves-the-cache-stays`): the embed is a remote call and the key
+    comes back from the server. What is left on this side is real work all the same. Turning a
+    Hessian into a free energy diagonalizes a matrix that is 99x99 for a drug-sized molecule, once
+    per refinement pass, inside the connector's single-loop MCP server and inside Temporal
+    activities that are coroutines — so it has to be threaded, and the assertion is the thread it
+    actually ran on rather than the presence of a call to `to_thread`.
     """
-    from chemclaw.science.calc import xtb_props
+    from chemclaw.connectors.calc import compose
+    from chemclaw.science.calc import thermo
+    from tests.calc_server_fake import FakeCalcServer, install
 
-    embeds: list[int] = []
-    keys: list[int] = []
+    install(monkeypatch, FakeCalcServer())
+    threads: list[int] = []
     monkeypatch.setattr(
-        xtb_props, "_property_structure", _thread_recording(xtb_props._property_structure, embeds)
+        compose,
+        "thermochemistry_from_hessian",
+        _thread_recording(thermo.thermochemistry_from_hessian, threads),
     )
-    monkeypatch.setattr(XtbSpec, "cache_key", _thread_recording(XtbSpec.cache_key, keys))
 
     async def _run() -> int:
-        await xtb_props.run_cached_properties(InMemoryStore(), "CCO")
+        await compose.relax_to_minimum(InMemoryStore(), await compose.embed("CCO"), None)
         return threading.get_ident()
 
     loop_thread = asyncio.run(_run())
-    assert embeds and all(thread != loop_thread for thread in embeds)
-    assert keys and all(thread != loop_thread for thread in keys)
+    assert threads and all(thread != loop_thread for thread in threads)
 
 
 def test_gather_evidence_runs_its_sources_concurrently() -> None:

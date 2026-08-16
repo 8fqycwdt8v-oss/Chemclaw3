@@ -33,6 +33,7 @@ import asyncio
 
 from temporalio import activity
 
+from chemclaw.connectors.bo.calculators import log_s_for
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
@@ -41,6 +42,7 @@ from chemclaw.science.bo.campaign_record import record_suggestion
 from chemclaw.science.bo.engine import initial_candidates, propose_candidates
 from chemclaw.science.bo.objectives import get_objective
 from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem
+from chemclaw.science.calc.postgres_store import default_store
 
 # BoFire fitting is CPU-bound (GP fit + acquisition optimization); run it off the
 # event loop so heartbeats and concurrent activities keep flowing (the same
@@ -96,7 +98,7 @@ async def evaluate_candidates(
     for calc's CREST jobs and Conn-F2 fixed for the two propose activities, left open here because
     a per-candidate beat looks like it covers a per-candidate wait and does not.
     """
-    objective = get_objective(objective_name)
+    objective = get_objective(objective_name, log_s_for(default_store()))
     observations = []
     for index, candidate in enumerate(candidates, start=1):
         progress = f"evaluating candidate {index}/{len(candidates)}"

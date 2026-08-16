@@ -1,33 +1,47 @@
 """The activity behind the `calc` connector's durable jobs (xTB plan X3/X4).
 
-One activity, deliberately. Each task routed here is a single call into `calc/` whose
-expensive parts — every optimization and every Hessian — are *already* content-addressed
-in the calculation store. So a retry after a worker restart re-enters the same function
-and walks straight through the work it already did, which is the resumability a fan-out
-of per-species activities would buy at the cost of a decomposition the workflow would
-have to own.
+One activity, deliberately. Each task routed here is a single call into
+`connectors/calc/compose.py`, whose expensive parts — every optimization, every Hessian, every
+CREST search — are individually content-addressed in the calculation store. So a retry after a
+worker restart re-enters the same function and walks straight through the work it already did,
+which is the resumability a fan-out of per-species activities would buy at the cost of a
+decomposition the workflow would have to own.
 
-**These are minute-scale, not second-scale.** On drug-sized molecules (measured:
-ibuprofen at 33 atoms takes 19 s to optimize and take a Hessian; cost grows steeply from
-there), a multi-species reaction or a solvent screen runs for minutes. Two consequences
-are built in here rather than assumed: the activity **heartbeats** between species and
-scan points, so a worker that dies is detected in seconds instead of at the hour-long
-start-to-close timeout; and each heartbeat carries how far it has got, which is what a
-caller watching a long job actually wants to know.
+**These are minute-scale, not second-scale.** On drug-sized molecules a multi-species reaction or a
+solvent screen runs for minutes, and after
+`D-2026-08-16-the-physics-leaves-the-cache-stays` every one of those minutes is spent inside a
+*remote* call: the physics is in `Chemclaw3-mcp`'s `servers/calc` and this side composes the parts
+and caches them.
 
-Non-determinism (the store, the SCF, wall-clock cost) lives here and not in the workflow,
-which is the standard Temporal split the QM job already follows.
+**Which is why every remote call here is wrapped in `durable/heartbeat.py::beating`.** A blocking
+call with no heartbeat is an activity Temporal declares dead: against
+`xtb_job_heartbeat_timeout_seconds` a longer run is retried from zero, up to `activity_max_attempts`
+times, each restarting from whatever the cache already holds — and before the split that cost
+roughly fifty minutes of saturated CPU to fail a CREST search that would have succeeded. That
+wrapper was extracted for exactly this shape ("one opaque call with nothing finer to report than
+*still running*") from the CREST subprocess, the HPC poll and the BoFire fit; a remote computation
+is the fourth instance. Its guarantee — **no exit from the wrapper leaves the wrapped work
+running** — is what makes a dropped connection safe rather than a detached write.
+
+The composites still report progress *between* units of work (one species, one solvent, one scan
+point) through the `progress` callback, because that is a real boundary and "still running" is the
+weaker signal where a better one exists. The two are complementary: `progress` says how far, the
+heartbeat timer says alive.
+
+Non-determinism (the store, the wire, wall-clock cost) lives here and not in the workflow, which is
+the standard Temporal split the QM job already follows.
 
 It runs on the bundle's own worker (`chemclaw.connectors.calc.worker`), not core's, and is
-registered
-there explicitly rather than through `chemclaw.durable.registry` — that registry serves core's two
-queues, and a connector's queue is the connector's own business.
+registered there explicitly rather than through `chemclaw.durable.registry` — that registry serves
+core's two queues, and a connector's queue is the connector's own business.
 """
 
-import asyncio
+from collections.abc import Awaitable
+from typing import TypeVar
 
 from temporalio import activity
 
+from chemclaw.connectors.calc import compose
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
     ComplexJobSpec,
@@ -41,22 +55,20 @@ from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
-from chemclaw.science.calc.complexes import ComplexSpec, run_cached_interaction
-from chemclaw.science.calc.conformers import ConformerSpec, run_cached_ensemble
 from chemclaw.science.calc.postgres_store import default_store
-from chemclaw.science.calc.reaction import compare_solvent_effects, compute_reaction_energy
-from chemclaw.science.calc.structure import structure_from_smiles
-from chemclaw.science.calc.xtb_scan import ScanSpec, run_cached_scan
 
-# The two CREST searches below (`EnsembleJobSpec`, `ComplexJobSpec`) are a single opaque
-# subprocess with no unit boundary to report progress at — unlike the other xTB tasks, which
-# report *between* units of work (one species, one solvent, one scan point) via `progress=
-# activity.heartbeat` directly. `chemclaw.durable.heartbeat.beating` is the shared fix (Conn-F2):
-# these are the only two jobs marked `expensive: true`, and their own manifest says a search's
-# cost "is not bounded by the input's size" — against `xtb_job_heartbeat_timeout_seconds` (600 s)
-# a CREST run over ten minutes used to be declared dead and retried, up to `activity_max_attempts`
-# times, each restarting from zero because the store is written only on completion: roughly fifty
-# minutes of saturated CPU spent to fail a calculation that would have succeeded.
+_Result = TypeVar("_Result")
+
+
+async def _beating(awaitable: Awaitable[_Result], what: str) -> _Result:
+    """Await one remote calculation while beating this activity's heartbeat.
+
+    The `RemoteRunner` a composite is handed on the durable path, and the only difference between
+    running one here and running one from an MCP tool. The beat interval is derived from the
+    configured `heartbeat_timeout` the workflow sets on this activity, so a deployment that shortens
+    one shortens the other and the two cannot drift apart.
+    """
+    return await beating(awaitable, what, settings.xtb_job_heartbeat_timeout_seconds)
 
 
 @durable_activity(bundle_queue("calc"))
@@ -72,7 +84,7 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
     store = default_store()
     activity.heartbeat(f"starting {spec.kind}")
     if isinstance(spec, ReactionJobSpec):
-        reaction = await compute_reaction_energy(
+        reaction = await compose.reaction_energy(
             store,
             spec.reactants,
             spec.products,
@@ -81,6 +93,7 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             spec.level,
             spec.symmetry_numbers,
             progress=activity.heartbeat,
+            run=_beating,
         )
         delta = (
             reaction.delta_g_kcal if reaction.delta_g_kcal is not None else reaction.delta_e_kcal
@@ -95,7 +108,7 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             reaction=reaction,
         )
     if isinstance(spec, SolventScreenJobSpec):
-        comparison = await compare_solvent_effects(
+        comparison = await compose.solvent_comparison(
             store,
             spec.reactants,
             spec.products,
@@ -104,6 +117,7 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             spec.level,
             spec.symmetry_numbers,
             progress=activity.heartbeat,
+            run=_beating,
         )
         best = comparison.best_solvent or "gas phase"
         return XtbJobResult(
@@ -115,15 +129,15 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             solvents=comparison,
         )
     if isinstance(spec, ScanJobSpec):
-        # Activities here are coroutines on the worker's one event loop (no `activity_executor`),
-        # so a synchronous RDKit embed also stalls task polling and heartbeats.
-        structure = await asyncio.to_thread(
-            structure_from_smiles, spec.smiles, multiplicity=None, optimize=True
+        scan = await compose.scan_profile(
+            store,
+            spec.smiles,
+            tuple(spec.atoms),
+            tuple(spec.values),
+            spec.solvent,
+            progress=activity.heartbeat,
+            run=_beating,
         )
-        scan_spec = ScanSpec(
-            solvent=spec.solvent, atoms=tuple(spec.atoms), values=tuple(spec.values)
-        )
-        scan, _ = await run_cached_scan(store, structure, scan_spec, progress=activity.heartbeat)
         return XtbJobResult(
             kind=spec.kind,
             summary=(
@@ -134,17 +148,13 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             scan=scan,
         )
     if isinstance(spec, EnsembleJobSpec):
-        structure = await asyncio.to_thread(
-            structure_from_smiles, spec.smiles, multiplicity=None, optimize=True
-        )
-        ensemble, _ = await beating(
-            run_cached_ensemble(
-                store,
-                structure,
-                ConformerSpec(search=spec.search, solvent=spec.solvent, effort=spec.effort),
-            ),
-            f"{spec.search} of {spec.smiles}",
-            settings.xtb_job_heartbeat_timeout_seconds,
+        ensemble, _ = await compose.conformer_ensemble(
+            store,
+            spec.smiles,
+            search=spec.search,
+            effort=spec.effort,
+            solvent=spec.solvent,
+            run=_beating,
         )
         return XtbJobResult(
             kind=spec.kind,
@@ -155,21 +165,19 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             ensemble=ensemble,
         )
     if isinstance(spec, ComplexJobSpec):
-        interaction, _ = await beating(
-            run_cached_interaction(
-                store,
-                spec.smiles_a,
-                spec.smiles_b,
-                ComplexSpec(solvent=spec.solvent, effort=spec.effort),
-            ),
-            f"interaction of {spec.smiles_a} and {spec.smiles_b}",
-            settings.xtb_job_heartbeat_timeout_seconds,
+        interaction = await compose.interaction(
+            store,
+            spec.smiles_a,
+            spec.smiles_b,
+            effort=spec.effort,
+            solvent=spec.solvent,
+            run=_beating,
         )
         return XtbJobResult(
             kind=spec.kind,
             # Named from the result, not the request: the pair is canonically ordered
-            # (`calc.complexes._ordered`) so that either direction is one cache entry, and
-            # the summary should describe the calculation that actually ran.
+            # (`connectors/calc/compose.py::_ordered`) so that either direction is one cache entry,
+            # and the summary should describe the calculation that actually ran.
             summary=(
                 f"{interaction.smiles_a} + {interaction.smiles_b}: interaction "
                 f"{interaction.interaction_energy_kcal:+.1f} kcal/mol over "

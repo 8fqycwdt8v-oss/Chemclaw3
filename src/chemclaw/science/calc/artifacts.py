@@ -1,9 +1,11 @@
 """Content-addressed store for a calculation's by-products (D-124).
 
 The calculation cache (`science/calc/store.py`) persists the *answer* — a small JSON payload.
-Everything else a run produced was deleted with its temporary directory: `science/calc/xtb_cli.py`
-executes xtb inside a `tempfile.TemporaryDirectory`, parses the Hessian and `vibspectrum` into
-numbers, and loses the files. On a drug-sized substrate that Hessian costs minutes, and it is
+Everything else a run produced was deleted with its temporary directory: the xtb driver executed
+the binary inside a `tempfile.TemporaryDirectory`, parsed the Hessian and `vibspectrum` into
+numbers, and lost the files. (That driver is `Chemclaw3-mcp`'s now,
+`D-2026-08-16-the-physics-leaves-the-cache-stays`; the argument for keeping the bytes is unchanged,
+and so is this store.) On a drug-sized substrate that Hessian costs minutes, and it is
 exactly the input that makes the *next* question cheap — thermochemistry at a second temperature, IR
 at a different broadening, a transition-state search seeded from a known curvature.
 

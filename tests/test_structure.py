@@ -1,14 +1,26 @@
-"""Behavioral tests for the content-addressed `Structure` (xTB plan X1).
+"""Behavioral tests for the content-addressed `Structure` — now a cross-repository contract.
 
-The three properties the rest of the xTB layer depends on: identity is the chemical
-content and nothing else, coordinates are normalized so float noise cannot fork the
-cache, and a physically impossible structure is rejected at construction rather than
-converged by tblite into a meaningless number (gate G4).
+The three properties everything keyed on a geometry depends on: identity is the chemical content
+and nothing else, coordinates are normalized so float noise cannot fork the cache, and a physically
+impossible structure is rejected at construction rather than converged into a meaningless number
+(gate G4).
+
+**They matter more since the physics left** (`D-2026-08-16-the-physics-leaves-the-cache-stays`).
+`structure_id` is half of every key `relax_structure`, `compute_hessian`, `scan_point` and the two
+CREST searches are cached under, and it is derived on *both* sides of the wire — measured identical
+for `CCO` (`st_739a222f45be0c3a`). A divergence in the rounding or the hash payload below would
+raise nowhere: every lookup would simply miss, forever, while `calculator_trust` reported a
+confident `UNCALIBRATED`.
+
+The embedding itself is no longer here — `structure_from_smiles` went with the engines, because a
+geometry built by a different RDKit build is a different id and every result keyed on it would miss.
+`connectors/calc/compose.py::embed` asks the server for it, which keeps the two sides in agreement
+by construction rather than by a version comparison nobody runs.
 """
 
 import pytest
 
-from chemclaw.science.calc.structure import Structure, structure_from_smiles
+from chemclaw.science.calc.models import Structure
 
 
 def _water() -> Structure:
@@ -78,11 +90,15 @@ def test_odd_electron_count_names_the_open_shell_problem() -> None:
 def test_declared_open_shell_is_allowed() -> None:
     """A methyl radical is computable once its multiplicity is stated, not rejected outright.
 
-    This is the generalization the Fukui ions depend on: the old check refused every
-    odd-electron system, which would have made the N-1/N+1 single points impossible.
+    This is the generalization the Fukui ions depend on: the old check refused every odd-electron
+    system, which would have made the N-1/N+1 single points impossible. It is also why
+    `connectors/calc/compose.py::radical_multiplicity` derives the value from the SMILES' own
+    radical electrons before embedding — the server reads an unstated multiplicity as closed-shell
+    singlet and refuses this species outright, which would take homolysis reactions with it.
     """
     radical = Structure(elements=[6, 1, 1, 1], positions=[[0.0, 0.0, 0.0]] * 4, multiplicity=2)
-    assert radical.uhf == 1
+    assert radical.multiplicity == 2
+    assert radical.structure_id.startswith("st_")
 
 
 def test_mismatched_arrays_are_rejected() -> None:
@@ -91,24 +107,15 @@ def test_mismatched_arrays_are_rejected() -> None:
         Structure(elements=[8, 1, 1], positions=[[0.0, 0.0, 0.0]])
 
 
-def test_smiles_spellings_produce_one_structure() -> None:
-    """Canonicalizing before embedding is what makes two spellings one cache entry (D-011)."""
-    assert structure_from_smiles("CCO").structure_id == structure_from_smiles("OCC").structure_id
+def test_symbols_index_the_atoms_in_order() -> None:
+    """Element symbols pair with `elements` positionally — the per-atom results' contract.
 
-
-def test_declared_charge_must_match_the_smiles() -> None:
-    """A charge contradicting the SMILES is rejected, never computed (G4)."""
-    with pytest.raises(ValueError, match="formal charge"):
-        structure_from_smiles("CC(=O)[O-]", charge=0)
-
-
-def test_charge_defaults_to_the_smiles_formal_charge() -> None:
-    """Omitting the charge takes the molecule's own, rather than assuming neutral."""
-    assert structure_from_smiles("CC(=O)[O-]").charge == -1
-
-
-def test_symbols_index_the_heavy_atoms_of_the_canonical_smiles() -> None:
-    """Heavy atoms keep their canonical-SMILES order; hydrogens follow (the tools' contract)."""
-    symbols = structure_from_smiles("CCO").symbols
-    assert symbols[:3] == ["C", "C", "O"]
-    assert set(symbols[3:]) == {"H"}
+    Heavy atoms keep their canonical-SMILES order and hydrogens follow, because that is the order
+    the server embeds in; what this pins is that the mapping from atomic number to symbol does not
+    reorder anything on the way to a chemist reading an atom index.
+    """
+    ethanol = Structure(
+        elements=[6, 6, 8, 1, 1, 1, 1, 1, 1], positions=[[0.0, 0.0, float(i)] for i in range(9)]
+    )
+    assert ethanol.symbols[:3] == ["C", "C", "O"]
+    assert set(ethanol.symbols[3:]) == {"H"}

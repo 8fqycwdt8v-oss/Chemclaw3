@@ -1,6 +1,6 @@
 # Where xTB earns its place in ChemClaw — use cases, tiered by what unlocks them
 
-Companion to `docs/guides/xtb-tools-proposal.md` (the *how*). This is the *why*: the concrete
+Companion to `docs/archive/plans/xtb-tools-proposal.md` (the *how*, archived once its build was done). This is the *why*: the concrete
 process-R&D questions xTB can answer, what each is worth, and which build phase unlocks
 it. It exists to drive phase priority from user value rather than from what is
 technically adjacent.
@@ -55,7 +55,7 @@ own selectivity?). A question the knowledge graph alone cannot answer.
 ### 2.4 Ranking acidity within a congeneric series ★★
 *Which of these six phenol analogues is the most acidic?* — `predict_pka`.
 
-**Ranking only.** Benchmarked against 12 experimental values (`tests/test_pka.py`):
+**Ranking only.** Benchmarked against 12 experimental values (the pKa suite, which moved to `Chemclaw3-mcp` with the predictor in `D-2026-08-16-the-physics-leaves-the-cache-stays`):
 Spearman ρ **0.965**, but individual errors reach **±2.1 units**. See §4 — this
 distinction is the whole content of the `ionization-and-partitioning` skill.
 
@@ -114,8 +114,9 @@ carboxylic acids, phenols, thiols and alcohols:
 pKa — the pH for an extraction or a wash, whether a salt will form — turn on rules of
 the form "work two units away from the pKa". An error of 2 units *inverts* such a
 decision while looking entirely plausible. So the honest rule is: **rank with it, never
-set a pH with it.** Both halves are now asserted in `tests/test_pka.py`, so a future
-recalibration cannot quietly break the claim the skill rests on.
+set a pH with it.** Both halves are asserted in the pKa suite — which moved to `Chemclaw3-mcp`
+with the predictor itself — so a future recalibration cannot quietly break the claim the skill
+rests on.
 
 **The gap worth naming — half closed by X11 (D-104).** Most pharmaceutical APIs are
 **basic amines**, and pKa v1 covered only neutral O-H/S-H acids. Extending to protonated

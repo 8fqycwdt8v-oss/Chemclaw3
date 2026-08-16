@@ -8,7 +8,7 @@ experiments that is most of the budget spent discovering that the model has no o
 Giving each category a numeric descriptor vector replaces the label with a *position in
 chemical space*, so the surrogate interpolates: evidence about two electron-rich phosphines
 informs a third. This module computes those descriptors from the electronic properties
-`chemclaw.science.calc.xtb_props` already provides — no new xTB capability, only wiring.
+the calculation server already provides — no new xTB capability, only wiring.
 
 Descriptor choice, and one deliberate omission. The five descriptors below are the electronic
 axes a reagent choice usually turns on: donor strength (HOMO), acceptor strength (LUMO),
@@ -23,6 +23,7 @@ That is a real limitation for phosphine selection specifically, and it is what t
 tasks (plan X3) would add.
 """
 
+from collections.abc import Awaitable, Callable
 from typing import NamedTuple
 
 from chemclaw.science.bo.problem import (
@@ -30,8 +31,18 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
     Parameter,
 )
-from chemclaw.science.calc.store import ResultStore
-from chemclaw.science.calc.xtb_props import ElectronicProperties, run_cached_properties
+from chemclaw.science.calc.models import ElectronicProperties
+
+# How this module obtains one molecule's electronic properties: given a SMILES, the properties and
+# the `calc_ref` they can be cited by.
+#
+# **Injected rather than imported, because of where the physics went.** The engines moved to
+# `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`) and the client that reaches
+# them lives in `connectors/calc/remote.py` — one package *above* this one. `science` may depend on
+# `core` and nothing else (`tests/test_layering.py`), and excusing an edge here would declare a
+# `science <-> connectors` cycle to save one argument. So the caller passes the calculator in;
+# `connectors/bo/calculators.py` is the one that does, for all three call sites.
+PropertiesFor = Callable[[str], Awaitable[tuple[ElectronicProperties, str]]]
 
 # The descriptor names, in the order they are reported. Fixed rather than configurable: the
 # values are stored in the campaign spec, so a campaign always sees the set it was built with,
@@ -71,7 +82,7 @@ class Featurized(NamedTuple):
 
     The keys are what lets a suggestion cite its own evidence. Descriptors are real xTB results
     from the shared calculation cache, and until now their identity was derived inside
-    `run_cached_properties` and discarded — so an `experiment-proposal` note could describe the
+    the calculator and discarded — so an `experiment-proposal` note could describe the
     conditions a surrogate recommended and could not point at the calculations that shaped the
     space it searched. D-158 plumbed exactly this out of the QM activity for the same reason.
 
@@ -84,7 +95,7 @@ class Featurized(NamedTuple):
 
 
 async def featurize_parameter(
-    store: ResultStore, parameter: CategoricalParameter
+    properties_for: PropertiesFor, parameter: CategoricalParameter
 ) -> tuple[CategoricalParameter, list[str]]:
     """Return `parameter` with `descriptors` computed from its `structures`.
 
@@ -107,18 +118,20 @@ async def featurize_parameter(
     for category in parameter.categories:
         smiles = parameter.structures[category]
         try:
-            cached = await run_cached_properties(store, smiles)
-            descriptors[category] = descriptors_from_properties(cached.properties)
+            properties, calc_ref = await properties_for(smiles)
+            descriptors[category] = descriptors_from_properties(properties)
         except ValueError as error:
             raise ValueError(
                 f"parameter {parameter.name!r}: cannot featurize category {category!r} "
                 f"({smiles!r}): {error}"
             ) from error
-        calc_refs.append(cached.key)
+        calc_refs.append(calc_ref)
     return parameter.model_copy(update={"descriptors": descriptors}), calc_refs
 
 
-async def featurize_problem(store: ResultStore, problem: OptimizationProblem) -> Featurized:
+async def featurize_problem(
+    properties_for: PropertiesFor, problem: OptimizationProblem
+) -> Featurized:
     """Return `problem` with every structure-carrying categorical parameter featurized.
 
     The one entry point a caller needs: continuous parameters and categoricals without
@@ -135,7 +148,7 @@ async def featurize_problem(store: ResultStore, problem: OptimizationProblem) ->
         if not isinstance(parameter, CategoricalParameter):
             parameters.append(parameter)
             continue
-        featurized, keys = await featurize_parameter(store, parameter)
+        featurized, keys = await featurize_parameter(properties_for, parameter)
         parameters.append(featurized)
         calc_refs.update(keys)
     return Featurized(

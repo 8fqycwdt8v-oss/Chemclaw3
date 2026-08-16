@@ -1,6 +1,17 @@
-# The fast calculators. Its own bundle because `tblite` and the calculation store are its
-# dependencies, and because a property calculation and a chat turn have nothing in common
-# operationally — this is the capability most worth scaling on its own.
+# The calculators. Its own bundle because the calculation store is its dependency, and because a
+# property calculation and a chat turn have nothing in common operationally — this is the capability
+# most worth scaling on its own.
+#
+# **It no longer computes anything.** `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the
+# engines to `Chemclaw3-mcp`'s `servers/calc` as individually-keyed primitives; what runs here is the
+# D-011 cache in front of them, the composition of the two tools that were never shipped whole
+# (`compute_thermochemistry`, `predict_logd`), and the calibration ledger. The tool names, arguments
+# and return shapes below are unchanged by that, deliberately — profiles, eval probes and skills name
+# them by string.
+#
+# That server's own manifest must **not** go on `CHEMCLAW_CONNECTORS_DIR`: its seventeen primitives
+# are orchestrator-facing, and a partial port would win the `calc` name collision and take the six
+# read tools and every durable job off the agent's surface with no error.
 #
 # `report_measurement` writes, but to the *calibration ledger*, which is this capability's own store —
 # not the knowledge graph, whose only agent-reachable write path remains the PR-gate in core.
@@ -38,8 +49,11 @@ endpoint:
   # plan gate refuses the state-changing ones under an unapproved plan, and getting that wrong by
   # omission would fail open.
   #
-  # Everything below runs a real semiempirical calculation and stores the result in
-  # `calculation_results`, except `report_measurement`, which appends to the calibration ledger.
+  # Everything below causes a real semiempirical calculation to be run and stored in
+  # `calculation_results` — on a miss, now across a wire — except `report_measurement`, which
+  # appends to the calibration ledger. A cache *hit* changes nothing, but the classification is of
+  # the tool rather than of the call: which one a request turns out to be is not knowable until it
+  # has already been made.
   state_changing:
     - compute_xtb_energy
     - compute_electronic_properties

@@ -93,6 +93,12 @@ _BAD_DATA_TYPES = [
     # attempt — a volume that failed to mount does not mount itself because Temporal asked twice —
     # and retrying only delays the log line naming which one it is.
     "DocumentShareError",
+    # The calculation server was reached and refused (`chemclaw.connectors.calc.remote`): an
+    # unparameterised solvent, an atom index past the molecule, a SMILES outside a predictor's
+    # domain. Its sibling `CalcServerError` is deliberately **not** here — an unreachable server is
+    # a `SubsystemUnavailableError`, the one fault a retry actually fixes, and conflating the two
+    # is what would burn `activity_max_attempts` on a refusal that never changes.
+    "CalcToolError",
     # A turn asked a tool the identical question once too often (`chemclaw.agent.repeat_guard`).
     # It never crosses an activity boundary today — the guard is a chat-side middleware — but it is
     # a `ChemclawError`, and the rule this list encodes is that every one of them fails fast: an

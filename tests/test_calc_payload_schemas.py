@@ -1,4 +1,4 @@
-"""The shape of every payload the calculation store holds, pinned against `CALCULATION_EPOCH`.
+"""The shape of every payload this repository reads back out of the calculation store.
 
 **The defect this exists for.** `SolubilityResult` gained an `estimate` field carrying the
 applicability-domain flag, and nothing about the key moved: the ESOL arithmetic was untouched, so
@@ -23,6 +23,19 @@ literally named `title` must not be fingerprinted as one without it.
 The one thing a digest cannot see is our arithmetic being wrong and then fixed — the payload's
 shape does not move when a corrected linear-rotor term changes every entropy in it. That half stays
 a judgement, which is why `CALCULATION_EPOCH` is a hand-bumped constant rather than a derived one.
+
+**What the split changed, and it is worth stating plainly.** Since
+`D-2026-08-16-the-physics-leaves-the-cache-stays` this repository no longer *writes* these payloads
+— the calculation server does, and it stamps each with its own `calc_version` and `calc_key` that
+the models below deliberately do not declare. So these digests guard the **reader** half of a
+cross-repository contract: adding a required field here makes every row already on disk fail to
+validate, and removing one makes a stored value unreachable. Neither side can see the other's
+schema, which is precisely why the fingerprint has to be checked rather than assumed. The models
+that dropped out of the list did so because nothing here reconstructs them from a stored row any
+more: `HessianResult` was replaced by the wire shape `HessianPayload`, `BestGeometry`'s pointer
+machinery left with the optimizer that wrote it, and `ConformerEnsemble`, `ScanResult`,
+`InteractionResult` and `ThermochemistryResult` are now *composed* from cached parts rather than
+cached themselves — they are Temporal wire types, pinned by workflow histories, not cache rows.
 """
 
 from typing import Any
@@ -31,19 +44,18 @@ from pydantic import BaseModel
 
 from chemclaw.connectors.qm.specs import QMJobResult
 from chemclaw.core.ids import stable_hash
-from chemclaw.science.calc.complexes import InteractionResult
-from chemclaw.science.calc.conformers import ConformerEnsemble
-from chemclaw.science.calc.descriptors import DescriptorProfile
-from chemclaw.science.calc.geometry import BestGeometry
-from chemclaw.science.calc.pka import PkaResult
-from chemclaw.science.calc.solubility import SolubilityResult
+from chemclaw.science.calc.models import (
+    DescriptorProfile,
+    ElectronicProperties,
+    EnsemblePayload,
+    HessianPayload,
+    OptimizationResult,
+    PkaResult,
+    SiteReactivityResult,
+    SolubilityResult,
+    XtbResult,
+)
 from chemclaw.science.calc.uncertainty import Estimate
-from chemclaw.science.calc.xtb import XtbResult
-from chemclaw.science.calc.xtb_hessian import HessianResult
-from chemclaw.science.calc.xtb_opt import OptimizationResult
-from chemclaw.science.calc.xtb_props import ElectronicProperties, SiteReactivityResult
-from chemclaw.science.calc.xtb_scan import ScanResult
-from chemclaw.science.calc.xtb_thermo import ThermochemistryResult
 
 # JSON-Schema keywords whose *keys* are names the model chose rather than schema vocabulary. The
 # prose filter must not be applied inside them — see the module docstring.
@@ -70,23 +82,19 @@ def shape_digest(model: type[BaseModel]) -> str:
     return stable_hash(_shape_only(model.model_json_schema()))
 
 
-# Every model whose instances are written into `calculation_results` — the payloads a cache hit
-# validates back. A new cached calculator belongs here; one that is missing is simply unguarded,
-# which is the state the whole file exists to leave behind.
+# Every model this repository validates a `calculation_results` row back into. A new cached
+# calculator belongs here; one that is missing is simply unguarded, which is the state the whole
+# file exists to leave behind.
 PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
-    BestGeometry,
-    ConformerEnsemble,
     DescriptorProfile,
     ElectronicProperties,
-    HessianResult,
-    InteractionResult,
+    EnsemblePayload,
+    HessianPayload,
     OptimizationResult,
     PkaResult,
     QMJobResult,
-    ScanResult,
     SiteReactivityResult,
     SolubilityResult,
-    ThermochemistryResult,
     XtbResult,
 )
 
@@ -94,23 +102,22 @@ PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
 # half is deciding whether rows already written are now wrong or incomplete, and bumping
 # `calc.store.CALCULATION_EPOCH` if they are.
 RECORDED_SHAPES: dict[str, str] = {
-    "BestGeometry": "36145271404b5c5b",
-    "ConformerEnsemble": "defae7d5ca39e8d9",
     "DescriptorProfile": "81370985b8bb84c0",
     "ElectronicProperties": "61f42bbba754c322",
-    "HessianResult": "a1703112a0866c95",
-    "InteractionResult": "bb0523e0297f8451",
+    # New with the split: the wire shape a `compute_hessian` row holds, base64 `.npy` and all. It
+    # replaces `HessianResult`, whose content addresses pointed into an artifact store this
+    # repository no longer writes to.
+    "EnsemblePayload": "583226fa547b2412",
+    "HessianPayload": "8495e40479a746f1",
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
     "QMJobResult": "fce36419000e7f0d",
-    "ScanResult": "72609a59a86db985",
     "SiteReactivityResult": "0378ea844edafd37",
     # Changed when `Estimate.method` dropped its unreachable `"conformal"` member: nothing ever
     # produced that value (the function behind it had no caller and was deleted), so every row on
     # disk carries `"reported"` and still validates and still means what it said. A narrowing that
     # removes a value nothing wrote is the one shape change that needs no epoch bump.
     "SolubilityResult": "9c81f577df57caed",
-    "ThermochemistryResult": "c60a948c32b35abd",
     "XtbResult": "cc278ccf4b7832db",
 }
 

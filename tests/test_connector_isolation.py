@@ -8,12 +8,15 @@ invisibly.
 `connector.yaml`'s `params_model` names a pydantic model as `module:Class`, and
 `connectors/jobs.py` resolves it by importing that module. It does so inside `build_job_tool`,
 which `agent/chemclaw_agent.py` calls on **every** `build_agent`. The `calc` bundle pointed its
-five jobs at `connectors/calc/specs.py`, which imported `chemclaw.science.calc.complexes`,
-`chemclaw.science.calc.conformers`,
-`chemclaw.science.calc.reaction` and `chemclaw.science.calc.xtb_scan` for the *result* types that
-lived alongside the request types.
-Measured on `main`, building the enabled job tools loaded **`tblite`** — a compiled
-quantum-chemistry library — **and fifteen `calc.*` modules** into the agent's process.
+five jobs at `connectors/calc/specs.py`, which imported four science modules for the *result* types
+that lived alongside the request types. Measured on `main` at the time, building the enabled job
+tools loaded **`tblite`** — a compiled quantum-chemistry library — **and fifteen science modules**
+into the agent's process.
+
+The heavy half has since left the repository altogether
+(`D-2026-08-16-the-physics-leaves-the-cache-stays`), which makes this check *more* worth keeping
+rather than less: the boundary it guards must hold because it is declared, not because nothing
+heavy happens to exist on the other side of it today.
 
 Nothing failed. The chat pod just carried, in memory and in its image, the whole closure the
 bundle exists to keep out of it. That is the failure mode this file exists to make loud: a

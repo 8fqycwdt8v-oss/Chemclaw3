@@ -230,3 +230,66 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
     `ruff`. The mechanism: `ruff check . && ruff format --check .` is cheap and takes seconds — run
     it after the last edit, not after the last edit you *considered significant*. The category
     "too small to re-check" does not exist for a linter with a column limit.
+
+## 2026-08-16 — a timing taken on a loaded machine is not a measurement
+
+**Pattern.** Measuring `compute_thermochemistry` cold-vs-repeat through the new remote path, the
+cold number came back at 115 s and then 147 s for ethanol against an in-process baseline of 0.816 s.
+The obvious reading was a defect — a refinement loop that never converged, or a cache key that
+missed every time — and I started instrumenting the loop to find it. There was no defect: two
+abandoned background `pytest` runs were pinning all four cores at 124% CPU each. With the machine
+idle the same call took 0.856 s.
+
+**Rule for myself.** Before reporting or acting on any wall-clock number, check `uptime` and the top
+CPU consumers, and kill anything I started in the background that should have finished. And where
+the question is "was this recomputed?", assert the **call count**, not the clock: the count is
+immune to load and is what D-011 actually claims. I did eventually measure it that way (`0 computed`
+on the repeat) and that is the number that belongs in the report.
+
+## 2026-08-16 — when a key is derived on the other side of a wire, ask what it names
+
+**Pattern.** Three defects in one migration, all the same shape: the cache key is derived by the
+*server* and the payload is stored by the *client*, so the client cannot see which arguments the key
+names. `optimize_geometry` and `relax_structure` share one key and return different payloads; a
+Fukui key does not name the mode; `multiplicity=None` means the opposite on the two sides. None of
+the three raises anything — they produce a wrong answer, a stale ranking, and a refused embed with a
+misleading message.
+
+**Rule for myself.** When adopting a remote cache, do not infer the key from the tool's arguments.
+Ask the server for the key of every *pair* of calls that could plausibly collide, and diff them —
+`calculation_key` is cheap and the answer is a fact rather than an inference. Any two tools whose
+keys are equal must return the same payload shape, and any argument the key does *not* name must
+either be omitted from the request or re-applied locally after the cache.
+
+32. **A lesson written down is not a lesson learned — #28 recurred, in the same session that could
+    quote it.** Lesson 28 says `git add <explicit paths>` does not bound a commit, the index does.
+    I ran `git add CLAUDE.md tests/pg.py` and committed a two-file docs change; the commit contains
+    **38 files and 9385 deletions**, because a subagent had already staged its `git rm` of the calc
+    engine and `git commit` ships the whole index. The commit titled "Record that the sandbox is not
+    offline" now carries the deletion of twenty engine modules.
+
+    What made it recur is worth more than the rule: lesson 28 is filed under *parallel agents*, and
+    I did not think of myself as being in that situation — I was doing a small documentation fix
+    while an agent happened to be working. The trigger is not "am I coordinating with others", it is
+    **"is anything else able to write this index"**, and a running subagent always is. The mechanism
+    is unchanged and cheap: `git status --short` before every commit, read the *staged* column, and
+    if it holds anything you did not stage, use `git stash --keep-index` or commit from a worktree.
+
+    Second-order: I decided *not* to rewrite the history, because every merge in this repo is a
+    squash, so the misattribution never reaches `main` and rewriting a 101-file branch to fix a
+    record that does not survive the merge is unnecessary risk. Put it in the PR body instead. The
+    general form — **fix a record where the record will actually be read** — is the part to keep.
+
+33. **Verify a claim at the layer the defect lives in, not at the layer that is convenient.** A
+    subagent reported that the answer judge never ran, measured 8/8 against a live model. The model
+    credential was exhausted by then, so re-measuring was impossible — but the *cause* was one line
+    with no network: `convert_to_openai_tool(VerificationResult)["function"]["parameters"]` has
+    `required == ["confidence"]`. Confirming that took one command and settled the question.
+
+    The same move then produced a better test than the one I first wrote. My first attempt asserted
+    the *fixed* schema required every field, which is false — `claims` has a default, so it is
+    optional in pydantic's own schema too, and `method="json_schema"` buys strict provider-side
+    enforcement rather than a different required-set. The failing assertion is what corrected my
+    model of the fix. **When a test you wrote to prove a fix fails, consider that it may be telling
+    you the fix works for a different reason than you thought** — before assuming the test is
+    wrong.

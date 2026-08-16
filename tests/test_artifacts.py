@@ -10,7 +10,6 @@ import logging
 import random
 
 import pytest
-from pydantic import BaseModel
 
 from chemclaw.core.config import settings
 from chemclaw.science.calc.artifacts import (
@@ -26,7 +25,6 @@ from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
     cached_compute,
-    run_cached_with_artifacts,
 )
 
 # A Turbomole-shaped Hessian: highly repetitive numeric text, which is what the real artifacts are
@@ -171,74 +169,5 @@ def test_cached_compute_records_what_a_miss_cost() -> None:
         again = await store.get(key)
         assert again is not None
         assert again.compute_seconds == stored.compute_seconds
-
-    asyncio.run(_run())
-
-
-class _Res(BaseModel):
-    """A calculator's typed result, for the cached-with-artifacts contract."""
-
-    energy: float
-
-
-def test_run_cached_with_artifacts_stores_on_a_miss_and_not_on_a_hit() -> None:
-    """One calculation, two halves: the typed result cached, the raw bytes stored — once."""
-
-    async def _run() -> None:
-        results = InMemoryStore()
-        artifacts = InMemoryArtifactStore()
-        calls = 0
-
-        def compute() -> tuple[_Res, dict[str, bytes]]:
-            nonlocal calls
-            calls += 1
-            return _Res(energy=1.5), {"hessian": _HESSIAN}
-
-        key = CalculationKey.build("xtb.hess", "gfn2", inputs={"structure": "s"})
-        first, cached_first = await run_cached_with_artifacts(
-            results, artifacts, key, compute, _Res
-        )
-        second, cached_second = await run_cached_with_artifacts(
-            results, artifacts, key, compute, _Res
-        )
-
-        assert (cached_first, cached_second) == (False, True)
-        assert calls == 1  # the expensive half still runs exactly once
-        assert first.energy == second.energy == 1.5
-        refs = await artifacts.list_for(key.as_str())
-        assert [ref.name for ref in refs] == ["hessian"]
-        # The stored bytes are the ones the run produced, and the cost of producing them is
-        # recorded on the result so eviction can order by it.
-        assert await artifacts.open(refs[0].content_hash) == _HESSIAN
-        stored = await results.get(key)
-        assert stored is not None and stored.compute_seconds is not None
-
-    asyncio.run(_run())
-
-
-def test_artifact_failure_does_not_lose_a_completed_calculation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A broken artifact store costs a future recomputation, never the calculation in hand."""
-
-    class _Broken(InMemoryArtifactStore):
-        async def put(self, *args: object, **kwargs: object) -> ArtifactRef | None:
-            raise ConnectionError("Postgres unreachable at <postgres>")
-
-    async def _run() -> None:
-        results = InMemoryStore()
-        key = CalculationKey.build("xtb.hess", "gfn2", inputs={"structure": "s"})
-        with caplog.at_level(logging.WARNING, logger="chemclaw.science.calc.store"):
-            result, was_cached = await run_cached_with_artifacts(
-                results,
-                _Broken(),
-                key,
-                lambda: (_Res(energy=2.0), {"hessian": _HESSIAN}),
-                _Res,
-            )
-        assert result.energy == 2.0
-        assert was_cached is False
-        assert await results.get(key) is not None  # the answer is safe
-        assert "could not store artifacts" in caplog.text  # and the loss is loud
 
     asyncio.run(_run())

@@ -331,9 +331,25 @@ async def verify_answer(
             # `with_structured_output` rather than a free-text parse: the judge's whole output is a
             # `VerificationResult`, and letting the provider enforce that is what makes the failure
             # mode "no structured answer" (handled below) instead of "prose that almost parses".
-            response = await client.with_structured_output(VerificationResult).ainvoke(
-                _verifier_prompt(answer, evidence)
-            )
+            #
+            # **`method="json_schema"` is load-bearing, and its absence made this feature a
+            # no-op.** The default `"function_calling"` path renders the model through
+            # `convert_to_openai_tool`, which marks a field optional whenever it has a default — so
+            # `claims` (`default_factory=list`) and `verified_by` dropped out of `required` and the
+            # emitted schema demanded `confidence` alone. Measured against `claude-sonnet-5`: 8 of 8
+            # calls failed validation, the model either omitting `confidence` or returning the whole
+            # object as a JSON *string* inside `claims`. Both land in the `except` below, so the
+            # judge degraded to the citation gate **every time** — and `score_answer`'s third rule
+            # then appends "the judge did not run" and flags the answer. The net effect of switching
+            # `verifier_enabled` on was that every non-empty answer was flagged unconditionally,
+            # with nothing but a log line to say so. `json_schema` makes the provider enforce the
+            # whole model: 13 of 13 with no other change.
+            #
+            # `tests/test_verifier.py` asserts the *schema*, not the call, because that is the part
+            # that can be checked without a credential and is where the defect actually lived.
+            response = await client.with_structured_output(
+                VerificationResult, method="json_schema"
+            ).ainvoke(_verifier_prompt(answer, evidence))
     except Exception:
         # An unreachable/failing judge endpoint must not weaken verification below the offline
         # gate: degrade to the deterministic citation check (which needs no network) instead of

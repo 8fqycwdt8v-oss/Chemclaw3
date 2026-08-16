@@ -29,7 +29,8 @@ def qm_energy_estimate(result: QMJobResult) -> Estimate:
 
     **`uncertainty` is `None`, and that is the answer rather than a gap awaiting a number.** An
     absolute total energy has no meaningful error bar — as this repo already says where it
-    differences them (`chemclaw.science.calc.reaction`): the method and basis-set error is enormous
+    differences them (`chemclaw.connectors.calc.compose`): the method and basis-set error is
+    enormous
     in absolute terms and cancels almost entirely in a difference. Inventing a figure here would be
     a fabricated uncertainty, refused for the reason D-2026-08-01 refused fabricated domain bounds —
     a number in a validated record is expected to have a provenance, and a check that exists gets

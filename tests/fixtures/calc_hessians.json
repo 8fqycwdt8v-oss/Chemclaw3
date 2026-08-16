@@ -1,0 +1,128 @@
+{
+ "carbon_dioxide": {
+  "hessian": {
+   "atom_count": 3,
+   "calc_key": "xtb.hess@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:a508a403d666718a:bdeeee3e1efe7abc",
+   "calc_version": "GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2",
+   "dipole_derivatives_npy": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDksIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIApcyrVpDSMawGPaUioEN/8/B2ClbQ5T8zz9wUa+tDf/P9wy3/+JngXAKUOhTaGaSL0AAAAAAAAAAAAAAAAAAAAAaxATyKwk/r9cqU8QbCMqQOwF2yQqOA/AIc4NeTSzLL1rpyy6tzcPwEoFcu9knhVAhh+1NLC7Rj0AAAAAAAAAAAAAAAAAAAAA928wdRwkDkBeKF8yZiMawNrVBNjLOP8/0ClfPDS03byDMhEozTb/PwswD6wnngXAbQvj9YEuUz0AAAAAAAAAAAAAAAAAAAAA/y8YbOAj/r8=",
+   "electronic_energy_hartree": -10.308452293763906,
+   "hessian_npy": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDksIDkpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIApMsz+FAo0MQNid7g9CPve/PhlOU6kDID2GAoDx7T4LwMtMUnINb/U/gV7FlbDPI70gRFkTwODEv1rxHebe8rw/Giq6Ezpg/jzYne4PQj73v/aahW2X6OY/kUBUTxiTCD2nXNsSLG/1P0IvEHmVy+i/p0NKRZXAEb0tUZSEI/G8P7Itb2abMK4/do2AdiTc9Tw+GU5TqQMgPZFAVE8Ykwg9RLTsuhlEuz/gAp++qCSPvLd3ozuMnwq9BC8qUIFAy78sash4WgL0vJ9lTnFGJdu8xp+D1QY9uz+GAoDx7T4LwKdc2xIsb/U/4AKfvqgkj7xrUL7mBkAbQJYOHnyVbwXAtPtRrSdwCL3GsloBMUELwHB9qEEMcPU/t5oQVkyPCD3LTFJyDW/1P0IvEHmVy+i/t3ejO4yfCr2WDh58lW8FwGsOI7j0yvg/S29n1q9tF73Y7o8PJXD1PzjBrUpryui/k5Uc+rpeIj2BXsWVsM8jvadDSkWVwBG9BC8qUIFAy7+0+1GtJ3AIvUtvZ9avbRe9NyBtfmE+2z86ahzvNlrKvKtmn6k3Ru+8lgJtoF88y78gRFkTwODEvy1RlIQj8bw/LGrIeFoC9LzGsloBMUELwNjujw8lcPU/Omoc7zZayrwZP2SVRY8MQNt+5vQ9P/e/cPerVqFN9zxa8R3m3vK8P7Itb2abMK4/n2VOcUYl27xwfahBDHD1PzjBrUpryui/q2afqTdG77zbfub0PT/3vwZD4jxt5+Y/v0wjcW1s9jwaKroTOmD+PHaNgHYk3PU8xp+D1QY9uz+3mhBWTI8IPZOVHPq6XiI9lgJtoF88y79w96tWoU33PL9MI3FtbPY8uVG0YtY7uz8=",
+   "ir_intensities": null,
+   "method": "GFN2-xTB",
+   "solvent": null,
+   "structure_id": "st_bd90aaf6d1f4735d"
+  },
+  "smiles": "O=C=O",
+  "structure": {
+   "charge": 0,
+   "elements": [
+    8,
+    6,
+    8
+   ],
+   "multiplicity": 1,
+   "origin": "xtb.opt@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:e3ba8242c1277519:56dca3aa944bd3da",
+   "positions": [
+    [
+     -1.0546,
+     0.0633,
+     0.0
+    ],
+    [
+     0.0,
+     -0.3792,
+     0.0
+    ],
+    [
+     1.0546,
+     -0.8216,
+     0.0
+    ]
+   ],
+   "smiles": "O=C=O",
+   "structure_id": "st_bd90aaf6d1f4735d"
+  }
+ },
+ "hydrogen": {
+  "hessian": {
+   "atom_count": 2,
+   "calc_key": "xtb.hess@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:3092fd07401aa9d8:bdeeee3e1efe7abc",
+   "calc_version": "GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2",
+   "dipole_derivatives_npy": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDYsIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIArj0iEFMdQ3vQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACg03pAQy+y8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKDTekBDL7Lzj0iEFMdQ3PQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABOF8S5+29M8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE4XxLn7b0zw=",
+   "electronic_energy_hartree": -0.982686131981703,
+   "hessian_npy": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDYsIDYpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAozi2n1bMbuPwAAAAAAAAAAAAAAAAAAAAAzi2n1bMbuvwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPMT+f6X6za/AAAAAAAAAAAAAAAAAAAAAPMT+f6X6zY/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8xP5/pfrNr8AAAAAAAAAAAAAAAAAAAAA8xP5/pfrNj8zi2n1bMbuvwAAAAAAAAAAAAAAAAAAAAAzi2n1bMbuPwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPMT+f6X6zY/AAAAAAAAAAAAAAAAAAAAAPMT+f6X6za/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8xP5/pfrNj8AAAAAAAAAAAAAAAAAAAAA8xP5/pfrNr8=",
+   "ir_intensities": null,
+   "method": "GFN2-xTB",
+   "solvent": null,
+   "structure_id": "st_875a05537414b307"
+  },
+  "smiles": "[H][H]",
+  "structure": {
+   "charge": 0,
+   "elements": [
+    1,
+    1
+   ],
+   "multiplicity": 1,
+   "origin": "xtb.opt@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:70df6fff6cdca344:56dca3aa944bd3da",
+   "positions": [
+    [
+     0.3882,
+     0.0,
+     0.0
+    ],
+    [
+     -0.3882,
+     0.0,
+     0.0
+    ]
+   ],
+   "smiles": "[H][H]",
+   "structure_id": "st_875a05537414b307"
+  }
+ },
+ "water": {
+  "hessian": {
+   "atom_count": 3,
+   "calc_key": "xtb.hess@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:92c05279ac9c63de:bdeeee3e1efe7abc",
+   "calc_version": "GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2",
+   "dipole_derivatives_npy": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDksIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqiIotE8lX/v3Cj5xVPW3e/D0TIo/OcNr0GZKs59m93v9mLexJ6EwLAS62GUVt1Qr0AAAAAAAAAAAAAAAAAAAAAorAY5QwqD8BQ9OD5O5zuP+AJBvVeqd6/xsL0dH5vI71sYuE2hcXmv5foKEZ+cPI/hCqpv9+/Tj0AAAAAAAAAAAAAAAAAAAAAnG1L5Sgq/z+za0C7MwjwP61ZwnPBBt8/b3rvOD92U72NQNv5ZfTmPz38WghYtvE/Ah5ez9i6Vb0AAAAAAAAAAAAAAAAAAAAAykWo9AUq/z8=",
+   "electronic_energy_hartree": -5.0705442298397285,
+   "hessian_npy": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDksIDkpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAq4uCKyRmgBQIT82PIy3oy/7xo30x5A57yGE3kOANrxvzTFNO9zdem/YwgK5Cmk6DyqMbP7jfbwvznd8ajs6Ok/RtcuDbFApryE/NjyMt6Mv0ur9p6YzvY/KCUelkbB9jyyxYOisrjkvyL/mOZI7OW/TEH2YiPE5Lz8L2p8KyzlP8+6OmzzsOe/BQlGyWm+6LzvGjfTHkDnvCglHpZGwfY8zguoV16ZDz+edcF3aL39POOu0TZ20gu93/uPY7Y3474fSvh/PEvxPF+WqSKJ4gI93lHjRjFtCL+GE3kOANrxv7LFg6KyuOS/nnXBd2i9/TyVt/7c88rzP8awgcvX+uY/qXRyoii7/bw8fyOINw+/v5gCBIU0EbK/QK0HeKr+Qbw0xTTvc3XpvyL/mOZI7OW/467RNnbSC73GsIHL1/rmPyGayK6z/+M/8OvLv1sVBT10MqBe6NSzP5AAmUusya4/zgsX3Gn06jxjCArkKaToPExB9mIjxOS83/uPY7Y3476pdHKiKLv9vPDry79bFQU9D0cST36YML+ZdQD0fGD3vPdREQShH/G8zlLU91cMMT+qMbP7jfbwv/wvanwrLOU/H0r4fzxL8Tw8fyOINw+/v3QyoF7o1LM/mXUA9Hxg97xS0RjEgefyP0pVjQ7Hpue/4q0g0AFV2Dw53fGo7OjpP8+6OmzzsOe/X5apIoniAj2YAgSFNBGyv5AAmUusya4/91ERBKEf8bxKVY0Ox6bnv/5ifi9exOU/x9pBQXGl9LxG1y4NsUCmvAUJRslpvui83lHjRjFtCL9ArQd4qv5BvM4LF9xp9Oo8zlLU91cMMT/irSDQAVXYPMfaQUFxpfS8TRQzZytJLL8=",
+   "ir_intensities": null,
+   "method": "GFN2-xTB",
+   "solvent": null,
+   "structure_id": "st_227f2a73680f9d73"
+  },
+  "smiles": "O",
+  "structure": {
+   "charge": 0,
+   "elements": [
+    8,
+    1,
+    1
+   ],
+   "multiplicity": 1,
+   "origin": "xtb.opt@GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:ef0db0221aeab39a:56dca3aa944bd3da",
+   "positions": [
+    [
+     0.0072,
+     0.3796,
+     0.0
+    ],
+    [
+     -0.7751,
+     -0.1752,
+     0.0
+    ],
+    [
+     0.7679,
+     -0.2045,
+     0.0
+    ]
+   ],
+   "smiles": "O",
+   "structure_id": "st_227f2a73680f9d73"
+  }
+ }
+}
