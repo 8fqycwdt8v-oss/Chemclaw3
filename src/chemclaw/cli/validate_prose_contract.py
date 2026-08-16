@@ -381,7 +381,14 @@ def _path_resolves(candidate: str) -> bool:
 
 
 def _connector_token_envs() -> set[str]:
-    """The credential variable names connector manifests declare, lowercased like a Settings field.
+    """The credential variable names this deployment declares, lowercased like a Settings field.
+
+    Two sources, and the second is the reason this docstring no longer says "connector manifests".
+    A server we do not run is reached either as a *connector* — a bundle manifest with an
+    `HttpEndpoint` and a `BearerAuth` — or, for `calc`, as a plain client seam whose address is
+    configuration rather than a manifest (`D-2026-08-16-the-physics-leaves-the-cache-stays` says
+    why: its manifest must stay off `connectors_dirs`). Both name a real, operator-set variable
+    that is genuinely not a `Settings` field, and both must resolve.
 
     **Derived rather than allow-listed, which is the difference between this and
     `_NON_SETTINGS_ENV`.** A bundle reached over the network names its bearer with `token_env`
@@ -401,12 +408,17 @@ def _connector_token_envs() -> set[str]:
 
     # `HttpEndpoint` narrowly, not "has an endpoint": a `StdioEndpoint` carries no `auth` at all,
     # because a subprocess is reached across no network and has nothing to authenticate to.
-    return {
+    declared = {
         endpoint.auth.token_env.removeprefix("CHEMCLAW_").lower()
         for _, manifest in discovered().values()
         for endpoint in (manifest.endpoint,)
         if isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
     }
+    # The calculation server's bearer, whose name is a *setting's value* rather than a manifest
+    # field. Read the same way — off the declaration, never hard-coded — so renaming the variable
+    # in config keeps this gate correct with no edit here.
+    declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
+    return declared
 
 
 def check_operator_prose() -> list[str]:

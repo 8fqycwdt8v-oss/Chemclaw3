@@ -211,3 +211,25 @@ class CalculatorSettings(BaseSettings):
     # attention. -20 kcal/mol is a conservative, commonly cited screening threshold for a
     # "strongly exothermic" flag; advisory only, like the structural hazard screen (D-080).
     reaction_energy_exotherm_threshold_kcal: float = -20.0
+
+    # **Where the physics runs.** The engines moved to `Chemclaw3-mcp`'s `servers/calc`
+    # (`D-2026-08-16-the-physics-leaves-the-cache-stays`); this repository keeps the D-011 cache,
+    # the calibration ledger and the orchestration, and reaches the compute over MCP.
+    #
+    # Not a connector bundle, deliberately. A bundle's manifest is what the *agent's* tool surface
+    # is built from, and this server is never on it — the agent still calls this repository's own
+    # `calc` tools, which now happen to be cache-and-compose wrappers. Putting the server's manifest
+    # on `connectors_dirs` would put seventeen orchestrator-facing primitives into a prompt and let
+    # a partial port win the `calc` name collision, taking six read tools and every durable job off
+    # the surface with no error. So the address is plain configuration read by one client module.
+    calc_server_url: str = "http://127.0.0.1:8860/mcp"
+    # The environment variable holding the bearer the server enforces on `/mcp`. Named rather than
+    # carried, read per request, and the same name the server itself reads — the shape every
+    # out-of-release connector uses (`D-2026-08-09-a-connector-we-do-not-run`). A missing value is a
+    # refused call, not an open one.
+    calc_server_token_env: str = "CHEMCLAW_CALC_TOKEN"
+    # How long one remote calculation may take. Far above a connector's 30 s because these are the
+    # calculations themselves: a Hessian on a large substrate is minutes, and the fleet's own
+    # guidance now says duration is not the property it promises. A durable job's activity bounds
+    # the same wait again with its own timeout and heartbeat.
+    calc_server_timeout_seconds: float = Field(default=900.0, gt=0)
