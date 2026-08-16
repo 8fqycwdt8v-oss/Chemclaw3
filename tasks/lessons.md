@@ -382,3 +382,16 @@ either be omitted from the request or re-applied locally after the cache.
     conditions that make it real *before* pushing** — here, `git fetch --unshallow` first. And expect
     a finding: a guard nobody has been able to violate-and-fail against has, in this repo's
     experience, always had something behind it.
+
+40. **This sandbox's clone is shallow, and one test fails here for that reason alone — recognize it
+    instead of re-diagnosing it.** `tests/test_migrations_are_additive.py::test_no_grandfathered_edit_outlives_its_reason`
+    reports `002_molecule_fingerprints.sql` / `003_reaction_fingerprints.sql` as exemptions with
+    nothing left to permit. The cause is lesson 39's, seen from the other side: the clone is shallow
+    *and* has 170 commits, so the test's `compared < 30` skip guard does not fire while its history
+    diff finds nothing edited. It reproduces on an unmodified tree.
+
+    **The rule: when a suite comes back with exactly one failure that is nowhere near what you
+    touched, stash and re-run before reading a line of the diff.** It cost me one round here and it
+    is a two-command check: `git stash -u && pytest <the one test> && git stash pop`. Then say in the
+    PR that it is pre-existing *and how you verified that*, because "unrelated" asserted without the
+    stash is indistinguishable from not having looked.
