@@ -341,7 +341,28 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout.strip()
 
 
-def _statements_changed_since_merge() -> tuple[list[str], int]:
+def _graft_commits(repo: Path) -> frozenset[str]:
+    """The commits this clone has no parents for — where a truncated history stops.
+
+    `git log --diff-filter=A` reports the *earliest commit in the clone* that added a path, which
+    on a complete history is the commit that introduced it and on a truncated one is whatever the
+    truncation left. Those two are indistinguishable from the commit id alone, and the difference
+    is the whole question: comparing a file against its graft-boundary content compares it against
+    a version that already carried any edit made before the graft.
+
+    A boundary commit is exactly a commit listed in `$GIT_DIR/shallow`, so this is asked of git
+    rather than inferred. An empty set — the complete-history case — costs nothing downstream.
+    """
+    git_dir = _git(repo, "rev-parse", "--absolute-git-dir")
+    if not git_dir:
+        return frozenset()  # no history at all; the caller's empty-glob branch already covers it
+    shallow = Path(git_dir) / "shallow"
+    if not shallow.is_file():
+        return frozenset()
+    return frozenset(shallow.read_text(encoding="utf-8").split())
+
+
+def _statements_changed_since_merge(migrations: Path | None = None) -> tuple[list[str], int]:
     """Which merged migrations differ from the commit that added them, and how many were compared.
 
     Extracted so the immutability check and its exemption's staleness check ask git the *same*
@@ -349,22 +370,36 @@ def _statements_changed_since_merge() -> tuple[list[str], int]:
     walk would let the exemption be validated against a rule the check no longer applies — which is
     precisely how an exemption outlives its reason.
 
-    `compared` counts only comparisons that **span a commit**: a file introduced by `HEAD` itself
-    has nothing earlier to differ from, and on a truncated clone every file looks introduced by the
-    graft (which *is* `HEAD`), so it is the one number telling a real run from a vacuous one.
+    `compared` counts only comparisons that span **the introducing commit**: a file introduced by
+    `HEAD` itself has nothing earlier to differ from, and a file whose earliest commit in this clone
+    is a graft boundary was not necessarily introduced there at all. It is the one number telling a
+    real run from a vacuous one, and it only holds if both exclusions are made.
+
+    The graft exclusion is not a refinement — without it the number moves the wrong way. Measured on
+    this repository at two clone depths: a 171-commit graft reported `compared` of **47**, *higher*
+    than the **44** a complete clone reports, because truncation gives more files an earliest-commit
+    that is not `HEAD`. Any threshold on a number that rises when history is lost cannot detect lost
+    history, which is why the `compared < 30` skip below had stopped firing.
+
+    `migrations` is a parameter so the property above can be asked of a deliberately truncated clone
+    rather than only of whatever checkout the suite happens to be running in.
     """
-    repo = _MIGRATIONS.parents[1]
+    migrations = _MIGRATIONS if migrations is None else migrations
+    repo = migrations.parents[1]
     head = _git(repo, "rev-parse", "HEAD")
+    grafts = _graft_commits(repo)
     edited: list[str] = []
     compared = 0
-    for path in sorted(_MIGRATIONS.glob("*.sql")):
+    for path in sorted(migrations.glob("*.sql")):
         introduced = _git(
-            _MIGRATIONS, "log", "--diff-filter=A", "--format=%H", "--", path.name
+            migrations, "log", "--diff-filter=A", "--format=%H", "--", path.name
         ).split()
         if not introduced:
             continue  # added in the working tree; not merged, so not yet immutable
         if introduced[-1] == head:
             continue  # introduced by the commit under test — there is no earlier version to differ
+        if introduced[-1] in grafts:
+            continue  # history stops here; the real introduction is outside this clone
         original = subprocess.run(
             ["git", "show", f"{introduced[-1]}:{path.relative_to(repo)}"],
             cwd=repo,
@@ -514,4 +549,51 @@ def test_no_grandfathered_edit_outlives_its_reason() -> None:
         f"grandfathered edit(s) that no longer differ from the commit that introduced them: "
         f"{sorted(_GRANDFATHERED_EDITS - set(edited))}. The exemption has nothing left to permit, "
         "so delete it — leaving it granted means the next edit to that file goes unexamined."
+    )
+
+
+def test_truncating_history_never_raises_the_number_of_sound_comparisons(tmp_path: Path) -> None:
+    """`compared` must fall when history is cut away, because that is the only reason to trust it.
+
+    Both checks above abstain on `compared < 30` when git reports a shallow repository, and that
+    threshold is only meaningful if the number actually tracks how much history is present. It did
+    not. Measured on this repository before the graft exclusion was added: a 171-commit clone
+    reported **47** comparisons against the **44** of a complete one, because truncation gives
+    *more* files an earliest-commit that is not `HEAD` — the graft stands in for the real
+    introduction. The skip therefore never fired above depth 1, and it had been unreachable since
+    the tree crossed thirty migrations.
+
+    What that cost was not hypothetical. On such a clone the immutability check compared every
+    migration against its graft-boundary content and passed having verified nothing about any edit
+    made earlier, while its sibling failed and told the reader to delete two exemptions that are
+    live on full history — an instruction that would have removed the control it exists to keep.
+
+    Asserted as an inequality rather than a fixed number so it keeps holding as migrations are
+    added: cutting history away can only remove comparisons, never invent them.
+    """
+    repo = _MIGRATIONS.parents[1]
+    if _git(repo, "rev-parse", "--is-shallow-repository") != "false":
+        pytest.skip("this checkout is itself truncated, so there is no complete run to compare to")
+
+    _, complete = _statements_changed_since_merge()
+
+    clone = tmp_path / "truncated"
+    cloned = subprocess.run(
+        # Deeper than 1 on purpose: at depth 1 the graft *is* `HEAD`, which the walk already
+        # excludes, so a depth-1 clone cannot tell the graft exclusion from its absence.
+        ["git", "clone", "--quiet", "--depth", "50", f"file://{repo}", str(clone)],
+        capture_output=True,
+        text=True,
+    )
+    if cloned.returncode != 0:
+        pytest.skip(f"could not build a truncated clone: {cloned.stderr.strip()}")
+
+    _, truncated = _statements_changed_since_merge(clone / "infra" / "sql")
+
+    assert truncated <= complete, (
+        f"a 50-commit clone reported {truncated} sound comparisons against {complete} on the "
+        f"complete history. `compared` is what both checks above read to decide whether they are "
+        "looking at real history, so a number that rises as history is removed makes that decision "
+        "backwards: the checks run, compare each migration against a graft-boundary version of "
+        "itself, and report success having asked nothing."
     )
