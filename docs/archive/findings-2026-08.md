@@ -94,12 +94,16 @@ after it, while the code that asserted it stayed word for word the same.
   `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/anc.py`; no test in that repo mentions
   `anc`, `model_hessian` or the basis. What survives is integration-level, so a sign error or a
   broken orthonormality is caught only if it also breaks convergence.
-- **The verifier's `method="json_schema"` binding is unmeasured against `openai_compatible`**, the
-  provider `CLAUDE.md` names as the real target. Both upstream downgrade paths were checked and
-  neither can trigger here (the schema is Pydantic v2 and an internal model name never matches the
-  `gpt-3`/`gpt-4-` test), so the risk is narrower than it first looked: a server that rejects
-  `response_format` outright lands in `verifier.py`'s blanket `except`, and the verifier degrades to
-  the citation gate on *every* call with only `chemclaw_verifier_degraded_total` to say so.
+- **The verifier on `openai_compatible` — now measured, and the concern was real.** Driven against
+  a real loopback server rather than an injected exception. Neither upstream downgrade path can
+  trigger here (Pydantic v2 schema, and an internal model name never matches the `gpt-3`/`gpt-4-`
+  test), and the client provably sends `response_format` on the wire — so this is the genuine
+  `json_schema` path. A server that rejects it with a 400, or ignores it and answers prose, degrades
+  to the citation gate: the same contradicted-citation answer a working judge scores
+  `confidence=0.0, unsupported=True` comes back `confidence=1.0, unsupported=False`. `score_answer`
+  catches it and forces `review_required`, so the safety net holds — but only because every caller
+  goes through `score_answer`. Queued in `BACKLOG.md` §2 with the fix: a pre-flight capability probe
+  at startup, loud like `_require_anthropic_key()`, instead of a silent per-call degradation.
 - **`CALCULATION_EPOCH` is `"1"` on both sides and the only thing holding them together is a
   hand-copied literal** in `Chemclaw3-mcp:servers/calc/tests/test_key_contract.py`. Nothing forces
   that literal to be updated in the PR that bumps the epoch.

@@ -81,6 +81,21 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **On `openai_compatible`, one unsupported `response_format` degrades every judged answer for
+      the life of the deployment** — [S]. Measured against a real loopback server, not argued: a
+      server that rejects `response_format` with a 400, or ignores it and returns prose, lands in
+      `agent/verifier.py`'s bare `except Exception` and degrades to the citation gate on *every*
+      call. The same contradicted-citation answer a working judge scores `confidence=0.0,
+      unsupported=True` comes back `confidence=1.0, unsupported=False`, because the citation gate
+      can only see that a citation resolves, not that the evidence contradicts the claim.
+      `score_answer` catches it — `verifier.py:448` forces `review_required` whenever
+      `verified_by != "judge"` — so nothing unsafe reaches a chemist *provided every caller goes
+      through `score_answer`*; a caller reading `VerificationResult` directly sees the inverted,
+      over-confident verdict with only `chemclaw_verifier_degraded_total` to say otherwise. The fix
+      is a pre-flight capability probe: one throwaway structured call when `verifier_enabled` turns
+      on, failing loudly at startup the way `_require_anthropic_key()` already does, instead of
+      silently per call. Anthropic is unaffected.
+
 - [ ] **Split-conformal uncertainty is implemented and unwired** — [S].
       `science/calc/uncertainty.conformal_uncertainty` is correct and tested and has no caller:
       the solubility model reports the constant `solubility_rmse_log` instead, so no prediction has

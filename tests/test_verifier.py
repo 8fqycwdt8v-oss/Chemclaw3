@@ -9,9 +9,14 @@ deterministic scan for method parameters no tool in the turn produced.
 """
 
 import asyncio
+import threading
+import time
 from typing import Any
 
 import pytest
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.verifier import (
@@ -25,7 +30,9 @@ from chemclaw.agent.verifier import (
     verify_turn_answer,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.retrieval.evidence import EvidenceChunk
+from tests.conftest import _free_port
 
 
 class _FakeResponse:
@@ -745,3 +752,243 @@ def test_the_judge_is_bound_with_json_schema_enforcement(
 
     asyncio.run(_run())
     assert client.methods == ["json_schema"], client.methods
+
+
+# --- the `openai_compatible` provider: does the real bind-and-call path survive a server that ---
+# --- does not implement OpenAI's Structured Outputs? (measured against a real local endpoint, ---
+# --- not argued from the SDK source — see the class and tests below) -----------------------------
+#
+# CLAUDE.md names `openai_compatible` (an internal OpenAI-compatible endpoint) as the real
+# deployment target; every test above drives `verify_answer` through a fake client that never
+# touches `langchain_openai`. These instead build the *real* client via
+# `agent.llm_provider.build_chat_model` — the same factory `_default_client` uses in production —
+# and point it at a real local HTTP server, so `with_structured_output(..., method="json_schema")`
+# actually binds and actually posts. Only the endpoint underneath is fake, and it never leaves
+# loopback (`tests/test_no_egress.py` scans `src/`, not `tests/`, for exactly this reason).
+
+
+class _FakeOpenAiEndpoint:
+    """A real uvicorn server speaking just enough of `/v1/chat/completions` to drive `ChatOpenAI`.
+
+    Three shapes, one per measured server behaviour: `status=200` with JSON `content` (the server
+    honours `response_format` and returns a well-formed verdict), `status=400` (the server rejects
+    `response_format` outright), and `status=200` with prose `content` (the server accepts the
+    request and silently ignores the field). `requests` records every decoded body this endpoint
+    received, so a test can confirm the real client actually sent `response_format` rather than
+    merely receiving a response that happens to fit.
+    """
+
+    def __init__(self, *, status: int = 200, content: str = "", error: str = "") -> None:
+        self.status = status
+        self.content = content
+        self.error = error
+        self.requests: list[dict[str, Any]] = []
+        app = FastAPI()
+
+        @app.post("/v1/chat/completions")
+        async def chat_completions(request: Request) -> Any:
+            self.requests.append(await request.json())
+            if self.status != 200:
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": self.error,
+                            "type": "invalid_request_error",
+                            "param": "response_format",
+                            "code": None,
+                        }
+                    },
+                    status_code=self.status,
+                )
+            return JSONResponse(
+                {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "internal-test-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": self.content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+                }
+            )
+
+        self.port = _free_port()
+        self._config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
+        self._server = uvicorn.Server(self._config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    def __enter__(self) -> "_FakeOpenAiEndpoint":
+        """Start the server and wait until it is actually accepting connections."""
+        self._thread.start()
+        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
+            if self._server.started:
+                return self
+            threading.Event().wait(0.05)
+        raise RuntimeError("fake openai_compatible endpoint did not start")
+
+    def __exit__(self, *_exc: object) -> None:
+        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+
+
+def _openai_compatible_client(monkeypatch: pytest.MonkeyPatch, base_url: str) -> Any:
+    """Point `settings` at `base_url` and build the real verifier client through the real seam.
+
+    Not a fake — `build_chat_model` is exactly what `agent.verifier._default_client` calls in
+    production. Only `llm_base_url` is local; the client, the binding, and the HTTP call are real.
+    """
+    from chemclaw.agent.llm_provider import build_chat_model
+
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    monkeypatch.setattr(settings, "llm_base_url", base_url)
+    monkeypatch.setattr(settings, "llm_model", "internal-test-model")
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    return build_chat_model("verifier")
+
+
+# A cited claim the evidence *contradicts* — the shape `VerificationResult`'s own docstring measures
+# the danger of. A working judge must catch it (confidence 0.0, unsupported); the deterministic
+# citation gate can only see that the citation resolves, and certifies it at confidence 1.0. Reusing
+# this one fixture across all three server behaviours is what makes the degraded results comparable
+# to the judged one below, rather than three unrelated verdicts.
+_CONTRADICTED_ANSWER = "Yield was 99% [[reaction-a]]."
+_CONTRADICTING_EVIDENCE = [
+    EvidenceChunk(
+        content="Internal note: yield was actually 12%.",
+        source_note_id="reaction-a",
+        retriever="graph",
+    )
+]
+
+
+def test_a_real_openai_compatible_server_that_honours_response_format_is_scored_as_a_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(a) The server implements Structured Outputs: the real bind-and-call path returns a verdict.
+
+    Measured against a real local `ChatOpenAI` bound with `method="json_schema"`, not asserted from
+    reading the SDK. The fake endpoint's JSON body is what a compliant server would answer with.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    before = METRICS.value("chemclaw_verifier_degraded_total")
+    verdict_json = (
+        '{"claims": [{"text": "Yield was 99%.", "supported": false, '
+        '"cited_note_id": "reaction-a"}], "confidence": 0.0, "verified_by": "judge"}'
+    )
+    with _FakeOpenAiEndpoint(status=200, content=verdict_json) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        result = asyncio.run(
+            verify_answer(_CONTRADICTED_ANSWER, _CONTRADICTING_EVIDENCE, client=client)
+        )
+        assert "response_format" in server.requests[0], "the real client never sent response_format"
+    assert result.verified_by == "judge"
+    assert result.confidence == 0.0
+    assert result.unsupported and result.unsupported[0].cited_note_id == "reaction-a"
+    assert METRICS.value("chemclaw_verifier_degraded_total") == before, (
+        "a healthy judge must not degrade"
+    )
+
+
+def test_a_real_openai_compatible_server_rejecting_response_format_inverts_the_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b) A 400 naming `response_format` unsupported lands in `verify_answer`'s broad `except`.
+
+    The OpenAI SDK raises `openai.BadRequestError` for the 400; `langchain_openai` either re-raises
+    it or wraps it, and either way it is still an `Exception` that never leaves `verify_answer`
+    unhandled — it degrades to the deterministic citation gate, silently, with only the counter and
+    a log line to say so. Because the citation resolves, the *contradicted* claim the judge above
+    correctly scored 0.0/unsupported now clears the gate at confidence 1.0 — the inversion
+    `VerificationResult.verified_by`'s docstring measures, reached here through a real 400 rather
+    than an injected exception.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    before = METRICS.value("chemclaw_verifier_degraded_total")
+    with _FakeOpenAiEndpoint(
+        status=400,
+        error="'response_format' of type 'json_schema' is not supported with this model",
+    ) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        result = asyncio.run(
+            verify_answer(_CONTRADICTED_ANSWER, _CONTRADICTING_EVIDENCE, client=client)
+        )
+        assert "response_format" in server.requests[0], "the real client never sent response_format"
+    assert result.verified_by == "citation-gate"
+    assert result.confidence == 1.0, (
+        "the same contradicted claim scored 0.0 by the working judge above"
+    )
+    assert not result.unsupported
+    assert METRICS.value("chemclaw_verifier_degraded_total") == before + 1, (
+        "a rejected response_format must move the degradation counter"
+    )
+
+
+def test_a_real_openai_compatible_server_that_ignores_response_format_degrades_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c) A 200 of ordinary prose fails `VerificationResult` validation client-side and degrades.
+
+    A server that accepts the request but never actually constrains generation to the schema — the
+    behaviour of a `json_object`-only or format-blind "OpenAI-compatible" endpoint — returns prose
+    that is not valid JSON. `model_validate_json` raises inside the OpenAI SDK's own parsing, and
+    that exception is likewise caught by `verify_answer`'s blanket `except Exception`, landing on
+    exactly the same degraded, confidence-inverted verdict as the 400 case above.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    before = METRICS.value("chemclaw_verifier_degraded_total")
+    with _FakeOpenAiEndpoint(
+        status=200, content="Sure, a 99% yield for that step looks about right to me."
+    ) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        result = asyncio.run(
+            verify_answer(_CONTRADICTED_ANSWER, _CONTRADICTING_EVIDENCE, client=client)
+        )
+        assert "response_format" in server.requests[0], "the real client never sent response_format"
+    assert result.verified_by == "citation-gate"
+    assert result.confidence == 1.0, (
+        "the same contradicted claim scored 0.0 by the working judge above"
+    )
+    assert not result.unsupported
+    assert METRICS.value("chemclaw_verifier_degraded_total") == before + 1, (
+        "prose that fails schema validation must move the degradation counter"
+    )
+
+
+def test_a_degraded_openai_compatible_judge_is_still_routed_to_a_human_by_score_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inversion above stops mattering only because `score_answer` reads `verified_by`.
+
+    `VerificationResult` alone is not distinguishable from a genuinely strong verdict on
+    `confidence`/`unsupported` — the test above proves exactly that. This drives the real
+    `_default_client()` construction path (not an injected `client=`) through `score_answer`, the
+    one function `api/runner_answer.py` actually reads, and shows the degraded call is still
+    flagged: `review_required` is forced `True` and the reason is stated, regardless of the
+    confidence the deterministic gate reported.
+    """
+    from chemclaw.agent.verifier import score_answer
+
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    with _FakeOpenAiEndpoint(
+        status=400, error="response_format is not a supported parameter"
+    ) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        # `score_answer` never takes a client — it goes through the cached `_default_client()`, so
+        # that is the seam to replace here, exactly as `_default_client` itself is real: assigning a
+        # plain callable defeats `functools.cache` without touching production code.
+        monkeypatch.setattr("chemclaw.agent.verifier._default_client", lambda: client)
+        review = asyncio.run(
+            score_answer(
+                _CONTRADICTED_ANSWER, ["Internal note: yield was actually 12%. [[reaction-a]]"]
+            )
+        )
+    assert review.verified_by == "citation-gate"
+    assert review.confidence == 1.0
+    assert review.review_required is True
+    assert "verified by the citation gate only; the judge did not run" in review.unsupported
