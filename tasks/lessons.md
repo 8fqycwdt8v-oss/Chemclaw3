@@ -317,3 +317,21 @@ either be omitted from the request or re-applied locally after the cache.
     Reporting either number alone would have been misleading — "the judge is unreliable" overstates
     it, "I could not reproduce it" buries it. The characterization that survives contact with both
     observations is narrower and more useful than either.
+
+36. **"Run the full suite" is per repository, and the second repository is the one you forget.**
+    Adding `revision` to the mcp fleet's `/healthz` payload, I ran `ruff`, `make type` and
+    `uv run pytest -q tests` — the fleet directory, where my new tests lived. CI went red on five
+    per-server `test_healthz_answers_and_names_the_server`, each an exact dict comparison, all of
+    which a bare `uv run pytest -q` would have shown in 40 seconds.
+
+    This is not lesson 29 (a `tail` swallowing an exit code) or lesson 30 (skipping `make type`).
+    It is narrower and it is specific to this family of four repos: I had *just* run the full
+    Chemclaw3 suite, and the discipline did not transfer across the `cd`. The path-scoped run is
+    also what made it feel complete — the subset I chose was exactly the subset containing my new
+    tests, which is the least informative one available.
+
+    **The rule: a change to shared infrastructure gets the repository's whole default test command,
+    unscoped, before the commit — and when the change touches a payload, a signature or a schema,
+    assume the assertions that break are in files you have never opened.** `packages/` in that repo
+    is imported by all five servers, so "I edited one file in `packages/`" is exactly the case where
+    a scoped run proves the least.
