@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Phases 0–5b of the plan are **implemented and CHECKMATE-reviewed**: toolchain + config,
 the agent+Temporal spine, fast calculators (xTB/pKa/solubility) with the Postgres
-calculation cache, BoFire BO campaigns, the knowledge graph + PR-gate, the eval/metric
+calculation cache (the calculators themselves have since moved to `Chemclaw3-mcp`; the cache and
+the ledger stayed), BoFire BO campaigns, the knowledge graph + PR-gate, the eval/metric
 layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
 harness.
 
@@ -165,12 +166,21 @@ generations and are not in scope for any task here.
 **Where a capability belongs.** This repo holds *infrastructure*: conversation orchestration, the
 knowledge graph, retrieval, memory, ingestion, identity and durable execution. Scientific capability
 — quantum chemistry, reaction prediction, property lookup, optimization — belongs in `Chemclaw3-mcp`
-as a server. The boundary within science is by *runtime*, not by subject: a request/response
-computation is a stateless MCP server there, while long-running orchestration (an HPC/Nextflow run,
-a multi-round campaign) stays a durable job here, because that repo's no-state promise is enforced
-rather than requested. `science/fingerprints` stays here despite the name — retrieval, memory and
-ELN ingest import it in-process, which makes it infrastructure by this rule rather than an
-exception to it. `science/safety` used to be listed beside it on the same grounds; that argument
+as a server. **The boundary within science is by *composability*, not by speed or by subject**
+(`D-2026-08-16-the-physics-leaves-the-cache-stays`): a *primitive* — one calculation whose identity
+is derivable from its inputs — is a stateless MCP server there, while *orchestration* and the D-011
+cache stay here. A **composite**, whose key would name an output, is not shipped at all: it is
+decomposed, and this repo composes the parts so every step is cached.
+
+That replaced an earlier fast/slow rule, and measurement is what replaced it. Leaving the durable
+jobs' physics here would have *copied* the engine rather than moved it — the four modules behind
+them transitively needed almost all of it — and shipping `compute_thermochemistry` whole would have
+turned a 0.007 s repeat into a full recompute, because its key names the geometry its refinement
+loop settles on. Duration was never the property that mattered; a server there may be slow, it may
+not be stateful.
+
+`science/fingerprints` stays here despite the name — retrieval, memory and ELN ingest import it
+in-process, which makes it infrastructure by this rule rather than an exception to it. `science/safety` used to be listed beside it on the same grounds; that argument
 died when the `kg-validate` hazard gate that made the claim true was retired
 (`D-2026-08-15-safety-is-a-tool-not-a-gate`), and the screen is now an ordinary MCP server with no
 in-process caller left.
@@ -191,9 +201,13 @@ and giving the directory a `README.md`** — `tests/test_repo_map.py` fails othe
 Three rules the tree is arranged around, each enforced by a test rather than asked for:
 
 - **`src/` is all the code.** Everything beside it is data, configuration or documents.
-- **Capability code lives in a connector bundle or in `science/`, nowhere else.** The engine is
-  pure computation; the bundle is its durable-job and MCP wrapper. They are a pair, not a
-  duplication, and merging them would put Temporal imports inside the physics.
+- **Capability code lives in a connector bundle or in `science/`, nowhere else.** The rule stands;
+  what it covers shrank. `science/bo` and `science/fingerprints` are still engines — pure
+  computation, with the bundle as their durable-job and MCP wrapper, a pair rather than a
+  duplication. `science/calc` no longer holds an engine at all: after
+  `D-2026-08-16-the-physics-leaves-the-cache-stays` it is the cache, the calibration ledger, the
+  RRHO/Crippen arithmetic and the models the Temporal wire carries, while the physics answers from
+  `Chemclaw3-mcp`.
 - **`data/` holds every corpus the code reads at runtime** — except `knowledge/` and `skills/`,
   which stay at the root because they are architecture layers 4 and 3, not configuration.
 

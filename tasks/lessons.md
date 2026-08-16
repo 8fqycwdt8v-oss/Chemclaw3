@@ -260,3 +260,36 @@ Ask the server for the key of every *pair* of calls that could plausibly collide
 `calculation_key` is cheap and the answer is a fact rather than an inference. Any two tools whose
 keys are equal must return the same payload shape, and any argument the key does *not* name must
 either be omitted from the request or re-applied locally after the cache.
+
+32. **A lesson written down is not a lesson learned — #28 recurred, in the same session that could
+    quote it.** Lesson 28 says `git add <explicit paths>` does not bound a commit, the index does.
+    I ran `git add CLAUDE.md tests/pg.py` and committed a two-file docs change; the commit contains
+    **38 files and 9385 deletions**, because a subagent had already staged its `git rm` of the calc
+    engine and `git commit` ships the whole index. The commit titled "Record that the sandbox is not
+    offline" now carries the deletion of twenty engine modules.
+
+    What made it recur is worth more than the rule: lesson 28 is filed under *parallel agents*, and
+    I did not think of myself as being in that situation — I was doing a small documentation fix
+    while an agent happened to be working. The trigger is not "am I coordinating with others", it is
+    **"is anything else able to write this index"**, and a running subagent always is. The mechanism
+    is unchanged and cheap: `git status --short` before every commit, read the *staged* column, and
+    if it holds anything you did not stage, use `git stash --keep-index` or commit from a worktree.
+
+    Second-order: I decided *not* to rewrite the history, because every merge in this repo is a
+    squash, so the misattribution never reaches `main` and rewriting a 101-file branch to fix a
+    record that does not survive the merge is unnecessary risk. Put it in the PR body instead. The
+    general form — **fix a record where the record will actually be read** — is the part to keep.
+
+33. **Verify a claim at the layer the defect lives in, not at the layer that is convenient.** A
+    subagent reported that the answer judge never ran, measured 8/8 against a live model. The model
+    credential was exhausted by then, so re-measuring was impossible — but the *cause* was one line
+    with no network: `convert_to_openai_tool(VerificationResult)["function"]["parameters"]` has
+    `required == ["confidence"]`. Confirming that took one command and settled the question.
+
+    The same move then produced a better test than the one I first wrote. My first attempt asserted
+    the *fixed* schema required every field, which is false — `claims` has a default, so it is
+    optional in pydantic's own schema too, and `method="json_schema"` buys strict provider-side
+    enforcement rather than a different required-set. The failing assertion is what corrected my
+    model of the fix. **When a test you wrote to prove a fix fails, consider that it may be telling
+    you the fix works for a different reason than you thought** — before assuming the test is
+    wrong.
