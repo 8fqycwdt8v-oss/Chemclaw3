@@ -45,10 +45,29 @@ _UPSERT = re.compile(r"\bINSERT\s+INTO\s+(\w+).*?\bON CONFLICT\b.*?\bDO UPDATE\b
 #   (`science/fingerprints/store.py`), with the table from `default_molecule_store` /
 #   `default_reaction_store`.
 # - The retention sweep builds `DELETE FROM {table}` over the closed `_PRUNABLE` map.
+#
+# - The LangGraph checkpointer and store issue their own SQL from inside the installed package, so
+#   *no* first-party literal names them at all. Their verbs are recorded here, read off those
+#   packages rather than assumed: `checkpoints`/`checkpoint_writes`/`store`/`store_vectors` upsert
+#   with `ON CONFLICT … DO UPDATE`, `checkpoint_blobs` uses `DO NOTHING` and so needs no UPDATE, and
+#   the three version ledgers take one INSERT per schema step. The DELETEs on the checkpoint tables
+#   and on `store`/`store_vectors` are ours (retention by thread, erasure by subject) and *are*
+#   visible as literals — they are folded in below by the ordinary scan.
 _DYNAMIC: dict[str, set[str]] = {
     "molecule_fingerprints": {"INSERT", "UPDATE"},
     "reaction_fingerprints": {"INSERT", "UPDATE"},
+    # `_PRUNABLE` first, so the fuller upstream matrix below wins for `checkpoints` rather than
+    # being flattened back to the retention sweep's single DELETE — which is what a later `**`
+    # expansion did, and it read as "the grant allows an INSERT nobody performs".
     **{table: {"DELETE"} for table in _PRUNABLE},
+    "checkpoints": {"INSERT", "UPDATE", "DELETE"},
+    "checkpoint_writes": {"INSERT", "UPDATE", "DELETE"},
+    "checkpoint_blobs": {"INSERT", "DELETE"},
+    "checkpoint_migrations": {"INSERT"},
+    "store": {"INSERT", "UPDATE", "DELETE"},
+    "store_vectors": {"INSERT", "UPDATE", "DELETE"},
+    "store_migrations": {"INSERT"},
+    "vector_migrations": {"INSERT"},
 }
 
 # Written by the migrator alone: the ledger of its own work. A runtime credential that could write
@@ -57,8 +76,42 @@ _DYNAMIC: dict[str, set[str]] = {
 _MIGRATOR_ONLY = {"schema_migrations"}
 
 
+def _upstream_tables() -> set[str]:
+    """Every table LangGraph's `setup()` creates, derived from the installed distributions.
+
+    These exist in the same database and are declared by no file in `infra/sql`, because the
+    checkpointer and the store build their own schema lazily on first use. Derived rather than
+    listed for the reason the rest of this module is derived: a table upstream adds in a minor bump
+    must fail the grant check, not inherit `GRANT SELECT` and be discovered as a write outage.
+
+    The two version ledgers the store writes are named here instead of parsed. Upstream spells them
+    inline in `setup()` (`_get_version(cur, table="store_migrations")`) rather than in the
+    `MIGRATIONS` lists, so there is no statement to read them out of — `tests/test_upstream_surface`
+    pins the names so a rename turns red here rather than silently un-granting them.
+    """
+    from langgraph.checkpoint.postgres import base as checkpoint_base
+    from langgraph.store.postgres import base as store_base
+
+    created = {"store_migrations", "vector_migrations"}
+    for statements in (
+        checkpoint_base.MIGRATIONS,
+        store_base.MIGRATIONS,
+        store_base.VECTOR_MIGRATIONS,
+    ):
+        for statement in statements:
+            if match := re.search(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", str(statement), re.I):
+                created.add(match.group(1).lower())
+    return created
+
+
 def _tables() -> set[str]:
-    """Every table the migrations create."""
+    """Every table this database holds: the migrations' and LangGraph's alike.
+
+    The upstream half used to be absent, and its absence was not cosmetic. `note()` below drops any
+    table it does not recognise, so `_DYNAMIC`'s entry naming `checkpoints` was discarded before it
+    could assert anything and this file reported "the code writes what the grant withholds: {}"
+    while the grant withheld every write on five tables.
+    """
     names: set[str] = set()
     for path in sorted(_SQL.glob("*.sql")):
         names |= {
@@ -67,7 +120,7 @@ def _tables() -> set[str]:
                 r"CREATE TABLE IF NOT EXISTS\s+(\w+)", path.read_text(encoding="utf-8"), re.I
             )
         }
-    return names
+    return names | _upstream_tables()
 
 
 def _joined(node: ast.JoinedStr) -> str:
