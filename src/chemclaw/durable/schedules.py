@@ -21,8 +21,8 @@ surface (`python -m chemclaw.cli.schedules`, `make schedules-apply`) is now a th
 
 import asyncio
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel
@@ -36,6 +36,7 @@ from temporalio.client import (
     SchedulePolicy,
     ScheduleSpec,
     ScheduleUpdate,
+    ScheduleUpdateInput,
 )
 
 from chemclaw.core.config import settings
@@ -54,6 +55,7 @@ from chemclaw.durable.memory_jobs import (
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
+from chemclaw.ingest.sources.registry import active_ingest_source_names
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,23 @@ OWNED_SCHEDULE_IDS = frozenset(
 )
 
 
+def _retention_windows_are_set() -> bool:
+    """Whether any table has a retention window, i.e. whether the sweep would delete anything.
+
+    Reads the same four settings `retention._window_days` maps, because the condition being asked
+    is exactly "would that function return a non-zero for anything". Kept a predicate here rather
+    than imported from there so the plan stays free of the workflow module's own imports.
+    """
+    return any(
+        (
+            settings.retention_session_events_days,
+            settings.retention_session_messages_days,
+            settings.retention_tool_results_days,
+            settings.retention_checkpoints_days,
+        )
+    )
+
+
 def planned_schedules() -> list[PlannedSchedule]:
     """The Schedules this script maintains — the ELN sync plus the three memory jobs.
 
@@ -103,11 +122,19 @@ def planned_schedules() -> list[PlannedSchedule]:
     eln_every = timedelta(minutes=settings.eln_sync_schedule_minutes)
     memory_every = timedelta(minutes=settings.memory_synthesis_schedule_minutes)
     schedules = [
-        PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every),
         PlannedSchedule("campaign-synthesis", CampaignSynthesisWorkflow, memory_every),
         PlannedSchedule("playbook-distillation", PlaybookDistillationWorkflow, memory_every),
         PlannedSchedule("optimization-campaign", OptimizationCampaignWorkflow, memory_every),
     ]
+    # The ELN sync earns a Schedule only where there is an ELN to sync — the same question
+    # `document-sync` asks seventeen lines below, asked of the same registry. It was the one
+    # periodic job planned unconditionally, and with no source configured (the default) that is an
+    # hourly Schedule firing a workflow whose first act is to enumerate zero sources and merge an
+    # empty list. Asked of the manifests rather than of a new `eln_sync_enabled` setting, for the
+    # reason `document-sync` records: `CHEMCLAW_DATA_SOURCES` is already the enable switch (D-018),
+    # and a second flag could only restate it or contradict it.
+    if active_ingest_source_names():
+        schedules.insert(0, PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
     # The drift check is opt-in (plan F10-F2): it only earns a Schedule where a committed baseline
     # is maintained, so an unconfigured deployment does not fire an eval it has no baseline for.
     if settings.eval_drift_enabled:
@@ -132,7 +159,15 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(PlannedSchedule("digest", DigestWorkflow, digest_every))
     # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
     # unconfigured deployment must never start deleting records on a default it did not choose.
-    if settings.retention_enabled:
+    #
+    # **The policy is the windows, not the boolean.** `retention_enabled` turns the *Schedule* on
+    # and `retention_*_days > 0` turns the *work* on, and all four windows default to 0 — so the
+    # documented act of "stating a policy" produced a job that swept nothing, reported
+    # `skipped: [... (retention disabled)]` for every table, and showed healthy in
+    # `describe_schedules` forever. Two expressions of one condition, in two files, disagreeing.
+    # Asking for both here makes "on but inert" unrepresentable, which is what `share_sources()`
+    # already does for `document-sync`.
+    if settings.retention_enabled and _retention_windows_are_set():
         retention_every = timedelta(minutes=settings.retention_schedule_minutes)
         schedules.append(PlannedSchedule("retention", RetentionWorkflow, retention_every))
     # Artifact eviction earns a Schedule as soon as either of its two bounds is set — those two
@@ -197,15 +232,40 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
     )
 
 
+def _preserving_pause(job: PlannedSchedule) -> Callable[[ScheduleUpdateInput], ScheduleUpdate]:
+    """Build the update callback: this repository's spec, the *cluster's* paused state.
+
+    **A reconcile must not undo an operator's hand.** `_build_schedule` returns a fresh `Schedule`
+    whose `state` defaults to `paused=False`, and the chart runs this applier as a
+    `post-install,post-upgrade` hook — so pausing `document-sync` because a share is broken, or
+    `retention` during an incident, survived exactly until the next unrelated `helm upgrade`, with
+    no log line saying it had been resumed. Measured against a live server: pause → `True`, the old
+    one-line update → `False`, this callback → `True`.
+
+    The callback is already handed the live description; it was simply ignored, which is why the fix
+    is to read it rather than to add a setting recording what an operator paused.
+
+    Everything *else* stays declarative on purpose. The spec, the action and the overlap policy are
+    this repository's to state, and re-applying them is the whole point of the hook; only the
+    paused bit is a fact about the cluster that no file here can know.
+    """
+
+    def update(current: ScheduleUpdateInput) -> ScheduleUpdate:
+        return ScheduleUpdate(
+            schedule=replace(_build_schedule(job), state=current.description.schedule.state)
+        )
+
+    return update
+
+
 async def _apply(client: Client, job: PlannedSchedule) -> str:
     """Create the Schedule, or update it in place if it already exists. Returns the action taken."""
-    schedule = _build_schedule(job)
     try:
-        await client.create_schedule(job.schedule_id, schedule)
+        await client.create_schedule(job.schedule_id, _build_schedule(job))
         return "created"
     except ScheduleAlreadyRunningError:
         handle = client.get_schedule_handle(job.schedule_id)
-        await handle.update(lambda _input: ScheduleUpdate(schedule=schedule))
+        await handle.update(_preserving_pause(job))
         return "updated"
 
 
