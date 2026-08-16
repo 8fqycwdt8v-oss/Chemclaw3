@@ -517,7 +517,7 @@ def test_a_long_failure_message_is_truncated_before_it_reaches_the_stream() -> N
 
 
 def test_a_calculator_domain_refusal_reaches_the_model_verbatim() -> None:
-    """`predict_pka`'s real refusal, driven through the real middleware, arrives as its message.
+    """A real domain refusal, driven through the real middleware, arrives as its message.
 
     Deliberately raised by the production code path rather than by a hand-thrown error: the defect
     was that these sites raised a *bare* `ValueError`, and `ChemclawError` subclasses `ValueError`,
@@ -527,18 +527,33 @@ def test_a_calculator_domain_refusal_reaches_the_model_verbatim() -> None:
     Measured consequence, 2026-08-02 live run: the aliphatic-amine explanation — which names the
     Spearman -0.17 correlation and tells the chemist to measure instead — reached the model as
     "Error: Function failed.", and the answer then guessed the reason and stated the guess as fact.
+
+    The refusal driven here is now logD's rather than the pKa predictor's: the pKa engine left for
+    `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`) and the composition it feeds
+    stayed, along with the narrowing that is this repository's own — an amphoteric molecule that one
+    Henderson-Hasselbalch term cannot describe. Same class, same production path, no server needed.
     """
-    from chemclaw.science.calc.pka import PkaInput, predict_pka
+    from chemclaw.science.calc.logd import logd_from_pka
+    from chemclaw.science.calc.models import PkaResult
 
     async def _refuse() -> None:
-        # Ethane: nothing acidic to lose, no nitrogen to protonate.
-        predict_pka(PkaInput(smiles="CC"))
+        # Glycine: a carboxyl and an aliphatic amine, ionising in opposite directions.
+        logd_from_pka(
+            PkaResult(
+                smiles="NCC(=O)O",
+                method="GFN2-xTB/alpb-water",
+                pka=2.3,
+                deprotonation_energy_kcal=320.0,
+                uncertainty=1.6,
+            ),
+            ph=7.4,
+        )
 
-    ctx = _ctx("predict_pka")
+    ctx = _ctx("predict_logd")
     _drive_domain_errors(ctx, _refuse)  # must not raise
     assert isinstance(ctx.result, str)
     assert ctx.result.startswith("Error: ")
-    assert "nothing to" in ctx.result, ctx.result
+    assert "amphoteric" in ctx.result, ctx.result
 
 
 def test_an_unreachable_durable_backend_says_nothing_was_started(

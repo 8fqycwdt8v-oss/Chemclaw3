@@ -1,6 +1,6 @@
 # xTB skill catalogue — the judgment layer, ideated in full
 
-Companion to `docs/guides/xtb-tools-proposal.md` (the *how*) and `docs/guides/xtb-use-cases.md` (the
+Companion to `docs/archive/plans/xtb-tools-proposal.md` (the *how*, archived) and `docs/guides/xtb-use-cases.md` (the
 *why*). This is the **skill** layer: every piece of chemical judgment worth writing down,
 across the whole xTB capability ladder, whether or not the tools exist yet.
 

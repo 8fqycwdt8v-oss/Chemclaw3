@@ -36,7 +36,7 @@ generates enters the graph through a **PR-gate**, so a human decides before it b
 | `api/` | 1 (LangGraph) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. `create_app` (`api/app.py`) is the sole composition root; the routes themselves live one level down in `api/routes/`, one module per resource (R3.2 split of a ~1100-line closure — see `api/routes/README.md`). |
 | `durable/` | 2 (Temporal) | Workflows, activities, and the `background-jobs` worker that hosts them. |
 | `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its Temporal worker, its own `skills/`, and — for the ones this release still runs — its MCP tool server. Adding a capability is adding a directory here — no core edit. **A bundle without a `server/` is a declaration we do not run**: `chem`'s and `safety`'s capabilities are `Chemclaw3-mcp`'s, and what stays here is the manifest four validators resolve tool names through — plus, for `safety`, its `skills/` tree, because judgment is layer 3 and does not follow the engine — and the chart's `connectors.<name>.url` saying where to dial it (D-2026-08-09). |
-| `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `fingerprints` (ECFP4/DRFP + Tanimoto). No Temporal, no MCP. |
+| `science/` | — | The pure-computation engines: `bo` (BoFire), `fingerprints` (ECFP4/DRFP + Tanimoto), and what is left of `calc` — the D-011 result cache, the calibration ledger, the shapes a calculation is stored in, and the statistical mechanics over what comes back (RRHO, Boltzmann populations). The xTB/CREST engines themselves moved to `Chemclaw3-mcp` in `D-2026-08-16-the-physics-leaves-the-cache-stays`, because a cache and an engine want to live on opposite sides of a wire. No Temporal, no MCP. |
 | `kg/` | 4 (Graph) | The graph indexer, the schema and link validators, the PR-gate that writes notes. |
 | `ingest/` | — | Getting records in: `sources` is the generic `DataSource` seam, `eln` the ELN adapters hosted behind it, `documents` a mounted file share read as cited evidence (and the one home of this system's document parsers, which `agent/attachments.py` reuses). |
 | `retrieval/` | — | Reading back out: the retrievers, hybrid search, the vector index, the report harness, and `vectors/` — the seam that lets dense embeddings live outside Postgres (`pgvector` by default, Qdrant behind a late-bound client). |
@@ -80,6 +80,14 @@ the wrapper: the durable job definition and the MCP tool surface that expose tha
 agent. Keeping them apart is the layering rule; merging them would put Temporal imports inside the
 physics. Before D-148 they were `calc/` and `connectors/calc/` — same distinction, no way to see it
 from the names.
+
+For `calc` the pairing now spans two repositories, and the line moved rather than blurred
+(`D-2026-08-16-the-physics-leaves-the-cache-stays`). `science/calc/` holds the cache, the ledger,
+the payload shapes and the arithmetic that is *not* a calculation — RRHO partition functions over a
+Hessian, Boltzmann weights over an ensemble. `connectors/calc/` holds the client, the composition
+over remote primitives, and the durable jobs. The engines are `Chemclaw3-mcp`'s. What the rule still
+forbids is the same thing: a Temporal import inside the arithmetic, and a second copy of a
+capability.
 
 The pairing is now the **only** arrangement: capability code lives in a connector bundle or in
 `science/`, nowhere else. `chemclaw.mcp` was the last exception, holding the fingerprint code one

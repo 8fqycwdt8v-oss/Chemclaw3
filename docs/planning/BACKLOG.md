@@ -83,8 +83,12 @@ topic).
 
 - [ ] **Split-conformal uncertainty is implemented and unwired** — [S].
       `science/calc/uncertainty.conformal_uncertainty` is correct and tested and has no caller:
-      `solubility.py` reports the constant `solubility_rmse_log` instead, so no prediction has ever
-      carried an interval derived from this deployment's own residuals. Wiring it is a capability
+      the solubility model reports the constant `solubility_rmse_log` instead, so no prediction has
+      ever carried an interval derived from this deployment's own residuals. **The predictor moved
+      to `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`) and the residuals did
+      not** — the calibration ledger is this repository's — so wiring it now also has to answer
+      where the interval is attached: on the server, which cannot see the ledger, or here, over a
+      payload the server produced. Wiring it is a capability
       decision — which predictors, over which reconciled measurements — not a cleanup.
       *The configuration half is closed*: `calibration_conformal_coverage` and
       `calibration_conformal_min_samples` were deleted (2026-08-14) rather than left as knobs an

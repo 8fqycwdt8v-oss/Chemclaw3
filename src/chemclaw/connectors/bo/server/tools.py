@@ -37,6 +37,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, computed_field
 
+from chemclaw.connectors.bo.calculators import properties_for
 from chemclaw.connectors.caller import caller_provenance
 from chemclaw.science.bo.campaign_record import (
     CampaignThread,
@@ -537,7 +538,7 @@ async def suggest_next_experiment(
     # models the categorical space, so this must happen for the seeding path too — otherwise
     # a problem that declares structures would silently fall back to an opaque category.
     # Runs *after* the coercion above, because it needs a real `OptimizationProblem`.
-    featurized = await featurize_problem(default_store(), problem)
+    featurized = await featurize_problem(properties_for(default_store()), problem)
     # After featurization, not before: two labels pointing at the same molecule are distinct until
     # xTB gives them the same descriptor row, and from there the surrogate cannot tell them apart.
     require_descriptors_distinguish_categories(featurized.problem)
@@ -841,7 +842,7 @@ async def predict_outcome(
     # Featurized for the same reason the suggestion path is: descriptors change how the surrogate
     # models a categorical space, so a prediction made without them would answer about a different
     # model than the one that proposed.
-    featurized = await featurize_problem(default_store(), problem)
+    featurized = await featurize_problem(properties_for(default_store()), problem)
     require_descriptors_distinguish_categories(featurized.problem)
     predictions, fit = await asyncio.to_thread(
         interrogate_surrogate, featurized.problem, history, asked, None, assess_fit

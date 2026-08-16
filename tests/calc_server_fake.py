@@ -1,0 +1,432 @@
+"""A stand-in for `Chemclaw3-mcp`'s `calc` server, so this suite proves wiring without physics.
+
+`D-2026-08-16-the-physics-leaves-the-cache-stays` moved every engine out of this repository. What
+is left here is the cache, the composition and the ledger, and all three are testable *without* a
+quantum chemistry program — but not without something on the other end of `calc_session`. This is
+that something.
+
+**It answers the same shapes and counts every call**, which is what the surviving tests are about:
+"was this recomputed?" is a question about call counts and nothing else (D-011), and "did the
+composite ask for the right parts?" is a question about which tools were called with what. The
+numbers it returns are arithmetic placeholders and are never asserted on as chemistry — the one
+place real physics is asserted is `tests/test_calc_thermo.py`, which runs the RRHO arithmetic over
+Hessians *recorded from the live server* and checks them against measured entropies.
+
+**Keys are derived the way the server derives them**, from the same inputs: `structure_id` (or the
+canonical SMILES) plus the parameters that move the answer. Two properties that were measured
+against the running server are reproduced deliberately, because a fake that got them wrong would
+make the tests pass on a design that fails in production:
+
+- **A Fukui key does not name the mode.** All three modes on phenol derive one key, so a cache hit
+  can serve the wrong ranking unless the caller re-ranks (`SiteReactivityResult.ranked_for`).
+- **A relaxation key does not name who asked.** `optimize_geometry` and `relax_structure` derive
+  the same `xtb.opt` key while returning different payloads, which is why this repository only ever
+  caches the full result.
+"""
+
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any
+
+import numpy as np
+import pytest
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+from chemclaw.core.chem import require_canonical_smiles
+from chemclaw.core.ids import stable_hash
+
+# A version string carrying **both** key delimiters, because a real one does: `esol-delaney@2004`
+# carries the `@` and `cal-0.28733:-29.3116` carries the `:`. A client that split the flat
+# `type@version:input:params` form would reassemble a key that matches nothing, forever.
+FAKE_VERSION = "GFN2-xTB+fake@1/cal-0.28733:-29.3116"
+
+# Which cache type each compute tool answers under, and which of its arguments enter `params`. The
+# *subject* — a `structure` or a `smiles` — is never in this tuple: it is hashed into `input_hash`,
+# and a molecule's canonical form is what makes two spellings one row. An argument missing from a
+# tuple is one the answer does not depend on, which is exactly the property the composites rely on:
+# `predict_site_reactivity` has an empty tuple because a Fukui calculation does not depend on the
+# mode, and `scan_point` carries `atoms` and `value` because a constrained point does.
+_KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
+    "compute_xtb_energy": ("xtb.sp", ("charge",)),
+    "compute_electronic_properties": ("xtb.properties", ("solvent",)),
+    "predict_site_reactivity": ("xtb.fukui", ()),
+    "predict_pka": ("pka", ()),
+    "predict_solubility": ("solubility", ()),
+    "predict_developability_profile": ("developability", ()),
+    "relax_structure": ("xtb.opt", ("solvent", "frozen_atoms")),
+    "compute_hessian": ("xtb.hess", ("solvent",)),
+    "scan_point": ("xtb.opt", ("atoms", "value", "solvent")),
+    "search_conformer_ensemble": ("xtb.conformers", ("search", "effort", "solvent")),
+    "search_binding_modes": ("xtb.complex", ("effort", "solvent")),
+}
+
+# Tools with no cache row at all. `predict_logd` never had one — its expensive half is a cached pKa
+# — and the two geometry builders are not compute tools, so the real server refuses them by name.
+_UNKEYED = frozenset({"predict_logd", "embed_structure", "combine_structures"})
+
+
+def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
+    """A real ETKDG geometry for `smiles`, in the `Structure` shape the server returns.
+
+    Real rather than synthetic because a `structure_id` is a hash of coordinates and half of every
+    downstream key: a fake that returned the same three atoms for every molecule would make two
+    different species share a relaxation entry, which is the one failure a cache test must be able
+    to see.
+    """
+    canonical = require_canonical_smiles(smiles)
+    mol = Chem.AddHs(Chem.MolFromSmiles(canonical))
+    AllChem.EmbedMolecule(mol, randomSeed=7)
+    conformer = mol.GetConformer()
+    return {
+        "elements": [atom.GetAtomicNum() for atom in mol.GetAtoms()],
+        "positions": [list(conformer.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())],
+        "charge": Chem.GetFormalCharge(mol),
+        "multiplicity": multiplicity,
+        "smiles": canonical,
+    }
+
+
+def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> dict[str, Any]:
+    """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
+
+    Not physics: a diagonal matrix whose spectrum is chosen, base64-encoded exactly as the server
+    encodes a real one. `imaginary=True` is how the saddle-point refinement loop is driven — the
+    escape it performs is a property of this repository (the key of a thermochemistry would name
+    the geometry the loop settles on, which is why it was never shipped), so it has to be
+    exercisable without a real saddle point.
+    """
+    import base64
+    import io
+
+    size = 3 * len(structure["elements"])
+    diagonal = np.full(size, 0.5)
+    if imaginary:
+        diagonal[0] = -0.5
+    matrix = np.diag(diagonal)
+
+    def pack(array: np.ndarray) -> str:
+        buffer = io.BytesIO()
+        np.save(buffer, array, allow_pickle=False)
+        return base64.b64encode(buffer.getvalue()).decode()
+
+    return {
+        "calc_version": FAKE_VERSION,
+        "calc_key": None,
+        "structure_id": _structure_id(structure),
+        "method": "GFN2-xTB",
+        "solvent": structure.get("solvent"),
+        "atom_count": len(structure["elements"]),
+        "electronic_energy_hartree": -1.0 * len(structure["elements"]),
+        "hessian_npy": pack(matrix),
+        "dipole_derivatives_npy": pack(np.zeros((size, 3))),
+        "ir_intensities": None,
+    }
+
+
+def _structure_id(structure: dict[str, Any]) -> str:
+    """The content address of a structure dict, by the same rule `Structure.structure_id` uses."""
+    return "st_" + stable_hash(
+        {
+            "elements": structure["elements"],
+            "positions": structure["positions"],
+            "charge": structure.get("charge", 0),
+            "multiplicity": structure.get("multiplicity", 1),
+        }
+    )
+
+
+class FakeCalcServer:
+    """One MCP session's worth of calculation server, counting every tool call it answers."""
+
+    def __init__(self, *, saddle_first: bool = False) -> None:
+        """Start with no calls recorded.
+
+        `saddle_first` makes the first Hessian carry an imaginary frequency and every later one a
+        minimum, which is the sequence `relax_to_minimum`'s escape needs to be visible.
+        """
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._saddle_first = saddle_first
+        self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
+    def count(self, tool: str) -> int:
+        """How many times `tool` was called."""
+        return sum(1 for name, _ in self.calls if name == tool)
+
+    def arguments(self, tool: str) -> list[dict[str, Any]]:
+        """The arguments every call to `tool` was made with, in order."""
+        return [args for name, args in self.calls if name == tool]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Answer one tool call in the `CallToolResult` shape the client reads."""
+        self.calls.append((name, arguments))
+        try:
+            return _Result(self._answer(name, arguments))
+        except ValueError as error:
+            return _Result({"detail": str(error)}, is_error=True)
+
+    def _answer(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Dispatch one call, honouring an override the test installed."""
+        if name == "calculation_key":
+            return self._identity(arguments["tool"], arguments["arguments"])
+        override = self.overrides.get(name)
+        if override is not None:
+            return override(arguments)
+        handler = getattr(self, f"_{name}", None)
+        if handler is None:
+            raise ValueError(f"{name!r} is not a tool on this server")
+        result: dict[str, Any] = handler(arguments)
+        return result
+
+    def _identity(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """What `calculation_key` answers: the version always, the key only when there is one."""
+        if tool in _UNKEYED:
+            return {"tool": tool, "calc_version": FAKE_VERSION, "key": None, "calc_key": None}
+        if tool not in _KEYED:
+            raise ValueError(f"{tool!r} is not a compute tool on this server")
+        calc_type, keyed = _KEYED[tool]
+        subject = arguments.get("structure")
+        inputs: Any = (
+            _structure_id(subject)
+            if subject is not None
+            else require_canonical_smiles(arguments["smiles"])
+        )
+        params = {field: arguments.get(field) for field in keyed}
+        key = {
+            "calc_type": calc_type,
+            "calc_version": FAKE_VERSION,
+            "input_hash": stable_hash(inputs),
+            "params_hash": stable_hash(params),
+        }
+        return {"tool": tool, "calc_version": FAKE_VERSION, "key": key, "calc_key": None}
+
+    # --- the tools themselves ---------------------------------------------------------------
+
+    def _embed_structure(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return embed(arguments["smiles"], arguments.get("multiplicity") or 1)
+
+    def _combine_structures(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        first, second = arguments["first"], arguments["second"]
+        offset = [10.0, 0.0, 0.0]
+        return {
+            "elements": [*first["elements"], *second["elements"]],
+            "positions": [
+                *first["positions"],
+                *[[x + offset[0], y, z] for x, y, z in second["positions"]],
+            ],
+            "charge": first["charge"] + second["charge"],
+            "multiplicity": first["multiplicity"] + second["multiplicity"] - 1,
+            "smiles": f"{first['smiles']}.{second['smiles']}",
+        }
+
+    def _relax_structure(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._optimization(arguments["structure"], arguments.get("solvent"))
+
+    def _scan_point(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        # The driven coordinate shifts the energy, so a profile has a minimum somewhere to find.
+        result = self._optimization(arguments["structure"], arguments.get("solvent"))
+        result["energy_hartree"] += (float(arguments["value"]) - 1.5) ** 2
+        result["frozen_atoms"] = list(arguments["atoms"])
+        return result
+
+    def _optimization(self, structure: dict[str, Any], solvent: str | None) -> dict[str, Any]:
+        return {
+            "calc_version": FAKE_VERSION,
+            "calc_key": f"xtb.opt@{FAKE_VERSION}:{_structure_id(structure)}:0",
+            "smiles": structure.get("smiles"),
+            "input_structure_id": _structure_id(structure),
+            "structure": structure,
+            "method": "GFN2-xTB",
+            "engine": "tblite",
+            "solvent": solvent,
+            "initial_energy_hartree": -1.0 * len(structure["elements"]) + 0.01,
+            "energy_hartree": -1.0 * len(structure["elements"]),
+            "relaxation_kcal": 6.3,
+            "steps": 4,
+            "max_gradient": 1e-5,
+            "displacement_rms_angstrom": 0.02,
+            "frozen_atoms": [],
+        }
+
+    def _compute_hessian(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        saddle = self._saddle_first and self.count("compute_hessian") == 1
+        payload = harmonic_hessian(arguments["structure"], imaginary=saddle)
+        payload["solvent"] = arguments.get("solvent")
+        return payload
+
+    def _search_conformer_ensemble(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._ensemble(arguments, search=arguments.get("search", "conformers"))
+
+    def _search_binding_modes(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._ensemble(arguments, search="complex")
+
+    def _ensemble(self, arguments: dict[str, Any], *, search: str) -> dict[str, Any]:
+        structure = arguments["structure"]
+        return {
+            "calc_version": FAKE_VERSION,
+            "calc_key": None,
+            "structure_id": _structure_id(structure),
+            "method": "GFN2-xTB",
+            "solvent": arguments.get("solvent"),
+            "search": search,
+            "effort": arguments.get("effort", "quick"),
+            # Three members, degeneracies 1/2/1: enough for a degeneracy-weighted population to
+            # differ visibly from an unweighted one, which is the arithmetic that stayed here.
+            "members": [
+                {
+                    "energy_hartree": -1.0 * len(structure["elements"]) - shift,
+                    "degeneracy": degeneracy,
+                    "structure": structure,
+                }
+                for shift, degeneracy in ((0.0, 1), (-0.001, 2), (-0.002, 1))
+            ],
+            "total_found": 3,
+        }
+
+    def _compute_xtb_energy(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "calc_version": FAKE_VERSION,
+            "smiles": require_canonical_smiles(arguments["smiles"]),
+            "method": "GFN2-xTB",
+            "charge": arguments.get("charge", 0),
+            "total_energy_hartree": -5.07,
+        }
+
+    def _predict_solubility(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "calc_version": FAKE_VERSION,
+            "smiles": require_canonical_smiles(arguments["smiles"]),
+            "model": "esol-delaney@2004",
+            "log_s_mol_per_l": -2.13,
+            "uncertainty_log": 0.75,
+            "estimate": {"value": -2.13, "unit": "log S", "uncertainty": 0.75},
+        }
+
+    def _predict_pka(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        canonical = require_canonical_smiles(arguments["smiles"])
+        # An aromatic nitrogen with no acidic proton is a base; everything else here is an acid.
+        molecule = Chem.MolFromSmiles(canonical)
+        acidic = any(
+            atom.GetAtomicNum() in (8, 16) and atom.GetTotalNumHs() for atom in molecule.GetAtoms()
+        )
+        return {
+            "calc_version": FAKE_VERSION,
+            "smiles": canonical,
+            "method": "GFN2-xTB/alpb-water",
+            "pka": 4.2 if acidic else 5.2,
+            "deprotonation_energy_kcal": 320.0,
+            "uncertainty": 1.6 if acidic else 1.0,
+            "site": "acid" if acidic else "base",
+        }
+
+    def _predict_developability_profile(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "calc_version": FAKE_VERSION,
+            "smiles": require_canonical_smiles(arguments["smiles"]),
+            "molecular_weight": 180.16,
+            "clogp": 1.31,
+            "tpsa": 63.6,
+            "h_bond_donors": 1,
+            "h_bond_acceptors": 3,
+            "rotatable_bonds": 2,
+            "aromatic_rings": 1,
+            "fraction_csp3": 0.11,
+            "qed": 0.55,
+            "lipinski_violations": 0,
+            "veber_pass": True,
+        }
+
+    def _predict_site_reactivity(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        canonical = require_canonical_smiles(arguments["smiles"])
+        molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
+        atoms = list(molecule.GetAtoms())
+        # f_minus descends with the index and f_plus ascends, so the two modes rank the atoms in
+        # opposite orders — which makes a mis-served ranking visible rather than coincidental.
+        sites = [
+            {
+                "index": atom.GetIdx(),
+                "element": atom.GetSymbol(),
+                "f_minus": round(1.0 - atom.GetIdx() / len(atoms), 4),
+                "f_plus": round(atom.GetIdx() / len(atoms), 4),
+                "f_zero": 0.5,
+            }
+            for atom in atoms
+        ]
+        return {
+            "calc_version": FAKE_VERSION,
+            "smiles": canonical,
+            "structure_id": "st_fake",
+            "method": "GFN2-xTB",
+            "solvent": arguments.get("solvent"),
+            # Whatever the server's own default is — the caller must not depend on it.
+            "mode": "electrophilic",
+            "ranked_by": "f_minus",
+            "total_atoms": len(atoms),
+            "sites": sites,
+        }
+
+    def _compute_electronic_properties(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        canonical = require_canonical_smiles(arguments["smiles"])
+        molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
+        atoms = list(molecule.GetAtoms())
+        return {
+            "calc_version": FAKE_VERSION,
+            "calc_key": f"xtb.properties@{FAKE_VERSION}:{stable_hash(canonical)}:0",
+            "smiles": canonical,
+            "structure_id": "st_fake",
+            "method": "GFN2-xTB",
+            "solvent": arguments.get("solvent"),
+            "total_energy_hartree": -1.0 * len(atoms),
+            # Derived from the molecule so two categories of a BO parameter get different
+            # descriptors, which is what a featurized surrogate is supposed to be able to see.
+            "homo_ev": -10.0 - len(atoms) / 100,
+            "lumo_ev": 1.0 + len(atoms) / 100,
+            "gap_ev": 11.0 + len(atoms) / 50,
+            "dipole_debye": 1.5 + len(atoms) / 100,
+            # Varied *per molecule*, not just per atom: BoFire refuses a descriptor column with
+            # no variation across categories, which is a real property of a featurized campaign —
+            # a descriptor that is the same for every option tells the surrogate nothing.
+            "atom_charges": [
+                {
+                    "index": atom.GetIdx(),
+                    "element": atom.GetSymbol(),
+                    "charge": round((0.1 + len(atoms) / 1000) * (-1) ** i, 4),
+                }
+                for i, atom in enumerate(atoms)
+            ],
+            "bond_orders": [{"atom_i": 0, "atom_j": 1, "order": 1.0}],
+        }
+
+    def _predict_logd(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        raise ValueError("logD is composed on the client side; this tool should never be called")
+
+
+class _Result:
+    """The `CallToolResult` shape the client reads: `isError` plus text content."""
+
+    def __init__(self, payload: dict[str, Any], is_error: bool = False) -> None:
+        import json
+
+        self.isError = is_error
+        self.content = [_Text(json.dumps(payload))]
+
+
+class _Text:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalcServer:
+    """Make every `calc_session()` yield `server`, so no socket is opened anywhere.
+
+    Patched at `connectors.calc.remote`, the one module that opens a session — so the tool path,
+    the composites, the durable activities and the BO calculator bindings all reach this fake
+    through their real call chains rather than through a stub of their own.
+    """
+
+    @asynccontextmanager
+    async def _session() -> AsyncIterator[FakeCalcServer]:
+        yield server
+
+    monkeypatch.setattr("chemclaw.connectors.calc.remote.calc_session", _session)
+    return server

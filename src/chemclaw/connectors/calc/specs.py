@@ -5,20 +5,20 @@
 `build_langgraph_agent`, in the chat service's own process, and again in `make connector-validate`.
 So whatever this module imports, the chat service imports too.
 
-They used to live in `connectors/calc/specs.py`, which imports `chemclaw.science.calc.complexes`,
-`chemclaw.science.calc.conformers`,
-`chemclaw.science.calc.reaction` and `chemclaw.science.calc.xtb_scan` for the *result* types
-alongside them. Measured on `main`,
-building the enabled job tools pulled **`tblite` and fifteen `calc.*` modules** into the agent's
-process — the entire quantum-chemistry closure this bundle exists to keep out of it (D-114), let
-back in through the one manifest field that resolves an import. Nothing failed; the chat pod simply
-carried a compiled QM library it never called.
+They used to sit beside the *result* types, which named four science modules and, through them,
+`tblite` — the compiled quantum-chemistry library. Measured on `main` at the time, building the
+enabled job tools pulled **`tblite` and fifteen science modules** into the agent's process: the
+entire quantum-chemistry closure this bundle exists to keep out of it (D-114), let back in through
+the one manifest field that resolves an import. Nothing failed; the chat pod simply carried a
+compiled QM library it never called.
 
 So the split here is not stylistic. Requests live in this module and import pydantic and config
-only; results live in `connectors/calc/results.py`, which is free to import the heavy `calc.*`
-types because only this bundle's own worker ever imports it. `cli/validate_connectors.py`
-enforces the boundary rather than trusting it, and `tests/test_connector_isolation.py` asserts it
-in a fresh interpreter (D-118).
+only; results live in `connectors/calc/results.py`. That weight is gone —
+`D-2026-08-16-the-physics-leaves-the-cache-stays` took the engines out of this repository entirely
+— and the split stays anyway, because these shapes are pinned by workflow histories in flight and
+because a boundary that only holds while nothing heavy exists is not a boundary.
+`cli/validate_connectors.py` enforces it rather than trusting it, and
+`tests/test_connector_isolation.py` asserts it in a fresh interpreter (D-118).
 """
 
 from typing import Annotated, Literal

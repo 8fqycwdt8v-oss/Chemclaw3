@@ -9,11 +9,14 @@ the answer itself stays cached forever.
 
 That distinction is what makes an eviction policy expressible at all. A result row is the answer;
 an artifact is an optimization on top of it, and `chemclaw.science.calc.artifacts` states in its
-own contract that
-an artifact may be absent. `chemclaw.science.calc.xtb_hessian` is built on exactly that: a cached
-Hessian whose blob
-is gone is treated as a miss and recomputed, so this job can reclaim space without any reader
-having to learn about it.
+own contract that an artifact may be absent — a reader that finds a blob gone treats it as a miss
+and recomputes, so this job can reclaim space without any reader having to learn about it.
+
+**Its largest producer left, and the policy is unchanged by that.**
+`D-2026-08-16-the-physics-leaves-the-cache-stays` moved the Hessians — the multi-megabyte blobs this
+job was sized against — to `Chemclaw3-mcp`, which persists nothing and returns them on the wire. So
+what remains here is whatever the QM path and any later producer store. The mechanism is the same
+and the ordering below still applies; what changed is how much there is to reclaim.
 
 **What it orders by.** `compute_seconds` — the wall time of the run that produced the blob, which
 D-124 started recording precisely so this job would not have to guess — divided into how long the

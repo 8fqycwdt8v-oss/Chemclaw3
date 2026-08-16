@@ -41,7 +41,7 @@ class CalculatorSettings(BaseSettings):
     # Hessian. Set it to 1 only where many activities share a pod, to stop them
     # oversubscribing each other.
     xtb_cli_threads: int = 0
-    # How many media a solvent screen evaluates at once (`science/calc/reaction.py`).
+    # How many media a solvent screen evaluates at once (`connectors/calc/compose.py`).
     #
     # **Default 1 — today's behaviour exactly — and that is a measurement waiting to be taken
     # rather than caution.** A screen is one reaction per solvent and they genuinely serialize, so
@@ -233,3 +233,13 @@ class CalculatorSettings(BaseSettings):
     # guidance now says duration is not the property it promises. A durable job's activity bounds
     # the same wait again with its own timeout and heartbeat.
     calc_server_timeout_seconds: float = Field(default=900.0, gt=0)
+    # The molecule `connectors/calc/remote.py::remote_version` derives a key *for* when it asks the
+    # server what version a calculator is on. `calculation_key` answers an identity, and an identity
+    # is of something — but the `calc_version` it reports is a property of the programs and the
+    # calibration behind the calculator, not of the molecule, so any parseable input gives the same
+    # answer. Acetic acid because it is the one molecule every calibrated calculator here can
+    # enumerate: it has an acidic O-H, so the pKa predictor's acid branch is well defined, and ESOL
+    # takes anything. Configurable rather than inlined so it is one visible fact instead of a
+    # literal repeated at each call site — and so a deployment whose calibrated set changes can move
+    # it without a code change.
+    calc_version_probe_smiles: str = "CC(=O)O"

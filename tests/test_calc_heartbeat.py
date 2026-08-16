@@ -1,84 +1,95 @@
-"""The two CREST jobs heartbeat using the configured xTB heartbeat timeout (REV-3, D-136; Conn-F2).
+"""Every remote calculation inside a durable job beats the heartbeat (REV-3, D-136; Conn-F2).
 
-Every other xTB task reports progress *between* units of work — one species, one solvent, one scan
-point — and passes `activity.heartbeat` down as that callback. A CREST search has no unit boundary:
-it is a single subprocess. So `run_cached_ensemble`/`run_cached_interaction` take no `progress`
-argument, and the only beat these two jobs ever produced was the `"starting {kind}"` line at the
-top of the activity.
+Before the split this mattered for two jobs: the CREST searches were a single opaque subprocess with
+no unit boundary, and against a 600 s heartbeat timeout a longer run was declared dead and retried
+from zero — roughly fifty minutes of saturated CPU spent failing a calculation that would have
+succeeded.
 
-That is the wrong way round. They are the only two jobs marked `expensive: true`, and their own
-manifest says a search's cost "is not bounded by the input's size". Against a 600 s heartbeat
-timeout a longer run was declared dead and retried from zero — the store is written only on
-completion — so roughly fifty minutes of saturated CPU was spent failing a calculation that would
-have succeeded.
+After `D-2026-08-16-the-physics-leaves-the-cache-stays` it matters for **all five**, and for a
+stronger reason: every minute of every job is now spent inside a remote call. A relaxation, a
+Hessian, a scan point and a binding-mode search are each one `await` with nothing finer to report
+than "still running", which is precisely the shape `chemclaw.durable.heartbeat.beating` was
+extracted for. A blocking call with no heartbeat is an activity Temporal declares dead.
 
-The generic heartbeat-while-waiting timer this run wraps is `chemclaw.durable.heartbeat.beating`
-(shared with `connectors.bo`, Conn-F2) and is tested once, generically, in
-`tests/test_durable_heartbeat.py`. What is specific to this connector — and so tested here — is
-the *wiring*: that `run_xtb_calculation` actually routes the ensemble/complex jobs through it with
-`settings.xtb_job_heartbeat_timeout_seconds`, end to end through the real activity entry point.
+The timer itself is tested once, generically, in `tests/test_durable_heartbeat.py`. What is specific
+to this connector — and so tested here — is the **wiring**: that `run_xtb_calculation` actually
+routes its remote calls through the timer with `settings.xtb_job_heartbeat_timeout_seconds`, end to
+end through the real activity entry point, with `beating` unmodified and only `activity.heartbeat`
+stubbed. So a real heartbeat has to fire through the real call chain rather than through a mock
+recording its arguments.
 """
 
 import asyncio
 from typing import Any
 
 import pytest
+from temporalio import activity
 
 from chemclaw.connectors.calc import activities
-from chemclaw.connectors.calc.specs import EnsembleJobSpec
+from chemclaw.connectors.calc.specs import EnsembleJobSpec, ReactionJobSpec, XtbJobSpec
 from chemclaw.core.config import settings
-from chemclaw.science.calc.conformers import Conformer, ConformerEnsemble
-from chemclaw.science.calc.structure import structure_from_smiles
+from chemclaw.science.calc.store import InMemoryStore
+from tests.calc_server_fake import FakeCalcServer, install
 
 
-def _fake_ensemble() -> ConformerEnsemble:
-    """A minimal, valid ensemble result — standing in for a real CREST search."""
-    structure = structure_from_smiles("C")
-    conformer = Conformer(relative_kcal=0.0, population=1.0, degeneracy=1, structure=structure)
-    return ConformerEnsemble(
-        smiles="C",
-        method="GFN2-xTB",
-        search="conformers",
-        effort="quick",
-        solvent=None,
-        temperature_k=298.15,
-        conformers=[conformer],
-        total_found=1,
-        conformational_entropy_cal_per_mol_k=0.0,
-        ensemble_correction_kcal=0.0,
+class _SlowServer(FakeCalcServer):
+    """A calculation server whose every compute call takes longer than one beat interval."""
+
+    def __init__(self, delay: float, slow: str) -> None:
+        """`slow` names the one tool that sleeps, so a test can say which call it is covering."""
+        super().__init__()
+        self._delay = delay
+        self._slow = slow
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Answer as the fake does, after a delay on the tool under test."""
+        if name == self._slow:
+            await asyncio.sleep(self._delay)
+        return await super().call_tool(name, arguments)
+
+
+def _beats_during(monkeypatch: pytest.MonkeyPatch, spec: XtbJobSpec, slow: str) -> list[str]:
+    """Run one job with `slow` taking longer than a beat, and return every heartbeat recorded."""
+    beats: list[str] = []
+    monkeypatch.setattr(settings, "xtb_job_heartbeat_timeout_seconds", 4.0)  # -> 1 s beat interval
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a[0])))
+    monkeypatch.setattr(activities, "default_store", lambda: InMemoryStore())
+    install(monkeypatch, _SlowServer(1.3, slow))  # clears the 1 s interval a 4 s timeout implies
+    asyncio.run(activities.run_xtb_calculation(spec))
+    return beats
+
+
+def test_a_crest_search_beats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The original case: one opaque search, no unit boundary, and it must not go silent."""
+    beats = _beats_during(
+        monkeypatch, EnsembleJobSpec(smiles="C"), slow="search_conformer_ensemble"
+    )
+    assert any("still running" in beat for beat in beats), (
+        "a search longer than xtb_job_heartbeat_timeout_seconds produced no timer heartbeat — the "
+        f"ensemble job is not routed through the shared heartbeat timer: {beats}"
     )
 
 
-def test_an_ensemble_job_heartbeats_through_the_configured_xtb_timeout(
+def test_a_remote_hessian_inside_a_reaction_beats_while_it_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`run_xtb_calculation` on an `EnsembleJobSpec` calls the shared timer with the *xTB* setting.
+    """The case the split created, and the one a per-species progress callback does not cover.
 
-    `run_cached_ensemble` is monkeypatched (CREST is not installed in this sandbox) but
-    `chemclaw.durable.heartbeat.beating` is the real, unmodified helper: it is `activity.heartbeat`
-    that is stubbed, so a real heartbeat must actually fire through the real call chain, at the
-    interval `xtb_job_heartbeat_timeout_seconds` implies — not through a mock recording call args.
+    A reaction reports progress *between* species, which is a real boundary and the better signal
+    where it exists. It says nothing during the minutes one species' second derivatives take, and
+    that wait is now a network call: without the timer underneath it, a single large species
+    silently outlives the heartbeat timeout and the whole job is retried from the cache it already
+    filled.
     """
-    from temporalio import activity
-
-    beats: list[str] = []
-    monkeypatch.setattr(settings, "xtb_job_heartbeat_timeout_seconds", 4.0)  # -> 1s beat interval
-    monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a[0])))
-
-    async def _slow_ensemble(*_args: Any, **_kwargs: Any) -> tuple[ConformerEnsemble, bool]:
-        await asyncio.sleep(1.3)  # clears the 1s beat interval a 4s timeout implies
-        return _fake_ensemble(), False
-
-    monkeypatch.setattr(activities, "run_cached_ensemble", _slow_ensemble)
-
-    spec = EnsembleJobSpec(smiles="C")
-    result = asyncio.run(activities.run_xtb_calculation(spec))
-
-    assert result.ensemble is not None
-    # The first beat is `run_xtb_calculation`'s own "starting {kind}" line; what proves the
-    # shared timer actually ran is a *second* beat from inside it, "still running".
-    assert any("still running" in b for b in beats), (
-        "a run longer than xtb_job_heartbeat_timeout_seconds produced no timer heartbeat — the "
-        f"ensemble job is not routed through the shared heartbeat timer with the xTB setting: "
-        f"{beats}"
+    spec = ReactionJobSpec(
+        reactants=["[H][H]", "ClCl"],
+        products=["Cl", "Cl"],
+        symmetry_numbers={"[H][H]": 2, "ClCl": 2, "Cl": 1},
     )
+    beats = _beats_during(monkeypatch, spec, slow="compute_hessian")
+    assert any("still running" in beat for beat in beats), (
+        f"a remote Hessian longer than the heartbeat timeout produced no timer heartbeat: {beats}"
+    )
+    # And the per-species progress line is still there beside it: the two are complementary,
+    # "how far" and "alive".
+    assert any(beat.startswith("species ") for beat in beats)

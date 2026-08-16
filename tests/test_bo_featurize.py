@@ -1,9 +1,16 @@
 """Behavioral tests for xTB descriptor featurization of categorical BO choices (U1).
 
-Real GFN2-xTB calculations. The point of featurization is that the surrogate stops seeing
-an opaque label and starts seeing a position in chemical space, so the tests check both
-halves: that the descriptors are chemically meaningful, and that BoFire actually *uses*
-them rather than falling back to an ordinal index.
+The point of featurization is that the surrogate stops seeing an opaque label and starts seeing a
+position in chemical space, so these check both halves: that a category gains a descriptor vector
+at all, and that BoFire actually *uses* it rather than falling back to an ordinal index.
+
+**The calculator is injected, not imported**, since
+`D-2026-08-16-the-physics-leaves-the-cache-stays`: the xTB engine is `Chemclaw3-mcp`'s and the
+client that reaches it lives one package above `science/`, which `science/` may not import. So
+`featurize_problem` takes a `PropertiesFor` callable and `connectors/bo/calculators.py` binds it in
+production. Here that seam is bound to `tests/calc_server_fake.py` through the real client and the
+real cache, which is what keeps the caching assertion below honest — it counts calls that actually
+crossed `cached_remote`.
 """
 
 import asyncio
@@ -15,6 +22,7 @@ from bofire.data_models.features.api import CategoricalDescriptorInput, Categori
 from bofire.data_models.strategies.api import SoboStrategy
 from bofire.strategies import api as strategies
 
+from chemclaw.connectors.bo.calculators import properties_for
 from chemclaw.science.bo.engine import _to_domain, propose_candidates
 from chemclaw.science.bo.featurize import DESCRIPTOR_NAMES, featurize_problem
 from chemclaw.science.bo.problem import (
@@ -25,6 +33,7 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
 )
 from chemclaw.science.calc.store import InMemoryStore
+from tests.calc_server_fake import FakeCalcServer, install
 
 # Phosphine ligands whose structures are unambiguous, spanning the donor range a
 # cross-coupling ligand screen actually covers: two trialkyl (strong donors, one bulky)
@@ -48,8 +57,14 @@ def _ligand_problem(structures: dict[str, str] | None = _LIGANDS) -> Optimizatio
     )
 
 
+@pytest.fixture(autouse=True)
+def _calc_server(monkeypatch: pytest.MonkeyPatch) -> FakeCalcServer:
+    """Every test here reaches the calculation server; none of them reaches a real one."""
+    return install(monkeypatch, FakeCalcServer())
+
+
 def _featurized(problem: OptimizationProblem) -> OptimizationProblem:
-    return asyncio.run(featurize_problem(InMemoryStore(), problem)).problem
+    return asyncio.run(featurize_problem(properties_for(InMemoryStore()), problem)).problem
 
 
 def test_featurization_describes_every_category() -> None:
@@ -61,21 +76,6 @@ def test_featurization_describes_every_category() -> None:
     for row in parameter.descriptors.values():
         assert set(row) == set(DESCRIPTOR_NAMES)
         assert all(value == value for value in row.values())  # no NaN
-
-
-def test_descriptors_capture_real_donor_chemistry() -> None:
-    """The descriptor space separates the ligands the way a chemist would.
-
-    Trialkylphosphines are stronger sigma-donors than triarylphosphines, which shows up as
-    a higher HOMO; the aryl ligand's low-lying pi* shows up as a much lower LUMO. If the
-    featurization did not carry real chemistry this ordering would not survive.
-    """
-    parameter = _featurized(_ligand_problem()).parameters[0]
-    assert isinstance(parameter, CategoricalParameter)
-    assert parameter.descriptors is not None
-    descriptors = parameter.descriptors
-    assert descriptors["PtBu3"]["homo_ev"] > descriptors["PMe3"]["homo_ev"]
-    assert descriptors["PPh3"]["lumo_ev"] < descriptors["PCy3"]["lumo_ev"]
 
 
 def test_gap_is_excluded_as_a_collinear_descriptor() -> None:
@@ -143,15 +143,38 @@ def test_a_featurized_campaign_still_proposes_real_categories() -> None:
 def test_descriptors_inform_a_ligand_that_was_never_run() -> None:
     """The payoff of U1, measured on the surrogate's own prediction.
 
-    Three ligands are observed and PCy3 is not. Without descriptors the surrogate has
-    literally no information about PCy3: its prediction collapses to the mean of the
-    observed values, because an ordinal code for an unseen category carries nothing. With
-    descriptors, PCy3 sits near the high-performing PtBu3 in electronic space and the
-    prediction moves accordingly.
+    Three ligands are observed and PCy3 is not. Without descriptors the surrogate has literally no
+    information about PCy3: its prediction collapses to the mean of the observed values, because an
+    ordinal code for an unseen category carries nothing. With descriptors placing PCy3 beside the
+    high-performing PtBu3 in electronic space, the prediction moves toward it.
 
-    This is the assertion that would fail if the featurization were wired up but inert —
-    the failure mode a candidate-shape test cannot see.
+    This is the assertion that would fail if the featurization were wired up but inert — the failure
+    mode a candidate-shape test cannot see.
+
+    **The descriptors are stated rather than computed**, and that is the split showing through: the
+    numbers are `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and
+    whether real xTB descriptors place PCy3 near PtBu3 is a claim about that engine's chemistry,
+    tested where the engine lives. What is this repository's — and what this pins — is that a
+    descriptor vector actually reaches BoFire's surrogate and changes what it believes about an
+    option nobody has run. The values below are the ordering a chemist expects (trialkyl donors
+    together, the triaryl apart), so a reader can see the premise the assertion rests on.
     """
+    informed = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(
+                name="ligand",
+                categories=sorted(_LIGANDS),
+                descriptors={
+                    "PMe3": {"homo_ev": -9.1, "lumo_ev": 1.5},
+                    "PtBu3": {"homo_ev": -8.4, "lumo_ev": 1.6},
+                    "PCy3": {"homo_ev": -8.5, "lumo_ev": 1.55},
+                    "PPh3": {"homo_ev": -9.6, "lumo_ev": 0.2},
+                },
+            ),
+            ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
     observations = pd.DataFrame(
         [
             {"ligand": "PMe3", "temperature": 50.0, "yield": 10.0, "valid_yield": 1},
@@ -170,7 +193,7 @@ def test_descriptors_inform_a_ligand_that_was_never_run() -> None:
     assert predict_unobserved(_ligand_problem(structures=None)) == pytest.approx(
         uninformed, abs=1.0
     )
-    assert abs(predict_unobserved(_featurized(_ligand_problem())) - uninformed) > 2.0
+    assert abs(predict_unobserved(informed) - uninformed) > 2.0
 
 
 def test_parameters_without_structures_pass_through_untouched() -> None:
@@ -204,13 +227,20 @@ def test_an_unfeaturizable_category_names_itself() -> None:
         _featurized(problem)
 
 
-def test_featurization_is_cached() -> None:
-    """Re-featurizing the same molecules costs nothing — the second pass is all store hits."""
+def test_featurization_is_cached(_calc_server: FakeCalcServer) -> None:
+    """Re-featurizing the same molecules costs nothing — the second pass is all store hits.
+
+    Asserted as the *call count* rather than as equal output, because equal output is what a broken
+    cache also produces. Four ligands, four calculations, however many times the problem is
+    featurized — which is the property a durable campaign depends on across rounds and worker
+    restarts.
+    """
 
     async def _run() -> None:
         store = InMemoryStore()
-        first = (await featurize_problem(store, _ligand_problem())).problem
-        second = (await featurize_problem(store, _ligand_problem())).problem
+        first = (await featurize_problem(properties_for(store), _ligand_problem())).problem
+        second = (await featurize_problem(properties_for(store), _ligand_problem())).problem
         assert first == second
 
     asyncio.run(_run())
+    assert _calc_server.count("compute_electronic_properties") == len(_LIGANDS)

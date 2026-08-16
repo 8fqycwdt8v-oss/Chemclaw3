@@ -139,9 +139,12 @@ _STACKS: dict[str, str] = {
     # `api/auth.py` alongside `jwt`; measured, it is not there and never was — `api/auth.py`
     # imports `jwt` only. The two are separate concerns and get separate stacks.)
     "cryptography": "crypto",
-    # The xTB engine itself: the `science/` half of the `science/` ↔ `connectors/` pair CLAUDE.md
-    # says must never merge. `import tblite` inside `connectors/` is the mirror image of the
-    # "Temporal imports inside the physics" the same sentence forbids.
+    # The xTB engine itself. **No package may import it any more**, which is the point of keeping
+    # the row: `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the engines to
+    # `Chemclaw3-mcp`, so an `import tblite` reappearing anywhere in this tree is a copy of a
+    # capability that lives elsewhere — the second-copy failure D-148 forbids, arriving as a
+    # dependency rather than as a directory. There is no allowed `(package, "xtb")` row below, so
+    # any such import fails this file rather than needing to be noticed in review.
     "tblite": "xtb",
 }
 
@@ -213,10 +216,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.connectors", "rdkit"): "bundle tools validate and depict structures",
     # science: pure computation. Its README forbids Temporal/MCP/FastAPI and permits the rest.
     ("chemclaw.science", "rdkit"): "the cheminformatics toolkit is the engine",
-    ("chemclaw.science", "xtb"): (
-        "science/calc/xtb_engine.py IS the GFN2-xTB engine; `connectors/calc` is its durable-job "
-        "and MCP wrapper and must never import the physics itself"
-    ),
     ("chemclaw.science", "ml"): "science/bo is BoFire on BoTorch on torch",
     ("chemclaw.science", "postgres"): "the calculation cache is a table (D-011)",
     # the leaf packages: each owns its own tables and nothing else.

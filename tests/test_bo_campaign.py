@@ -11,6 +11,8 @@ from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import pytest
+from rdkit import Chem
+from rdkit.Chem import Crippen
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -47,8 +49,6 @@ from chemclaw.science.bo.problem import (
     require_campaign_startable,
     require_rounds_within_ceiling,
 )
-from chemclaw.science.calc.solubility import SolubilityInput, predict_solubility
-from chemclaw.science.calc.store import InMemoryStore
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 warnings.filterwarnings("ignore")
@@ -72,10 +72,28 @@ def _no_op_heartbeat_outside_activity_context(monkeypatch: pytest.MonkeyPatch) -
     yield
 
 
+# A deterministic stand-in for the solubility calculator. The model itself is the calculation
+# server's since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and `solubility_objective` now
+# takes the scorer as an argument for exactly that reason (`science/bo/objectives.py::LogSFor`) —
+# so what these tests inject is a monotone surrogate rather than a mock of a network call. It is
+# the honest shape for them: what is under test is the *search*, and a search is tested by whether
+# it finds the best member of a library under an objective it does not get to see.
+def _log_s(smiles: str) -> float:
+    """Negated Crippen LogP — ordered like an aqueous solubility and free of any server."""
+    molecule = Chem.MolFromSmiles(smiles)
+    assert molecule is not None
+    return -float(Crippen.MolLogP(molecule))
+
+
+async def _log_s_for(smiles: str) -> float:
+    """`_log_s` in the shape `solubility_objective` consumes."""
+    return _log_s(smiles)
+
+
 def test_get_objective_unknown_raises() -> None:
     """An unknown objective name is a clear error listing the known ones (G4)."""
     with pytest.raises(ValueError, match="unknown objective"):
-        get_objective("does-not-exist")
+        get_objective("does-not-exist", _log_s_for)
 
 
 @pytest.mark.parametrize("n_initial", [0, 1])
@@ -134,14 +152,13 @@ def test_solubility_objective_scores_via_calculator() -> None:
     """The calculator-backed objective (1d.3) scores a molecule via the cached calculator."""
 
     async def _run() -> None:
-        store = InMemoryStore()
-        objective = solubility_objective(store)
+        objective = solubility_objective(_log_s_for)
 
         ethanol = await objective({MOLECULE_KEY: "CCO"})
         hexadecane = await objective({MOLECULE_KEY: "CCCCCCCCCCCCCCCC"})
 
         # The objective returns exactly the calculator's predicted log S...
-        assert ethanol == predict_solubility(SolubilityInput(smiles="CCO")).log_s_mol_per_l
+        assert ethanol == _log_s("CCO")
         assert ethanol > hexadecane  # ethanol far more soluble than the alkane
         # ...and a repeat is served from the store (same value, no recompute error).
         assert await objective({MOLECULE_KEY: "CCO"}) == ethanol
@@ -151,14 +168,13 @@ def test_solubility_objective_scores_via_calculator() -> None:
 
 def test_get_objective_resolves_calculator_objective() -> None:
     """The calculator-backed objective is registered and resolvable by name."""
-    assert callable(get_objective("solubility_max"))
+    assert callable(get_objective("solubility_max", _log_s_for))
 
 
 def test_candidate_set_bo_finds_soluble_molecule() -> None:
     """Candidate-set BO over a molecule library finds a top molecule sub-exhaustively."""
 
     async def _run() -> None:
-        store = InMemoryStore()
         # 14 diverse molecules; only a few (glycerol, glycol, water, urea) are very soluble.
         library = [
             "CCCCCCCCCCCCCCCC",
@@ -178,11 +194,9 @@ def test_candidate_set_bo_finds_soluble_molecule() -> None:
         ]
         problem = molecule_library_problem(library)
 
-        result = await optimize(problem, solubility_objective(store), n_initial=4, n_rounds=5)
+        result = await optimize(problem, solubility_objective(_log_s_for), n_initial=4, n_rounds=5)
 
-        all_values = sorted(
-            predict_solubility(SolubilityInput(smiles=s)).log_s_mol_per_l for s in library
-        )
+        all_values = sorted(_log_s(s) for s in library)
         median = all_values[len(all_values) // 2]
         assert len(result.history) < len(library)  # BO did not evaluate the whole library
         assert result.best.value > median  # yet steered to a soluble molecule (top half)
@@ -218,16 +232,13 @@ def test_optimize_stops_gracefully_on_exhausted_discrete_space() -> None:
     """A budget exceeding the discrete space stops cleanly instead of crashing in BoFire."""
 
     async def _run() -> None:
-        store = InMemoryStore()
         library = ["CCO", "O", "c1ccccc1", "CCCCCCCCCCCCCCCC"]  # only 4 candidates
         problem = molecule_library_problem(library)
 
         # Budget 2 + 10 far exceeds the 4-candidate space; must not raise.
-        result = await optimize(problem, solubility_objective(store), n_initial=2, n_rounds=10)
+        result = await optimize(problem, solubility_objective(_log_s_for), n_initial=2, n_rounds=10)
 
-        best_possible = max(
-            predict_solubility(SolubilityInput(smiles=s)).log_s_mol_per_l for s in library
-        )
+        best_possible = max(_log_s(s) for s in library)
         assert distinct_candidate_count(result.history) <= len(library)
         assert result.best.value == pytest.approx(best_possible)
 

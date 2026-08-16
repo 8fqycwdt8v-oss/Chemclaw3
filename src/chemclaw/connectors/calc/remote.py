@@ -38,7 +38,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError
+from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.science.calc.store import (
     CalculationKey,
     ResultPayload,
@@ -47,12 +47,34 @@ from chemclaw.science.calc.store import (
 )
 
 
-class CalcServerError(ChemclawError):
-    """The physics server could not be reached, or refused, or answered unusably.
+class CalcServerError(SubsystemUnavailableError):
+    """The calculation server could not be reached, so the calculation never began.
 
-    One error for all three because the caller's options are identical in every case: a
-    calculation did not happen. A durable job retries it; a tool surfaces it. Distinguishing
-    "connection refused" from "tool raised" would be a distinction no caller acts on.
+    **This was one error for both failures, and wiring the client into a Temporal activity is what
+    made that wrong.** The original reasoning — "the caller's options are identical in every case:
+    a calculation did not happen" — holds for a tool, which surfaces either one to a chemist. It is
+    false for a durable job, where the two are opposites: an unreachable server is fixed by exactly
+    one thing, a retry, and a refused *request* is fixed by exactly one thing that is not a retry.
+    Conflating them means either burning `activity_max_attempts` on an unparameterised solvent, or
+    giving up on a pod restart. So the transport failure is a `SubsystemUnavailableError` — the
+    retryable hierarchy, deliberately absent from `durable/publish.py`'s non-retryable list — and a
+    refusal is `CalcToolError` below.
+
+    The message is written for the **chemist**, because `agent/tool_authz.py` hands it to the model
+    verbatim: it says the calculators are unavailable and that this is an outage rather than a
+    problem with what was asked. The address and the driver text ride on `__cause__`, for the log
+    and the operator.
+    """
+
+
+class CalcToolError(ChemclawError):
+    """The calculation server was reached and refused, or answered something unusable.
+
+    Bad data by the same test as every other `ChemclawError`: an unparameterised solvent, an atom
+    index past the molecule, a SMILES the predictor's domain excludes. The identical call fails
+    identically on the next attempt, so it is registered non-retryable in
+    `durable/publish.py::_BAD_DATA_TYPES` and a durable job fails fast instead of paying for the
+    same refusal three more times.
     """
 
 
@@ -75,11 +97,13 @@ async def calc_session() -> AsyncIterator[ClientSession]:
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 yield session
-    except CalcServerError:
+    except (CalcServerError, CalcToolError):
         raise
     except Exception as exc:
         raise CalcServerError(
-            f"the calculation server at {settings.calc_server_url} is unreachable: {exc}"
+            "the calculation service is not answering, so no calculation was run. This is an "
+            "outage rather than a problem with what was asked; the same request will work once "
+            "it is back."
         ) from exc
 
 
@@ -89,8 +113,8 @@ def _token() -> str | None:
     Unset is not an error here, and the reason is that the server decides: a development server
     started without a credential accepts an unauthenticated call, and forcing one would make this
     module refuse a request the server would have served. A server that *does* enforce one answers
-    401, which surfaces as a `CalcServerError` naming the variable — the failure a reader can act
-    on, at the moment it is true.
+    401, which surfaces as a `CalcServerError` — an outage from this side, with the status and the
+    address on `__cause__` for the operator who can fix it.
     """
     import os
 
@@ -98,15 +122,20 @@ def _token() -> str | None:
 
 
 async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:
-    """Invoke one tool and return its decoded payload, turning every failure into one error."""
+    """Invoke one tool and return its decoded payload, or raise the failure the caller can act on.
+
+    A refused tool call is a `CalcToolError` — the server was reached and said no, which no retry
+    changes — and it carries the server's own message, because that message is the whole content of
+    the refusal (which solvent is unparameterised, which atom index is out of range).
+    """
     result = await session.call_tool(tool, arguments)
     if result.isError:
-        raise CalcServerError(f"{tool} failed: {_text(result.content)}")
+        raise CalcToolError(f"{tool} failed: {_text(result.content)}")
     text = _text(result.content)
     try:
         return json.loads(text)
     except ValueError as exc:
-        raise CalcServerError(f"{tool} returned no JSON: {text[:200]}") from exc
+        raise CalcToolError(f"{tool} returned no JSON: {text[:200]}") from exc
 
 
 def _text(content: Any) -> str:
@@ -141,9 +170,7 @@ async def remote_key(
             params_hash=key["params_hash"],
         )
     except (KeyError, TypeError) as exc:
-        raise CalcServerError(
-            f"calculation_key returned an unusable key for {tool}: {key}"
-        ) from exc
+        raise CalcToolError(f"calculation_key returned an unusable key for {tool}: {key}") from exc
 
 
 async def remote_compute(
@@ -152,8 +179,49 @@ async def remote_compute(
     """Run one calculation on the server and return its payload as the cache stores it."""
     payload = await _call(session, tool, arguments)
     if not isinstance(payload, dict):
-        raise CalcServerError(f"{tool} returned {type(payload).__name__}, not an object")
+        raise CalcToolError(f"{tool} returned {type(payload).__name__}, not an object")
     return payload
+
+
+async def remote_call(tool: str, arguments: dict[str, Any]) -> ResultPayload:
+    """One round trip to a tool that has **no cache row**, in its own session.
+
+    Two tools on the server are like this and both are geometry rather than physics:
+    `embed_structure` (ETKDG plus a force-field cleanup) and `combine_structures` (centre two
+    monomers and offset one along x). `calculation_key` refuses them by name — they are not compute
+    tools — so routing them through `cached_remote` would spend a round trip learning that, then
+    call them anyway.
+
+    They are on the server rather than here because their output is an *input to a key*: a geometry
+    embedded by a different RDKit build is a different `structure_id`, and every cached relaxation
+    and Hessian downstream of it would miss. Deriving it locally would put the two repositories'
+    RDKit versions into an agreement nothing checks.
+    """
+    async with calc_session() as session:
+        return await remote_compute(session, tool, arguments)
+
+
+async def remote_version(tool: str, arguments: dict[str, Any]) -> str:
+    """The `calc_version` this tool would stamp on a result, without computing one.
+
+    The one way this repository is allowed to learn a calculator's current version, and the reason
+    it needs one at all is the calibration ledger: `predictions` is keyed exactly on
+    `(calc_type, calc_version, input_hash)` with no version pooling (D-139), so `calculator_trust`
+    has to ask "what version would answer this question *now*" before it can score anything against
+    it. A result carries its own version, but a trust report has no result — that is the question.
+
+    `arguments` are needed because `calculation_key` derives an identity and an identity is of
+    something; the version it returns does not depend on the molecule, only on the programs and the
+    calibration behind the calculator. `settings.calc_version_probe_smiles` is what that argument
+    is, named in configuration rather than inlined so it is one visible fact rather than a literal
+    repeated at each call site.
+    """
+    async with calc_session() as session:
+        identity = await _call(session, "calculation_key", {"tool": tool, "arguments": arguments})
+    version = identity.get("calc_version")
+    if not isinstance(version, str) or not version:
+        raise CalcToolError(f"calculation_key returned no calc_version for {tool}: {identity}")
+    return version
 
 
 async def cached_remote(

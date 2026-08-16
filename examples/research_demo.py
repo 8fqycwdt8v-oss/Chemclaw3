@@ -15,6 +15,14 @@ out of their connector bundle's own server module, which is where the capability
 runs in its own process — so this walkthrough drives exactly the functions a turn reaches over MCP,
 rather than an in-process lookalike of them.
 
+**One live dependency, and it is named rather than hidden.** `predict_solubility` no longer computes
+anything here: the model moved to `Chemclaw3-mcp`'s `calc` server
+(`D-2026-08-16-the-physics-leaves-the-cache-stays`), so running this script needs that server
+reachable at `CHEMCLAW_CALC_SERVER_URL`. Still credential-free — a loopback service, not an API key
+— and the walkthrough refuses rather than inventing a number if it is absent, which is the same
+contract every other tool here has. `tests/test_research_demo.py` drives it against the suite's fake
+server, so the loop stays covered with nothing running.
+
 Run: `python -m examples.research_demo`.
 """
 

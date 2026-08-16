@@ -15,10 +15,16 @@ The tests below hold three claims that are easy to state and easy to get subtly 
   different things, so `method` has to reach the rendering rather than stopping at the model.
 """
 
+import asyncio
+
+import pytest
 from rdkit import Chem
 
-from chemclaw.science.calc.solubility import SolubilityInput, predict_solubility
+from chemclaw.connectors.calc.remote import cached_remote
+from chemclaw.science.calc.models import SolubilityResult
+from chemclaw.science.calc.store import InMemoryStore
 from chemclaw.science.calc.uncertainty import Estimate, structural_domain
+from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
 
 
 def test_an_unknown_domain_is_not_a_trustworthy_one() -> None:
@@ -73,26 +79,51 @@ def test_an_ordinary_neutral_organic_is_in_domain() -> None:
     assert reasons == ()
 
 
-def test_solubility_reports_the_uniform_shape_and_flags_what_it_cannot_describe() -> None:
-    """The row's own example, end to end: a confident number is now labelled.
+def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row's own example, end to end — and the half of it this repository still owns.
 
-    Both predictions still return a value — refusing outright would break the calculator's contract
-    and hide the number a chemist may still want — but only one of them says it can be relied on.
+    The ESOL prediction itself is the calculation server's since
+    `D-2026-08-16-the-physics-leaves-the-cache-stays`, but the *flag reaching a chemist* is not: it
+    travels as a field of a payload this side stores and validates back. That is exactly where it
+    was lost once before — `SolubilityResult` gained `estimate`, no version moved, and every row
+    already on disk validated back with `estimate=None`, which `Estimate.render` spells as
+    "applicability not assessed". A salt the calculator refuses to speak about came back looking
+    merely unchecked, forever, because `durable/retention.py` never prunes `calculation_results`.
+
+    So the assertion is on the *served* copy, not the fresh one: an out-of-domain estimate that
+    does not survive a cache hit is the same defect through a shorter route.
     """
-    ethanol = predict_solubility(SolubilityInput(smiles="CCO"))
-    assert ethanol.estimate is not None
-    assert ethanol.estimate.value == ethanol.log_s_mol_per_l
-    assert ethanol.estimate.unit == "log10(mol/L)"
-    assert ethanol.estimate.method == "reported"
-    assert ethanol.estimate.trustworthy is True
+    salt_payload = {
+        "calc_version": FAKE_VERSION,
+        "smiles": "CCN.Cl",
+        "model": "esol-delaney@2004",
+        "log_s_mol_per_l": 0.29,
+        "uncertainty_log": 0.75,
+        "estimate": {
+            "value": 0.29,
+            "unit": "log10(mol/L)",
+            "uncertainty": 0.75,
+            "method": "reported",
+            "in_domain": False,
+            "domain_reasons": ["multi-component (salt or mixture)"],
+        },
+    }
+    server = install(monkeypatch, FakeCalcServer())
+    server.overrides["predict_solubility"] = lambda _arguments: salt_payload
 
-    salt = predict_solubility(SolubilityInput(smiles="CCN.Cl"))
-    assert salt.estimate is not None
-    assert salt.estimate.trustworthy is False
-    assert salt.estimate.domain_reasons, "an out-of-domain prediction gave no reason"
-    # The uncertainty is unchanged, deliberately. Widening it would imply the error is merely larger
-    # and still drawn from the same distribution, which is the claim being refused.
-    assert salt.estimate.uncertainty == ethanol.estimate.uncertainty
+    async def _run() -> None:
+        store = InMemoryStore()
+        fresh, _ = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
+        served, cached = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
+        assert cached is True
+        first = SolubilityResult.model_validate(fresh)
+        second = SolubilityResult.model_validate(served)
+        assert second.estimate is not None
+        assert second.estimate.trustworthy is False
+        assert second.estimate.domain_reasons, "an out-of-domain prediction gave no reason"
+        assert second.estimate == first.estimate
+
+    asyncio.run(_run())
 
 
 def test_the_trust_rides_on_the_value_line_because_the_excerpt_truncates() -> None:

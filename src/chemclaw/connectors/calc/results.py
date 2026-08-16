@@ -1,23 +1,30 @@
 """What an xTB job returns — the result half of this bundle's durable contract.
 
-Separate from `connectors/calc/specs.py` because of what it imports. A result is a rich domain
-type (`ReactionEnergyResult`, `ConformerEnsemble`, …) and naming those pulls in
-`chemclaw.science.calc.reaction`,
-`chemclaw.science.calc.conformers`, `chemclaw.science.calc.complexes` and
-`chemclaw.science.calc.xtb_scan` — and through them `tblite`, the compiled
-quantum-chemistry library.
+Separate from `connectors/calc/specs.py` because of what it used to import: a result is a rich
+domain type (`ReactionEnergyResult`, `ConformerEnsemble`, …) and naming those pulled in four
+`science.calc` engine modules and, through them, `tblite` — the compiled quantum-chemistry library.
+That was fine here and only here, because nothing outside this bundle's own worker imports this
+module, while the *request* side cannot afford it: `connector.yaml` names those models in
+`params_model` and `connectors/jobs.py` resolves that name by importing it inside the chat service
+(D-118).
 
-That is fine here and only here: nothing outside this bundle's own worker imports this module. The
-*request* side cannot afford it, because `connector.yaml` names those models in `params_model` and
-`connectors/jobs.py` resolves that name by importing it inside the chat service (D-118).
+The weight is gone — `D-2026-08-16-the-physics-leaves-the-cache-stays` took the engines out of this
+repository entirely, so `science/calc/models.py` is pydantic, numpy and RDKit and nothing compiled.
+The split stays anyway, and not out of caution: these five shapes are pinned by workflow histories
+already in flight, so this module is a *contract* boundary rather than an import-weight one, and
+`cli/validate_connectors.py` plus `tests/test_connector_isolation.py` still enforce that the request
+side stays leaf.
 """
 
 from pydantic import BaseModel
 
-from chemclaw.science.calc.complexes import InteractionResult
-from chemclaw.science.calc.conformers import ConformerEnsemble
-from chemclaw.science.calc.reaction import ReactionEnergyResult, SolventComparisonResult
-from chemclaw.science.calc.xtb_scan import ScanResult
+from chemclaw.science.calc.models import (
+    ConformerEnsemble,
+    InteractionResult,
+    ReactionEnergyResult,
+    ScanResult,
+    SolventComparisonResult,
+)
 
 
 class XtbJobResult(BaseModel):

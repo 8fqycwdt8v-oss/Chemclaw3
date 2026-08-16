@@ -11,15 +11,14 @@ aggregate can pull them apart.
 """
 
 import asyncio
-import threading
 
 import pytest
 
 from chemclaw.connectors.calc.server import tools
 from chemclaw.core.chem import InvalidSmilesError, substructure_pattern
 from chemclaw.core.config import settings
-from chemclaw.science.calc import xtb_cli
-from chemclaw.science.calc.calibration import Residual
+from chemclaw.science.calc.calibration import Calibration, Residual
+from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
 
 # Two acids that the predictor badly under-called, and two neutrals it got nearly right. The
 # aggregate over all four looks mediocre; the acids alone look disqualifying.
@@ -47,6 +46,9 @@ def _ledger(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(settings, "calibration_enabled", True)
     monkeypatch.setattr(tools, "reconciled_for", _reconciled)
+    # The version these tools report against is a round trip to the calculation server now, so the
+    # fake has to be behind them even where the ledger itself is stubbed.
+    install(monkeypatch, FakeCalcServer())
 
 
 def test_an_uncalibrated_property_is_refused_and_the_message_names_the_real_ones() -> None:
@@ -188,38 +190,52 @@ def test_an_empty_substructure_query_is_rejected_rather_than_matching_everything
         substructure_pattern("not a molecule at all )(")
 
 
-def test_the_calc_connector_resolves_its_backend_before_serving(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The blocking call is hoisted to startup, so no request path can be the first to pay it.
+def test_the_calibrated_version_comes_from_the_server_and_never_from_here() -> None:
+    """The single most important correctness item of the split, asserted where it is read.
 
-    Resolving `pka_calc_version()` shells out to `xtb --version` once per process whenever the
-    resolved backend is the binary, `lru_cache`d thereafter. `run_cached_pka` threads its own
-    call; `_log_prediction` and `_calibrated` (behind `calculator_trust` and `calculator_outliers`)
-    do not, so an ordinary first `calculator_trust("pka")` could hold the connector's single event
-    loop for the subprocess timeout.
+    `calculator_trust` and `calculator_outliers` used to derive the version locally, from
+    `xtb --version` and seven calibration settings this process can no longer see. That failure is
+    silent: `binary_version()` answered the literal string `"absent"` rather than raising when the
+    binary was missing, so a pod without it would build a **well-formed** version, match zero rows
+    in a ledger keyed exactly on `(calc_type, calc_version, input_hash)` (D-139, no pooling), and
+    report a confident `UNCALIBRATED` — the state that machinery exists to distinguish, reached by
+    a route it never anticipated, with every historical residual unreachable at once.
 
-    What is asserted is the property every one of those call sites now depends on: the version
-    resolution happens at startup **and off the event loop**, proved by recording the thread the
-    version call runs on. `binary_version` is stubbed rather than executed — there is no `xtb`
-    binary in this environment, and with `xtb_engine` at its `auto` default the resolution never
-    reaches it, so the engine is pinned to make the blocking branch the one under test.
+    So the version is a `calculation_key` round trip, and both tools take the same route. What is
+    asserted is that the string reaching the ledger query is the server's — and, because the
+    derivation lived in `_calibrated` for both, that neither tool has its own copy.
+
+    `tests/test_calc_remote.py` asserts the other half statically, over the source: no module in
+    this repository defines a `calc_version`.
     """
-    monkeypatch.setattr(settings, "xtb_engine", "xtb")
-    ran_on: list[str] = []
+    asked: list[tuple[str, str]] = []
 
-    def _version() -> str:
-        ran_on.append(threading.current_thread().name)
-        return "6.6.1"
+    async def _reconciled(calc_type: str, calc_version: str) -> list[Residual]:
+        asked.append((calc_type, calc_version))
+        return list(_LEDGER)
 
-    monkeypatch.setattr(xtb_cli, "binary_version", _version)
-    asyncio.run(tools.resolve_calculator_versions())
-    assert ran_on, "the backend version was never resolved at startup"
-    assert threading.main_thread().name not in ran_on  # i.e. never on the loop's thread
+    async def _calibration(calc_type: str, calc_version: str, unit: str) -> Calibration:
+        asked.append((calc_type, calc_version))
+        return Calibration(calc_type=calc_type, unit=unit, n=0)
 
-    # And it cannot take the connector down: the `on_start` contract is diagnostics-only.
-    def _explode() -> str:
-        raise OSError("no such binary")
+    async def _run() -> None:
+        with pytest.MonkeyPatch.context() as patch:
+            server = install(patch, FakeCalcServer())
+            patch.setattr(tools, "reconciled_for", _reconciled)
+            patch.setattr(tools, "calibration_for", _calibration)
+            await tools.calculator_outliers("pka")
+            await tools.calculator_trust("solubility")
+            # The probe molecule is configuration, and it is the only argument the derivation
+            # needs — a version is a property of the programs behind a calculator, not of a
+            # molecule.
+            assert [args["tool"] for args in server.arguments("calculation_key")] == [
+                "predict_pka",
+                "predict_solubility",
+            ]
+            assert all(
+                args["arguments"] == {"smiles": settings.calc_version_probe_smiles}
+                for args in server.arguments("calculation_key")
+            )
 
-    monkeypatch.setattr(tools, "pka_calc_version", _explode)
-    asyncio.run(tools.resolve_calculator_versions())
+    asyncio.run(_run())
+    assert asked == [("pka", FAKE_VERSION), ("solubility", FAKE_VERSION)]

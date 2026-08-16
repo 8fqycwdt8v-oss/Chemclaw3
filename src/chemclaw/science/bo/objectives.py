@@ -22,11 +22,18 @@ from chemclaw.science.bo.problem import (
 from chemclaw.science.bo.problem import (
     Objective as ObjectiveSpec,
 )
-from chemclaw.science.calc.postgres_store import PostgresStore
-from chemclaw.science.calc.solubility import SolubilityInput, run_cached_solubility
-from chemclaw.science.calc.store import ResultStore
 
 Objective = Callable[[dict[str, ParamValue]], Awaitable[float]]
+
+# How a calculator-backed objective obtains one molecule's predicted log S.
+#
+# **Injected rather than imported**, for the reason `science/bo/featurize.py` states at length: the
+# solubility model moved to `Chemclaw3-mcp` and the client that reaches it lives one package above
+# this one, which `science` may not import (`tests/test_layering.py`). The binding lives in
+# `connectors/bo/calculators.py`. The property this objective always advertised is now the client's:
+# a molecule revisited during a search is served from the calculation store and never recomputed
+# (D-011).
+LogSFor = Callable[[str], Awaitable[float]]
 
 # The parameter key a molecule-scoring objective reads its candidate from.
 MOLECULE_KEY = "molecule"
@@ -55,21 +62,18 @@ def molecule_library_problem(smiles: list[str]) -> OptimizationProblem:
     )
 
 
-def solubility_objective(store: ResultStore) -> Objective:
+def solubility_objective(log_s_for: LogSFor) -> Objective:
     """A BO objective that scores a candidate molecule by cached predicted log S.
 
-    This is the calculator-backed objective of plan step 1d.3: each evaluation runs
-    the solubility calculator through the store, so a molecule revisited during a
-    search is served from the store and never recomputed (D-011). The store is
-    injected so the objective is testable without a database. The candidate molecule
-    is read from `params[MOLECULE_KEY]`; pair it with `molecule_library_problem`.
+    This is the calculator-backed objective of plan step 1d.3: each evaluation asks the calculator
+    through the calculation store, so a molecule revisited during a search is served from the store
+    and never recomputed (D-011). The scorer is injected so the objective is testable without a
+    database or a server. The candidate molecule is read from `params[MOLECULE_KEY]`; pair it with
+    `molecule_library_problem`.
     """
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
-        result, _ = await run_cached_solubility(
-            store, SolubilityInput(smiles=str(params[MOLECULE_KEY]))
-        )
-        return result.log_s_mol_per_l
+        return await log_s_for(str(params[MOLECULE_KEY]))
 
     return evaluate
 
@@ -81,21 +85,23 @@ def _reizman_suzuki() -> Objective:
     return objective
 
 
-def _solubility_max() -> Objective:
-    """Calculator-backed solubility objective on the production (Postgres) store."""
-    return solubility_objective(PostgresStore())
-
-
-# Name → factory. Factories are cached where construction is expensive.
-_REGISTRY: dict[str, Callable[[], Objective]] = {
-    "reizman_suzuki": _reizman_suzuki,
-    "solubility_max": _solubility_max,
+# Name → factory. Every factory takes the calculator seam, so the registry has one shape even
+# though the benchmark objective — a surrogate fitted from a bundled dataset — needs no calculator
+# at all. A per-entry signature would push the branch into `get_objective` and make adding a
+# calculator-backed objective a change to the resolver rather than a row here.
+_REGISTRY: dict[str, Callable[[LogSFor], Objective]] = {
+    "reizman_suzuki": lambda _log_s_for: _reizman_suzuki(),
+    "solubility_max": solubility_objective,
 }
 
 
-def get_objective(name: str) -> Objective:
-    """Resolve a named objective, or raise with the known names (gate G4)."""
+def get_objective(name: str, log_s_for: LogSFor) -> Objective:
+    """Resolve a named objective, or raise with the known names (gate G4).
+
+    `log_s_for` is the calculator a calculator-backed objective evaluates through; see `LogSFor`
+    for why it arrives as an argument rather than as an import.
+    """
     factory = _REGISTRY.get(name)
     if factory is None:
         raise ValueError(f"unknown objective {name!r}; known: {sorted(_REGISTRY)}")
-    return factory()
+    return factory(log_s_for)

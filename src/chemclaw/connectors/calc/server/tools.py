@@ -1,20 +1,28 @@
-"""The `calc` connector's MCP tool surface: the fast calculators (plan step 1c.5).
+"""The `calc` connector's MCP tool surface: cache, compose, and read the ledger.
 
-Exposes the cached calculators as MCP tools. Unlike the QM/HPC path, fast calculators run
-**inline** (sub-second) — no durable workflow is needed; the calculation store (Phase 1b) already
-makes a repeat call free and idempotent, which is why these are tools on a connector rather than a
-`jobs:` entry. `default_store` names the production backend and is the seam tests swap for an
-in-memory store.
+Fifteen tools, and after `D-2026-08-16-the-physics-leaves-the-cache-stays` not one of them computes
+anything. The physics is in `Chemclaw3-mcp`'s `servers/calc`, exposed as individually-keyed
+primitives; what happens here is the three things that stayed:
 
-Running here rather than in the agent's process is what takes `tblite` and the calculation store's
-driver out of the chat service's image (D-110): a calculation's dependencies are the calculator's
-business, and this capability scales on its own.
+- **The D-011 cache.** Every compute tool goes through `connectors/calc/remote.py::cached_remote` —
+  ask the server for the key, look it up, cross the wire only on a miss. A persisted result is still
+  never recomputed; the miss path just got longer.
+- **Composition.** `compute_thermochemistry` and `predict_logd` are not shipped by the server at
+  all, because their keys would name an output. They are assembled here from parts that *are* keyed
+  (`connectors/calc/compose.py`), which is what keeps their warm path warm.
+- **The calibration ledger and the store's read side.** `report_measurement`, `calculator_trust`,
+  `calculator_outliers`, `find_calculations`, `list_artifacts`, `fetch_artifact` — none of which the
+  server can answer, because it holds no state at all.
+
+`default_store` names the production backend and is the seam tests swap for an in-memory store.
+
+**The agent-facing surface did not move.** Every signature, docstring and return type below is what
+it was before the split, because profiles, eval probes and skills name these tools by string. What
+changed is one layer down.
 """
 
 import asyncio
 import logging
-import subprocess
-from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -22,6 +30,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
+from chemclaw.connectors.calc import compose
+from chemclaw.connectors.calc.remote import cached_remote, remote_version
 from chemclaw.core.chem import canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
@@ -34,35 +44,23 @@ from chemclaw.science.calc.calibration import (
     record_observation,
     record_prediction,
 )
-from chemclaw.science.calc.descriptors import (
-    DescriptorInput,
+from chemclaw.science.calc.logd import logd_from_pka
+from chemclaw.science.calc.models import (
     DescriptorProfile,
-    run_cached_descriptor_profile,
-)
-from chemclaw.science.calc.logd import LogdInput, LogdResult
-from chemclaw.science.calc.logd import predict_logd as _predict_logd
-from chemclaw.science.calc.pka import PkaInput, PkaResult, run_cached_pka
-from chemclaw.science.calc.pka import calc_version as pka_calc_version
-from chemclaw.science.calc.postgres_artifacts import default_artifact_store
-from chemclaw.science.calc.postgres_store import PostgresStore
-from chemclaw.science.calc.solubility import (
-    SolubilityInput,
-    SolubilityResult,
-    run_cached_solubility,
-)
-from chemclaw.science.calc.solubility import calc_version as solubility_calc_version
-from chemclaw.science.calc.store import CalculationQuery, ResultStore, StoredResult
-from chemclaw.science.calc.structure import structure_from_smiles
-from chemclaw.science.calc.xtb import XtbInput, XtbResult, run_cached_xtb
-from chemclaw.science.calc.xtb_opt import OptimizationSummary, OptSpec, run_cached_optimization
-from chemclaw.science.calc.xtb_props import (
     ElectronicProperties,
     FukuiMode,
+    LogdResult,
+    OptimizationSummary,
+    PkaResult,
     SiteReactivityResult,
-    run_cached_fukui,
-    run_cached_properties,
+    SolubilityResult,
+    ThermochemistryResult,
+    XtbResult,
 )
-from chemclaw.science.calc.xtb_thermo import ThermochemistryResult, ThermoSpec, relax_to_minimum
+from chemclaw.science.calc.postgres_artifacts import default_artifact_store
+from chemclaw.science.calc.postgres_store import PostgresStore
+from chemclaw.science.calc.store import CalculationQuery, ResultPayload, ResultStore, StoredResult
+from chemclaw.science.calc.thermo import ThermoSettings
 
 server = FastMCP("calc")
 
@@ -74,36 +72,27 @@ def default_store() -> ResultStore:
     return PostgresStore()
 
 
-async def resolve_calculator_versions() -> None:
-    """Resolve the xTB backend once at startup, off the event loop, before a request needs it.
+def _version_of(payload: ResultPayload, tool: str) -> str:
+    """The `calc_version` a result was computed under, read off the payload rather than derived.
 
-    `pka_calc_version()` names the optimizer that relaxes the base, so it resolves the backend —
-    and wherever that resolves to the `xtb` binary (always under `xtb_engine=xtb`, and under the
-    `auto` default on any pod that has the binary), it shells out to `xtb --version` on the first
-    call in a process, `lru_cache`d thereafter. `run_cached_pka` guards its own call with
-    `asyncio.to_thread`; three other call sites do not — `_log_prediction` builds the version for
-    the ledger, and `calculator_trust`/`calculator_outliers` reach it through `_calibrated`. So
-    `calculator_trust("pka")`, an ordinary *first* call in a fresh pod, could hold this process's
-    single event loop — every session's stream, not just its own — for up to the 30 s subprocess
-    timeout.
+    Every result the server returns is stamped with its own version, and a stored row keeps that
+    stamp — so on a cache hit this is still the version that produced the number, not the version
+    that is current. That is exactly what the calibration ledger wants: `predictions` records what
+    was predicted *by what*, and a row logged under today's version for a value computed under
+    yesterday's would put two incomparable calculators into one bias figure (REV-12).
 
-    Guarding each caller would leave the same trap set for the next one, so the resolution is
-    hoisted to the one place a process starts: after this, every call site hits a warm cache and
-    none of them can block. Honest limit: `on_start` is *started*, not awaited (see
-    `connector_app`), so a request arriving in the first milliseconds can still win the race and
-    pay the resolution once — the window is startup-sized, not per-request, and shrinking it
-    further would mean blocking readiness on a diagnostic.
-
-    Swallows its own failures, as the `on_start` contract requires: a connector that refuses to
-    start because it could not ask a binary for its version is strictly worse than one that starts
-    and resolves the version on first use.
+    Raises rather than defaulting, because the failure it would otherwise cause is silent: an empty
+    or missing version degenerates the ledger's unique index `(calc_type, calc_version, input_hash)`
+    to `(calc_type, input_hash)`, and one calculator version's prediction quietly overwrites
+    another's.
     """
-    try:
-        version = await asyncio.to_thread(pka_calc_version)
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("could not resolve the xTB backend at startup: %s", exc)
-        return
-    logger.info("calc connector resolved its calculator version: %s", version)
+    version = payload.get("calc_version")
+    if not isinstance(version, str) or not version:
+        raise ValueError(
+            f"{tool} returned a result with no calc_version, so its prediction cannot be logged "
+            "against a calibration ledger keyed on one"
+        )
+    return version
 
 
 async def _log_prediction(
@@ -429,14 +418,29 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
 # about the wrong calculator, in the wrong unit, and the model had no way to tell. Adding a
 # calibrated calculator is now one row, and asking about an uncalibrated one is an error that
 # names what does exist.
-_CALIBRATED: dict[str, tuple[Callable[[], str], str]] = {
-    "solubility": (solubility_calc_version, "log S"),
-    "pka": (pka_calc_version, "pKa"),
+_CALIBRATED: dict[str, tuple[str, str]] = {
+    "solubility": ("predict_solubility", "log S"),
+    "pka": ("predict_pka", "pKa"),
 }
 
 
-def _calibrated(property_name: str) -> tuple[str, str]:
-    """The current version and unit for a calibrated property, or raise naming the alternatives."""
+async def _calibrated(property_name: str) -> tuple[str, str]:
+    """The current version and unit for a calibrated property, or raise naming the alternatives.
+
+    **The version comes from the server, and that is the single most load-bearing line in this
+    module.** It used to be derived here, from `xtb --version` and seven calibration settings this
+    process can no longer see. `binary_version()` answered the literal string `"absent"` rather than
+    raising when a binary was missing, so a locally-derived version would be *well-formed*, match
+    **zero** rows in a ledger keyed exactly on `(calc_type, calc_version, input_hash)` (D-139, no
+    pooling), and `calculator_trust("pka")` would report a confident `UNCALIBRATED` — the state that
+    machinery exists to distinguish, reached by a route it never anticipated, with every historical
+    residual unreachable at the same moment. Nothing would look broken.
+    `tests/test_calc_remote.py` asserts statically that no derivation has crept back.
+
+    The *current* version, not a pooled figure: the chemist is asking how far to trust the
+    calculator that is about to answer them, and a v1 that ran high averaged with a v2 that ran low
+    reads as well-calibrated while neither is (REV-12).
+    """
     entry = _CALIBRATED.get(property_name)
     if entry is None:
         raise ValueError(
@@ -444,11 +448,9 @@ def _calibrated(property_name: str) -> tuple[str, str]:
             f"{', '.join(sorted(_CALIBRATED))}). Only calculators that log their predictions can "
             "be scored against measurements."
         )
-    version, unit = entry
-    # The *current* version, not a pooled figure: the chemist is asking how far to trust the
-    # calculator that is about to answer them, and a v1 that ran high averaged with a v2 that ran
-    # low reads as well-calibrated while neither is (REV-12).
-    return version(), unit
+    tool, unit = entry
+    version = await remote_version(tool, {"smiles": settings.calc_version_probe_smiles})
+    return version, unit
 
 
 @server.tool()
@@ -476,7 +478,7 @@ async def calculator_trust(property_name: str) -> Calibration:
     Returns:
         Bias, mean absolute error, RMSE, and uncertainty coverage, with the observation count.
     """
-    version, unit = _calibrated(property_name)
+    version, unit = await _calibrated(property_name)
     return await calibration_for(property_name, version, unit=unit)
 
 
@@ -581,7 +583,7 @@ async def calculator_outliers(
         The worst misses — each with what was predicted, what was measured, the signed error, and
         whether the calculator's own uncertainty covered it — with the ledger's state beside them.
     """
-    version, unit = _calibrated(property_name)
+    version, unit = await _calibrated(property_name)
     measured = await reconciled_for(property_name, version)
     residuals = await _only_matching(measured, matching) if matching else measured
     worst = sorted(residuals, key=lambda r: abs(r.error), reverse=True)
@@ -648,8 +650,10 @@ async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     Returns:
         The method, charge, and total energy in Hartree.
     """
-    result, _ = await run_cached_xtb(default_store(), XtbInput(smiles=smiles, charge=charge))
-    return result
+    payload, _ = await cached_remote(
+        default_store(), "compute_xtb_energy", {"smiles": smiles, "charge": charge}
+    )
+    return XtbResult.model_validate(payload)
 
 
 @server.tool()
@@ -666,10 +670,11 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     Returns:
         The predicted log solubility, its uncertainty, and the model used.
     """
-    result, _ = await run_cached_solubility(default_store(), SolubilityInput(smiles=smiles))
+    payload, _ = await cached_remote(default_store(), "predict_solubility", {"smiles": smiles})
+    result = SolubilityResult.model_validate(payload)
     await _log_prediction(
         "solubility",
-        solubility_calc_version(),
+        _version_of(payload, "predict_solubility"),
         smiles,
         result.log_s_mol_per_l,
         result.uncertainty_log,
@@ -702,8 +707,11 @@ async def predict_pka(smiles: str) -> PkaResult:
         The predicted pKa, which site it describes, the protonation/deprotonation energy,
         and the uncertainty.
     """
-    result, _ = await run_cached_pka(default_store(), PkaInput(smiles=smiles))
-    await _log_prediction("pka", pka_calc_version(), smiles, result.pka, result.uncertainty, "pKa")
+    payload, _ = await cached_remote(default_store(), "predict_pka", {"smiles": smiles})
+    result = PkaResult.model_validate(payload)
+    await _log_prediction(
+        "pka", _version_of(payload, "predict_pka"), smiles, result.pka, result.uncertainty, "pKa"
+    )
     return result
 
 
@@ -732,8 +740,12 @@ async def compute_electronic_properties(
         the bond orders. Atom indices match the heavy atoms of the canonical SMILES,
         with hydrogens following them.
     """
-    result = (await run_cached_properties(default_store(), smiles, solvent)).properties
-    return result
+    payload, _ = await cached_remote(
+        default_store(),
+        "compute_electronic_properties",
+        {"smiles": smiles, "solvent": solvent},
+    )
+    return ElectronicProperties.model_validate(payload)
 
 
 @server.tool()
@@ -767,7 +779,20 @@ async def predict_site_reactivity(
         of atoms the ranking was drawn from. Atom indices match the heavy atoms of the
         canonical SMILES, with hydrogens following them.
     """
-    result, _ = await run_cached_fukui(default_store(), smiles, mode)
+    payload, _ = await cached_remote(
+        default_store(),
+        "predict_site_reactivity",
+        # Neither `mode` nor `top_n` is sent, and both omissions matter. The three single points do
+        # not depend on the mode — the server keys them without it (measured: all three modes on
+        # phenol derive one key) and re-ranks on the way out, which a cache *hit* here would never
+        # reach. So the row is stored in whatever order the server's default produces and
+        # `ranked_for` re-ranks it locally; sending `mode` would only make the stored ordering look
+        # authoritative. `top_n` is left off for the same reason in the other direction: the row
+        # holds every atom, so asking for more sites re-slices a cached result instead of running
+        # three more single points.
+        {"smiles": smiles},
+    )
+    result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
     limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
     return result.model_copy(update={"sites": result.sites[:limit]})
 
@@ -795,13 +820,17 @@ async def optimize_geometry(smiles: str, solvent: str | None = None) -> Optimiza
         The converged energy, how much the relaxation lowered it, how far the atoms
         moved, and the id of the resulting geometry.
     """
-    # Embedding is synchronous RDKit (ETKDG + a force-field cleanup), tens of milliseconds for
-    # a drug-sized molecule; this coroutine shares its loop with every other in-flight request.
-    structure = await asyncio.to_thread(
-        structure_from_smiles, smiles, multiplicity=None, optimize=True
-    )
-    result, _ = await run_cached_optimization(default_store(), structure, OptSpec(solvent=solvent))
-    return OptimizationSummary.of(result)
+    # Embed and relax as two calls rather than through the server's own one-shot
+    # `optimize_geometry`, and the reason is a collision found by measurement rather than by
+    # reading. That tool and `relax_structure` derive the **same** key —
+    # `xtb.opt@…:389b625b3220108a:56dca3aa944bd3da` for `CCO` on both — while returning different
+    # payloads: a summary without coordinates, and the full result with them. Caching either under
+    # that one key poisons the other, and the failure is a
+    # validation error on a *hit* deep inside a reaction job. One key, one payload shape: the full
+    # result is stored, and the summary is derived from it here, where dropping the geometry costs
+    # nothing.
+    relaxed, _ = await compose.relax(default_store(), await compose.embed(smiles), solvent)
+    return OptimizationSummary.of(relaxed)
 
 
 @server.tool()
@@ -841,19 +870,16 @@ async def compute_thermochemistry(
         Frequencies with IR intensities, whether the geometry is a minimum, and the
         thermochemistry with the uncertainty to quote alongside it.
     """
-    # Embedding is synchronous RDKit (ETKDG + a force-field cleanup), tens of milliseconds for
-    # a drug-sized molecule; this coroutine shares its loop with every other in-flight request.
-    structure = await asyncio.to_thread(
-        structure_from_smiles, smiles, multiplicity=None, optimize=True
-    )
-    spec = ThermoSpec(
-        solvent=solvent,
+    # Composed rather than called: remote optimise, remote Hessian, local RRHO. The key of a
+    # thermochemistry would have to name the geometry the refinement loop settles on, which is an
+    # output, so it has no cache row of its own and never had one — its economy is entirely the two
+    # nested entries, and a single remote call would swallow both.
+    structure = await compose.embed(smiles)
+    thermo = ThermoSettings(
         symmetry_number=symmetry_number,
         temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
     )
-    _, result, _ = await relax_to_minimum(
-        default_store(), structure, OptSpec(solvent=solvent), spec
-    )
+    _, result, _ = await compose.relax_to_minimum(default_store(), structure, solvent, thermo)
     limit = top_bands if top_bands > 0 else settings.xtb_ir_bands_top_n
     # The imaginary mode's 3N-vector is refinement machinery, not something a model can
     # read; the frequency itself is already in `imaginary_frequencies_cm`.
@@ -878,8 +904,10 @@ async def predict_developability_profile(smiles: str) -> DescriptorProfile:
     Returns:
         The descriptor panel plus the two rule-of-thumb flags.
     """
-    result, _ = await run_cached_descriptor_profile(default_store(), DescriptorInput(smiles=smiles))
-    return result
+    payload, _ = await cached_remote(
+        default_store(), "predict_developability_profile", {"smiles": smiles}
+    )
+    return DescriptorProfile.model_validate(payload)
 
 
 @server.tool()
@@ -917,4 +945,11 @@ async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
         logD at the given pH, plus the LogP and pKa it was derived from and the pKa model's
         uncertainty (state it — this is not an exact value).
     """
-    return await _predict_logd(default_store(), LogdInput(smiles=smiles, ph=ph))
+    # The expensive half is a *cached* pKa on the server's own key; the rest is a Crippen sum and
+    # one Henderson-Hasselbalch term, both pure RDKit and both local. Shipping the composite whole
+    # would have made every repeat a full recompute of the most expensive tool in the set —
+    # measured, pyridine 20.603 s cold against 0.005 s warm — which is a D-011 violation reached by
+    # moving code rather than by changing a rule. `predict_logd` has no cache row of its own here
+    # and never had one, so `logd_from_pka` is called on the pKa the cache just served.
+    payload, _ = await cached_remote(default_store(), "predict_pka", {"smiles": smiles})
+    return logd_from_pka(PkaResult.model_validate(payload), ph)

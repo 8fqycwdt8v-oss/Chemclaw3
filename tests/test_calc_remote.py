@@ -29,9 +29,11 @@ import pytest
 
 from chemclaw.connectors.calc.remote import (
     CalcServerError,
+    CalcToolError,
     cached_remote,
     remote_key,
 )
+from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.science.calc.store import InMemoryStore
 
 # A version carrying *both* key delimiters, which is not a contrived string: `esol-delaney@2004`
@@ -170,8 +172,23 @@ def test_a_tool_with_no_derivable_key_computes_every_time_and_stores_nothing(
     asyncio.run(_run())
 
 
-def test_a_tool_error_becomes_one_calc_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every remote failure is one outcome — the calculation did not happen."""
+def test_a_refused_call_and_an_unreachable_server_are_different_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one distinction a durable job acts on, and the reason it is not one error any more.
+
+    They were one, on the reasoning that "the caller's options are identical in every case: a
+    calculation did not happen". That holds for a tool, which surfaces either to a chemist. It is
+    false for a Temporal activity, where the two are opposites: an unreachable server is fixed by
+    exactly one thing — a retry — and a refused request is fixed by exactly one thing that is not a
+    retry. Conflated, the durable jobs either burn `activity_max_attempts` on an unparameterised
+    solvent or give up on a pod restart.
+
+    So the classification is asserted on the *hierarchies*, which is what
+    `durable/publish.py` matches on: `CalcToolError` is a `ChemclawError` (registered non-retryable,
+    checked by `tests/test_publish.py`'s completeness walk) and `CalcServerError` is a
+    `SubsystemUnavailableError` (deliberately absent from that list).
+    """
 
     class _Failing(_FakeSession):
         async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -180,10 +197,15 @@ def test_a_tool_error_becomes_one_calc_server_error(monkeypatch: pytest.MonkeyPa
     _session(monkeypatch, _Failing(_KEY, {}))
 
     async def _run() -> None:
-        with pytest.raises(CalcServerError, match="calculation_key failed"):
+        with pytest.raises(CalcToolError, match="calculation_key failed") as refused:
             await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        # The server's own message is the whole content of a refusal — which solvent, which index.
+        assert "unparameterised solvent" in str(refused.value)
 
     asyncio.run(_run())
+    assert issubclass(CalcToolError, ChemclawError)
+    assert issubclass(CalcServerError, SubsystemUnavailableError)
+    assert not issubclass(CalcServerError, ChemclawError)
 
 
 # Every name whose value is or contains a `calc_version`. A local definition of any of these is the
@@ -194,23 +216,11 @@ _DERIVATION_NAMES = frozenset(
 _SRC = Path(__file__).resolve().parent.parent / "src" / "chemclaw"
 _SEARCHED = (
     pytest.param(_SRC / "connectors" / "calc", id="connectors"),
-    # **Expected to fail, strictly, until the engines are deleted.** `science/calc` still holds
-    # nine derivations (`xtb_spec`, `pka`, `solubility`, `descriptors`, `complexes`, and the two
-    # `binary_version`s) because the physics has not been removed from this repository yet — the
-    # server exists and the client works, but the old in-process path is still there beside it.
-    #
-    # `strict=True` is the point: the moment those modules go, this *passes*, pytest reports
-    # XPASS as a failure, and whoever finished the migration has to delete this marker. A plain
-    # skip or a narrowed search path would leave the rule looking enforced while the last
-    # derivation quietly survived, which is the exact shape of defect this whole test exists for.
-    pytest.param(
-        _SRC / "science" / "calc",
-        id="science",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="the in-process engines have not been deleted yet; remove this marker with them",
-        ),
-    ),
+    # `science/calc` carried nine derivations while the in-process engines sat beside the client —
+    # `xtb_spec`, `pka`, `solubility`, `descriptors`, `complexes` and the two `binary_version`s — so
+    # this parameter was `xfail(strict=True)` and its marker was the migration's own finish line.
+    # The engines are gone; the marker went with them, which is exactly what `strict=True` was for.
+    pytest.param(_SRC / "science" / "calc", id="science"),
 )
 
 
