@@ -102,7 +102,7 @@ from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import ChemclawState
-from chemclaw.agent.subagents import general_purpose_helper
+from chemclaw.agent.subagents import general_purpose_helper, governed_roster
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -371,18 +371,20 @@ def _subagents(
     Returns:
         The single-entry list to hand `create_deep_agent(subagents=…)`.
     """
-    return [
-        general_purpose_helper(
-            build_langgraph_agent(
-                model=model,
-                profile=profile,
-                actor=actor,
-                correlation_id=correlation_id,
-                audit_sink=audit_sink,
-                helper=True,
+    return governed_roster(
+        [
+            general_purpose_helper(
+                build_langgraph_agent(
+                    model=model,
+                    profile=profile,
+                    actor=actor,
+                    correlation_id=correlation_id,
+                    audit_sink=audit_sink,
+                    helper=True,
+                )
             )
-        )
-    ]
+        ]
+    )
 
 
 class ReloadingSkillsState(SkillsState):

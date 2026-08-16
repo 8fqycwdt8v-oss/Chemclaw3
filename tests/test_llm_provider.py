@@ -181,3 +181,109 @@ def test_no_bundle_leaves_the_sdk_its_own_client(monkeypatch: pytest.MonkeyPatch
         assert _tls_http_client() is None
     finally:
         _tls_http_client.cache_clear()
+
+
+def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put the provider on the `openai_compatible` branch with a primary endpoint configured."""
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    monkeypatch.setattr(settings, "llm_base_url", "https://primary.internal/v1")
+    monkeypatch.setattr(settings, "llm_model", "internal-large")
+    monkeypatch.setattr(settings, "llm_api_key", "primary-key")
+
+
+def test_no_fallback_configured_returns_the_model_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is off, so an existing deployment's model object does not change shape.
+
+    Asserted because wrapping unconditionally would be the easy mistake: every caller of
+    `build_chat_model` would start receiving a `RunnableWithFallbacks`, and the one that noticed
+    would be whichever code path calls a `ChatOpenAI`-only attribute.
+    """
+    _openai_endpoint(monkeypatch)
+    monkeypatch.setattr(settings, "llm_fallback_base_url", "")
+
+    model = provider.build_chat_model()
+    assert type(model).__name__ == "ChatOpenAI"
+
+
+def test_a_configured_fallback_wraps_the_model_and_reuses_the_primarys_model_and_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second endpoint is enough; the model name and credential default to the primary's.
+
+    The common case is a second replica of one internal deployment rather than a different vendor,
+    and requiring all three would make that case verbose enough that somebody skips it.
+    """
+    _openai_endpoint(monkeypatch)
+    monkeypatch.setattr(settings, "llm_fallback_base_url", "https://standby.internal/v1")
+    monkeypatch.setattr(settings, "llm_fallback_model", "")
+    monkeypatch.setattr(settings, "llm_fallback_api_key", "")
+
+    model = provider.build_chat_model()
+    assert type(model).__name__ == "RunnableWithFallbacks"
+    standby = model.fallbacks[0]
+    assert str(standby.openai_api_base) == "https://standby.internal/v1"
+    assert standby.model_name == "internal-large", "the fallback should reuse the primary's model"
+    assert standby.openai_api_key.get_secret_value() == "primary-key"
+
+
+def test_the_fallback_may_name_its_own_model_and_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely different endpoint needs its own two values, and they win when set."""
+    _openai_endpoint(monkeypatch)
+    monkeypatch.setattr(settings, "llm_fallback_base_url", "https://other.example/v1")
+    monkeypatch.setattr(settings, "llm_fallback_model", "other-model")
+    monkeypatch.setattr(settings, "llm_fallback_api_key", "other-key")
+
+    standby = provider.build_chat_model().fallbacks[0]
+    assert standby.model_name == "other-model"
+    assert standby.openai_api_key.get_secret_value() == "other-key"
+
+
+def test_only_an_endpoint_that_is_down_fails_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refused *request* must not be re-sent to the standby, and this is where that is decided.
+
+    `with_fallbacks` defaults to catching every `Exception`. Under that default a malformed request
+    is rejected by the primary, sent to the standby, and rejected identically — twice the latency
+    for the same answer, and a 400 laundered into something that looks like an outage. It is the
+    same distinction `connectors/calc/remote.py` draws between a refused call and an unreachable
+    service: a retry fixes exactly one of them.
+
+    Asserted on the handled set rather than by driving a live failure, because what can go wrong
+    here is the *configuration* of the wrapper, and that is visible directly.
+    """
+    from openai import APIConnectionError, APITimeoutError, BadRequestError, InternalServerError
+
+    _openai_endpoint(monkeypatch)
+    monkeypatch.setattr(settings, "llm_fallback_base_url", "https://standby.internal/v1")
+
+    handled = provider.build_chat_model().exceptions_to_handle
+    assert APIConnectionError in handled
+    assert issubclass(APITimeoutError, tuple(handled)), "a timeout is an outage"
+    assert InternalServerError in handled
+    assert not issubclass(BadRequestError, tuple(handled)), (
+        "a malformed request must fail where it was made, not be retried against the standby"
+    )
+
+
+def test_binding_tools_reaches_the_fallback_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failover answer must still be able to call tools, or it is worse than no failover.
+
+    `create_agent` binds the turn's tools to whatever `build_chat_model` returned. If that binding
+    reached only the primary, an outage would produce a model that answers fluently and cannot do
+    anything — a degraded mode that looks like it is working. Measured here rather than assumed,
+    because "wrapping a chat model loses its tool surface" is exactly the shape of upstream
+    behaviour this repository has been caught by before.
+    """
+    from langchain_core.tools import StructuredTool
+
+    _openai_endpoint(monkeypatch)
+    monkeypatch.setattr(settings, "llm_fallback_base_url", "https://standby.internal/v1")
+    tool = StructuredTool.from_function(
+        name="find_notes", description="d", func=lambda: "", infer_schema=True
+    )
+
+    bound = provider.build_chat_model().bind_tools([tool])
+    assert type(bound).__name__ == "RunnableWithFallbacks", "the fallback survived binding"
+    assert "tools" in bound.runnable.kwargs, "the primary carries the tools"
+    assert "tools" in bound.fallbacks[0].kwargs, "so does the standby"
