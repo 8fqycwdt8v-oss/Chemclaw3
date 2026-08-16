@@ -361,9 +361,15 @@ async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) ->
     try:
         result = await handler(request)
     except Exception as exc:
-        record_tool_failure(request.tool_call["name"], failure_detail(exc))
+        record_tool_failure(
+            request.tool_call["name"], failure_detail(exc), str(request.tool_call.get("id") or "")
+        )
         raise
     failed = returned_failure(result)
     if failed is not None:
-        record_tool_failure(request.tool_call["name"], returned_failure_detail(failed))
+        record_tool_failure(
+            request.tool_call["name"],
+            returned_failure_detail(failed),
+            str(request.tool_call.get("id") or ""),
+        )
     return result

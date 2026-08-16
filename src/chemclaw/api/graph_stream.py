@@ -111,6 +111,19 @@ async def graph_events(
         `Event`s in the order and with the meanings `api/events.py` declares.
     """
     todos: list[str] = []
+    # The calls this turn has already reported as failed, by call id. **Not read off the
+    # `ToolMessage`'s status**, which is the mistake this replaced:
+    # `agent/tool_authz.answered_failure` rewrites that status to `"success"` before the stream ever
+    # sees the message — deliberately, so a provider does not read `is_error` as "retry this" — and
+    # its own docstring names this module as the reader that therefore needs a status-independent
+    # test. It never got one, so every failed call emitted `tool_failed` *and* `tool_result`, and
+    # the error sentence joined `ToolCallTrace.outputs`, which is the corpus `score_answer` grades
+    # an answer's grounding against. Measured across four failure shapes on a real compiled graph:
+    # the signal fired every time and the status read `'success'` every time.
+    #
+    # By call id rather than tool name, because a model may issue two calls to one tool in a single
+    # batch and only one of them fail.
+    failed_calls: set[str] = set()
     # Who is currently answering, tracked across the stream by the handoff pair rather than
     # inferred per event. `""` is the main agent, which is every turn without a team.
     agent = ""
@@ -138,6 +151,8 @@ async def graph_events(
             if text:
                 yield TokenEvent(text=text, agent=agent or ("subagent" if namespace else ""))
         elif mode == "custom":
+            if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
+                failed_calls.add(signal.call_id)
             event = _custom_event(payload, on_signal)
             if isinstance(event, HandoffEvent):
                 # The enter names the specialist, the hand back clears it. Safe to read as state
@@ -148,7 +163,37 @@ async def graph_events(
             if event is not None:
                 yield event
         elif mode == "updates":
-            async for event in _from_update(payload, agent, trace, todos, exchanges):
+            # **A non-empty namespace means "below the root", and that is the only attribution
+            # available here.** `agent` is threaded from the handoff pair, which nothing raises
+            # since
+            # the specialist team went — so it is permanently `""`, and `events.py` states that `""`
+            # *means* the main agent. Without the namespace test, every helper the `task` tool runs
+            # had its tool calls, its results and its plan emitted as the supervisor's: its output
+            # joined `ToolCallTrace.outputs` and the parent session's fetchable `result_ref`
+            # indistinguishably, and its `write_todos` surfaced as a root `PlanEvent` that
+            # *replaced*
+            # the supervisor's — so under `plan_only` the checklist a chemist approved could be the
+            # helper's rather than the turn's.
+            #
+            # The same rule the token branch above already applies, for the same reason: the
+            # specialist's *name* is not in the namespace under any dispatch that routes through the
+            # task tool (D-2026-08-11-the-specialists-name-is-not-in-the-namespace), but its
+            # non-emptiness is a fact, and marking work as a subagent's is what fails safe.
+            #
+            # The plan is not merely relabelled but withheld: `PlanEvent` carries no `agent` field,
+            # so a helper's todo list has nowhere to say whose it is, and a surface showing it as
+            # the
+            # turn's plan is worse than a surface not showing it.
+            below_root = bool(namespace)
+            async for event in _from_update(
+                payload,
+                agent or ("subagent" if below_root else ""),
+                trace,
+                todos,
+                exchanges,
+                failed_calls,
+                emit_plan=not below_root,
+            ):
                 yield event
 
 
@@ -182,6 +227,8 @@ async def _from_update(
     trace: ToolCallTrace,
     todos: list[str],
     exchanges: list[Any] | None = None,
+    failed_calls: frozenset[str] | set[str] = frozenset(),
+    emit_plan: bool = True,
 ) -> AsyncIterator[Event]:
     """The events one completed node produces: its calls, its results, and any new plan.
 
@@ -238,11 +285,14 @@ async def _from_update(
                 # `tool_result` while `announce_tool_failures` had already raised `tool_failed` for
                 # it. Two events for one outcome, one of them wrong, and the pair is documented as
                 # exhaustive.
-                if getattr(message, "status", "success") == "error":
-                    logger.debug(
-                        "tool call %s returned an error result; already reported as tool_failed",
-                        getattr(message, "tool_call_id", ""),
-                    )
+                #
+                # The turn's own failure signals are the reader that can be right; the status is
+                # kept as a second test only because a `ToolMessage` can reach here from a path that
+                # raised no signal (a middleware short-circuit), and an unreported failure is worse
+                # than a redundant check.
+                call_id = str(getattr(message, "tool_call_id", ""))
+                if call_id in failed_calls or getattr(message, "status", "success") == "error":
+                    logger.debug("tool call %s failed; already reported as tool_failed", call_id)
                 else:
                     yield _attributed(
                         await trace.returned(
@@ -250,7 +300,7 @@ async def _from_update(
                         ),
                         agent,
                     )
-        plan = _todo_titles(update)
+        plan = _todo_titles(update) if emit_plan else None
         if plan is not None and plan != todos:
             # Only on change and never empty, matching `runner._PlanEmitter`: an unchanged plan
             # re-sent every node would drown the trace, and an empty one is the harness clearing

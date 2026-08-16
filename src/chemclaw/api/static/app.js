@@ -112,6 +112,18 @@ function applyEvent(evt, answerEl) {
       add("trace", `${agentTag(evt)}→ ${evt.tool}(${evt.arguments || ""})`);
       return answerEl;
     case "token":
+      // Attributed tokens are another agent's working prose, not this turn's answer. The server
+      // already knows: `api/runner` concatenates only unattributed tokens into `AnswerEvent.text`,
+      // so appending them here made the bubble a chemist reads diverge permanently from the
+      // durable transcript — permanently, because `case "answer"` below only fills an *empty*
+      // element and so never overwrites the contaminated one. Every other agent-bearing event
+      // routes through `agentTag`; this is the one where the attribution decides what the answer
+      // *is*, which is why it was the one worth getting wrong.
+      if (evt.agent) {
+        add("trace", `${agentTag(evt)}${evt.text}`);
+        transcript.scrollTop = transcript.scrollHeight;
+        return answerEl;
+      }
       if (!answerEl) answerEl = add("assistant", "");
       answerEl.textContent += evt.text;
       transcript.scrollTop = transcript.scrollHeight;
