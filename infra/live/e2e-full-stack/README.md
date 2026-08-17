@@ -17,6 +17,8 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | PR-gate note repo | this repo | — | `infra/live/bootstrap.sh` |
 | `props` (solvent/pure-component properties) | Chemclaw3-mcp | 8850 | this script |
 | `rxnpredict` (forward/condition prediction, `fake_a`/`fake_c` doubles) | Chemclaw3-mcp | 8857 | this script |
+| `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | this script |
+| `safety` (structural hazard / genotoxicity screen, ICH limits) | Chemclaw3-mcp | 8859 | this script |
 | `mock-hpc-eln` (Nextflow-shaped HPC launcher + ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
 | connectors, 4 Temporal workers, front door | this repo | 8810+, 9000-9003, 8000 | `infra/live/processes.sh` |

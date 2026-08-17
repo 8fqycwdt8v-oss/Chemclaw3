@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (props, rxnpredict), Chemclaw3_mock (the HPC/Nextflow mock, the
+# Chemclaw3-mcp tool fleet (props, rxnpredict, chem, safety, calc), Chemclaw3_mock (the HPC/Nextflow mock, the
 # eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
@@ -68,8 +68,32 @@ wait_for() {
 }
 
 # ---------------------------------------------------------------------------- Chemclaw3-mcp
-# `props` and `rxnpredict` share one uv workspace at the repo root, so one resolved interpreter
-# serves both (same reasoning as processes.sh's python_bin()).
+# The four servers this harness runs share one uv workspace at the repo root, so one resolved
+# interpreter serves them all (same reasoning as processes.sh's python_bin()).
+#
+# `chem` and `safety` are here because Chemclaw3 *dials* them: both bundles declare
+# `http://127.0.0.1:885{8,9}/mcp`, and under `CHEMCLAW_CONNECTORS_REQUIRED=true` an unreachable
+# one is a hard startup failure of the front door, not a degraded connector. They were absent
+# from this script while the fleet grew to five servers, which is exactly how that failed —
+# `ConnectorsUnavailable: ... chem, safety`, with nothing in the harness saying who should have
+# started them.
+#
+# The fifth server, `calc`, is started too, but it is NOT a connector and its manifest must stay
+# off `CHEMCLAW_CONNECTORS_DIR` — it says so in a box. Chemclaw3 keeps its own `calc` bundle and
+# all fifteen tools; what moved to the fleet is the *physics* behind them
+# (D-2026-08-16-the-physics-leaves-the-cache-stays), which `connectors/calc/remote.py::calc_session`
+# dials on a cache miss at `calc_server_url` (8860). "Not a connector" is not "not needed": with
+# this server down, `/readyz` is entirely green — it probes connectors, and this is not one — and
+# every calculator tool fails at call time with `CalcServerError: the calculation service is not
+# answering`. That is how `predict_pka` failed on this harness's first real turn.
+#
+# Note the collision, because it is intentional: `chem` and `safety` exist *both* in this repo's
+# `src/chemclaw/connectors/` and in the fleet's `manifests/`, same names, same tools. First
+# directory on `CHEMCLAW_CONNECTORS_DIR` wins (`connectors/registry.py::_bundle_dirs`) and this
+# script lists Chemclaw3's own first, so the in-tree bundles answer. That is the right way round
+# for an end-to-end pass: the in-tree `safety` bundle ships `skills/safety-screening/SKILL.md`,
+# and a skill is architecture layer 3 — the fleet's manifest declares none. Either way both
+# bundles name the same URLs, so these two servers must run regardless of which manifest wins.
 
 mcp_python_bin() { ( cd "$MCP_REPO" && uv sync --quiet && uv run python -c 'import sys; print(sys.executable)' ); }
 
@@ -92,6 +116,28 @@ start_rxnpredict() {
     CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}" \
     start rxnpredict "$python" -m uvicorn chemclaw_mcp_rxnpredict.app:app --host 127.0.0.1 --port 8857
   wait_for rxnpredict "http://127.0.0.1:8857/healthz"
+}
+
+start_chem() {
+  local python="$1"
+  CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}" \
+    start chem "$python" -m uvicorn chemclaw_mcp_chem.app:app --host 127.0.0.1 --port 8858
+  wait_for chem "http://127.0.0.1:8858/healthz"
+}
+
+start_safety() {
+  local python="$1"
+  CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}" \
+    start safety "$python" -m uvicorn chemclaw_mcp_safety.app:app --host 127.0.0.1 --port 8859
+  wait_for safety "http://127.0.0.1:8859/healthz"
+}
+
+# Not a connector — see the fleet comment above. `calc_server_url` defaults to 8860.
+start_calc() {
+  local python="$1"
+  CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}" \
+    start calc "$python" -m uvicorn chemclaw_mcp_calc.app:app --host 127.0.0.1 --port 8860
+  wait_for calc "http://127.0.0.1:8860/healthz"
 }
 
 # ---------------------------------------------------------------------------- Chemclaw3_mock
@@ -192,15 +238,26 @@ up() {
   export CHEMCLAW_HPC_ARTIFACT_STORE_URL="http://localhost:8090/artifacts"
   export CHEMCLAW_HPC_PIPELINE_NAME="qm-pipeline"
   export CHEMCLAW_HPC_PIPELINE_VERSION="mock-1"
+  # Both halves of each token matter and they are set in two different places: the `start_*`
+  # function gives the *server* the value it verifies, and this export gives the *front door* the
+  # value it sends. Setting only the first is a specific and quiet failure — `/healthz` is
+  # unauthenticated, so the connector reports `healthy` while every `/mcp` call it makes is
+  # rejected, and the turn degrades with no clue why.
   export CHEMCLAW_PROPS_TOKEN="${CHEMCLAW_PROPS_TOKEN:-dev-token}"
   export CHEMCLAW_RXNPREDICT_TOKEN="${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}"
+  export CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}"
+  export CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}"
+  export CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}"
 
   log "connectors dir: $CHEMCLAW_CONNECTORS_DIR"
 
-  log "starting the Chemclaw3-mcp fleet (props, rxnpredict)"
+  log "starting the Chemclaw3-mcp fleet (props, rxnpredict, chem, safety, calc)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
   start_props "$mcp_python"
   start_rxnpredict "$mcp_python"
+  start_chem "$mcp_python"
+  start_safety "$mcp_python"
+  start_calc "$mcp_python"
 
   log "starting Chemclaw3_mock (HPC/ELN mock + mock-vendor MCP tool)"
   local mock_python; mock_python="$(mock_venv_bin)"
@@ -249,7 +306,8 @@ status() {
 }
 
 # Stop one named external process and bring it back — the shape the chaos round needs. Only
-# covers the processes this script owns (props, rxnpredict, mock-hpc-eln, mock-vendor, ui-bff);
+# covers the processes this script owns (props, rxnpredict, chem, safety, calc, mock-hpc-eln,
+# mock-vendor, ui-bff);
 # restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb.
 restart() {
   local name="$1" pidfile="$RUN_DIR/$1.pid"
@@ -262,6 +320,9 @@ restart() {
   case "$name" in
     props) start_props "$(mcp_python_bin)" ;;
     rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
+    chem) start_chem "$(mcp_python_bin)" ;;
+    safety) start_safety "$(mcp_python_bin)" ;;
+    calc) start_calc "$(mcp_python_bin)" ;;
     mock-hpc-eln) start_mock_hpc_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
     ui-bff) start_ui ;;
