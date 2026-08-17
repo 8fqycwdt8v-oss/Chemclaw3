@@ -141,3 +141,53 @@ def test_the_real_hash_embedder_still_round_trips_through_the_cache() -> None:
 def test_an_empty_batch_is_not_a_cache_lookup() -> None:
     """Cheap, and it keeps the zip-strict pairing below from ever seeing an empty provider call."""
     assert embed_texts([]) == []
+
+
+def test_a_batch_larger_than_the_bound_still_returns_every_vector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trim may evict a key this very call inserted; the caller still gets its vector.
+
+    The deterministic half of the concurrency defect below, and the one worth pinning hardest
+    because it needs no threads to state: the answer is assembled from what the call holds, not
+    re-read from `_CACHE` after the trim has run. `reindex_notes` embeds one text per note in a
+    single batch, so any corpus larger than `embedding_cache_size` takes this path.
+    """
+    monkeypatch.setattr(settings, "embedding_cache_size", 4)
+    texts = [f"text-{index}" for index in range(20)]
+
+    vectors = embed_texts(texts)
+
+    assert len(vectors) == len(texts)
+    assert all(
+        vector == embeddings._hash_embedding(text)
+        for text, vector in zip(texts, vectors, strict=True)
+    )
+    assert len(embeddings._CACHE) <= 4
+
+
+def test_concurrent_batches_do_not_race_on_the_cache() -> None:
+    """`_CACHE` is reached from several threads, and was a plain dict with no lock.
+
+    Every retrieval runs its embedding through `asyncio.to_thread`, so concurrent turns land on the
+    default executor together. Two races followed and both are reproduced by this shape at the
+    shipped `embedding_cache_size` of 2048: a trim evicting a key between another thread's insert
+    and its read (`KeyError`, naming nothing, on the interactive path), and two trims mutating the
+    dict together (`RuntimeError: dictionary changed size during iteration`).
+
+    Measured on the pre-fix tree with these parameters: 6 of 6 trials failed, 1-3 of the 8 threads
+    each time. A race test cannot promise to fail every run, so this is written to make the window
+    as wide as the real workload does rather than to be a coin flip — batches that overlap, and a
+    total well past the bound.
+    """
+    import concurrent.futures
+
+    def embed_a_batch(worker: int) -> int:
+        return len(embed_texts([f"text-{worker}-{index}" for index in range(600)]))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        counts = list(pool.map(embed_a_batch, range(8)))
+
+    # A raised KeyError/RuntimeError fails the test by propagating out of `map`; this pins that
+    # every caller also got a complete answer rather than a short one.
+    assert counts == [600] * 8
