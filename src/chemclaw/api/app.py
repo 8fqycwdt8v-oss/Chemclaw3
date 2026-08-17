@@ -35,6 +35,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
 from chemclaw.agent.graph_tools import expand_note
@@ -47,6 +48,7 @@ from chemclaw.agent.interaction_tools import (
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
+from chemclaw.agent.scratchpad import close_memory_store
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.middleware import (
@@ -137,6 +139,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     deployment where answering with a silently reduced tool surface is worse than not answering.
     That check belongs at startup rather than in the readiness route because refusing to *start*
     is the only way to keep a pod with degraded capability out of a rollout.
+
+    **Closes the checkpointer's pool on the way out, which nothing did before.** The LangGraph turn
+    state lives on its own pool (`agent/checkpointer.py`), built lazily the first time a turn needs
+    it, and `close_checkpointer`/`close_memory_store` existed with no caller outside tests — this
+    process built the pool and then let it die with the process instead of closing it, which is
+    exactly the sockets-left-for-the-database-to-reap outcome `db.pooling()` already avoids for the
+    *other* pool. The memory store closes first because it holds no connections of its own, only a
+    reference into the checkpointer's pool (`agent/scratchpad.py`); closing the pool first would
+    leave it pointing at dead connections for whatever ran between the two calls.
     """
     # First, so everything below is logged the way the operator asked. The front door never
     # configured either of these, so it ran on Python's default root logger (WARNING, no format)
@@ -154,7 +165,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
-        yield
+        try:
+            yield
+        finally:
+            await close_memory_store()
+            await close_checkpointer()
 
 
 def create_app(
