@@ -268,6 +268,16 @@ async def _from_update(
     is non-empty.
     """
     for node, update in (payload or {}).items():
+        # **Whoever adds the first interrupt: this line drops it.** LangGraph delivers a suspended
+        # turn as `{"__interrupt__": (Interrupt(...),)}` — a *tuple*, not a dict — so it takes this
+        # `continue` and the turn ends with no answer text, which the runner then classifies as
+        # `empty_answer`. Nothing raises `interrupt()` today (D-2026-08-15 kept the plan gate a
+        # refusal, and the durable hold went with the challenge panel), so this is latent rather
+        # than live, and writing the branch now would be a path no test could reach.
+        #
+        # Recorded here rather than in `BACKLOG.md` deliberately: a note addressed to whoever adds
+        # a producer belongs where they will be reading, not in a queue of forty things capped on
+        # what a person can hold.
         if not isinstance(update, dict):
             continue
         for message in update.get("messages") or []:
