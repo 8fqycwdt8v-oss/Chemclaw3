@@ -37,9 +37,16 @@ from typing import Any, cast
 import pytest
 
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
+from chemclaw.core.identity_context import (
+    get_current_actor,
+    get_current_correlation_id,
+    get_current_roles,
+)
+from chemclaw.core.session_context import get_current_session_id
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 
@@ -482,6 +489,68 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
         booked_session, user_id, tokens = budget.booked[0]
         assert (booked_session, user_id) == ("s5", "u1")
         assert tokens >= 30, f"only {tokens} of the ~30 metered tokens were booked"
+
+    asyncio.run(_drive())
+
+
+def test_a_cancelled_turn_unstamps_every_ambient_it_stamped() -> None:
+    """The ambients a turn stamps are cleared on the disconnect path, asserted by driving one.
+
+    **This is the behavioural half of a guarantee that used to be pinned only by reading source.**
+    `tests/test_disconnect_teardown.py` asserts that `run_turn`'s `finally` contains no `await`,
+    because on the cancellation path an `await` there re-raises on the spot and skips every
+    statement below it — which used to include the five `reset_current_*` calls, so the next turn on
+    the worker would run under the disconnected user's identity. That proxy is worth keeping and is
+    not sufficient: it constrains one block's shape rather than the property anyone actually cares
+    about, and it went half-stale the moment the resets moved into `_turn_ambient`, still describing
+    a block that no longer holds them.
+
+    So this asserts the property itself: stamped while the turn runs, clear once a `CancelledError`
+    has torn it down.
+
+    **Driven directly rather than through `_cancel_mid_turn`, and that is a correctness condition
+    rather than a shortcut.** That helper consumes the stream inside `asyncio.create_task`, which
+    *copies* the context — so contextvars set within the task are invisible to the caller, and the
+    "after" assertion below would pass against a runner that reset nothing at all. An async
+    generator, by contrast, runs in the context of whoever drives it (PEP 568 was never
+    implemented), so stamping and unstamping are both observable here. A vacuous green is the one
+    outcome this test must not be able to produce.
+
+    `athrow` is the same delivery a real disconnect makes — `CancelledError` raised at the
+    suspension point *inside* the turn — which is the D-130 distinction the module docstring above
+    records.
+    """
+    session = TurnSession(session_id="s-ambient")
+
+    async def _drive() -> None:
+        agent = _StallingAgent(session)
+        # `_closable` for its narrowing rather than for `aclose`: `run_turn` is declared
+        # `AsyncIterator`, and `athrow` — the delivery a real disconnect makes — is on the concrete
+        # async *generator*. The same cast every sibling here uses, for the same reason.
+        stream = _closable(
+            run_turn(
+                session,
+                "hi",
+                actor="oid-ambient",
+                roles=frozenset({"chemist"}),
+                dry_run=True,
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            )
+        )
+        await stream.__anext__()
+        assert get_current_session_id() == "s-ambient"
+        assert get_current_actor() == "oid-ambient"
+        assert get_current_roles() == frozenset({"chemist"})
+        assert get_current_correlation_id(), "the turn stamped no correlation id"
+        assert is_dry_run() is True
+        with pytest.raises(asyncio.CancelledError):
+            await stream.athrow(asyncio.CancelledError())
+        assert get_current_session_id() is None, "the session id outlived its turn"
+        assert get_current_actor() is None, "the turn's identity leaked past its teardown"
+        assert get_current_roles() == frozenset(), "the turn's roles leaked past its teardown"
+        assert get_current_correlation_id() is None, "the correlation id outlived its turn"
+        assert is_dry_run() is False, "the dry-run flag leaked past its turn"
 
     asyncio.run(_drive())
 
