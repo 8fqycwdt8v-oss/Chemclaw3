@@ -538,6 +538,80 @@ def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
     )
 
 
+_CONFIG_MODULE = "chemclaw.core.config"
+
+# Every module that derives the bytes an identity is made of, and where therefore *no* setting may
+# be read at all. Three rather than one, because the read that re-keys a deployment does not have to
+# happen in the model: `store.CalculationKey.build` assembles the key and folds in
+# `CALCULATION_EPOCH`, and `core/ids.stable_hash` is the digest under both. A knob in any of them
+# has the identical consequence, and a single-file check said nothing about two of them.
+_IDENTITY_MODULES = (
+    Path("science") / "calc" / "models.py",
+    Path("science") / "calc" / "store.py",
+    Path("core") / "ids.py",
+)
+
+# The client is not on that list, because it legitimately reads settings: the server URL, the
+# bearer's env var and two timeouts. None of those is a byte on the wire — a socket bound is not
+# an argument.
+# What *is* on the wire is the `arguments` mapping, so the rule for this module is scoped to the
+# functions that hold one: a payload-carrying function may not read a setting, because anything it
+# reads can be folded into what the server hashes. Derived from the signature rather than from a
+# hand-kept list of function names, so a new payload path is covered the day it is written.
+_PAYLOAD_CLIENT = Path("connectors") / "calc" / "remote.py"
+_PAYLOAD_PARAMETER = "arguments"
+
+
+def _settings_aliases(tree: ast.Module) -> set[str]:
+    """Every local dotted name bound to the one settings object in this module.
+
+    The whole point of the alias walk: `from chemclaw.core.config import settings as cfg` binds the
+    same object under a name a check keyed on the literal `settings` cannot see, and `import
+    chemclaw.core.config` reaches it through a dotted prefix instead. Both are ordinary Python and
+    neither is unusual enough to notice in review.
+    """
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == _CONFIG_MODULE:
+            aliases |= {a.asname or a.name for a in node.names if a.name == "settings"}
+        elif isinstance(node, ast.Import):
+            aliases |= {
+                f"{a.asname or a.name}.settings" for a in node.names if a.name == _CONFIG_MODULE
+            }
+    return aliases
+
+
+def _dotted(node: ast.expr) -> str | None:
+    """`a.b.c` as a string for a name/attribute chain, `None` for anything else."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base is not None else None
+    return None
+
+
+def _settings_reads(tree: ast.AST, aliases: set[str]) -> list[str]:
+    """Every settings field read under `tree`, by whichever name the module bound the object to.
+
+    An accessor is covered as well as a name: an attribute taken off the result of a call whose
+    function is named `…settings` (`get_settings().x`, `Settings().x`) is the same read through one
+    more door, and a check that only knew names would be blind to it the day someone adds one.
+    """
+    reads: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        base = _dotted(node.value)
+        if base is not None and base in aliases:
+            reads.append(node.attr)
+        elif isinstance(node.value, ast.Call):
+            func = _dotted(node.value.func) or ""
+            if func.rsplit(".", 1)[-1].lower().endswith("settings"):
+                reads.append(node.attr)
+    return reads
+
+
 def test_no_setting_shapes_the_bytes_the_server_hashes() -> None:
     """The sibling rule to the version check, and it failed the same way: silently.
 
@@ -547,19 +621,55 @@ def test_no_setting_shapes_the_bytes_the_server_hashes() -> None:
     scan point and CREST search miss forever and diverge from every other deployment, with nothing
     raising — a miss is not an error, it is a recomputation.
 
-    Checked statically over the model that *is* the wire contract, because the failure has no
+    Checked statically over the modules that *are* the wire contract, because the failure has no
     observable symptom other than a bill.
+
+    **An audit defeated the first version of this while it stayed green**, twice over, and both
+    defeats are the same mistake: it checked a spelling instead of a meaning.
+
+    - It matched `ast.Attribute` on a bare `ast.Name` called `settings`, so
+      `from chemclaw.core.config import settings as cfg` — one alias, the same object, the same
+      consequence — read the knob straight back into `_GEOMETRY_DECIMALS` and passed. Fixed by
+      resolving the import: whatever local name the module bound that object to is the name checked
+      (`_settings_aliases`), including a dotted `import chemclaw.core.config` and a `…settings()`
+      accessor.
+    - It read one file, and the identity is not assembled in one file. `store.CalculationKey.build`
+      and `core/ids.stable_hash` shape the same bytes, and the client builds the `arguments` the
+      server hashes. All four are checked now — the client by the rule its own settings reads
+      require (see `_PAYLOAD_CLIENT`), which is a scope rather than an exemption.
     """
-    module = _SRC / "science" / "calc" / "models.py"
-    tree = ast.parse(module.read_text(encoding="utf-8"))
-    reads = [
-        node.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "settings"
+    offenders: list[str] = []
+    for relative in _IDENTITY_MODULES:
+        module = _SRC / relative
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        reads = _settings_reads(tree, _settings_aliases(tree))
+        if reads:
+            offenders.append(f"{relative} reads settings {sorted(set(reads))}")
+
+    client = ast.parse((_SRC / _PAYLOAD_CLIENT).read_text(encoding="utf-8"))
+    aliases = _settings_aliases(client)
+    payload_functions = [
+        node
+        for node in ast.walk(client)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(arg.arg == _PAYLOAD_PARAMETER for arg in node.args.args)
     ]
-    assert not reads, (
-        f"{module.name} reads settings {sorted(set(reads))} — every value it contributes to a "
-        "`Structure` is hashed by the server, so a deployment could re-key its own calculations."
+    assert payload_functions, (
+        f"no function in {_PAYLOAD_CLIENT} takes `{_PAYLOAD_PARAMETER}` — this check is reading a "
+        "module that no longer carries the payload, so it is proving nothing."
+    )
+    for function in payload_functions:
+        reads = _settings_reads(function, aliases)
+        if reads:
+            offenders.append(
+                f"{_PAYLOAD_CLIENT}:{function.lineno} {function.name}() reads settings "
+                f"{sorted(set(reads))} while holding the payload"
+            )
+
+    assert not offenders, (
+        "a setting shapes the bytes the server hashes: "
+        + "; ".join(offenders)
+        + ". Every value these contribute to a `Structure`, a `CalculationKey` or a tool's "
+        "`arguments` is hashed on the other side, so a deployment could re-key its own "
+        "calculations — silently, because a miss is not an error."
     )

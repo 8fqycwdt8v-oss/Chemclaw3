@@ -82,6 +82,7 @@ coverage:
 from __future__ import annotations
 
 import ast
+import re
 import tomllib
 from collections import defaultdict
 from dataclasses import dataclass
@@ -540,15 +541,36 @@ def test_no_declared_private_import_is_stale() -> None:
     assert not stale, f"declared private import(s) no longer in the tree — delete: {stale}"
 
 
-def test_the_xtb_engine_is_not_in_the_runtime_closure() -> None:
-    """The sibling of the `tblite` row above, asked of `pyproject.toml` instead of the imports.
+# Flags that would put the dev group back into the image, whatever else the command says. `--no-dev`
+# is not a promise a later flag cannot take back: uv resolves these together, so `--no-dev
+# --all-groups` installs the group this test exists to keep out.
+_DEV_REINSTATING_FLAGS = ("--all-groups", "--dev", "--group dev", "--only-dev")
 
-    Forbidding the *import* left the *dependency* declared, so the runtime image
-    (`deploy/Containerfile`, `uv sync --frozen --no-dev`) still installed a compiled
-    quantum-chemistry library that nothing in `src/` could legally call. What kept it there was a
-    test: `tests/test_solvents.py` re-derives `ALPB_SOLVENTS` against the installed copy. That is
-    the right check, so the package stays — in the dev group, where a test dependency belongs,
+
+def _image_install_commands() -> list[str]:
+    """Every `uv sync` in the Containerfile, each on one line with its continuations joined."""
+    text = (_REPO_ROOT / "deploy" / "Containerfile").read_text(encoding="utf-8")
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+    return [line.strip() for line in joined.splitlines() if "uv sync" in line]
+
+
+def test_the_xtb_engine_is_not_in_the_runtime_closure() -> None:
+    """The sibling of the `tblite` row above, asked of the manifest *and* of the image reading it.
+
+    Forbidding the *import* left the *dependency* declared, so the runtime image still installed a
+    compiled quantum-chemistry library that nothing in `src/` could legally call. What kept it there
+    was a test: `tests/test_solvents.py` re-derives `ALPB_SOLVENTS` against the installed copy. That
+    is the right check, so the package stays — in the dev group, where a test dependency belongs,
     rather than in every deployed pod.
+
+    **The second half is here because an audit defeated the first.** This test cited
+    `deploy/Containerfile`'s `uv sync --frozen --no-dev` as the mechanism that keeps the dev group
+    out of the image, and then never read the Containerfile — so deleting `--no-dev` reshipped the
+    compiled engine to every pod with this green. A manifest that files a dependency under `dev`
+    means nothing on its own; it is the *install command* that decides what a pod gets, and a
+    docstring naming a mechanism is not the mechanism. Both are asserted now, and the flag is
+    checked as a decision rather than as a word: a later `--all-groups` on the same command takes
+    `--no-dev` back.
     """
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     runtime = pyproject["project"]["dependencies"]
@@ -562,3 +584,20 @@ def test_the_xtb_engine_is_not_in_the_runtime_closure() -> None:
         "tblite left the dev group too — tests/test_solvents.py derives ALPB_SOLVENTS from the "
         "installed copy and will fail without it. Keep it here, not in the runtime closure."
     )
+
+    installs = _image_install_commands()
+    assert installs, (
+        "deploy/Containerfile no longer installs with `uv sync` — this check is reading for a "
+        "command that is gone, so it is proving nothing about what the image contains."
+    )
+    for command in installs:
+        assert "--no-dev" in command, (
+            f"the image installs the dev group: `{command}`. The dev group is where tblite lives, "
+            "so without `--no-dev` every pod gets the compiled engine back and the assertions "
+            "above stop meaning anything about what ships."
+        )
+        reinstated = [flag for flag in _DEV_REINSTATING_FLAGS if flag in command]
+        assert not reinstated, (
+            f"`{command}` carries {reinstated} beside `--no-dev`, which puts the dev group back "
+            "into the image the flag was there to keep it out of."
+        )

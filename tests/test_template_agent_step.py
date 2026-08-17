@@ -27,18 +27,25 @@ it, so a test of the arithmetic would have passed throughout.
 """
 
 import asyncio
+import contextlib
 from contextlib import AsyncExitStack
 from typing import Any, NamedTuple
 
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool as tool_decorator
+from temporalio.testing import ActivityEnvironment
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
 from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core.metrics import METRICS
-from chemclaw.durable.template_activities import AgentStepInput, StepIdentity, step_profile
+from chemclaw.durable.template_activities import (
+    AgentStepInput,
+    StepIdentity,
+    ToolStepInput,
+    step_profile,
+)
 from chemclaw.templates.manifest import AgentStep
 from tests.fakes_langgraph import ScriptedChatModel
 
@@ -547,6 +554,147 @@ def test_every_dispatched_step_carries_a_heartbeat_timeout() -> None:
         timedelta(seconds=60),
         timedelta(seconds=60),
     ]
+
+
+# --- and the beat the option is listening for ----------------------------------------------------
+
+
+# A `safety` endpoint tool the manifest classifies `read_only`, so it survives an `agent` step's
+# narrowing with nothing declared and passes a `tool` step's authorization as itself. The stand-in
+# below borrows the name because what is under test is the *wrapper around the wait*, not which
+# tool is waiting.
+_SLOW_TOOL = "screen_hazards"
+# What the two activities are given as their heartbeat timeout while this test drives them.
+# `durable/heartbeat.beating` derives its beat interval from this value — a quarter of it, floored
+# at one second — so four is the smallest number that still exercises the shipped arithmetic rather
+# than a special case: four seconds in, a beat at one.
+_TEST_HEARTBEAT_TIMEOUT_SECONDS = 4
+# How long the driven work waits to be heartbeat for before giving up and answering anyway. It
+# bounds only the *failing* run: a healthy step is released by the beat itself, so a pass costs one
+# beat interval and no more.
+_BEAT_DEADLINE_SECONDS = 10.0
+
+
+class _Beats:
+    """Every heartbeat one driven activity emitted, and the release the driven work waits on."""
+
+    def __init__(self) -> None:
+        self.seen: list[Any] = []
+        self._first = asyncio.Event()
+
+    def record(self, *details: Any) -> None:
+        """`ActivityEnvironment.on_heartbeat`: keep the beat, and let the waiting work finish."""
+        self.seen.append(details)
+        self._first.set()
+
+    async def wait(self) -> None:
+        """Block until this activity has been heartbeat for, or until the deadline lapses.
+
+        Waiting *for the beat* rather than sleeping a fixed span is what makes this both quick and
+        not a race: the healthy run ends the instant the timer fires, and the broken one is not
+        losing a bet against a sleep on a loaded machine. The deadline is suppressed rather than
+        raised so the failure is the assertion below — nothing beat — rather than a `TimeoutError`
+        surfacing out of the middle of somebody else's activity.
+        """
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._first.wait(), _BEAT_DEADLINE_SECONDS)
+
+
+def _beats_of(monkeypatch: pytest.MonkeyPatch, activity: Any, payload: Any) -> _Beats:
+    """Run one real template step activity, in an activity context, over one slow tool.
+
+    The slowness is the point and it is put where a real step's slowness is: in the tool. Both
+    activities wrap their whole wait in `beating`, so a tool that does not return until it has been
+    heartbeat for is enough to observe the timer from outside — and `ActivityEnvironment` is what
+    makes `activity.heartbeat` legal here at all, since it raises outside an activity context.
+
+    Everything substituted is what `_drive` substitutes and for the same reasons (no MCP server, no
+    provider credential, no database), plus the heartbeat timeout, so a beat is one second away
+    rather than fifteen.
+    """
+    from chemclaw.core.config import settings
+    from chemclaw.durable import template_activities
+
+    beats = _Beats()
+    monkeypatch.setattr(
+        settings, "template_step_heartbeat_timeout_seconds", _TEST_HEARTBEAT_TIMEOUT_SECONDS
+    )
+    monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: _Recorder())
+    monkeypatch.setattr(
+        "chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: _CostRecorder([])
+    )
+    monkeypatch.setattr(
+        "chemclaw.agent.langgraph_agent.build_chat_model",
+        lambda *_a, **_k: _scripted([{"name": _SLOW_TOOL, "args": {"smiles": "CCO"}}, "done"]),
+    )
+
+    @tool_decorator(name_or_callable=_SLOW_TOOL, description=f"slow stand-in for {_SLOW_TOOL}")
+    async def _slow(smiles: str) -> str:
+        await beats.wait()
+        return "screened"
+
+    async def fake_open(_stack: AsyncExitStack, _specs: Any) -> tuple[list[Any], list[str]]:
+        return [_slow], []
+
+    monkeypatch.setattr(template_activities, "open_connector_specs", fake_open)
+
+    env = ActivityEnvironment()
+    env.on_heartbeat = beats.record
+
+    async def _driven() -> None:
+        await env.run(activity, payload)
+        # The cost task `run_agent_step` deliberately does not await, given one scheduling round
+        # before the loop closes under it — same reason as `_drive`.
+        await asyncio.sleep(0)
+
+    asyncio.run(_driven())
+    return beats
+
+
+@pytest.mark.parametrize(
+    ("activity_name", "payload"),
+    [
+        pytest.param(
+            "run_tool_step",
+            lambda: ToolStepInput(
+                tool=_SLOW_TOOL,
+                arguments={"smiles": "CCO"},
+                identity=StepIdentity(actor="chemist-1", roles=[], correlation_id="run-1"),
+            ),
+            id="tool",
+        ),
+        pytest.param("run_agent_step", lambda: _step(prompt="screen CCO"), id="agent"),
+    ],
+)
+def test_every_dispatched_step_actually_heartbeats(
+    monkeypatch: pytest.MonkeyPatch, activity_name: str, payload: Any
+) -> None:
+    """The half an audit deleted while the whole suite stayed green.
+
+    `test_every_dispatched_step_carries_a_heartbeat_timeout` pins that the *workflow* schedules both
+    steps with a `heartbeat_timeout`, and nothing else asserted that anything ever beats. So
+    removing the `beating(...)` wrapper from both activities — the whole liveness mechanism — left
+    every test in this file and its sibling passing. A heartbeat timeout is not a safety net on its
+    own: it is a **deadline**, and the two changes together are what make a missing beat fatal
+    rather than merely undetected. With 60 s configured and no beat, Temporal now kills any step
+    that runs longer than a minute, which is every step worth dispatching to a worker.
+
+    So this drives the real activities and watches for the beat itself, through
+    `ActivityEnvironment.on_heartbeat` — the environment's own recording, not a spy on our wrapper,
+    so it is `activity.heartbeat` actually being called that is observed and not our own idea of it.
+    Both kinds, for the same reason the option test takes both: the failure mode is a step kind
+    arriving without it.
+    """
+    from chemclaw.durable import template_activities
+
+    beats = _beats_of(monkeypatch, getattr(template_activities, activity_name), payload())
+
+    assert beats.seen, (
+        f"{activity_name} ran for {_BEAT_DEADLINE_SECONDS:.0f}s without one heartbeat. Temporal "
+        "was told to expect one within `template_step_heartbeat_timeout_seconds`, so this step is "
+        "killed as a dead worker the moment it outlives that — restore `beating(...)` around the "
+        "wait."
+    )
 
 
 # --- the validator ------------------------------------------------------------------------------

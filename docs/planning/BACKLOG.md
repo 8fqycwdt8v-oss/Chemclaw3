@@ -12,27 +12,42 @@ had and D-154 fixed there with this one rule.
 **Rows are grouped by what they ask for, not by which review produced them.** A finding's date and
 its reviewing pass are provenance, and provenance belongs in
 [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md) — the long-form record of every
-row this queue has ever carried, including the ~185 that are open but not queued here. When a queued
-row needs its full measurement history, that file has it under the review that found it.
+row this queue has ever carried. 223 of its rows are open
+(`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
+2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
+**restates** it, so a queued row is still open there under its original wording, and matching the
+two sets by title matches only 7 of this queue's 30 rows — the overlap is real and unmeasurable by
+`grep`, which is why the number here is the archive's own and not a difference. When a queued row
+needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
 queued.
 
-**A row is a claim about the code, and claims go stale.** A 2026-08-17 pass opened every anchor in
-the forty rows this file then held and found that roughly a third of them were not workable as
-written: four rows
-described code that a merged decision had already deleted or fixed, eight were misstated in a way
-that would have sent someone to the wrong function, and three carried their own deferral trigger and
-belonged in `DEFERRED.md`. Two stated the opposite of what the tree does — one pointed at a
-`DEFERRED.md` row that does not exist, and one said a data-subject erasure route was missing while
-`make user-erase` implements it across nine tables with a dry run and per-table counts. **Before
-working a row, check it against `HEAD`**; if it is wrong, the fix is to correct or delete the row,
-and that is as much a contribution as the code would have been.
+**A row is a claim about the code, and claims go stale.** A 2026-08-17 pass opened every anchor this
+file then held and found seventeen rows not workable as written: four described code that a merged
+decision had already deleted or fixed, eight were misstated in a way that would have sent someone to
+the wrong function, and three carried their own deferral trigger and belonged in `DEFERRED.md`. Two
+stated the opposite of what the tree does — one pointed at a `DEFERRED.md` row that does not exist,
+and one said a data-subject erasure route was missing while `make user-erase` implements it across
+**twelve** tables with a dry run and per-table counts
+(`python -c "from chemclaw.agent.leaver import _ERASE; print(len(_ERASE))"` → 12: seven always,
+plus the checkpointer's three and the store's two, each skipped when the deployment has not created
+it). **Before working a row, check it against `HEAD`**; if it is wrong, the fix is to correct or
+delete the row, and that is as much a contribution as the code would have been.
 
 Ten further rows arrived from concurrent reviews while that pass ran and are carried here unedited —
 they postdate it and have not been re-verified against `HEAD` by anyone but their author, which is
 exactly the state the paragraph above is about.
+
+**And the pass that wrote the two paragraphs above is not exempt from them.** An audit later the
+same day found its own numbers stale in the way it was written to catch: it said "nine tables" for
+an erasure that clears twelve; it filed a hazard as unpinned that
+`tests/test_connector_registry.py:293` had already pinned; and five of the anchors it wrote no
+longer resolved to the construct they named by the time the branch was audited, four of them off by
+a handful of lines. None of that is neglect — it is a measurement taken hours before the tree moved
+under it, which is the failure mode this file has rather than an exception to it. Re-measure on the
+way past; a row you had to correct before you could work it is a row that was worth opening.
 
 Related registers: [`DEFERRED.md`](DEFERRED.md) (postponed with the trigger that would revisit each),
 [`docs/decisions/`](../decisions/) (why the system is the way it is; its README indexes the record by
@@ -53,14 +68,15 @@ topic).
       *Measured shape of the change:* four manifests, four `values.yaml` `optionalKeys`, the
       `tests/test_helm_chart.py` set that pins them, `.env.example`, and the dev/live runners —
       which need the vars or every call 401s. **Watch the name collision**: `CHEMCLAW_CALC_TOKEN` is
-      already taken by a different hop (`core/config/calculators.py:166`, the token core presents to
+      already taken by a different hop (`core/config/calculators.py:165`, the token core presents to
       the *remote* calc server), so the calc connector's own `/mcp` needs a distinct variable.
       *Design direction:* MCP's OAuth 2.1 / ID-JAG token exchange for the federated case.
 
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
-      the durable path takes `actor` as an argument sourced from core's validated front-door
-      principal (`durable/connector_job.py:302`), and never reads the header. The real reach is two
+      the durable path takes the actor as an argument sourced from core's validated front-door
+      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:126` — the row named a
+      field called `actor`, which does not exist), and never reads the header. The real reach is two
       columns on the synchronous MCP path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
       `connectors/bo/server/tools.py:393`. The `unverified:<id>` marking is in place (D-2026-08-13),
       so what is open is that a caller still chooses the string. A bearer on the row above proves
@@ -73,14 +89,14 @@ topic).
       `defang`, `safe_id`, with a deployment-stable nonce. What remains is that **no connector
       result is framed at all**: `connectors/calc/server/tools.py`'s `fetch_artifact` hands
       arbitrary externally-produced text straight to the model, and none of the seven
-      `wrap_tool_call` middlewares in `agent/langgraph_agent.py:594-646` is a framing one.
+      `wrap_tool_call` middlewares in `agent/langgraph_agent.py:594-631` is a framing one.
       This is ADR-sized rather than a patch: a middleware must not corrupt structured results
       (`ArtifactContent`, `EvidenceChunk`), so it needs a content-field convention first. The
       registry already answers "which tools are a connector's".
 
 - [ ] **The stored-message conversion is a destructive in-place rewrite, run as a pre-upgrade
       hook** — [M]. `agent/message_migration.py:242` overwrites `session_messages.message` while its
-      own docstring and `043_session_message_shape.sql:22` both promise the original stays readable.
+      own docstring and `043_session_message_shape.sql:20` both promise the original stays readable.
       `migrate-job.yaml:10` runs it *before* any new pod exists, so it rewrites data the previous
       release is still serving with a reader that raises on the new shape — and `helm rollback`
       stays broken. Two separable halves: a preserved-original column (~15 lines), and moving the
@@ -94,8 +110,13 @@ topic).
       move and *is* served.) `cli/connectors_dev.py:78` emits URLs only for bundles with a local
       app, so chem and safety keep their loopback defaults and the front door never boots. Also
       `infra/live/e2e-full-stack/up.sh:185` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`,
-      which `connectors/calc/connector.yaml:13` explicitly forbids — it survives only on
-      `registry.py:124` being first-dir-wins, which **no test pins**.
+      which `connectors/calc/connector.yaml:13` explicitly forbids — it survives on
+      `connectors/registry.py:124` (`found.setdefault`) being first-dir-wins, and **that behaviour
+      is pinned**: `tests/test_connector_registry.py:293` builds two dirs holding a bundle both
+      named `alpha`, on ports 7777 and 8888, and asserts the *first* dir's endpoint is the one
+      `enabled()` returns. (This row said "no test pins" it until 2026-08-17, which invented a
+      second hazard on top of a real one — the ordering is a load-bearing dependency of the live
+      lane whether or not it is pinned, and it is.)
 
 - [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:350` reads
       `get_current_specialist()`; `set_current_specialist` has **zero callers in `src/`** and
@@ -133,29 +154,43 @@ topic).
       `_identity_survives_stripping` guards only organometallics and reactive metals.
       *Blast radius, measured rather than feared:* the D-011 calculation cache is **unaffected** (it
       keys on `require_canonical_smiles`), fingerprints have a designed invalidation lever
-      (`STANDARDIZATION_VERSION` → `std5`), 0 of 68 shipped reagents change, and the committed
-      corpus has 9 compound notes with **0 multi-fragment**. Candidate fix: keep every fragment when
-      ≥2 are organic. Caveat that needs deciding, not assuming — that heuristic keeps the tartrate
-      on nicotine bitartrate, which is arguably a salt; consulting the existing solvent table is the
-      stricter variant.
+      (`STANDARDIZATION_VERSION` → `std5`), **0 of the 68 shipped reagents change**, and the
+      committed corpus has 9 compound notes with **0 multi-fragment**. The 68 is
+      `core/reagents.py::_RAW_SYNONYMS` — 97 spellings over 68 distinct SMILES, 21 of them
+      multi-fragment — named here because the row quoted the number without its corpus and an
+      auditor looking for it found `data/vendored/records.csv` (35 rows) instead and read the row
+      as invented.
+      *What the same measurement turned up, and it strengthens the row:* three of those 68 —
+      LDA, HATU and TBTU — **already** collapse today (`CC(C)[N-]C(C)C.[Li+]` →
+      `CC(C)NC(C)C`, i.e. LDA recorded as diisopropylamine), and `data/vendored/records.csv`'s
+      sodium tert-butoxide already becomes tert-butanol. Those are D-2026-08-01's counterion rule
+      working as designed, not this defect — but they are why the candidate fix is stated as it is.
+      Candidate fix: keep every fragment when ≥2 are organic. Measured, that changes **none** of the
+      68 and leaves all three salt collapses in place, which is the point: it is a solvate rule, not
+      a re-litigation of the salt one. Caveat that needs deciding, not assuming — the heuristic
+      keeps the tartrate on nicotine bitartrate, which is arguably a salt; consulting the existing
+      solvent table (`science/calc/solvents.py:44`) is the stricter variant.
 
 - [ ] **On `openai_compatible`, one unsupported `response_format` degrades every judged answer for
       the life of the deployment** — [S]. Measured against a real loopback server: a server that
       rejects `response_format` with a 400, or ignores it and returns prose, lands in
-      `agent/verifier.py:353`'s bare `except` and degrades to the citation gate on *every* call. The
+      `agent/verifier.py:372`'s bare `except` and degrades to the citation gate on *every* call. The
       same contradicted-citation answer a working judge scores `confidence=0.0, unsupported=True`
-      comes back `confidence=1.0, unsupported=False`. `score_answer` catches it (`verifier.py:448`
-      forces `review_required` whenever `verified_by != "judge"`), and today it is the *only* caller
-      of `verify_turn_answer` — so the danger is a future direct reader, not a live path. Fix is a
-      pre-flight capability probe when `verifier_enabled` turns on, failing loudly at startup the
-      way `_require_anthropic_key()` does, at the seam `api/app.py:155` already uses. Anthropic is
-      unaffected. Both failure modes are already covered by loopback tests.
+      comes back `confidence=1.0, unsupported=False`. `score_answer` catches it
+      (`agent/verifier.py:467` forces `review_required` whenever `verified_by != "judge"`), and
+      today it is the *only* caller of `verify_turn_answer` — so the danger is a future direct
+      reader, not a live path. Fix is a pre-flight capability probe when `verifier_enabled` turns
+      on, failing loudly at startup the way `_require_anthropic_key()`
+      (`agent/llm_provider.py:305`) does, at the seam `api/app.py:166`
+      (`check_connectors_at_startup`, inside `_lifespan`) already uses. Anthropic is unaffected.
+      Both failure modes are already covered by loopback tests.
 
 - [ ] **A retracted ELN entry stays current evidence** — [M]. A withdrawn entry that simply
       disappears from the export is invisible to a cursor-based sync, so the note it produced keeps
       answering as current. `RawEntry` has no tombstone and the `ElnAdapter` protocol's two methods
-      cannot express one. The *amendment* half already works (`sync.py:275` re-proposes on a changed
-      body); only disappearance is invisible. **The receiving end is already built** — `Note.valid_to`
+      cannot express one. The *amendment* half already works (`ingest/eln/sync.py:201` — a body that
+      is not byte-identical to the merged note falls through and is re-proposed); only disappearance
+      is invisible. **The receiving end is already built** — `Note.valid_to`
       + `is_current(as_of)` — and `ingest/documents/sync.py:428 prune_share` is the same problem
       already solved for the share, including the three refusals that make a sweep safe ("an
       unreachable share and an empty one look identical"). Port that shape. Testable offline against
@@ -220,7 +255,8 @@ topic).
       `digest` row returned `[]` and left it unconsumed. `notify_session_best_effort` returns `True`
       on a successful *insert*, so `acknowledge_digest` fires and `mark_reported` moves the
       watermark past notes the subscriber will never see; `_is_new` can never re-qualify them, and
-      `retention.py:122` (`consumed_at IS NOT NULL`) makes the orphaned rows immortal. The same
+      `durable/retention.py:133` (`_PRUNABLE`'s `consumed_at IS NOT NULL` predicate) makes the
+      orphaned rows immortal. The same
       dead end exists for `system-eval-drift`, whose must-deliver stance therefore guarantees
       delivery to nobody. Needs a route (`GET /digests` claiming `kinds=("digest",)`) — and until
       one exists, `digest_enabled` should plan no Schedule, since shipping the ack without the
@@ -263,8 +299,18 @@ topic).
       here; it was downstream of this one and overcounted the stores.)
 
 - [ ] **The image vulnerability scan is not merged as a gate** — [M]. The runbook's false claim that
-      it runs is corrected (2026-08-17) and `tests/test_deploy_chart.py` now fails if the runbook
-      names a gate nothing runs. The gate itself is still absent: `trivy` appears nowhere in
+      it runs is corrected (2026-08-17) and
+      `tests/test_deploy_chart.py::test_every_supply_chain_gate_the_runbook_names_actually_runs`
+      keeps it corrected. **State the guarantee, not the implementation:** no supply-chain tool the
+      runbook's §(xiv) claims — in the gate table *or* in the prose beside it — may be one that
+      `image.yml` does not actually execute. It does not prove the named gate is *blocking*, only
+      that something runs it. This row said it "fails if the runbook names a gate nothing runs",
+      which was one degree stronger than the assertion then in the tree: the check was a substring
+      over the workflow, so a comment naming the tool satisfied it, and only backticked table rows
+      were read at all. Both holes were found and closed the same day — which is the argument for
+      naming the guarantee rather than the mechanism, since the mechanism changed under this row
+      within hours of it being written. The gate itself is still absent: `trivy`
+      appears nowhere in
       `.github/workflows/image.yml`, which already builds `chemclaw:ci` locally on every PR, so the
       step needs no registry. Held for a stated reason — per D-2026-08-01 the candidate scan
       reported `setuptools` 70.3.0 and `msgpack` 1.1.2 while an exhaustive `find / -xdev` in the
@@ -285,18 +331,27 @@ topic).
       escape hatch. ~15 lines plus tests, fully offline (the chart tests parse YAML).
 
 - [ ] **Three credentials are plain `str` on the settings object** — [S], **corrected**. The hazard
-      this row stated is already closed: `core/logging.py:449` redacts all nine secrets by exact
-      value across message, args, `exc_text` and `stack_info`, and its docstring names a settings
-      `repr` as a covered route — so `logger.debug("%s", settings)` is safe today, and as of
+      this row stated is already closed: `core/logging.py:972` (`SecretRedactingFilter._redact`)
+      redacts all nine `_SECRET_SETTINGS` values by exact match across `msg`, `args`, `exc_text` and
+      `stack_info`, and the module docstring (`core/logging.py:23`) names "a `repr` of a config
+      object" as a covered route — so `logger.debug("%s", settings)` is safe today, and as of
       2026-08-17 so is logging's own `handleError` path. What is left is defence in depth on
-      `llm_api_key`, `hpc_api_token` and `temporal_api_key` — **4 read sites**, ~20 lines. The three
-      DSNs are explicitly *not* in scope: 43 sites all feeding psycopg conninfo, which needs the
-      plain string straight back. Rotation is a separate concern with no anchor and is dropped.
+      `llm_api_key`, `hpc_api_token` and `temporal_api_key` — **5 read sites in 4 modules**
+      (`agent/llm_provider.py:251`, `core/embeddings.py:232`, `connectors/qm/hpc/nextflow.py:53`,
+      `core/temporal_client.py:74` and `:75`), ~20 lines. The three DSNs are explicitly *not* in scope:
+      **34 lines** read one (`grep -rno "settings\.\(postgres_dsn\|postgres_migration_dsn\|session_store_dsn\)" src/ --include=*.py | sed 's/:settings.*//' | sort -u | wc -l`
+      — 41 occurrences over 27 modules; the row said 43 and never said what it was counting), all
+      feeding psycopg conninfo, which needs the plain string straight back. Rotation is a separate
+      concern with no anchor and is dropped.
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
-      `agent/leaver.py` erases across **nine** tables in one transaction with per-table rowcounts
-      and a dry-run default, shipped as `make user-erase`. What is actually missing is (a) cursor
+      `agent/leaver.py:161` (`_ERASE`) erases across **twelve** tables in one transaction with
+      per-table rowcounts and a dry-run default, shipped as `make user-erase` — seven unconditional,
+      plus the checkpointer's three (`CHECKPOINT_TABLES`) and the store's two (`_MEMORY_ERASE`),
+      each skipped when a deployment has not created it. (The row said nine until 2026-08-17 — a
+      hand count of a tuple whose length is seven literals plus two splats, which is why it is now
+      `len(_ERASE)` and not as a reading of the source.) What is actually missing is (a) cursor
       pagination — `session_store.list_for_owner` truncates at `service_max_listed_sessions` with no
       cursor, so older sessions are unreachable, and (b) `DELETE /sessions/{id}`, which `leaver`
       does not offer because it is actor-scoped, not session-scoped.
@@ -356,10 +411,12 @@ topic).
 
 ## Everything else
 
-~185 further open findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md),
-grouped by the review that found them, with their full measurements. They are open, not abandoned —
-promote one into the queue above when it becomes the next thing worth doing, and delete it from
-here when it is done.
+223 open findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md)
+(`grep -c '^- \[ \]'` on that file), grouped by the review that found them, with their full
+measurements. That set **overlaps** this queue rather than extending it — promotion restates a row,
+so a queued row is still open there under its original wording, and the header's "~185 further"
+was a subtraction nobody could reproduce. They are open, not abandoned — promote one into the queue
+above when it becomes the next thing worth doing, and delete it from here when it is done.
 
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
