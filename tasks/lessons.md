@@ -400,3 +400,23 @@ either be omitted from the request or re-applied locally after the cache.
     is a two-command check: `git stash -u && pytest <the one test> && git stash pop`. Then say in the
     PR that it is pre-existing *and how you verified that*, because "unrelated" asserted without the
     stash is indistinguishable from not having looked.
+
+## A line count is not a measure of reading cost (2026-08-17)
+
+**What happened.** Asked to make the agentic backend "lean to read", I profiled it, found `agent/`
+at 58% prose (11,217 lines, 2,895 of them code) and a 165-module import fan-out, and proposed three
+fixes — one structural, two derived from those two ratios. The user approved all three. Both
+ratio-derived ones then failed on measurement: relocating the biggest docstring yielded **0 lines**
+once readability was held constant, and the best available import work reached 37% only by moving
+eight dependencies into function bodies, which makes the tree *harder* to read. The structural one
+— a single 483-line function — was the entire real problem and went to 194.
+
+**The rule.** Measure a candidate *before* pitching it, not after it is approved. A ratio is a
+smell, not a finding: prose that records a measurement is not overhead, and this tree's long
+docstrings are mostly that. What actually costs a reader is structure — a function too big to hold
+in your head, a duplicated loop, a rule stated as a comment where it could be a type.
+
+**The tell I should have caught.** I had already measured the docstring distribution — median 9
+lines, mean 12.8 — which says the prose is healthy and the mass sits in a tail of deliberate
+records. I read that number and still proposed a mass relocation, because the *total* looked large.
+Medians answer "is this bloated"; totals do not.
