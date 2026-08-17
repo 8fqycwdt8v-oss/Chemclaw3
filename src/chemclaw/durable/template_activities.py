@@ -26,7 +26,8 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import AsyncExitStack, contextmanager
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.outputs import LLMResult
 from langchain_core.tools import tool as tool_decorator
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
@@ -405,6 +406,52 @@ def _mcp_text(result: Any) -> Any:
     return result
 
 
+class _StepMeter(AsyncCallbackHandler):
+    """Accumulates a step's token spend as each model call *ends*, rather than after the turn does.
+
+    **This is the whole difference between a ledger and a ledger of the tidy runs.** The spend used
+    to be summed off `result["messages"]` once `ainvoke` returned, which is a line that only runs
+    when the turn returns — so a step that raised booked an all-zero row, and a row that exists
+    saying zero is worse than no row: it asserts the step cost nothing. Measured on this activity
+    against a scripted model reporting 120 tokens per call: a provider error after two paid calls
+    booked `(0, 0)` and moved `chemclaw_tokens_total` by 0.0, and a runaway that made **52** paid
+    model calls (6,240 tokens) before the recursion ceiling stopped it booked the same. The runaway
+    is the case the metering was added for.
+
+    A callback rather than a `try`/`except` around the sum, because the messages of an *abandoned*
+    turn are not reachable at all — `GraphRecursionError` and a provider exception both propagate
+    out of `ainvoke` with no result to read. The only place the numbers exist is the moment each
+    call returns them, which is what `on_llm_end` is.
+
+    `graph_usage_tokens` is the same reader the chat path uses (`agent/turn_usage.py`), so the two
+    paths cannot disagree about what a cached token costs. It is handed the generation's `message`,
+    and meters 0 for a generation that carries none — the duck-typing that keeps a provider
+    reporting no usage from failing a step.
+
+    **One `on_llm_end` per model call, whether the provider streamed or not**, which is why this
+    cannot double-count: LangChain aggregates a stream's chunks and fires this hook once with the
+    summed message. It is also the only accumulation path left — the post-hoc loop is deleted, not
+    kept beside it.
+    """
+
+    def __init__(self) -> None:
+        self.usage = TurnUsage()
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        """Add what one finished model call reported to this step's running total.
+
+        Args:
+            response: The call's result. `generations` is a list per prompt, each a list of
+                candidates; both are walked because the shape is upstream's, and a chat call's
+                single generation is the degenerate case of it rather than a different thing.
+            kwargs: `run_id`, `parent_run_id` and the rest of the callback contract, unused here —
+                a step's spend is one number, not a per-call breakdown.
+        """
+        for generation in response.generations:
+            for candidate in generation:
+                self.usage.add(graph_usage_tokens(getattr(candidate, "message", None)))
+
+
 @durable_activity("background")
 @activity.defn
 async def run_agent_step(step: AgentStepInput) -> str:
@@ -469,7 +516,7 @@ async def run_agent_step(step: AgentStepInput) -> str:
     _capability_tools, connector_specs = _agent_surface()
     profile = step_profile(step.profile, step.write_tools)
     started = time.perf_counter()
-    usage = TurnUsage()
+    meter = _StepMeter()
     answered = False
     calls_token = begin_call_watch()
     with _acting_as(step.identity):
@@ -500,33 +547,33 @@ async def run_agent_step(step: AgentStepInput) -> str:
                 # thread-dependent branch), which is what keeps a looping step from inheriting
                 # `create_agent`'s baked 9999. The cap is deliberately *not* attached instead: it
                 # comes bundled with `TodoListMiddleware`, and a todo list is the discretion this
-                # step exists without. What the ceiling cannot do is let the partial answer out,
-                # so a step that reaches it raises — and the metering below is what now makes that
-                # runaway visible in `chemclaw_tokens_total` rather than free and silent.
+                # step exists without. What the ceiling cannot do is let the partial answer out, so
+                # a step that reaches it raises with no result to read — which is exactly why the
+                # meter is a callback on `turn_config()` rather than a sum over the returned
+                # messages, and is what makes that runaway visible in `chemclaw_tokens_total`
+                # rather than free and silent. Measured: 52 paid model calls, 6,240 tokens, booked.
                 result = await beating(
-                    graph.ainvoke(turn_input(step.prompt), turn_config()),
+                    graph.ainvoke(turn_input(step.prompt), {**turn_config(), "callbacks": [meter]}),
                     f"template agent step {step.step_id or step.profile or 'agent'}",
                     settings.template_step_heartbeat_timeout_seconds,
                 )
-                # Summed off the finished message list rather than off a stream, because this path
-                # has neither a stream nor a checkpointer: `ainvoke` returns exactly the messages
-                # *this* turn produced, so every `AIMessage` in it is one model call of this step
-                # and nothing earlier can be double-counted. `graph_usage_tokens` is the same reader
-                # the chat path uses (`agent/turn_usage.py`) — one arithmetic, so the two paths
-                # cannot disagree about what a cached token costs.
-                for message in result.get("messages") or []:
-                    if isinstance(message, AIMessage):
-                        usage.add(graph_usage_tokens(message))
                 answer = _answer_text(result)
                 answered = True
                 return answer
         finally:
-            # Booked on every path, including a failure or a cancelled attempt: a step that broke
-            # after three model calls still spent them, and a ledger that kept only the tidy runs
-            # would be wrong in the direction that hides a runaway. Same stance as
-            # `api/runner.run_turn`'s `finally`.
+            # Booked on every path, including a failure, a runaway and a cancelled attempt: a step
+            # that broke after three model calls still spent them, and a ledger that kept only the
+            # tidy runs would be wrong in the direction that hides a runaway. Same stance as
+            # `api/runner.run_turn`'s `finally`. What makes that true here is `_StepMeter`, not this
+            # line — a sum taken after `ainvoke` returned never ran on the paths where it mattered.
+            #
+            # The residual limit, stated because it is small rather than absent: the meter books a
+            # call when the call *ends*, so a turn cancelled or failing **mid-call** does not book
+            # that one in-flight call — the provider reported no usage for it, and there is nothing
+            # to read. Every call that completed is booked. So the ledger can under-report by at
+            # most one call, never by a whole turn.
             end_call_watch(calls_token)
-            _book_step_spend(step, usage, time.perf_counter() - started, answered)
+            _book_step_spend(step, meter.usage, time.perf_counter() - started, answered)
 
 
 def _book_step_spend(
