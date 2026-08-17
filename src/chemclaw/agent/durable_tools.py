@@ -58,6 +58,15 @@ from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import envelope_from_result
 from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, search_job_records
+
+# Importing the workflow *types* to launch them is deliberate and bounded
+# (D-2026-08-17-a-workflow-type-is-a-launch-contract-not-a-durability-leak): it is what makes
+# `start_workflow`'s argument type-checked at the one site that decides durable identity, and it
+# costs 10 modules and no third-party package here, because both closures are what core already
+# carries for `gather_evidence`. It is allowed only while that stays true — a *bundle's* workflow
+# is reached by name across its own queue instead, and
+# `tests/test_layering.py::test_the_agent_layer_imports_no_bundle_workflow` is what keeps the two
+# cases apart.
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
 from chemclaw.retrieval.harness import ReportRequest, ReportSection
