@@ -7,10 +7,10 @@ can de-escalate, neither can escalate. UNDECIDED means only one lens has reporte
 because `src/` is all the code (`tests/test_repo_map.py`).
 
 ```
-verdict files read: 68
-findings with >=1 verdict: 57
+verdict files read: 72
+findings with >=1 verdict: 60
 
-=== SURVIVORS (53) — neither lens refuted; severity is the lower of the two
+=== SURVIVORS (59) — neither lens refuted; severity is the lower of the two
   [critical] `standardize` silently erases sp3 stereochemistry — enantiomers collapse to one compound id, on
              reach=CONFIRMED repro=CONFIRMED
   [high    ] LLM failover makes every agent build crash — the AG-12 fallback is unusable
@@ -18,6 +18,8 @@ findings with >=1 verdict: 57
   [high    ] A failed session-title write bricks the conversation with 409 for 605 seconds
              reach=CONFIRMED repro=CONFIRMED
   [high    ] A one-shot plan approval is not spent on two reachable turn endings, so one human approval auth
+             reach=CONFIRMED repro=CONFIRMED
+  [high    ] `predict_site_reactivity` truncates the ranking here, so the payload the caller re-ranks is mis
              reach=CONFIRMED repro=CONFIRMED
   [high    ] An atomic number of 0 terminates the server process — no exception, no error response, exit cod
              reach=CONFIRMED repro=CONFIRMED
@@ -30,6 +32,10 @@ findings with >=1 verdict: 57
   [high    ] A multi-fragment SMILES silently defeats every pair rule and over-fires every counted rule
              reach=CONFIRMED repro=CONFIRMED
   [high    ] `MAX_COMPONENTS` bounds the component count, not the response — 6 KB in, 29.6 MB out
+             reach=CONFIRMED repro=CONFIRMED
+  [high    ] 5,760 of the 9,987 seeded ORD records — the entire Suzuki-Miyaura dataset — are rejected wholes
+             reach=CONFIRMED repro=CONFIRMED
+  [high    ] The vendor MCP server does not start: `mcp>=1.2` resolves to mcp 2.0.0, which has no `mcp.serve
              reach=CONFIRMED repro=CONFIRMED
   [high    ] Any authenticated principal can read every other principal's durable job — inputs, results, mol
              reach=CONFIRMED repro=OVERSTATED
@@ -75,6 +81,10 @@ findings with >=1 verdict: 57
              reach=OVERSTATED repro=CONFIRMED
   [medium  ] Three dead Entra settings, one of them set to a real-looking tenant URL by the shipped chart
              reach=OVERSTATED repro=OVERSTATED
+  [medium  ] `engine` is in every xTB key but the single point, the properties and the Fukui paths never dis
+             reach=OVERSTATED repro=CONFIRMED
+  [medium  ] The frozen-atom fallback keeps `engine="xtb"`, so every `scan_point` on a binary pod is keyed a
+             reach=OVERSTATED repro=CONFIRMED
   [medium  ] A skipped beam gives a model gapped ranks, and the aggregator divides by the rank — flipping th
              reach=OVERSTATED repro=CONFIRMED
   [medium  ] Condition sets that every model agrees on are counted as separate one-vote candidates
@@ -109,6 +119,8 @@ findings with >=1 verdict: 57
              reach=OVERSTATED repro=OVERSTATED
   [low     ] The explanatory prose has decayed: eight symbol references in this slice resolve to nothing
              reach=OVERSTATED repro=OVERSTATED
+  [low     ] `POST /workflow/launch` accepts a body carrying no chemistry and returns a converged energy
+             reach=OVERSTATED repro=OVERSTATED
   [low     ] A typo'd `MOCK_HPC_ENFORCE_AUTH` value silently turns off all HPC authentication
              reach=OVERSTATED repro=OVERSTATED
   [low     ] The ELN control surface has no authentication and deletes JSON files it did not create
@@ -121,12 +133,9 @@ findings with >=1 verdict: 57
 === KILLED (1) — at least one lens refuted
   [low     ] `props.compare_solvents` takes an unbounded list — 700 KB in, 81.6 MB out, 15 s of frozen serve  (reach=REFUTED repro=CONFIRMED)
 
-=== UNDECIDED (3) — only one lens has reported; NOT survivors yet
-  [high    ] `predict_site_reactivity` truncates the ranking here, so the payload the caller re-ranks is mis  (repro=CONFIRMED)
-  [high    ] `engine` is in every xTB key but the single point, the properties and the Fukui paths never dis  (repro=CONFIRMED)
-  [high    ] The frozen-atom fallback keeps `engine="xtb"`, so every `scan_point` on a binary pod is keyed a  (repro=CONFIRMED)
+=== UNDECIDED (0) — only one lens has reported; NOT survivors yet
 
-=== FILED crit/high WITH NO VERDICT (32) — the coverage gap
+=== FILED crit/high WITH NO VERDICT (31) — the coverage gap
   [critical] The digest dedupe key omits the session, so two chemists watching the same query silently lose 
   [critical] One row with a NULL (or unparseable) created_at column kills the whole warehouse sync, permanen
   [critical] A "full factorial" over mixed categorical + continuous factors is not the Cartesian product — f
@@ -148,10 +157,9 @@ findings with >=1 verdict: 57
   [high    ] A Unicode minus or en dash before a temperature flips its sign: “−78 °C” is ingested as **+78 °
   [high    ] Rows tied on the watermark beyond `fetch_limit` are stranded forever, and nothing reports it
   [high    ] The cursor advances on `max(created, modified)` while the fetch pages on `COALESCE(modified, cr
+  [high    ] The two file-drop adapters' `fetch_new_entries` are a 30-line clone, and it has already diverge
+  [high    ] `warehouse/adapter._optional_timestamp` silently drops an unparseable `modified_at`, wedging th
   [high    ] The warehouse ELN retrieve half has no authorization gate, and its binding cannot declare one
-  [high    ] 5,760 of the 9,987 seeded ORD records — the entire Suzuki-Miyaura dataset — are rejected wholes
-  [high    ] `POST /workflow/launch` accepts a body carrying no chemistry and returns a converged energy
-  [high    ] The vendor MCP server does not start: `mcp>=1.2` resolves to mcp 2.0.0, which has no `mcp.serve
   [high    ] F0-3 — The migration-immutability guard is vacuous on a shallow clone, and its sibling's failur
   [high    ] An excluded pairing in the run history makes the optimizer declare a finite space exhausted whi
   [high    ] A NaN `threshold` escapes `find_matches`' clamp and turns a populated index into a "genuine neg
