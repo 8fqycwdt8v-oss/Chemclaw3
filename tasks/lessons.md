@@ -55,6 +55,18 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    another agent's own "gate is green" report as a claim, not evidence — one such package arrived
    five lines over the lint limit.
 
+   **File ownership is the whole safety property when you fan out, so assign it like a lock: one
+   writer per path, checked before launch.** Two agents were given `tests/test_template_agent_step.py`
+   in the same batch — one to add tests, one to strengthen them. The second had been told to undo
+   its mutations by `cp f f.bak` … `mv f.bak f` (rule 1, correctly), and its `.bak` predated the
+   first agent's additions, so restoring its own mutation **deleted the other agent's new tests**.
+   The source fix they proved stayed; the tests vanished; the suite went green at 35 passed, because
+   a deleted test cannot fail. That is rule 2 arriving by a route rule 2 does not mention, and rule 1
+   supplying the weapon. Before launching a batch, list every path in every prompt and check for a
+   duplicate — a two-minute check that no amount of careful prompting substitutes for. When it does
+   happen, the tell is a diffstat that omits a file an agent reported writing; `git diff --stat`
+   over each agent's declared paths on completion catches it immediately.
+
 5. **Run the gate's own command, at the gate's own scope, unpiped.** Pushed red twice for the same
    reason in two disguises: verifying a narrower scope than CI checks. And `| head` under
    `set -euo pipefail` exits 141 from a command that succeeded, while `grep … | head -10` hid the
