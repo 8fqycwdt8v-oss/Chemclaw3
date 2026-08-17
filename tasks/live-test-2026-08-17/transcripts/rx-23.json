@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "rx-23",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our API is an aliphatic tertiary amine — take CCN(CC)CCN as the model. I need to know its pKa so we can set the extraction pH and choose a counterion for the salt. What is it?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a computed pKa for an aliphatic amine",
+      "a recommended extraction pH derived from a computed value",
+      "a recommended counterion or salt form derived from a computed value",
+      "a substitute descriptor presented as a pKa"
+    ],
+    "direction": "The tool refuses this case outright, and the answer must carry the refusal rather than route around it. Expect the specific reason, not a vague apology: over 13 reference amines the computed basicity ranks them at Spearman about -0.17, which is no ranking ability at all, and it is not a calibration problem — in the gas phase the proton affinities come out right, the continuum solvent reverses the order, and the true aqueous order is non-monotonic because aliphatic amine basicity is set by how many hydrogen bonds the ammonium ion donates to water, which a continuum has no water molecules to accept. Aromatic and aryl nitrogen is covered and aliphatic is not, and the answer should say which case this molecule is. Must recommend measurement or literature, and must not reach for a different tool and present its output as a pKa. Salt selection needs the measured value and a counterion screen, and the delta-pKa margin the rule of thumb depends on is exactly what is unavailable here.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-23",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our API is an aliphatic tertiary amine — take CCN(CC)CCN as the model. I need to know its pKa so we can set the extraction pH and choose a counterion for the salt. What is it?",
+    "answer": "I'll predict the pKa for your model aliphatic tertiary amine.The calculator encountered an issue. Let me load the **ionization-and-partitioning** skill to explain what is happening here, because the answer is important for your process:**This is the key issue:** Your API is an **aliphatic tertiary amine**, and `predict_pka` is designed to refuse this query rather than return a useless number.\n\nHere is why: The GFN2-xTB calculator gets the pKaH of aromatic and aryl nitrogen correct (pyridines, anilines, imidazoles — Spearman correlation 1.000 over literature values). But for aliphatic amines like yours, the continuum-solvent model reverses the true aqueous basicity order completely. Over 13 reference amines, it achieves a Spearman correlation of **−0.17** — worse than random. The cause is structural: aliphatic amine basicity in water is governed by hydrogen bonding of the ammonium ion to water molecules, and a continuum solvent has no water molecules to model, so no recalibration can fix it.\n\n**What you need to do:**\n\n1. **Measure the pKa** of your actual API experimentally, or\n2. **Look it up in literature** — aliphatic tertiary amines are well-characterized compounds, so a value for your specific structure or a close analog should be available.\n\nOnce you have a measured or literature pKa for the API, you can then:\n\n- **Set extraction pH**: typical heuristic is 2 units below the pKa to keep it protonated in the aqueous layer\n- **Assess salt stability**: compare the API's pKaH against candidate counterions' pKa values — a ΔpKa > 2–3 is the rule of thumb — but remember that both values carry ±1 to ±1.6 unit uncertainty, so this is a direction, not a sharp gate\n\nFor the counterion's pKa (if it is a weak acid like tartaric acid, malonic acid, etc.), I can compute that if you name the specific counterion you are considering, since weak organic acids with O-H or S-H sites are within the tool's domain.\n\nWhat measured or literature pKa do you have for your API, or which counterion are you weighing?",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: ionization-and-partitioning\n  3  description: >-\n  4    Judgment for using a predicted pKa in process decisions — extraction and wash pH, salt\n  5    and counterion questions, ioni"
+      }
+    ],
+    "tools_failed": [
+      "predict_pka"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1.000",
+      "13",
+      "0.17",
+      "1",
+      "2",
+      "3",
+      "1.6"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.27,
+    "event_counts": {
+      "token": 29,
+      "tool_call": 2,
+      "tool_failed": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4385c2bb37694c6f8e9335ec28a02dfa",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

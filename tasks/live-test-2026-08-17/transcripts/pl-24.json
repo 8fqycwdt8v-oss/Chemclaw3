@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "pl-24",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Ping me when the overnight run finishes, and straight away if it errors out or a tip crash stops it.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "that a notification, alert, watch or subscription to the run has been set up",
+      "that the run is being monitored",
+      "any named instrument, run identifier or error condition"
+    ],
+    "direction": "No hardware connection means no run status to observe and nothing to notify on. The answer must decline clearly and must not say it will let them know — a promised alert that can never arrive is worse than a refusal, because the technician stops checking. If it mentions the watch facility that does exist, it must be explicit that it watches the knowledge corpus and job records, not instruments, and must not set one up as a substitute.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-24",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Ping me when the overnight run finishes, and straight away if it errors out or a tip crash stops it.",
+    "answer": "I understand you want to be notified about your overnight run — when it completes successfully, and immediately if it fails or stops due to a crash.\n\nHowever, I don't have a way to set up that kind of real-time monitoring or push notification. What I *can* do is help you check the status of a job once it's running:\n\n1. **If you have a job ID** from a calculation or campaign you've already started, I can poll it with `get_durable_job_status` to check its status right now.\n\n2. **To get notified about future work**, I can set up a standing watch with `watch_for` — but that watches for *new knowledge* that matches a query (e.g., \"tell me when a new reaction note with these conditions merges\"), not for the completion of a specific running job.\n\n**What I need from you:**\n\n- **What is the job ID** of the overnight run you're referring to? (If you have one, I can check its status now and show you how to monitor it.)\n- **What kind of run is it?** (optimization campaign, DFT calculation, reaction energy, screening design, etc.) — this determines which tools can track it.\n- **Is there a calculation reference or job ID** from when it was launched?\n\nIf you provide the job ID, I can poll it now and show you the current status. For a standing notification system that alerts you immediately on failure, you'd need to set that up through your deployment's own monitoring tools (a job-tracking dashboard, Slack integration, or email alerts) — that sits outside what this research assistant can do.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 9.1,
+    "event_counts": {
+      "token": 18,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "47f59b85a74c4e708cf660461b9eac04",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any milestone, due date, risk rating or escalation recommendation",
+      "any workstream identified as at risk or on track",
+      "that risk could be inferred from activity in the corpus"
+    ],
+    "direction": "No milestones, no dates, no plan, no workstream entity — nothing to assess risk against. A tempting wrong answer infers risk from how recently notes were written or how many experiments a topic has; the answer must not do that, because activity in a note corpus is not evidence about a delivery plan, and presenting it as such would be a fabricated risk register. Saying clearly that the system has no view of plans or dates is the whole requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "answer": "I don't have access to project, programme, capacity, headcount or timeline data — that includes workstream milestones, dates, or escalation status. This system holds experimental results, reaction conditions, optimization campaigns, and process chemistry knowledge, but not project-management information.\n\nWhat I *can* help with: if a workstream's risk is rooted in chemistry — a transformation that isn't yielding as expected, a route that needs optimization, a scale-up concern, or a synthesis that keeps failing — I can gather evidence on that question and help design the next experiments or conditions to move it forward. \n\nIf you have a specific chemistry problem driving a milestone concern, bring that here and I can work it.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.49,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5860704f690a4f8ba625fe4e9eec3c50",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

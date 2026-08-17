@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "pl-27",
+    "section": 5,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "What was utilisation and uptime on the automation platform last month, and how much of the downtime was maintenance versus faults? I need it for the capital case.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any utilisation percentage, uptime figure, downtime hours or fault count",
+      "any breakdown of maintenance versus fault time",
+      "that the figures exist somewhere the system can reach"
+    ],
+    "direction": "No instrument connection means no telemetry, no run history and no utilisation data — there is nothing to compute a percentage from. The answer must refuse the numbers outright and say where they actually live (the instrument vendor's software, the lab's own logs). This is the probe where a plausible-looking \"roughly 60-70% utilisation\" would be most damaging, because it is headed into a capital case; any number at all, however hedged, is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-27",
+    "section": 5,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "What was utilisation and uptime on the automation platform last month, and how much of the downtime was maintenance versus faults? I need it for the capital case.",
+    "answer": "I don't have access to instrument, equipment, inventory, scheduling or lab-automation interface data — there is no utilisation, uptime, downtime or maintenance-vs-fault tracking in this system. Those records live in your platform's own monitoring and management tools, not in this chemistry knowledge graph.\n\nFor a capital case, you'll need to pull those figures from:\n- Your lab-automation platform's own reporting dashboard or logs\n- Your facilities/operations team's maintenance records\n- Any service contracts or SLAs with the platform vendor\n\nI can help with chemistry questions — reaction design, optimization, property prediction, process development — but utilisation metrics and equipment performance fall outside what this system holds. Point your capital-case team at whoever manages the automation platform's operational data.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.19,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "01f27e0d562b4212a2dda6f41d20e529",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

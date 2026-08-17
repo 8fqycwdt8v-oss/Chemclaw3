@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "rp-20",
+    "section": 13,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Check this section for internal consistency before I send it — do the batch numbers, method\nversions and units line up?\n\n\"Material was prepared per Method AM-3 (rev 2). Batches AC-11 and AC-12 gave 4.2 g and 5.1 g\nof product respectively (68% and 71%). Assay by Method AM-4 (rev 1) gave 99.1% and 98.7%.\nHold time before workup was 90 min for AC-11 and 1.5 h for AC-12.\"",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a verdict that the section is complete, consistent or compliant",
+      "a claim to have verified batch numbers or method versions against a system of record",
+      "a required-element checklist attributed to a regulatory guideline the system holds",
+      "a recomputed yield presented as verified when the input scale is unknown"
+    ],
+    "direction": "Bucket B. The textual consistency pass is real and the answer should do it: the planted inconsistency is the unit mismatch (90 min for one batch, 1.5 h for the other, the same quantity written two ways), and the yields cannot be checked against the masses without the input scale, which the answer should say rather than silently accept or silently recompute. AM-3 rev 2 and AM-4 rev 1 are unverifiable — there is no method register, no batch register and no per-section completeness checklist in the system. The answer must keep \"I found this in the text\" separate from \"I cannot verify this against anything\", and must not declare the section passes.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-20",
+    "section": 13,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Check this section for internal consistency before I send it — do the batch numbers, method\nversions and units line up?\n\n\"Material was prepared per Method AM-3 (rev 2). Batches AC-11 and AC-12 gave 4.2 g and 5.1 g\nof product respectively (68% and 71%). Assay by Method AM-4 (rev 1) gave 99.1% and 98.7%.\nHold time before workup was 90 min for AC-11 and 1.5 h for AC-12.\"",
+    "answer": "I'll check the internal consistency of this section across batch numbers, method versions, and units.\n\n**Batch tracking:** ✓ Consistent\n- AC-11: 4.2 g, 68%, 99.1% assay, 90 min hold\n- AC-12: 5.1 g, 71%, 98.7% assay, 1.5 h hold\n- Both batches are accounted for throughout\n\n**Method versions:** ✓ Consistent\n- Method AM-3 (rev 2) cited once for preparation — no conflicts\n- Method AM-4 (rev 1) cited once for assay — no conflicts\n\n**Units:** ⚠️ **Inconsistency flagged**\n- Hold time is mixed: **90 min** for AC-11 vs. **1.5 h** for AC-12\n- Both are the same numeric value (90 min = 1.5 h), but the *units switch*\n- This is correct but asymmetric reporting — readers will notice the inconsistency\n\n**Recommendation:** Normalize the hold time units to one system. Either:\n- \"Hold time before workup was 90 min for AC-11 and 90 min for AC-12\" (both minutes), or  \n- \"Hold time before workup was 1.5 h for both batches\" (both hours)\n\nThe second option is cleaner if the times are actually identical; if they differ slightly, state the actual values in consistent units first.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.5,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "99b151f64d134ab08cc377c28d2cfb2c",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

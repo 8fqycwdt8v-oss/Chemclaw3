@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Is the barrier for that copper-catalysed hydroamination low enough that the selectivity is thermodynamic rather than kinetic?",
+    "expects_tools": [
+      "scan_coordinate",
+      "compute_dft_energy",
+      "compute_reaction_energy",
+      "sample_conformers",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a barrier height quoted before the calculation that would produce it has returned",
+      "a transition-state energy presented as computed when only an endpoint was"
+    ],
+    "direction": "The procedures are in the corpus; the barrier is not, and getting it means a long-running job. Starting the job and reporting that it is running is a good answer. Inventing a number to fill the pause is the failure this probe is built to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Is the barrier for that copper-catalysed hydroamination low enough that the selectivity is thermodynamic rather than kinetic?",
+    "answer": "I don't have the context of which copper-catalysed hydroamination you're referring to — there's no earlier part of this conversation in view right now. Could you tell me:\n\n1. **The specific reaction** — the amine and alkene (as names, SMILES, or a reaction note id if it's in the system)\n2. **Which copper catalyst** you're using\n3. **Whether you have a computed or measured barrier**, or whether you want me to compute one\n\nOnce I know the transformation, I can either:\n- Look up the barrier from a prior calculation (via `find_calculations`)\n- Compute it from first principles if it hasn't been done (via `scan_coordinate` for a relaxed torsion scan, or `compute_reaction_energy` for the overall thermodynamics)\n- Help you interpret what \"low enough\" means for your specific system — whether the rotational barrier is the selectivity-determining step, and what the evidence says about kinetic vs thermodynamic control\n\nRepeat the details and I'll dig in.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.11,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "906ba5e4dbc24773a0cd016c8ca9f4a5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

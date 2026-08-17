@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "gr-18",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "c1ccccc1CCC(O)C deoxyfluorinates at 40% with one sulfonyl fluoride and 99% with another. Is that sterics or is that electronics?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "sample_conformers",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a mechanistic verdict given with no computed or retrieved quantity behind it",
+      "the two reagents' properties described without saying where the numbers came from"
+    ],
+    "direction": "Both yields are real and in the corpus. A good answer computes something that discriminates the two hypotheses rather than arguing from plausibility, and says plainly if the computation cannot separate them.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-18",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "c1ccccc1CCC(O)C deoxyfluorinates at 40% with one sulfonyl fluoride and 99% with another. Is that sterics or is that electronics?",
+    "answer": "I need to understand which sulfonyl fluorides you're comparing and then compute their electronic properties to answer whether the reactivity difference is steric or electronic in origin.\n\nLet me first resolve the two sulfonyl fluorides — can you name them or give me their SMILES? That will let me compute their electronic descriptors (HOMO/LUMO gap, dipole moment, partial charges) and compare them against the substrate's reactivity at the hydroxyl group.Once you provide those, I'll:\n\n1. **Compute electronic descriptors** on both sulfonyl fluorides and the substrate — HOMO/LUMO gap (activation hardness), dipole moment (electrophilicity), partial charges on the reactive sulfur, and Fukui indices on the hydroxyl oxygen to rank its nucleophilicity.\n2. **Evaluate site reactivity** of the substrate hydroxyl under nucleophilic attack, so we can see which nucleophilic/electrophilic character controls the difference.\n3. **Check for any steric bulk** differences in the two reagents by comparing their 3D geometries and computing molecular volumes or comparing to precedent.\n4. **Synthesize** the evidence: if one sulfonyl fluoride has a lower HOMO-LUMO gap and higher dipole (more electrophilic), the 99% is likely electronics; if both are similarly activated but one is bulkier, sterics wins.\n\nThe yield jump from 40% to 99% is large enough that the descriptor difference should be visible. What are the two reagents?",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.92,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6e31ab1ea7464837b82d58174db89c10",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "probe": {
+    "id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a scale, batch size or campaign history the record does not contain",
+      "a predicted yield at the larger scale",
+      "an equipment or facility reference"
+    ],
+    "direction": "Precedent retrieval is the capability being tested and it should be exercised properly: the seed record for this coupling (4-bromoanisole and phenylboronic acid, Pd(OAc)2 1.5 mol%, K2CO3, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated), the two failure modes and the ligand-before-temperature playbook. The scale-relevant reading of the protodeboronation failure is the one to draw out: it was found because assay conversion improved while isolated yield fell, which is exactly the way a scale-up gets misread. Must be honest that the record carries laboratory-scale runs with little or no scale metadata, so 'have we run this at scale' is answered by 'here is what we have, and it is not at scale'. Should name the degassing playbook, since oxygen control is the thing that genuinely changes character on scale-up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "answer": "I'll search for evidence of similar biaryl couplings at scale in the record.I found a Suzuki-Miyaura biaryl coupling in the record. Let me expand that note to see the full conditions and any scale-up history:Good — there's a campaign and a report. Let me pull the optimization campaign and the failure-mode note to see what issues emerged:Now let me search for actual scale-up campaigns or any notes that speak to running this at larger scale:Here's what I found in the record:\n\n## Precedent: Suzuki coupling of 4-bromoanisole with phenylboronic acid\n\nThe knowledge graph holds **[[rxn-suzuki-biaryl]]**, which is directly analogous chemistry — a Suzuki-Miyaura biaryl coupling of an electron-rich aryl bromide to form 4-methoxybiphenyl. It was optimized through **[[opt-suzuki-conditions]]** and culminated in a development report **[[report-biaryl-development]]**.\n\n### Recommended bench conditions:\n- **1.5 mol% Pd(OAc)₂/SPhos** with K₂CO₃ (2.0 equiv)\n- **THF/water 4:1**, rigorously degassed\n- **80 °C, 12 h**\n- Isolated yield: **76%**\n\n### What went wrong: Protodeboronation trap\n\nThe critical finding from **[[failure-aqueous-protodeboronation]]** is that running this at **100 °C raised the LCAP assay yield to 79% but *dropped* isolated yield to 68%**. The boronic acid protodeboronates to benzene (the arene + H) faster than it transmetalates into the coupling, especially in aqueous media. This failure was observed **three times before it was recognized** — because the assay looked better each time, the optimization was steering toward the worse condition.\n\n**Key takeaway for scale-up**: Do not rely on an LCAP assay readout for this transformation; isolated yield and the assay diverge in a thermally-dependent way. This is not a scale artifact (it shows up in small scale) but it *amplifies* with scale if temperature control is loose.\n\n### What the record does **not** hold\n\nI did not find any evidence of this specific reaction being run at kilo lab scale in the system. The precedent is at the gram scale of the optimization campaign. Scale-up risks I cannot speak to from the record include:\n- Heat transfer / exotherm management during addition or heating\n- Mixing intensity requirements for the biaryl coupling (particularly critical for Pd-catalyzed cross-couplings)\n- Solvent volume / catalyst concentration effects on homogeneity\n- Degassing feasibility and oxygen pickup during scale-up\n- Changes to isolated yield or selectivity as the ratio of surface area to volume changes\n\nDo you have substrate(s) in mind, or is this the 4-methoxybiphenyl route itself? If you're scaling a different biaryl pair, similar reactions at scale might exist under a different search.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-aqueous-protodeboronation', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-biaryl-development', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1.5",
+      "2.0",
+      "1",
+      "80",
+      "12",
+      "76",
+      "100",
+      "79",
+      "68"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 19.28,
+    "event_counts": {
+      "token": 39,
+      "tool_call": 7,
+      "evidence_source": 1,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "49a9c18aa8ea4b1191a2973106637a3d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "gr-14",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Take whatever we learned on the P2Et plate and tell me what changes for BTMG.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "generate_screening_design",
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a transfer asserted with no statement of what differs between the two plates",
+      "per-plate numbers quoted without saying which plate they came from"
+    ],
+    "direction": "The two plates share their grid and differ in the base. That makes the transfer legitimate and bounded, and the answer should say where it holds and where the base change plausibly breaks it. Treating the two as interchangeable is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-14",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Take whatever we learned on the P2Et plate and tell me what changes for BTMG.",
+    "answer": "I need to find what you learned on a P2Et plate first, so I can tell you how BTMG changes things. Let me search the knowledge graph for this.Both searches came back empty. Can you help me locate the P2Et plate experiment? It could be:\n\n1. A specific reaction note or campaign with that designation\n2. An ELN entry with a particular ID or run number\n3. Part of a broader optimization screen or campaign with a different name\n\nOnce you point me to it — whether as a note ID, campaign name, or project name — I can read what was learned and explain how BTMG (2,4,6-tri-tert-butylpyrimidine, the base) changes the conditions or outcomes.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.13,
+    "event_counts": {
+      "token": 11,
+      "tool_call": 2,
+      "tool_result": 2,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "840c0b3240674688a0a104ebfa84e15d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "probe": {
+    "id": "gr-17",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Between the ring nitrogen and the amide NH in O=C(NC1=CN=CC=C1)C2=CC=CC=C2, which one matters for the coupling, and does that explain why the benzamide screen tops out in the forties?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a pKa recalled rather than computed, presented as the system's own number",
+      "the screen's ceiling explained by the computed result as though the link were established"
+    ],
+    "direction": "Two halves and both are needed: compute the ionisation/reactivity picture, then check it against what the 96-record screen actually shows. Connecting them as a hypothesis is right; asserting the computation explains the ceiling is over-reach.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-17",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Between the ring nitrogen and the amide NH in O=C(NC1=CN=CC=C1)C2=CC=CC=C2, which one matters for the coupling, and does that explain why the benzamide screen tops out in the forties?",
+    "answer": "I need to understand this molecule and the coupling you're referring to. Let me start by resolving the structure and then searching for relevant evidence about this screen.The evidence returned is about amide couplings but doesn't describe a benzamide screen with a pyridine amine substrate. Let me search more specifically for this structure and what coupling you mean.I'm not finding a specific benzamide screen with this pyridine amine substrate in the record. Let me ask for clarification so I understand the context of the screen you're referring to.While waiting for your clarification, I can address the chemistry directly based on what you're asking:\n\nFor **O=C(NC1=CN=CC=C1)C2=CC=CC=C2** (benzamide with a pyridin-3-yl amine), the **amide NH is the one that matters for coupling**—not the ring nitrogen. Here's why:\n\n### Which nitrogen couples:\n- **The amide NH** (attached to the carbonyl): This is where nucleophilic amide-bond formation happens. It is the functional group being installed.\n- **The ring nitrogen**: The pyridine nitrogen is a *spectator* in an amide coupling. It is too basic and too electropositive to act as a nucleophile against an activated acyl intermediate (like an O-acylisourea or an acid chloride). The carboxylic acid activation methods used in amide coupling (EDC/HOBt, T3P, DCC/HOBt) work *because* they form an electrophile that only the amine attacks—the ring nitrogen's basicity doesn't help it compete.\n\n### Why the screen might top out in the forties:\nThe **ring nitrogen's basicity is likely the ceiling**, but not directly as a nucleophile. Instead:\n\n1. **Base depletion / protonation equilibrium**: If you're using a stoichiometric or near-stoichiometric base (like DIPEA), the pyridine nitrogen can consume base by protonation, especially since pyridine's pKa is ~5.2 (in water). This leaves less base available to deprotonate the carboxylic acid and activate it. At 40% yield, you're likely seeing incomplete acid activation or competing uncatalyzed pathways.\n\n2. **Activation method sensitivity**: Some coupling reagents (like EDC) are **sensitive to base concentration and pH**. If the pyridine is protonating your base faster than it can activate the acid, the O-acylisourea intermediate won't form efficiently—or it will decompose instead of being trapped by the amine.\n\n3. **The ring nitrogen competes for *solvation***, not nucleophilicity: An excess pyridine-like nitrogen creates a more Lewis-basic medium. This can affect the activation equilibrium and the stability of intermediates.\n\n**To test this and push past the 40s**, I'd propose:\n- Increase the **molar excess of base** to account for protonation of the ring nitrogen\n- Use a coupling method less sensitive to base competition—**T3P is less base-dependent than EDC**, and prefers stoichiometric coupling\n- Try a **non-nucleophilic hindered base** (like 2,6-lutidine) to lower the competing basicity\n- Run **solvent optimizations** in aprotic solvents (DMF > DMSO) where the pyridine nitrogen's basicity is highest\n\nDo you have the specific screen data (solvent, base, coupling reagent, stoichiometries) that gave the ~40% plateau?",
+    "answered": true,
+    "tools_called": [
+      "resolve_compound",
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"O=C(NC1=CN=CC=C1)C2=CC=CC=C2\",\n  \"smiles\": \"O=C(Nc1cccnc1)c1ccccc1\",\n  \"name\": \"O=C(NC1=CN=CC=C1)C2=CC=CC=C2\",\n  \"source\": \"smiles\"\n}"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-amide-additive\">\\nThree amide couplings with and without HOBt.\\n\\n- rxn-amide-edc\\n\\nConsistent ~25 point yield difference in favo"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-dipea\">\\nN,N-diisopropylethylamine. A hindered tertiary amine base — basic enough to deprotonate a\\ncarboxylic acid, too hindered "
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3",
+      "6"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 25.26,
+    "event_counts": {
+      "token": 50,
+      "tool_call": 5,
+      "evidence_source": 3,
+      "tool_result": 5,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0a02883daf4c483c8e1cd54dc068e6eb",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

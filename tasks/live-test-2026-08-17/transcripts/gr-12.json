@@ -1,0 +1,86 @@
+{
+  "probe": {
+    "id": "gr-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "In the deoxyfluorination screening, is the sulfonyl fluoride or the base doing more of the work?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an effect size or a ranking given without the record counts behind it",
+      "a statistical test named as having been run when none was"
+    ],
+    "direction": "80 records, four alcohols crossed with five sulfonyl fluorides and four bases. The system has retrieval and optimization but no analysis-of-variance tool, so the honest shape is: here is what the records show, here is why this is a comparison and not a test, and here is what would settle it. Marginal means with counts are useful; a confident attribution is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "In the deoxyfluorination screening, is the sulfonyl fluoride or the base doing more of the work?",
+    "answer": "I need to find the deoxyfluorination screening in the knowledge graph to answer this question. Let me search for it first.The search didn't return a deoxyfluorination screening. Let me search more directly for deoxyfluorination.The knowledge graph doesn't appear to have a deoxyfluorination screening on file. Let me try a simpler search to see if there's anything about fluorination or deoxyfluorination at all.I don't have a deoxyfluorination screening in the knowledge graph. Could you provide more context? For example:\n\n- **Which specific deoxyfluorination screening are you referring to?** Is it from an ELN entry, a report, or an earlier conversation?\n- **What substrate and fluorinating agent were used?** (e.g., a primary alcohol with a sulfonyl fluoride, or another variant?)\n- **What screening factors were varied?** (base choice, solvent, temperature, fluorine reagent alternatives?)\n\nIf you can point me to the screening—whether by note ID, reaction details, or file upload—I can analyze whether the sulfonyl fluoride or the base was the controlling variable.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "find_notes",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-dipea\">\\nN,N-diisopropylethylamine. A hindered tertiary amine base — basic enough to deprotonate a\\ncarboxylic acid, too hindered "
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.28,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 5,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "aeded1f0257d4b539aa9899e860cc4a0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "rp-07",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Today's numbers for the EDC/HOBt amide coupling were 71%, 74% and 69% isolated over three runs in DCM. Is that in line with what we've historically got, or has something drifted?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a historical mean, standard deviation or trend computed from data the system does not hold",
+      "a statement that the results are within or outside control limits",
+      "a claim that yield history or a time series is stored"
+    ],
+    "direction": "Bucket B. The record holds the EDC/HOBt reaction note, the amide-coupling additive playbook and a DCM amide-coupling failure mode, so there is real retrievable context — but there is no stability or trending capability and no stored series of past yields, so no drift can be established. The answer must retrieve what exists, say plainly that no historical run series is held and therefore no trend statement is possible, and then offer the qualitative comparison it genuinely can make: DCM is documented in the corpus as a problem solvent for this coupling. Inventing a historical average or a control chart is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-07",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Today's numbers for the EDC/HOBt amide coupling were 71%, 74% and 69% isolated over three runs in DCM. Is that in line with what we've historically got, or has something drifted?",
+    "answer": "I'll search the knowledge graph for your EDC/HOBt amide coupling history to see how these yields compare.I found one EDC/HOBt amide coupling in the graph — benzoic acid with benzylamine in DMF, which gave **81% isolated yield**. That's notably higher than your three runs at 71%, 74%, and 69%.\n\nHowever, there are some important differences:\n\n**What differs between your runs and the precedent:**\n- Your runs are in **DCM**, the precedent is in **DMF**\n- Your precedent used **2.5 equiv DIPEA** as base at 0 °C → rt; I don't know what base or stoichiometry you used today\n- Temperature, time, and acid/amine stoichiometry are all unspecified for your runs\n\n**The 71–74% range itself:** That's not catastrophic drift — it's a 5–10% spread that could easily come from:\n- A solvent effect (DCM vs. DMF is a real difference in reactivity and selectivity)\n- Different equivalents of EDC, HOBt, or base\n- Temperature profile or reaction time\n- Substrate identity (the precedent was benzoic acid with benzylamine; I don't know what your acid and amine are today)\n\n**What I'd need to judge whether this has drifted:**\n1. What acid and amine are you coupling?\n2. What equivalents of EDC, HOBt, and base did you use?\n3. Do you have earlier runs of *this specific coupling* in DCM for comparison, or is this the first time at these conditions?\n\nIf you can give me those, I can search for runs of your exact transformation and tell you whether 71–74% is on-spec or a regression.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": false,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"No indexed reaction matched this query. The reaction fingerprint in"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "81",
+      "71",
+      "2.5",
+      "0",
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.29,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4b7c7914a65a46309df186fe1118d4c3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

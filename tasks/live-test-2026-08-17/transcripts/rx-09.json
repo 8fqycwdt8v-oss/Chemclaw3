@@ -1,0 +1,127 @@
+{
+  "probe": {
+    "id": "rx-09",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Give me the three or four things we have actually learned about palladium cross-couplings that I could put on a slide for the site review. I want lessons, not a reaction list.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a claim to summarise years of programme history or a project portfolio",
+      "a count of experiments run that the retrieved record does not support",
+      "a lesson stated without the evidence it was distilled from"
+    ],
+    "direction": "The corpus holds exactly the artefact this question wants — distilled playbooks and recorded failure modes — so a good answer returns those rather than generic cross-coupling advice. Expect the ligand-before-temperature playbook, the aqueous protodeboronation failure (conversion up, isolated yield down, seen three times before it was recognised because the assay looked better each time), the degassing playbook, and the reporting rule that a yield must be quoted with the purification that produced it. Each lesson should carry what it was distilled from. The honesty test is scale: this is a small seed corpus plus published HTE data, not an institutional history, and the answer must not let a manager infer a programme-wide evidence base that does not exist.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-09",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Give me the three or four things we have actually learned about palladium cross-couplings that I could put on a slide for the site review. I want lessons, not a reaction list.",
+    "answer": "I'll search the knowledge graph for distilled insights about palladium cross-couplings — playbooks, campaign summaries, or other notes that capture what we've actually found rather than just collecting runs.Good; I found a playbook on palladium couplings and two related campaigns. Let me expand the main playbook to get the full detail, then check whether there are other campaigns that could add to it.Let me get the full details on the two main campaigns cited in that playbook.Perfect. Now let me search for any other substantive campaigns on cross-couplings to see if there are additional lessons.Let me expand the degassing playbook to get the full detail.Excellent. Now I have the core lessons. Let me pull together what we actually learned that's slide-worthy.\n\n---\n\n## Three lessons on palladium cross-couplings for your site review:\n\n### 1. **Ligand, not temperature, is the dial for electron-rich halides** *(from campaign-biaryl-scope, opt-suzuki-conditions)*\n\nWhen a coupling stalls on an electron-rich substrate, bulkier biaryl phosphines work better than raising temperature. Oxidative addition is the slow step on electron-rich aryl halides, and it responds far more to ligand steric bulk than to heat. Raising the temperature instead accelerates the *decomposition* of the boronic acid and other coupling partners — a trap we walked into three times before we recognised it (failure-aqueous-protodeboronation). The evidence: the playbook recommends this order — bulkier phosphine → higher ligand:Pd ratio → degas harder → *only then* more heat — and the optimization data backs it up.\n\n### 2. **Assay yield and isolated yield are telling you different things** *(from opt-suzuki-conditions)*\n\nRunning the biaryl coupling at 100 °C raised the LCAP assay yield to 79% but *lowered* isolated yield to 68%. The boronic acid was protodeboronating to benzene faster than it was coupling. This matters because an optimizer fitted on assay numbers would have selected the worse conditions. The lesson: **measure the outcome that matches your goal** — isolated purity matters more than conversion, and conflating them silently optimizes for the wrong thing.\n\n### 3. **Degassing properly or accept a bimodal yield distribution** *(from playbook-degassing, opt-suzuki-conditions)*\n\nPd(0) is oxidised by dissolved oxygen into catalytically dead black precipitate. The signature is *bimodal*: nominally identical runs give 70%+ or under 20%, rarely in between, depending entirely on whether the catalyst survived its first minutes. Three freeze-pump-thaw cycles or 20 minutes of sparging per 100 mL. Two minutes looks like you are doing it and is the same as not degassing. We observed this bimodality in the optimization runs before we understood what caused it.\n\n---\n\nThese are distilled findings, not reaction conditions: they are the transferable things that would apply to other couplings you run.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-pd-cross-coupling-scope\">\\n## When a palladium coupling stalls, change the ligand before the temperature\\n\\nDistilled from campaig"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-biaryl-scope\">\\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\\nwhere does this"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=Non"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-biaryl-scope\">\\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\\nwhere does this"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-aqueous-protodeboronation', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-amide-additive\">\\nThree amide couplings with and without HOBt.\\n\\n- rxn-amide-edc\\n\\nConsistent ~25 point yield difference in favo"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-pd-cross-coupling-scope\">\\n## When a palladium coupling stalls, change the ligand before the temperature\\n\\nDistilled from campaig"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "100",
+      "79",
+      "68",
+      "0",
+      "70",
+      "20"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 27.36,
+    "event_counts": {
+      "token": 42,
+      "tool_call": 11,
+      "evidence_source": 5,
+      "tool_result": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cc720075261544e7aa034d737460d60f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

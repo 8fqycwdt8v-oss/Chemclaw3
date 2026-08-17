@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "op-09",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "whats the fastest way to get a go/no-go on whether this new amine even couples? dont want to burn a week finding out it doesnt",
+    "expects_tools": [
+      "gather_evidence",
+      "similar_reactions",
+      "similar_molecules",
+      "resolve_compound",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a literature or patent precedent",
+      "a yield prediction for the new amine stated as fact",
+      "this substrate will/will not couple"
+    ],
+    "direction": "Proposes one decisive small-scale experiment rather than a programme: the in-house standard conditions for the closest recorded analogue, at a scale and timescale that answers the question in a day, with an explicit success criterion decided before the run. It cites the precedent that sets those conditions and says how close the analogue actually is. Crucially it states what a negative result would and would not rule out — a failed test under one condition set is not evidence the substrate is inert — so the technician does not over-read a no-go. No invented literature.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-09",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "whats the fastest way to get a go/no-go on whether this new amine even couples? dont want to burn a week finding out it doesnt",
+    "answer": "I'll help you design a quick go/no-go test. To give you the sharpest answer, I need a few specifics:While you're providing that, here's the general fastest path for coupling go/no-go:\n\n**Fastest screening order (ranked by time and decisiveness):**\n\n1. **Literature/precedent first** — I'll search the knowledge graph and similar-reaction database for this amine + electrophile combination or close analogs. A precedent that worked is the answer in 30 seconds. If there's precedent, you know it couples; if it failed under the proposed conditions, you learn what to change.\n\n2. **Crude reaction at small scale** (if no precedent or precedent is inconclusive) — one-pot, ambient or mild heat, one of the standard coupling methods for that class (amidation, arylation, heterocyclic coupling). Run it 1–2 hours, pull a crude aliquot, check by MS or LC/UV. You'll see product mass (go) or not (no-go) in 4–6 hours total including workup.\n\n3. **In parallel: computed site reactivity** — while the reaction runs, I can rank the amine's N against competing nucleophilic sites using Fukui indices. If there's a more reactive site that gets alkylated instead, you learn whether you need to protect it or change the electrophile.\n\nOnce you give me the amine and electrophile, I can pull precedent and flag any obvious incompatibilities (steric clashes, incompatible functional groups) before you even set up.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.44,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b23a32a9744b47b781435a87e0ea1e96",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

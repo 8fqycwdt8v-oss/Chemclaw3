@@ -1,0 +1,64 @@
+{
+  "probe": {
+    "id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the design called exhaustive, full or complete",
+      "a design offered with no statement of what is confounded with what"
+    ],
+    "direction": "A screening design, with its resolution and its aliasing said out loud. Twelve runs over four factors is a real constraint and the answer has to name what it buys and what it gives up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "answer": "I'll help you design an efficient screening plan. Let me first understand your factors better by asking a clarifying question.I'm ready to design your screening once you supply those details. With 12 experiments and four factors, I'll likely recommend one of two paths:\n\n1. **Factorial screen** — if all factors are two-level (e.g., two solvents, two temperatures at the range ends, two catalysts) — a 2^4 = 16-run full design is slightly over budget, but a fractional design at 8 runs leaves room for replicates or centre points to detect curvature.\n\n2. **Bayesian optimization** — if factors are continuous or have more than two levels — start with 5 space-filling seed points (showing you the corners and middle of the space), then use 7 runs to have the model learn where to look next, so the later experiments are more informative than the early ones.\n\nThe choice depends on your factors' shape and what you're trying to learn: \"Does this factor matter at all?\" (factorial) vs. \"Where in the range is the optimum?\" (Bayesian).",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.33,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b4fef3443ef147e997a90dc2a40bc942",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

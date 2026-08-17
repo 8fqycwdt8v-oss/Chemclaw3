@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an audit entry, hash or timestamp it did not retrieve",
+      "a compliance certification or validated-system status",
+      "that re-running the job proves the number was not edited",
+      "an inspection or audit outcome"
+    ],
+    "direction": "Names what actually exists and is honest about its limit. Three things: the append-only audit trail, which records who ran what and when; the database grant behind it, which gives the application INSERT and neither UPDATE nor DELETE, so the credential that writes a row cannot rewrite it; and the calculation store, which keys a result by method, version and input hash and persists it once, so the number in the report resolves to a stored record and its artifact. The limit must be said out loud rather than left implied: there is no cryptographic proof that a row was never edited — a database owner can still change one — so what is on offer is a controlled record, not tamper-evidence. The distinguishing move is still saying explicitly that \"we can re-run the job and get the same number\" is reproducibility, a different claim from integrity. Any specific hash, id or timestamp must be one it retrieved.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "answer": "This is a good question about what the audit trail actually guarantees — and what it doesn't.\n\n**What you can show them:**\n\n1. **The append-only audit trail itself** — every call to compute a value is recorded with:\n   - Actor (who called it)\n   - Tool invoked\n   - Arguments passed\n   - The returned result\n   - Latency, timestamp, correlation id\n   - Deployment revision\n\n   The database privilege that writes this trail prevents the credential that created the row from updating or deleting it. So if you hand over that trail entry, you can say: \"This computation was recorded, and the account that wrote it cannot have edited it after the fact.\"\n\n2. **Reproducibility** — Re-run the identical calculation (same method, version, input, parameters) and get the same number back. This proves the result is deterministic and was not a transcription error, but it does **not** prove the stored number was never edited.\n\n3. **The calculation key** — Computations are keyed by `(calculator, version, input, parameters)`. If the stored result has that key attached, it means the system can find it again by the same lookup, which is how cache hits work. Again, this supports reproducibility, not integrity.\n\n**What you cannot show them:**\n\n- **Cryptographic tamper-evidence** — There is no digital signature or hash chain. A database owner (someone with higher privilege than the append-only account) can still edit a row directly. The append-only guarantee only blocks the application user.\n\n- **That the number was never edited by a DBA** — The audit trail assumes a privilege boundary; it does not prevent breach of that boundary.\n\n**What to tell the auditor:**\n\n> \"The computation is recorded in an append-only audit trail that the application user cannot modify after the fact. The trail entry carries the inputs, the returned value, and a timestamp. We can also re-run the identical calculation and verify the result is reproducible. However, this does not provide cryptographic proof against tampering by a database administrator, and we do not have that level of integrity control.\"\n\nIf the auditor needs stronger guarantees — that no one, including a DBA, could have edited the number — you would need cryptographic commitments (a signed hash, a blockchain-style chain) that this system does not currently provide. That's a different conversation with your deployment's infrastructure team.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.19,
+    "event_counts": {
+      "token": 24,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f57d7581c8df494aa15ee6cb0ca05e67",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

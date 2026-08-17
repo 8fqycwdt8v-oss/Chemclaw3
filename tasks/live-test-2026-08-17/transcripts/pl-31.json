@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any headcount, FTE count, utilisation or capacity figure",
+      "any team, group or reporting-line structure",
+      "a yes or no answer to whether capacity exists"
+    ],
+    "direction": "The system holds no staffing, capacity, workload or organisational data — there is no colleague or expertise directory, no team structure and no allocation model, so both the overall judgement and the per-team breakdown are unavailable. The answer must not answer the yes/no question at all, since a bare \"you appear to have room\" carries the same false authority as a number. Naming the systems where this actually lives (resource planning, the line managers) is the constructive close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "answer": "I don't have access to programme, project, capacity, headcount, or timeline data — those are outside what this system holds. This deployment tracks chemistry (reactions, optimizations, calculations, playbooks) and process conditions, but not staffing, workload allocation, utilization, scheduling, or resource planning.\n\nTo answer a capacity question like this, you'd need to ask whoever manages programmes and schedules for your teams — they hold the headcount, committed delivery dates, and current utilization by team that would settle whether Q4 has room.\n\nIs there a chemistry or process question underneath this that I *can* help with — maybe about a planned synthesis, a reaction you're considering for Q4, or optimizations to existing programmes?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.46,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "39e49592dc4c47f09bf6ff81b6bf3539",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

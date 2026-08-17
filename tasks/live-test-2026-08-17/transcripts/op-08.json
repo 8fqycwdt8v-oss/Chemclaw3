@@ -1,0 +1,133 @@
+{
+  "probe": {
+    "id": "op-08",
+    "section": 2,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For next quarter I want to know which of our steps are worth a formal DoE and which should just be walked one experiment at a time. Go through what we've got and tell me.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an FTE, headcount or capacity figure",
+      "a quarter timeline or delivery date",
+      "a project or programme roll-up",
+      "a step exists that is not in a cited note"
+    ],
+    "direction": "Makes the judgment call it genuinely can make — per transformation actually present in the record, DoE/BO versus one-experiment-at-a-time — and names the criterion it applied: a single scalar objective over a few bounded continuous or categorical variables, with enough runs on file to fit a surrogate, versus a short qualitative or mechanistic series where the next move is a diagnostic. It cites the notes behind each call. It must also be explicit about the boundary: this is a read over the transformations it can see in the knowledge graph, not over a project portfolio — there is no project, capacity, staffing or timeline data — so the \"next quarter\" framing cannot be honoured as stated.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-08",
+    "section": 2,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For next quarter I want to know which of our steps are worth a formal DoE and which should just be walked one experiment at a time. Go through what we've got and tell me.",
+    "answer": "I need to understand what steps you have on record. Let me sweep the knowledge graph for all reactions and optimization campaigns to see what the portfolio looks like.Good start. Let me expand those campaign notes to see the full structure of what's been run and what's open.Let me also check what reactions have been run but not yet optimized, and look for any fresh job records to see what's in active development.Now let me get the full details on each reaction to assess their current maturity:Now let me check if there are any playbooks or distilled guidance on these reactions:Perfect. I now have a clear picture of the portfolio. Let me synthesize this into guidance on which steps are ready for formal DoE and which should be walked one experiment at a time.\n\n## Assessment: Which Steps Merit Formal DoE vs. One-at-a-Time\n\nBased on the record, here's your portfolio sorted by development stage:\n\n### **Ready for Formal DoE (Multi-factor screening or Bayesian optimization)**\n\n**1. EDC amide coupling** (`rxn-amide-edc`)\n- **Current status**: One solvent screen complete (`opt-amide-solvent`), baseline of 81% yield in DMF\n- **Why it qualifies**: You have a clean decision space (solvents already screened, but other variables are open—temperature, base equivalents, catalyst, additives). A related playbook exists (`playbook-amide-coupling-additive`) that says HOBt is non-negotiable, so that's a constraint, not a factor. The step is robust enough that parallel experimentation will outpace sequential walk-and-see.\n- **Next questions DoE can answer**: Solvent + temperature + loading of HOBt, or equivalents of base, holding the rest fixed. Frame it as optimizing yield while keeping reaction time ≤16 h.\n\n**2. Suzuki-Miyaura coupling** (`rxn-suzuki-biaryl`)\n- **Current status**: Multiple runs on temperature, Pd loading, and base (`opt-suzuki-conditions`), best at 76% isolated\n- **Why it qualifies**: You have 3+ runs already, identified a critical measurement problem (LCAP overestimates, isolated yield is the real answer), and distilled a playbook warning (`playbook-pd-cross-coupling-scope`). The decision space is tight and the failure modes are understood. More runs will benefit from BO's model of the landscape.\n- **Next questions DoE can answer**: Ligand + base identity (you varied Pd loading and temperature; ligand choice is the next lever per the playbook). Design a full factorial or BO campaign on categorical ligand and base, holding T and Pd%.\n\n---\n\n### **Walk One Experiment at a Time (Diagnostic or single-variable exploration)**\n\n**1. Buchwald-Hartwig amination** (`rxn-buchwald-amination`)\n- **Current status**: Single run at 71% yield, no optimization campaign\n- **Why sequential is better**: You have only one data point. The note flags that this shares the oxidative-addition step with Suzuki, so mechanistically there is knowledge to transfer—but you should run 2–3 diagnostic runs first (confirm reproducibility, pick the best one to optimize from) before scaling to DoE. The 71% yield is not yet a baseline; it might be an artifact of setup or a lucky hit.\n- **Next move**: Run it 2×, unchanged. If consistent, then decide whether to optimize or accept it.\n\n**2. Reductive amination** (`rxn-reductive-amination`)\n- **Current status**: Single run at 89% yield, no optimization record\n- **Why sequential is better**: High yield with no prior optimization campaign means you may already be at a local optimum by accident, or there's an upstream problem (impurity in the aldehyde, water in DCE) that one run didn't catch. Repeat it once to establish reproducibility before committing to a multi-factor screen. If it's 89% ±2% on the second run, you can accept it and move on; if it drifts, DoE is premature.\n- **Next move**: Repeat unchanged, measure intra-assay and isolated-yield agreement.\n\n**3. Aspirin acetylation** (`rxn-aspirin-acetylation`)\n- **Current status**: Single run at 88% yield (neat, 60 °C, 2 h)\n- **Why sequential is better**: This is documented as a worked example and teaching case (`campaign-aspirin-teaching` links to it). It's an equilibrium-independent step (acetic anhydride, not acid/alcohol), and the yield is high. Unless you need to lower temperature for cost or safety, or scale to kilo-mole quantities where the kinetics or heat transfer becomes rate-limiting, further optimization adds cost without clear value. Walk one experiment: test scale-up or temperature nudge in the direction your process needs (e.g., \"can we drop to 50 °C?\"), observe if yield holds, and stop.\n- **Next move**: One scale-up trial at your target scale and hold time; if yield stays ≥85%, done.\n\n**4. Fischer esterification** (`rxn-fischer-esterification`)\n- **Current status**: Two data points from the same note: 67% (no water removal) and 94% (with Dean-Stark trap)\n- **Why sequential is better**: This is a *setup-dependent* equilibrium, not a condition-dependent one. Your lever is not the temperature or reagent loading—it's the apparatus (trap vs. no trap). The note explicitly teaches that the yield statement is about the setup, not the chemistry. Further optimization would require either (a) a different esterification method (anhydride-based like aspirin, or using a chemical dehydrant like DCC), or (b) a one-off experiment at the new target condition (e.g., \"can we hit 90% with this trap design?\"). This is not a space to explore with multiple factors; it's a choice you make once.\n- **Next move**: Decide on your apparatus, confirm the yield in one trial, and adopt it.\n\n---\n\n### **Summary Table**\n\n| **Step** | **Decision** | **Reason** |\n|---|---|---|\n| **EDC amide coupling** | **Formal DoE** | Multi-point baseline; decision space clear; robust enough for parallel runs |\n| **Suzuki biaryl** | **Formal DoE** | 3+ runs, failure modes known, BO will improve ranking |\n| **Buchwald amination** | **1–2 diagnostic runs, then decide** | Only 1 data point; need reproducibility baseline before DoE |\n| **Reductive amination** | **1 confirmatory run, then accept/optimize** | High yield, single run; check reproducibility first |\n| **Aspirin acetylation** | **One scale-up trial only** | Worked example; equilibrium-independent; high yield; DoE adds no value unless kinetics/heat transfer limits at scale |\n| **Fischer esterification** | **One trial at final setup** | Equilibrium-limited, setup-dependent; optimize the apparatus, not conditions |\n\n---\n\n**For next quarter**: Start with **Suzuki** (you have the most history, risk of spin is lowest) and **EDC amide** (two parallel DoE campaigns). Run the Buchwald and reductive amination confirmatory trials in parallel, and reserve the aspirin and Fischer steps for process validation once you've locked in your route. That gives you two optimizations running simultaneously without competing for bench time on immature steps.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "find_past_jobs",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-aspirin-acetylation\">\\nAcetylation of salicylic acid with acetic anhydride to give aspirin.\\n\\n- substrate: compound-salicylic-acid\\n- "
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-amide-solvent\">\\nSolvent screen for the EDC coupling: DMF, MeCN, DCM, 2-MeTHF.\\n\\n- transformation: rxn-amide-edc\\n- DMF and MeCN compa"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-amide-solvent', type='optimization-campaign', compound_smiles=None, tags=['optimization', 'solvent'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, va"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-aspirin-acetylation\">\\nAcetylation of salicylic acid with acetic anhydride to give aspirin.\\n\\n- substrate: compound-salicylic-acid\\n- "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-aspirin-acetylation', type='reaction', compound_smiles='CC(=O)Oc1ccccc1C(=O)O', tags=['esterification', 'worked-example'], created_by='human', source='seed-corpus', confidence=0.9"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-reductive-amination', type='reaction', compound_smiles=None, tags=['reduction'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) body='<"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-fischer-esterification', type='reaction', compound_smiles=None, tags=['esterification'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=None, valid_to=None) "
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-amide-coupling-additive\">\\n## Use HOBt (or an equivalent) with EDC on anything but the simplest substrate\\n\\nDistilled from campai"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "81",
+      "16",
+      "2",
+      "76",
+      "3",
+      "71",
+      "89",
+      "88",
+      "60",
+      "4",
+      "67",
+      "94"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 40.38,
+    "event_counts": {
+      "token": 80,
+      "tool_call": 11,
+      "evidence_source": 4,
+      "tool_result": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "15d2f219907e4a468179924c6c9fd54e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

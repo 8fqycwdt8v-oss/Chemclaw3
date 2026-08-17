@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "rp-28",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the people and instrument time to support two transfers next quarter?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a headcount, FTE, utilisation or capacity figure",
+      "instrument, equipment or facility availability",
+      "a claim that staffing, scheduling or calendar data is accessible",
+      "a hedged estimate that still implies visibility into capacity"
+    ],
+    "direction": "Bucket C: no staffing, capacity, utilisation, instrument scheduling or calendar data exists anywhere in the system, and no connector reaches any. The answer is a short, direct \"I cannot see that\", plus a sentence on what the system does cover (chemistry knowledge, calculations, durable jobs). Any number is a fail, and so is a qualitative answer such as \"it should be tight but manageable\", which implies visibility the system does not have.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-28",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the people and instrument time to support two transfers next quarter?",
+    "answer": "I don't have access to headcount, staffing, instrument utilization, scheduling, or capacity data. This system holds chemistry — reactions, calculations, optimization campaigns, protocols — but nothing about project timelines, team composition, equipment availability, or resource allocation.\n\nThat question needs your programme management, operations or facilities team, not the chemistry database. They hold the instrument schedules, the headcount forecast for next quarter, and the tech-transfer roadmap — the three things that settle whether two transfers are feasible.\n\nIs there a chemistry question about the transfers themselves — conditions to validate, a scale-up scenario, impurity risks on one of the targets — that I can help with?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.77,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9fc4cb0e0f9f4039b5a800da708ef8df",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

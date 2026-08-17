@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a completion percentage or fraction",
+      "a filing date, milestone date, or an assessment of whether a date will be met",
+      "a count or status list of package sections or deliverables",
+      "a claim that a project, programme or document-package entity exists"
+    ],
+    "direction": "Bucket C, and firmly so: there is no project entity, no programme, no timeline, no deliverable tracking and no document package anywhere in the system — it holds chemistry knowledge notes, calculations and jobs. Any percentage or date would be invented outright. The right answer says that in a couple of sentences, states what it genuinely can tell a manager (which chemistry evidence exists and where the record is thin), and sends the schedule question to the project management system. Offering find_knowledge_gaps as the nearest useful thing is a plus, not a requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "answer": "I don't have access to project timelines, submission schedules, completion percentages, or filing-date tracking. Those are outside what this system holds.\n\nWhat I can reach:\n- The knowledge graph (reactions, optimization campaigns, playbooks, development reports)\n- Calculations this system has run (DFT, xTB, property predictions, BO campaigns)\n- Lab notes and ELN records (structured and unstructured)\n- Past jobs and their rationale\n\nNone of those give me project status, milestone dates, resource allocation, or readiness assessment. That information lives in your project-management system, your submission-tracking software, or your programme office — not here.\n\n**If your question is actually about the chemistry or process development side** — \"are we ready on the synthetic route,\" \"do we have the stability data we need,\" \"what gaps remain in the optimization\" — I can help with that. Point me at the specific chemistry question and I'll search the record.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.95,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a6ed2aea24bd4c86b9a94061fad3fe3e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

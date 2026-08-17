@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "expects_tools": [
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a confidence statement with no reference to recorded calculations or measurements",
+      "a validation study, benchmark or error statistic that was not retrieved"
+    ],
+    "direction": "Introspects over what has actually been computed and measured rather than describing the method's reputation. \"There are no measurements to compare against\" is a strong answer if it is true; a confident accuracy claim with nothing behind it is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "answer": "I don't have \"these molecules\" in view — could you give me the structures (SMILES or names) you're asking about? Once you do, I can tell you exactly what the solubility model's track record actually is.\n\nThe short version for context: solubility predictions have a calibrated accuracy ledger. I can call `calculator_trust` to show you the model's average bias and error over every molecule measured so far, and `calculator_outliers` to show you where it was most wrong — which matters, because a model can be well-behaved overall and badly wrong on one class of molecule (e.g., all carboxylic acids, or all aromatic nitro compounds). A low average error does not mean the error is uniform, and an average does not show you whether your particular molecules are the ones it handles well or the ones it fails on.\n\n**What you should know about the limits:**\n- The model predicts aqueous solubility of neutral species only. If your molecules are ionizable or you need solubility in an organic solvent or a mixture, it says nothing useful.\n- A prediction arrives with an uncertainty; I will quote both and you should factor the uncertainty into your decision, not treat the value as exact.\n- Past measurements on file are the only thing that calibrate trust. If your molecules are outside the measured set entirely (a rare scaffold, a new functional group), the error bars may not apply.\n\nGive me the SMILES or names and I'll load the actual ledger for you.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.22,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "e4680eabaf634c50b5590e5900f7c945",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

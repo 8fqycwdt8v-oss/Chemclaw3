@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "gr-30",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How green is the Friedel-Crafts step, honestly, and is it the one worth fixing?",
+    "expects_tools": [
+      "green_metrics",
+      "gather_evidence",
+      "expand_note",
+      "stoichiometry_table"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a metric quoted with no statement of what was counted into it",
+      "a comparison to an industry benchmark that was not retrieved"
+    ],
+    "direction": "Five equivalents of benzene against the limiting acid chloride, plus stoichiometric aluminium chloride, is a genuinely poor step and the numbers should say so. The second half of the question — is it the one worth fixing — needs the other steps for context, so an answer that only computes one metric has answered half.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-30",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How green is the Friedel-Crafts step, honestly, and is it the one worth fixing?",
+    "answer": "I need to understand what Friedel-Crafts step you're referring to — this is likely a specific route in your ELN or knowledge graph. Let me search for it first.The record holds nothing on a Friedel-Crafts step yet. To give you an honest green assessment and rank it against the other steps, I need to know:\n\n1. **What is your Friedel-Crafts transformation?** (reactants and product SMILES, or the names if they're in the system)\n2. **What are your current conditions?** (catalyst, solvent, temperature, stoichiometry)\n3. **Do you have a route map** — is there a prior step and a following step, so I can compare the Friedel-Crafts against the whole sequence?\n\nOnce I have those, I can compute:\n\n- **E-factor and PMI** for the Friedel-Crafts as you run it now (waste per kg product)\n- **Comparison to the other steps** in your sequence — so you know whether fixing this one moves the needle or whether you should be looking elsewhere\n- **Solvent and catalyst swaps** — what the Hansen-space alternatives are, and whether they would lower the metric without trading away chemical feasibility\n\nThe green picture always needs the full route context, because a step that looks wasteful in isolation might already be the best-in-class option when you account for downstream steps (e.g., an aqueous workup that is cheap on solvent but requires a preceding step to use something immiscible).",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.06,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "247e7de27ee344a6841969e9ff4cfe1d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

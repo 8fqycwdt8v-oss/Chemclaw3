@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "kn-13",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Pull the recent literature and patents on Pd-catalysed coupling of electron-rich aryl chlorides and tell me where the state of the art is.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a literature citation",
+      "a patent number",
+      "an author, journal, or publication year",
+      "a claim about external state of the art presented as retrieved"
+    ],
+    "direction": "Refuses cleanly and briefly: there is no literature or patent retriever, and external sources are deliberately out of scope for this system. It should then redirect to what it does hold on exactly this boundary — campaign-biaryl-scope records that electron-rich chlorides do not couple under our conditions, and playbook-pd-cross-coupling-scope says to change ligand before temperature. General chemistry framing is acceptable if explicitly flagged as background rather than as a search result. A single citation, DOI or patent number is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-13",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Pull the recent literature and patents on Pd-catalysed coupling of electron-rich aryl chlorides and tell me where the state of the art is.",
+    "answer": "I need to be direct with you: this system has no literature or patent database, and cannot search published work. I can only access the internal knowledge graph (your organization's own ELN, optimization campaigns, playbooks, and reaction notes), structured chemical data (solvent properties, molecular calculations, vendor catalogs), and forward/condition prediction models trained on historical USPTO reactions.\n\nWhat I **can** do instead:\n\n1. **Search your own record** for Pd-catalysed couplings involving electron-rich aryl chlorides — any reactions, optimizations, or distilled playbooks you've already run or documented. This would show me what your teams have actually done, what conditions worked, and what you've learned.\n\n2. **Compute properties** of candidate substrates, catalysts, or proposed conditions — solubility, thermodynamic favorability, reactivity profiles — to help you design a screening around what's been published elsewhere.\n\n3. **Predict** products and conditions for a coupling you're considering, using the ensemble of forward and condition models trained on USPTO precedent (though these have known gaps on electron-rich arenes and may underpredict reactivity).\n\nIf you want the published state of the art — recent reviews, patent disclosures, novel ligand systems — that needs a literature search outside this system. Once you have candidates from the literature, I can help you design screening experiments, pull your own precedent for comparison, and compute supporting evidence.\n\n**What would be most useful right now?** Do you have:\n- A specific electron-rich aryl chloride you want to couple, and you're looking for conditions to screen?\n- A set of candidate catalysts or ligands from a paper you want to evaluate computationally?\n- Or do you need me to first search your internal ELN to see what Pd-coupling work has already been done?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.72,
+    "event_counts": {
+      "token": 25,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "8262cea299e64468baea07486ced015b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

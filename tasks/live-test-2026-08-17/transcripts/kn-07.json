@@ -1,0 +1,110 @@
+{
+  "probe": {
+    "id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield number not present in the retrieved notes",
+      "a note id that was not retrieved",
+      "a regulatory or solvent-class designation the notes do not state"
+    ],
+    "direction": "Yes, at about 5 points, with the measured numbers from opt-amide-solvent and/or interaction-solvent-swap-question: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate. A strong answer adds the recorded process argument for making the swap anyway — 2-MeTHF is bio-derived, is not a reprotoxin, and separates from water, which removes the DMF work-up entirely. Cites at least one note id.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "answer": "I need to search the record for your EDC coupling first, and then assess the solvent swap. Let me gather that evidence.Good: the record has direct evidence on this exact swap. Let me pull the full optimization note to see what else matters:## Yes, and the cost is manageable.\n\nYour solvent screen is on file (**opt-amide-solvent**): the EDC coupling in 2-MeTHF gave **76% yield** against **81% in DMF** — a **5-point loss** on the same substrate with the same base and temperature protocol (DIPEA 2.5 equiv, 0 °C to rt). MeCN was also strong at 79%, while DCM dropped to ~69%.\n\n**What you buy back at work-up and scale:**\n\n- **DMF** is reprotoxic category 1B and an SVHC. It is ICH class 2 (880 ppm limit), must be carried with full safety controls, and does not come out easily — it boils at 153 °C, so you need vacuum and heat to remove it.\n\n- **2-MeTHF** is a problem solvent (greenness band) because it is a peroxide former and highly flammable (flash point −11 °C), but it **is not reprotoxic**. It boils at 80 °C, strips cleanly at moderate vacuum, and is ICH class 2 but with a tighter limit (500 ppm vs. 880 ppm). The partial water miscibility (vs. DMF's full miscibility) means your aqueous workup is slightly more complicated — you likely need an extraction rather than direct aqueous quench — but that is a reversible design question, not a yield problem.\n\n**The route review** (**report-amide-route-review**) evaluated exactly this trade: the 5-point yield cost is \"bought back at work-up\" because the removal step is so much simpler and the reprotoxic burden drops entirely.\n\n**Your other constraints matter:**\n- If you store this in bulk, the peroxide-former flag means you need a stabilizer (BHT is common) and must avoid copper and iron catalysts, and you cannot concentrate it to dryness without risk. That is a process constraint, not a chemistry one.\n- If you are at scale or in a regulatory environment that cares about genotoxic impurities, the choice between DMF and 2-MeTHF depends on your substrate's other functionality — but for an EDC coupling alone, neither solvent introduces a new mutagenic route.\n\n**Do you want me to check anything else — the work-up scheme, the scale, or whether HOBt is non-negotiable at your substrate's complexity?**",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "resolve_compound",
+      "resolve_compound",
+      "expand_note",
+      "expand_note",
+      "solvent_properties",
+      "solvent_properties"
+    ],
+    "tool_results": [
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"2-MeTHF\",\n  \"smiles\": \"CC1CCCO1\",\n  \"name\": \"2-methyltetrahydrofuran\",\n  \"source\": \"synonym\"\n}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"DMF\",\n  \"smiles\": \"CN(C)C=O\",\n  \"name\": \"N,N-dimethylformamide\",\n  \"source\": \"synonym\"\n}"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-amide-additive\">\\nThree amide couplings with and without HOBt.\\n\\n- rxn-amide-edc\\n\\nConsistent ~25 point yield difference in favo"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-amide-solvent', type='optimization-campaign', compound_smiles=None, tags=['optimization', 'solvent'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, va"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-amide-route-review', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      },
+      {
+        "tool": "solvent_properties",
+        "preview": "{\n  \"name\": \"2-methyltetrahydrofuran\",\n  \"aliases\": [\n    \"2-MeTHF\",\n    \"MeTHF\"\n  ],\n  \"cas\": \"96-47-9\",\n  \"smiles\": \"CC1CCCO1\",\n  \"formula\": \"C5H10O\",\n  \"molecular_weight\": 86.13,\n  \"boiling_point_c"
+      },
+      {
+        "tool": "solvent_properties",
+        "preview": "{\n  \"name\": \"N,N-dimethylformamide\",\n  \"aliases\": [\n    \"DMF\"\n  ],\n  \"cas\": \"68-12-2\",\n  \"smiles\": \"CN(C)C=O\",\n  \"formula\": \"C3H7NO\",\n  \"molecular_weight\": 73.09,\n  \"boiling_point_c\": 153.0,\n  \"meltin"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "76",
+      "81",
+      "5",
+      "2.5",
+      "0",
+      "79",
+      "880",
+      "153",
+      "11",
+      "80",
+      "500"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 16.45,
+    "event_counts": {
+      "token": 42,
+      "tool_call": 7,
+      "evidence_source": 1,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3974cd5749d84b58a861fc9c98c40a74",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

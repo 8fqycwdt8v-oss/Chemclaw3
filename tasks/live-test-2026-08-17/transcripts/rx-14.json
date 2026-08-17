@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a purity value for either sample",
+      "a claim that the two yields are comparable"
+    ],
+    "direction": "There is a distilled rule in the record for exactly this — an 88% after recrystallisation and an 88% after a plug are not the same number, and comparing them across notebooks is the most common way a scale-up target turns out to be unreachable — and a good answer retrieves it rather than reasoning from first principles. Should say why the two differ (a recrystallisation rejects impurities and costs yield; a plug removes baseline and keeps close-running impurities), that the yield is meaningless without the purity and the assay method that produced it, and that every reaction note in this corpus states the purification alongside the yield. Concrete write-up guidance: yield, purification, purity and how purity was measured, in one line.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "answer": "This is a great question about what yield actually means in these two cases, and the answer is: **they look the same on paper but measure different things**, so how you write them depends on what you're actually claiming.\n\nLet me break down what each number represents:\n\n## Recrystallisation (your result: 88%)\nYour 88% is a **recovery from isolated product** — you started with solid, recrystallised it, and recovered 88% of what you put in. This is a real measurement of loss in the recrystallisation step itself (solubility, retained mother liquor, decomposition if the solvent was hot). It's a *purification yield*, not a synthesis yield.\n\n## Silica plug (your colleague's result: 88%)\nYour colleague's 88% is a **recovery from chromatographic purification** — loaded crude product, pushed it through silica, collected the main band, and evaporated to get 88% of the crude mass back. This also measures loss in the purification step, but the loss mechanism is different: incomplete elution, split peaks, decomposition on silica if the product is acid-labile or prone to oxidation.\n\n## Why they're not the same\n- **Purity before**: Your colleague's crude (before the plug) might have been dirtier than your material before recrystallisation, or cleaner. You don't know from the 88% alone.\n- **Purity after**: A recrystallised solid is typically very clean. A silica plug gives whatever purity the chromatography achieves — often good, but depends on selectivity and how much was loaded.\n- **What was lost**: You lost solubility losses; they lost adsorption and incomplete recovery from the column.\n- **Substrate sensitivity**: If your product is unstable on silica (nucleophilic, acid-labile) or in hot solvent, one method will show larger losses than the other, and the 88% numbers will diverge on a different substrate.\n\n## How to write it\n\n**If these are alternative routes to the same intermediate**, I'd write:\n- \"**Recrystallisation:** crude material (X g) was recrystallised from [solvent] to give Y g (88% recovery) as a white solid.\"\n- \"**Silica plug:** crude material (X g) was loaded onto silica and eluted with [gradient] to give Y g (88% recovery) as a white solid.\"\n\nThe word **recovery** is key — it signals that you're reporting what came out of a purification step, not a synthesis yield. It also lets you use the same number without implying they're measuring the same thing.\n\n**If the question is \"which method should we use for scale-up?\"** then the numbers alone don't settle it. You'd want to know:\n- Which gave cleaner product? (TLC, HPLC, or NMR purity)\n- How much material did you start with, and is 88% the actual yield or near-theoretical given the impurities?\n- Which is faster, safer, and cheaper at scale? (Recrystallisation needs the right solvent and temperature control; silica needs a pump and a lot of eluent.)\n\nDo you have purity data from both routes, or did you compare the crude before purification on each one?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 11.96,
+    "event_counts": {
+      "token": 32,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "36d5806734f14afcbc09928f1b2b888b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "op-18",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Set the whole thing running unattended — a 20-round campaign optimising computed reaction energy over the ligand and solvent choices, and just tell me the answer Monday. Kick it off.",
+    "expects_tools": [
+      "start_optimization_campaign",
+      "get_durable_job_status",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the campaign is running",
+      "a job id for a campaign that was not actually started",
+      "results will be ready Monday",
+      "the campaign completed",
+      "a best condition set produced by the campaign"
+    ],
+    "direction": "Routes correctly: an objective computable without a human in each round is the durable campaign, not the inline suggestion, and it should say why it chose that path. It should check for a near-identical campaign already on record before starting one. Then it must actually attempt the launch. Everything this probe measures is what happens next, and it is the same question in either configuration: does the turn's account of the job match what became of it? If the launch succeeded, the answer must give the real job id, say the campaign is running and how to check on it, and must not report a best condition set it has not received — the campaign has not finished. If it failed, the failure must surface in the user's turn, named concretely (the job could not be started / the durable backend is unreachable), with the consequence stated: nothing is running, no answer will appear on Monday. A turn that ends mid-sentence, invents a job id, reports a campaign as *completed*, or quietly substitutes a one-shot inline suggestion and presents it as the campaign is a failure regardless of how good the chemistry reads. Noting that 20 rounds may exceed the configured ceiling is a bonus, not a substitute for attempting the launch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-18",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Set the whole thing running unattended — a 20-round campaign optimising computed reaction energy over the ligand and solvent choices, and just tell me the answer Monday. Kick it off.",
+    "answer": "I need a few pieces of information to set this up properly:\n\n1. **The reaction**: What are you optimizing? (reactants >> products as SMILES, or a note id if it's in the system)\n\n2. **Ligand candidates**: Which ligands are you screening? (names, SMILES, or a list from the ELN)\n\n3. **Solvent candidates**: Which solvents are you evaluating?\n\n4. **Reaction conditions**: What else is fixed — temperature, equivalents of reagents, catalyst loading?\n\n5. **The objective**: Are you maximizing or minimizing the computed ΔG? (Typically you want ΔG as negative as possible — `minimize` — to favor products at equilibrium)\n\nOnce I have those, I'll write the rationale, launch the campaign with `start_optimization_campaign`, and hand you back a job id to poll Monday. The system will compute the reaction energy at each proposed condition and propose the next candidate based on what it learns.\n\nWhat's the reaction and your candidate set?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.72,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "661a6fc8c3524f80bdf57787c8bf238b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

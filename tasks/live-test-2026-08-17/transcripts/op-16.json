@@ -1,0 +1,96 @@
+{
+  "probe": {
+    "id": "op-16",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "I want to maximise yield and minimise the des-bromo impurity at the same time. Give me the Pareto front over temperature, ligand and base.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "these conditions are the single best point",
+      "the front is the set of optimal conditions the model predicts",
+      "the optimizer proved no better trade-off exists"
+    ],
+    "direction": "Multi-objective is supported since W3, so the request as phrased *can* be met and refusing it is now the failure. The answer should pass both objectives — maximise yield, minimise the des-bromo impurity — with a direction each, supply every run's value for both, and present the returned `front`: the runs among those supplied that nothing else beats on both at once. It must let the chemist choose along that front rather than announcing a winner, because a trade-off has no single best point. Two things it must not claim: that the front is a *prediction* (it is the non-dominated subset of the runs supplied, a statement about measurements), and that no better trade-off exists anywhere (the optimizer searched, it did not prove). If the chemist supplied runs reporting only yield, the honest move is to ask for the impurity numbers rather than optimise one axis and call it a front.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-16",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "I want to maximise yield and minimise the des-bromo impurity at the same time. Give me the Pareto front over temperature, ligand and base.",
+    "answer": "I need to help you find the Pareto front for your reaction, but first I need to search your records for the relevant data. Let me gather evidence about what you're optimizing.Good. I can see you have optimization data on the Suzuki coupling. Let me get the full details of the optimization campaign and any runs that measured the des-bromo impurity.The search found the optimization note but no notes specifically mentioning the des-bromo impurity as a measured output. Let me check if there are data attached or in an uploaded file, and search more broadly for impurity measurements.I can see from the record that the optimization campaign exists, but the des-bromo impurity is not yet captured as a measured outcome in the knowledge graph. The notes mention LCAP (liquid chromatographic assay purity) as a measure, but don't give me the actual breakdown of individual impurities by condition.\n\nTo build a Pareto front that optimizes both **yield** (to maximize) and **des-bromo impurity** (to minimize), I need data showing how both metrics vary across your conditions. \n\nLet me ask you directly for what's needed:I've found references to the Suzuki coupling optimization in your record ([[opt-suzuki-conditions]]), which shows runs at different temperatures and bases. However, the stored data doesn't yet include the des-bromo impurity as a measured output per condition—only overall yield and the observation that a gap exists between LCAP assay and isolated yield.\n\nTo compute the Pareto front for you, I need the actual measurements: for each experimental run, the isolated yield (%) and the des-bromo impurity level (%) across your temperature, ligand, and base choices. Once you provide that table, I can call `suggest_next_experiment` with both objectives to show you the trade-off surface — the set of conditions where you cannot improve yield without sacrificing purity, and vice versa.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes",
+      "find_past_jobs",
+      "list_attachments",
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "list_attachments",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-4-bromoanisole\">\\nAn electron-rich aryl bromide. The deactivated coupling partner in this corpus\\'s Suzuki example —\\nthe methoxy "
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 25.69,
+    "event_counts": {
+      "token": 35,
+      "tool_call": 7,
+      "evidence_source": 2,
+      "tool_result": 7,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "dae36d9554644b6cb912f67ee605d527",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

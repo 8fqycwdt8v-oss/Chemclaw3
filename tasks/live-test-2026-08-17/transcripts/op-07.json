@@ -1,0 +1,116 @@
+{
+  "probe": {
+    "id": "op-07",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We keep losing boronic acid on the bigger runs and I think it's protodeboronation. Plan me the experiments that would actually settle whether it is, and what fixes it if so.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "predict_pka",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "this is definitely protodeboronation",
+      "kinetic data or rate constants that are not in a cited note",
+      "a literature study of this decomposition"
+    ],
+    "direction": "Pulls the aqueous-protodeboronation failure-mode note and the degassing playbook and uses them to state the hypothesis precisely enough to be refuted — what protodeboronation predicts that other losses do not. Proposes a small diagnostic sequence, each run isolating one factor (water content, base, temperature, order of addition, boronic acid held without catalyst), with the expected observation if the hypothesis holds and if it does not. Does not adopt the chemist's diagnosis as established. Any calculated input (a pKa, say) is labelled predicted. Offering the plan through the PR-gate as a proposal is right; asserting the cause is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-07",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We keep losing boronic acid on the bigger runs and I think it's protodeboronation. Plan me the experiments that would actually settle whether it is, and what fixes it if so.",
+    "answer": "I'll help you design a diagnostic campaign to confirm protodeboronation and identify fixes. Let me first gather what the record holds about this reaction.Good — the record holds evidence. Let me expand the key notes to see the full detail on the Suzuki work and what's known about protodeboronation.Excellent. Now let me check the reaction details and read the deep-research skill to frame the diagnostic campaign properly.Now I understand the situation. You have a **diagnostic question**, not an optimization — you need to confirm protodeboronation is the culprit and then find the lever that stops it. Let me design the experiments systematically.\n\n## The diagnostic campaign: confirming protodeboronation and finding fixes\n\n**What the record shows:**\n\nFrom `failure-aqueous-protodeboronation` and `opt-suzuki-conditions`: at 100 °C in THF/water, the LCAP conversion is *better* (79% vs 76% at 80 °C) but isolated yield *drops* (68% vs 76%). The gap between assay and isolated product is consistent with boronic acid hydrolyzing faster than it transmetalates—classic protodeboronation. The observation has been confirmed three times.\n\n**The hypothesis to test:** Boronic acid is converting to benzene (C-H rather than C-Ar coupling product) faster than it's transmetalating under your current bigger-scale conditions. This would show as:\n1. Missing boronic acid in the reaction mixture (LCMS, or just stoichiometry)\n2. Excess benzene in the product by GC or LCMS\n3. Lower isolated yield than bench conversions predict\n\n**Why this matters for scale:** Protodeboronation is pseudo-first-order in the boronic acid; its rate is driven by temperature, pH, and residence time in protic solvent. On scale, you likely have:\n- Longer mixing/heating time (more opportunity for protodeboronation)\n- Higher surface-to-volume ratio effects if cooling is slower\n- Potentially different water content or mixing hydrodynamics\n\n---\n\n## Proposed experiments (in sequence)\n\n### **Run 1: Confirm the mechanism** *(diagnostic, not a win)*\n\n**Conditions:**  \nReplicate your current \"bigger run\" (state the scale) but deliberately include in the work-up:\n- LCMS of the crude reaction mixture at the end (report benzene content, starting boronic acid content, ArB(OH)2 loss)\n- GC-FID of the crude product (benzene integration as % of product peak area)\n- Isolated yield + LCAP assay as usual\n\n**Rationale:**  \nYou need to *see* the byproducts and confirm the stoichiometry gap. If benzene is <0.5% of product, protodeboronation is not your lever. If it's >2%, it is.\n\n**Expectation (falsifiable):**  \n- **If benzene is significant** (>1–2% by GC): protodeboronation is confirmed, and you move to Run 2.\n- **If benzene is trace** (<0.5%): the yield loss is something else (e.g., phase separation, mass transfer on scale, or boronic acid not fully consumed before cooling). *Fallback:* measure conversion of each starting material separately (LCAP for both), so you know which one is stopping.\n\n**Confounds you're accepting:**  \nThis run uses your current conditions; you're not separating temperature/time/scale effects yet. But you need to know what's actually happening before you vary anything.\n\n---\n\n### **Run 2: Test the temperature lever** *(if Run 1 confirms protodeboronation)*\n\n**Conditions:**  \nSame scale and setup as Run 1, but **lower temperature to 65–70 °C** (pick one; say which). Everything else holds: same Pd, base (K2CO3), solvent (THF/water 4:1), time (12 h—but *timed from reaching setpoint*, not from start of heating).\n\n**Rationale:**  \nProtodeboronation is roughly exponential in temperature. A 15 °C drop slows it significantly (~2–5× slower, very rough estimate). If this recovers isolated yield without tanking assay conversion, temperature is your control lever, and you move to Run 3 (finding the sweet spot). The evidence from `opt-suzuki-conditions` (80 °C gives 76% isolated) supports this.\n\n**Expectation (falsifiable):**  \n- **If isolated yield recovers toward 76% or above**: temperature is indeed the problem and you have a path. Benzene in the crude should drop below 1%.\n- **If isolated yield stays low** (≤70%): you either haven't gone low enough, or protodeboronation is confounded with another loss mode (e.g., Pd precipitation, base degradation). *Fallback:* Run 3 below.\n\n**Confounds:**  \nYou're not moving the time variable; longer heating at lower T might bring you back to the same protodeboronation rate. That's acceptable for now—it's what Run 3 will test.\n\n---\n\n### **Run 3: Test two complementary levers if Run 2 disappoints** *(either or both)*\n\n**Option A: Add a water scavenger (if protic solvent is the problem)**\n\n**Conditions:**  \nSame as Run 1 (your current scale/temperature, to isolate this change), but add **4Å molecular sieves** (10 wt% on the boronic acid, pre-activated). No other changes.\n\n**Rationale:**  \nIf water is driving protodeboronation, removing it shifts equilibrium away from the hydrolyzed form. This doesn't fix a temperature problem, but it's quick and costs very little.\n\n**Expectation:**  \n- **Improved isolated yield**: boronic acid is being lost to hydrolysis, not heat-driven protodeboronation.\n- **Same low yield**: temperature or residence time is the driver, not water.\n\n---\n\n**Option B: Lower the water fraction** *(if Run 2 works and you need an extra margin)*\n\n**Conditions:**  \nKeep temperature from Run 2 (your new lower setpoint), but **change solvent to THF/water 6:1** instead of 4:1 (or test 8:1 if Pd stays soluble—check this first by literature or quick bench test at a smaller scale). Everything else holds.\n\n**Rationale:**  \nProtodeboronation kinetics depend on aqueous-phase concentration of water and acid. Dropping water from 20% to ~14% of the solvent mix lowers the rate without changing the transmetalation rate as much (it's largely in the organic phase). This is a complementary lever to temperature.\n\n**Expectation:**  \n- **If yield improves further with lower water**: you have two independent handles (T and solvent ratio) and can optimize.\n- **If yield plateaus**: you're hitting another constraint (maybe the boronic acid's solubility in less-aqueous solvent, or mass transfer limits).\n\n---\n\n### **Run 4: Once you've found a winning direction, optimize the sweet spot**\n\nOnce one of the above runs recovers your yield, you can then run a **small BoFire campaign** (temperature × boronic acid loading × time) to find where you get the isolated yield back without sacrificing conversion. At that point you have a fitted decision space.\n\n---\n\n## What this campaign tests\n\n| Run | Tests | Answers |\n|-----|-------|---------|\n| 1 | Is protodeboronation actually happening? | Mechanism confirmed or ruled out |\n| 2 | Is temperature your main lever? | Path forward defined |\n| 3A/B | Are there complementary fixes? | Robustness options identified |\n\n---\n\n## Safety note\n\nNone of these moves introduces new hazards. Molecular sieves are benign; lower water content at moderate temperature is fine. If you do move *above* 100 °C as a test (which I'm not proposing), run `screen_hazards` first on the reaction mixture.\n\n---\n\n**Next step:** Which of these resonates with your setup? Do you have LCMS/GC capability for Run 1, or is isolated yield + assay the only readout you have? That changes whether we can confirm the mechanism quickly or have to infer it from the yield gap. Also, what scale are the \"bigger runs\" — is the time to heat up / reach temperature significantly longer than your bench runs?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='compound-phenylboronic-acid', type='compound', compound_smiles='OB(O)c1ccccc1', tags=['boronic-acid'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=None, valid_to="
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"failure-aqueous-protodeboronation\">\\nRunning the biaryl coupling at 100 °C in THF/water raises LCAP conversion and *lowers* isolated\\nyield"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-aqueous-protodeboronation', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: experiment-progression\n  3  description: >-\n  4    Use when the series is qualitative or mechanistic rather than a factor table — runs that\n  5    changed several things at once, f"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "100",
+      "79",
+      "76",
+      "80",
+      "68",
+      "1",
+      "2",
+      "3",
+      "0.5",
+      "65",
+      "70",
+      "4",
+      "12",
+      "15",
+      "5",
+      "10",
+      "6",
+      "8",
+      "20",
+      "14"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 41.61,
+    "event_counts": {
+      "token": 91,
+      "tool_call": 6,
+      "evidence_source": 1,
+      "tool_result": 6,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b761c575c00e4db5b549741e7f289abe",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

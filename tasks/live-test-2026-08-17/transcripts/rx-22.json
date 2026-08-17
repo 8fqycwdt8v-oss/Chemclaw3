@@ -1,0 +1,90 @@
+{
+  "probe": {
+    "id": "rx-22",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The workup after my EDC/HOBt amide coupling emulsified badly — DCM and water, with DIPEA in there, and it sat for an hour without breaking. How do I stop this happening next time?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted interfacial tension, phase-separation time or emulsion stability",
+      "a claim that the emulsion caused the yield loss without evidence"
+    ],
+    "direction": "Should search the record first — the corpus holds an amide-coupling additive playbook and a recorded EDC-in-DCM failure whose real cause was the temperature ramp rather than the solvent, which is a useful correction if the user starts blaming DCM. Practical causes and fixes worth naming: urea by-product and DIPEA salts as the surfactant load, filtering the urea before separation, brine or a saturated salt wash, dilution, letting it stand versus filtering through a phase separator or celite, acid and base washes in the right order so the amine base is removed as a salt, and swapping DCM for a solvent with a larger density difference. Ionisation reasoning about where DIPEA and any acidic component sit at a given wash pH is legitimate here, with the usual caveat that the predicted pKa ranks rather than sets a pH.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-22",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The workup after my EDC/HOBt amide coupling emulsified badly — DCM and water, with DIPEA in there, and it sat for an hour without breaking. How do I stop this happening next time?",
+    "answer": "I'll help you troubleshoot this emulsion issue. Let me gather evidence from your records first—there may be precedent for this coupling or similar workup problems, and I can also check the properties involved.The record shows you're using your EDC/HOBt coupling, and importantly, DCM is giving weaker results already. But your emulsion question is a workup-specific problem—let me dive deeper into this specific issue.\n\nThe core problem is physical chemistry, not reaction chemistry. You've got three things colliding badly:\n\n1. **DCM + water is inherently emulsifying** ([solvent_properties]()); DCM has partial water miscibility, a moderate dielectric constant (8.9) and Hansen parameters that straddle both organic and aqueous. It forms stable emulsions easily.\n\n2. **DIPEA makes it worse.** DIPEA is a large, hindered amine that is amphipathic — it has hydrophobic isopropyl groups and a hydrophilic charged nitrogen, making it a natural surfactant. When you have DIPEA in the DCM phase trying to transfer a deprotonated carboxylate to the aqueous phase, you're essentially creating an emulsion-stabilizing interface.\n\n3. **The sitting-for-an-hour part is the real tell.** This suggests you waited for gravity separation instead of actively breaking the emulsion as it formed.\n\n**How to stop this next time:**\n\n- **Add salt to the aqueous phase** — a high concentration of NaCl or Na₂SO₄ (a \"salting out\" effect) reduces the solubility of both DIPEA and amide products in water, destabilizing the emulsion at the interface. Add it *before* mixing if possible.\n\n- **Use a different organic solvent for workup.** Your record shows DCM actually gives lower coupling yields anyway (opt-amide-solvent notes ~12 points lower than DMF). Since you're already running the coupling in DMF or 2-MeTHF (per report-amide-route-review), why switch to DCM for workup? Stay in the same solvent if the reaction is complete, or if you must extract, use **ethyl acetate** (which is fully immiscible with water and far less emulsion-prone) or **toluene**. Both separate faster.\n\n- **Acidify the aqueous wash first.** Adding aqueous HCl (or dilute acid) before the extraction protonates DIPEA to its ammonium salt, which is much less amphipathic and cannot stabilize an interface. Do a 10% HCl wash *first*, before any neutral aqueous washes. This is the most direct fix.\n\n- **Mechanical help if it happens.** If you do end up with an emulsion: centrifugation beats waiting. A 10 min spin at low speed breaks most emulsions. Alternatively, adding a small amount of MeOH (~5–10% of the organic layer) can reduce interfacial tension enough to collapse the emulsion — it's temporary and does not contaminate your product if you then remove it under vacuum.\n\nThe record doesn't flag a specific workup note for amide couplings, so this is a practical procedural issue rather than something that's been formally documented in your precedent. I'd suggest **acidic aqueous wash first, then salted wash** as your lead solution: it's fast, doesn't require equipment, and directly addresses the DIPEA surfactant problem.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "solvent_properties",
+      "solvent_properties"
+    ],
+    "tool_results": [
+      {
+        "tool": "solvent_properties",
+        "preview": "{\n  \"name\": \"water\",\n  \"aliases\": [\n    \"H2O\",\n    \"aqua\"\n  ],\n  \"cas\": \"7732-18-5\",\n  \"smiles\": \"O\",\n  \"formula\": \"H2O\",\n  \"molecular_weight\": 18.02,\n  \"boiling_point_c\": 100.0,\n  \"melting_point_c\": "
+      },
+      {
+        "tool": "solvent_properties",
+        "preview": "{\n  \"name\": \"dichloromethane\",\n  \"aliases\": [\n    \"DCM\",\n    \"methylene chloride\",\n    \"MDC\"\n  ],\n  \"cas\": \"75-09-2\",\n  \"smiles\": \"ClCCl\",\n  \"formula\": \"CH2Cl2\",\n  \"molecular_weight\": 84.93,\n  \"boilin"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"proposal-amide-2-methf\">\\nProposed next run on the amide coupling, reasoned from the series rather than from a surrogate\\nmodel — the count"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"proposal-amide-2-methf\">\\nProposed next run on the amide coupling, reasoned from the series rather than from a surrogate\\nmodel — the count"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "8.9",
+      "2",
+      "3",
+      "12",
+      "5"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.48,
+    "event_counts": {
+      "token": 38,
+      "tool_call": 4,
+      "evidence_source": 2,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "e3fcd2c521464d46963d1098b9238a40",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

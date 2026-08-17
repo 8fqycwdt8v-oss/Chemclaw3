@@ -1,0 +1,115 @@
+{
+  "probe": {
+    "id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a run, yield or condition set that is not in a cited note",
+      "a literature or patent reference as the source",
+      "we have no records on this coupling"
+    ],
+    "direction": "Reconstructs what the record actually holds for this transformation and cites each note it used: the Suzuki biaryl run (its base, solvent system, temperature, degassing and isolated yield), the aqueous-protodeboronation failure mode, and the degassing / Pd cross-coupling scope playbooks. Every number traces to a note; anything the notes do not record is said to be not recorded rather than filled in. It then turns that into the shape of a study plan — what is already settled and therefore not worth re-running, and what is genuinely open. An answer that asks the chemist to supply the history it could have retrieved is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "answer": "I'll search our knowledge graph and past calculations for everything we've done with 4-bromoanisole Suzuki couplings.Good—the graph has two reactions using 4-bromoanisole. Let me expand the Suzuki one for the full details, then search for similar Suzuki couplings to see the broader precedent.Excellent. Now let me pull the optimization campaign and the failure mode that are linked, plus the playbook on Pd cross-coupling scope:Perfect. Now let me get the campaign that the playbook cites for more scope detail:## Here's what we know about the 4-bromoanisole Suzuki coupling in-house:\n\n### **The Baseline Result**\n[[rxn-suzuki-biaryl]] established the reaction under these conditions:\n- **1.5 mol% Pd(OAc)₂, K₂CO₃ (2.0 equiv), THF/water 4:1, 80 °C, 12 h (degassed)**\n- **Isolated yield: 76%**\n\nThis is with phenylboronic acid → 4-methoxybiphenyl. The coupling of an electron-rich aryl *bromide* works. For analogues, you know you're starting from something that does.\n\n---\n\n### **The Critical Failure: Protodeboronation at Temperature**\n[[failure-aqueous-protodeboronation]] is the finding you *must* anchor the new study to. Running at 100 °C gave **79% assay yield but only 68% isolated** — the gap between what LCAP says and what you actually isolate. The boronic acid is protodeboronating faster than it transmetalates. \n\nThis was seen three times before it was named, each time because the assay looked better. If you're optimizing on LCAP conversion alone, higher temperature will appear to work and then wreck your actual yield.\n\n**For your study plan: always run isolated yield, not just assay.** Temperature sensitivity on this substrate is not a throttle you can ignore.\n\n---\n\n### **The Ligand-First Rule**\n[[playbook-pd-cross-coupling-scope]] distilled from our runs: for an electron-rich aryl halide where oxidative addition is the slow step, changing the ligand (or its loading) will move the needle far more than raising temperature will. The order you already found:\n1. Bulkier biaryl phosphine (if you're not already using one)\n2. Raise L:Pd ratio\n3. Degas harder\n4. Only *then* raise temperature (if needed)\n\nTemperature accelerates the unwanted protodeboronation at least as fast as the coupling itself. Save heat as the last lever.\n\n---\n\n### **The Scope Boundary**\n[[campaign-biaryl-scope]] mapped six couplings. The key takeaway for your analogues: **electron-rich bromides work; electron-rich chlorides do not under these conditions.** So if any of your new substrates are chlorides, you already know you'll need different conditions (higher Pd loading, hotter, or different ligand entirely). \n\n---\n\n### **What You're Standing On**\n- One fully worked example (phenylboronic acid)\n- One optimization showing the pitfall (temperature selection)\n- One playbook on what actually moves the system (ligand > heat)\n- One scope boundary (bromides vs. chlorides)\n- No optimization on boronic acid scope yet\n\nFor your analogue series, the study plan should test **new boronic acids** under the baseline 1.5 mol% Pd / K₂CO₃ / 80 °C / 12 h first — if any fail, the playbook tells you to reach for a better ligand before a higher thermometer. And isolate everything; don't let assay numbers lie to you on temperature.\n\nWant me to help structure the experiment progression once you know what analogues you're running?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "similar_reactions",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-suzuki-biphenyl-1\",\n      \"label\": \"COc1ccc(Br)cc1.OB(O)c1ccccc1.O=C([O-])[O-].[K+].[K+]>>COc1ccc(-c2ccccc2)cc1\",\n      \"simila"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-aqueous-protodeboronation', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=Non"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1.5",
+      "2.0",
+      "1",
+      "80",
+      "12",
+      "76",
+      "100",
+      "79",
+      "68",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 23.45,
+    "event_counts": {
+      "token": 53,
+      "tool_call": 8,
+      "tool_result": 8,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d6d3f1a76e084d9db43a04b42431d8cd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "probe": {
+    "id": "gr-31",
+    "section": 16,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The Sonogashira needs Ic1ccccc1 and C#Cc1ccccc1. When can I actually start?",
+    "expects_tools": [
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a price, pack size or lead time stated with no source named",
+      "stock availability asserted when no catalog was consulted"
+    ],
+    "direction": "This is a procurement question, not a chemistry one. If a vendor catalog is reachable in this deployment, the answer is a date and it should name where the date came from; if none is reachable, the answer is that the system has no procurement data and cannot tell them. Both are passes. Producing a confident lead time from neither is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-31",
+    "section": 16,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The Sonogashira needs Ic1ccccc1 and C#Cc1ccccc1. When can I actually start?",
+    "answer": "I need to understand what you're asking — are you checking availability of these building blocks for a Sonogashira coupling, or asking about a specific reaction setup that's already in the record?\n\nLet me search for both compounds and any recent Sonogashira work:The gathering picked up related coupling reactions but not a Sonogashira with these exact substrates. Let me check vendor availability for these building blocks:**Both building blocks are available, but not in stock:**\n\n- **Iodobenzene** (Ic1ccccc1): $45 for 25 g, **4-day lead time**, MockChem VC-00111\n- **Phenylacetylene** (C#Cc1ccccc1): $61.20 for 5 g, **5-day lead time**, MockChem VC-00112\n\n**You can start in approximately 5 days** once the phenylacetylene arrives (the longer of the two lead times).\n\nIs there anything else you need for the Sonogashira setup — catalyst/ligand availability, solvent, or conditions? I can check the literature precedent in the record and help you design the reaction.",
+    "answered": true,
+    "tools_called": [
+      "resolve_compound",
+      "resolve_compound",
+      "gather_evidence",
+      "search_building_blocks",
+      "search_building_blocks"
+    ],
+    "tool_results": [
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"Ic1ccccc1\",\n  \"smiles\": \"Ic1ccccc1\",\n  \"name\": \"Ic1ccccc1\",\n  \"source\": \"smiles\"\n}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"C#Cc1ccccc1\",\n  \"smiles\": \"C#Cc1ccccc1\",\n  \"name\": \"C#Cc1ccccc1\",\n  \"source\": \"smiles\"\n}"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      },
+      {
+        "tool": "search_building_blocks",
+        "preview": "{\n  \"catalog_id\": \"VC-00111\",\n  \"name\": \"Iodobenzene\",\n  \"smiles\": \"Ic1ccccc1\",\n  \"vendor\": \"MockChem\",\n  \"price_usd\": 45.0,\n  \"pack_size\": \"25 g\",\n  \"lead_time_days\": 4,\n  \"in_stock\": false\n}"
+      },
+      {
+        "tool": "search_building_blocks",
+        "preview": "{\n  \"catalog_id\": \"VC-00112\",\n  \"name\": \"Phenylacetylene\",\n  \"smiles\": \"C#Cc1ccccc1\",\n  \"vendor\": \"MockChem\",\n  \"price_usd\": 61.2,\n  \"pack_size\": \"5 g\",\n  \"lead_time_days\": 5,\n  \"in_stock\": false\n}"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "45",
+      "25",
+      "4",
+      "61.20",
+      "5"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.07,
+    "event_counts": {
+      "token": 15,
+      "tool_call": 5,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "79bd7f23af014d5ea7d9b90f2e36c7cb",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

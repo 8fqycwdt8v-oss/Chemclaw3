@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "op-21",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those two look right. Put them on record so the team runs them and I can point back at the decision in six months.",
+    "expects_tools": [
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "added to the knowledge graph",
+      "this is now plan-of-record",
+      "written as a bo-candidate note",
+      "the note has been merged or approved"
+    ],
+    "direction": "Drafts the batch as an experiment-proposal note through the propose route, carrying the calculation references that came back with the suggestion so a stale descriptor can later be traced to the experiments it shaped, and stating the rationale in the chemist's terms — the question this batch answers — rather than restating the parameter ranges. The status must be unambiguous: this is agent-authored and enters through the human review gate, so it is a proposal awaiting sign-off, not yet plan-of-record and not yet in the graph. It should not reach for the campaign's own note type, which belongs to a durable campaign rather than to an inline suggestion.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-21",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those two look right. Put them on record so the team runs them and I can point back at the decision in six months.",
+    "answer": "I'd be happy to record those experiments on the knowledge graph, but I don't have them in view right now — they've aged out of the conversation context. Could you paste or re-state the two experiments you want recorded? I need:\n\n- The reaction (reactants and products as SMILES, or a clear name)\n- The conditions you're proposing (solvent, temperature, catalyst, additives, etc.)\n- The rationale — what question each one is meant to answer\n\nOnce you give me those, I'll write them as experiment-proposal notes that cite the evidence behind them, so in six months you can pull the note and see exactly why you chose to run them.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.62,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fe230fc1d4874043aafbaff7414e9da7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

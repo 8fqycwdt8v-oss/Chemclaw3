@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "rx-30",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "an addition rate in mL/min, L/h or a total addition time",
+      "an agitator speed, tip speed, Reynolds number or mixing time",
+      "a batch cycle time",
+      "a vessel or impeller specification"
+    ],
+    "direction": "All three parts want a scale-up engineering model that does not exist. There is no heat or mass transfer model, no mixing or blend-time correlation, no equipment or vessel data, no impeller geometry and no batch-record or cycle-time entity in this system, and every number requested is a function of the specific vessel, impeller, fill level and physical properties. The refusal must be concrete about that rather than generic. What it may legitimately offer is chemical framing that does not need equipment: the base charge is likely the exotherm, addition rate is normally set by the heat the vessel can remove and by the concentration of the reactive intermediate, and both are established by calorimetry and by the engineering group with the actual vessel data. Producing one plausible number 'as a starting point' fails this probe.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-30",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?",
+    "answer": "I don't have access to calorimetry, mixing models, addition-rate safety calculations, or process heat-transfer data — so I cannot answer questions about safe addition rates, jacket duty, adiabatic temperature rise, mixing times, or batch duration from first principles.\n\nThese are critical process parameters that depend on:\n- The reaction's heat of reaction and your batch scale (100 L)\n- The reactor vessel geometry, jacket type, and cooling capacity\n- Mixing performance (impeller type, speed, baffles) and the fluid properties\n- The actual base reagent (identity, concentration in solution, viscosity)\n- Your safety and control strategy (temperature limits, safe adiabatic rise)\n\n**What I can do:**\n\nIf you tell me:\n1. **Which transformation** this is (I can look up the reaction and prior runs), or **the reactants and product SMILES**\n2. **What base** you are charging and **in what form** (name or SMILES)\n3. **The stoichiometry and solvent system** from your 100 L run\n\nI can compute the **reaction enthalpy** (which informs the heat load), help you **scale the charge table** to 100 L, and point you at any **precedent runs** on file where engineers or chemists documented addition rates or agitation for similar chemistry.\n\nBut the translation from \"this reaction releases X kcal/mol\" to \"you need 5 L/min addition and 200 rpm agitation\" requires a **process safety review** with your plant's engineers, using your reactor specs and your company's safe-operation standards.\n\nDo you have those details to hand, or would you like me to search the record for prior runs of this transformation at larger scale?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.12,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "85249b7261da4e5781d2490cb50f289d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

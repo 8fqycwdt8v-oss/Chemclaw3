@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "gr-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "We have two conformers of the ligand complex and they disagree. Which one do I use?",
+    "expects_tools": [
+      "sample_conformers",
+      "optimize_geometry",
+      "compute_xtb_energy"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a conformer declared correct with no relative energy and no method named",
+      "a solution-phase conclusion drawn from a gas-phase calculation without saying so"
+    ],
+    "direction": "Relative energies with the method and its limits stated. \"Which one is right\" often has no single answer at room temperature, and a Boltzmann-weighted picture is a better answer than a winner.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "We have two conformers of the ligand complex and they disagree. Which one do I use?",
+    "answer": "I need to see the structures or at least understand what they are so I can help you decide. Let me ask a clarifying question:While you answer that, I should mention what the answer depends on:\n\n**If both are computed**, the lower-energy one is the thermodynamically favored conformer *at the level of theory you used*. But \"which one do I use?\" depends on what you're using it for:\n- For a **structure-based prediction** (docking, interaction energy, site reactivity): use the lower-energy conformer, because it is the most probable state at equilibrium.\n- For a **flexible molecule that samples multiple conformers**: you may need to consider both, weighted by their Boltzmann populations. A small energy difference (< 2–3 kcal/mol) means both are substantially populated.\n- For **reaction mechanics or binding**: the conformer that is *relevant* to the mechanism might not be the global minimum — a transition state could sample a higher-energy conformer as a reactant state.\n\n**If one is experimental** (crystal structure, cryo-EM, NMR-derived): that one likely wins, because it is what the molecule actually does in the solid state or in solution under those conditions. The computed one then becomes a sanity check — if they differ drastically, something is wrong with either the structure assignment or the calculation.\n\nOnce you tell me what you have, I can load the relevant skill and give you a specific answer.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.61,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f55d741e1fba41e6b3d8ca19a25b1749",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

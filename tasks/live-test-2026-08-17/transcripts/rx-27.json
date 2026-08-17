@@ -1,0 +1,122 @@
+{
+  "probe": {
+    "id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "green_metrics",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a vessel size or reactor fill volume",
+      "a batch cycle time or addition rate",
+      "a predicted yield or isolated mass of product"
+    ],
+    "direction": "This is squarely inside the tool surface and should produce a real computed table rather than arithmetic in prose: limiting reagent identified, molecular weights resolved, moles, equivalents and masses for every component, and the solvent volumes that ten volumes implies. Should state which component it took as limiting and check that the equivalents it was given are what it used. The boundary to hold is that a charge table is not a batch record: no vessel, no fill level, no addition rate, no cycle time, and no master batch record template exists in this system. If it offers anything beyond the table, it should be a hazard screen on the charge list, not engineering.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "answer": "I'll build that charge table for you. Let me start by resolving the reagent names and then scaling to 2 kg of 4-bromoanisole.I need the SMILES for 4-bromoanisole and phenylboronic acid since those didn't resolve; let me search the knowledge graph:Perfect. Now I'll call the charge table with the resolved structures:Excellent. Here's your charge table for the 2 kg scale Suzuki coupling:\n\n| Species | Role | Mass (g) | Volume (mL) | Molar Equiv. |\n|---------|------|----------|-------------|--------------|\n| **4-bromoanisole** | Basis | 2000.0 | — | 1.0 |\n| **Phenylboronic acid** | Reagent | 1565 | — | 1.2 |\n| **Potassium carbonate** | Reagent | 2956 | — | 2.0 |\n| **Palladium(II) acetate** | Reagent | 36.0 | — | 0.015 (1.5 mol%) |\n| **THF** | Solvent | 14,224 | 16,000 | — |\n| **Water** | Solvent | 3,992 | 4,000 | — |\n\n**Key notes:**\n\n- **Total solvent:** 20,000 mL (16,000 mL THF + 4,000 mL water) = 10 volumes of the basis\n- **Solvent ratio:** 4:1 THF:water by volume as specified\n- All reagents are charged by molar equivalent; solvents are charged by volume (process volumes)\n- The table expresses each species in the units it was specified in — reagents as mass, solvents as volume\n\nReady to scale down, adjust conditions, or look at waste metrics (E-factor/PMI)?",
+    "answered": true,
+    "tools_called": [
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "find_notes",
+      "find_notes",
+      "stoichiometry_table"
+    ],
+    "tool_results": [
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"K2CO3\",\n  \"smiles\": \"O=C([O-])[O-].[K+].[K+]\",\n  \"name\": \"potassium carbonate\",\n  \"source\": \"synonym\"\n}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"Pd(OAc)2\",\n  \"smiles\": \"CC(=O)[O][Pd][O]C(C)=O\",\n  \"name\": \"palladium(II) acetate\",\n  \"source\": \"synonym\"\n}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"THF\",\n  \"smiles\": \"C1CCOC1\",\n  \"name\": \"tetrahydrofuran\",\n  \"source\": \"synonym\"\n}"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "{\n  \"query\": \"water\",\n  \"smiles\": \"O\",\n  \"name\": \"water\",\n  \"source\": \"synonym\"\n}"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='compound-4-bromoanisole', type='compound', compound_smiles='COc1ccc(Br)cc1', tags=['aryl-halide'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='compound-4-methoxybiphenyl', type='compound', compound_smiles='COc1ccc(cc1)-c1ccccc1', tags=['product', 'biaryl'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=Non"
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "{\n  \"basis_name\": \"COc1ccc(Br)cc1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"COc1ccc(Br)cc1\",\n      \"smiles\": \"COc1ccc(Br)cc1\",\n      \"role\": \"basis\",\n      \"equivalents\": 1.0,\n     "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "2000.0",
+      "1.0",
+      "1565",
+      "1.2",
+      "2956",
+      "2.0",
+      "36.0",
+      "0.015",
+      "14,224",
+      "16,000",
+      "3,992",
+      "4,000",
+      "1"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.67,
+    "event_counts": {
+      "token": 23,
+      "tool_call": 9,
+      "tool_result": 9,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a53c4eb4fa7e46a7845361257b34ac7f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}
