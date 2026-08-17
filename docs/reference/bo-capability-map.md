@@ -132,7 +132,11 @@ answer. `TargetObjective` ("hit exactly this") is the one with a real future cas
 method target — and it is blocked on the missing `method` note type, not on BoFire.
 
 **Design of experiments** — `DoEStrategy` with D/A/E/G/K/I-optimality and `SpaceFillingCriterion`
-(model-based optimal design, and the only route to a real LHS): `REFUSED`, it needs cyipopt + SCIP.
+(model-based optimal design, and the only route to a real LHS): `REFUSED` — because **no story asks
+for one**, not because of a dependency. This line used to read "it needs cyipopt + SCIP", which is
+false and was carried into `DEFERRED.md` too: SCIP already ships transitively with
+`bofire[optimization]`, cyipopt is optional with a `scipy.minimize` fallback, and measured on
+2026-08-17 with cyipopt absent both criteria returned a design on a *constrained continuous* domain.
 Three of the four unused `FractionalFactorialStrategy` knobs — `n_center`, `n_repetitions`,
 `randomize_runorder` — shipped in **W2**. `block_feature_key` did not: blocking needs a block
 factor, and no plate, day or operator entity exists in `src/`.

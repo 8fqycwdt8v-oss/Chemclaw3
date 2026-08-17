@@ -41,7 +41,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
-from chemclaw.agent.plan_gate import plan_identity
+from chemclaw.agent.plan_gate import plan_gate_failure_reason, plan_identity
 from chemclaw.agent.state import turn_input
 from chemclaw.api.events import (
     ApprovalRequestEvent,
@@ -217,7 +217,12 @@ def _custom_event(payload: Any, on_signal: Any) -> Event | None:
         return _signal_event(signal)
     if "evidence_source" in payload:
         return EvidenceSourceEvent(
-            source=str(payload["evidence_source"]), chunks=int(payload.get("chunks", 0))
+            source=str(payload["evidence_source"]),
+            chunks=int(payload.get("chunks", 0)),
+            # Defaulted on the read side as well as on the wire, because this payload has no schema
+            # between the branch and here: an older writer that publishes only a count must keep
+            # meaning "asked and answered", never "broken".
+            failed=bool(payload.get("failed", False)),
         )
     return None
 
@@ -263,6 +268,16 @@ async def _from_update(
     is non-empty.
     """
     for node, update in (payload or {}).items():
+        # **Whoever adds the first interrupt: this line drops it.** LangGraph delivers a suspended
+        # turn as `{"__interrupt__": (Interrupt(...),)}` — a *tuple*, not a dict — so it takes this
+        # `continue` and the turn ends with no answer text, which the runner then classifies as
+        # `empty_answer`. Nothing raises `interrupt()` today (D-2026-08-15 kept the plan gate a
+        # refusal, and the durable hold went with the challenge panel), so this is latent rather
+        # than live, and writing the branch now would be a path no test could reach.
+        #
+        # Recorded here rather than in `BACKLOG.md` deliberately: a note addressed to whoever adds
+        # a producer belongs where they will be reading, not in a queue of forty things capped on
+        # what a person can hold.
         if not isinstance(update, dict):
             continue
         for message in update.get("messages") or []:
@@ -411,7 +426,15 @@ def _signal_event(signal: Signal) -> Event:
         # `chemclaw.agent.plan_gate`, and it never reaches this stream.
         return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     if isinstance(signal, ToolFailureSignal):
-        return ToolFailedEvent(tool=signal.tool, message=signal.message)
+        # The one place a `PlanNotApprovedError` becomes an event, so the one place the refusal can
+        # be labelled as such. Downstream — the UI, the eval classifier — then reads a field
+        # instead of grepping the refusal's prose for a phrase, which is a classification that
+        # survives someone rewording the sentence a chemist reads.
+        return ToolFailedEvent(
+            tool=signal.tool,
+            message=signal.message,
+            reason=plan_gate_failure_reason(signal.message),
+        )
     if isinstance(signal, HandoffSignal):
         # Was raised by `agent/team.running_specialist`, so the pair bracketed exactly the
         # interval the audit trail attributed to the specialist. `to=""` is the hand back,

@@ -103,7 +103,26 @@ class ClaimCheck(BaseModel):
 class VerificationResult(BaseModel):
     """The verdict for a whole answer: per-claim checks and an aggregate confidence in [0, 1]."""
 
-    claims: list[ClaimCheck] = Field(default_factory=list)
+    # **Required, deliberately — a default here is a field the provider may legally omit.**
+    # `method="json_schema"` (see `verify_answer`) makes the provider enforce this model, but it can
+    # only enforce what the emitted schema *demands*, and pydantic drops any field carrying a
+    # default out of `required`. With `default_factory=list` the whole schema demanded `confidence`
+    # alone, so a judge returning `{"confidence": 0.9}` — no claims at all — validated cleanly and
+    # `score_answer` then read `result.unsupported` as empty: a verdict that names nothing, from a
+    # prompt that asks for every claim by name. The prompt was never the missing half; the schema
+    # was. Making it required is what turns "the model chose not to enumerate" into a wire-level
+    # rejection the degrade path can see.
+    #
+    # **An empty list is still a legal answer, and it means one specific thing**: the answer
+    # contains no factual claim to check (a greeting, a clarifying question). It never means claims
+    # were not looked for — that case is now a validation failure, not a silent `[]`.
+    claims: list[ClaimCheck] = Field(
+        ...,
+        description=(
+            "Every distinct factual claim in the answer, with its verdict. Return [] only when "
+            "the answer makes no factual claim at all."
+        ),
+    )
     confidence: float = Field(ge=0, le=1)
     # Which check produced this verdict. The judge scores *faithfulness* — does the answer say what
     # the evidence says; the citation gate scores only *resolvability* — do the wikilinks name

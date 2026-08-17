@@ -11,6 +11,20 @@ fingerprint index (G4):
    atom *counts* is unsound and falsely rejects valid reactions; element-set subsumption
    is the strongest check that stays a sound necessary condition.
 
+   **What this therefore does not catch, stated plainly** because it reads stronger than it
+   is: any fabrication whose product is built from elements the inputs already supply.
+   `aniline + methanol >> paracetamol` validates. So does `methane >> eicosane`, and
+   `glucose >> cholesterol`. Only a product introducing a *new element* is rejected — which
+   is why the reviewer, not this function, is the gate on whether a reaction is real.
+
+   Two stronger checks were considered and neither is available on this data. Comparing
+   heavy-atom counts needs a ceiling on how many times an input may repeat in a product, and
+   without coefficients that ceiling is arbitrary — it would reject a genuine oligomerization
+   to catch an invented one. Checking that products cannot outweigh inputs is sound at any
+   stoichiometry, but measured across every shipped fixture **no outcome records a mass**, so
+   it would be a no-op wearing the appearance of a control. Both need the export to carry
+   something it does not; see `docs/planning/DEFERRED.md`.
+
 Returns a list of human-readable problems (empty = valid), so the sync can log exactly why
 an entry was rejected and the CLI can report them.
 """

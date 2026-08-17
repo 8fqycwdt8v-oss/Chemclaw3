@@ -44,6 +44,7 @@ from chemclaw.agent.session import TurnSession
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
+from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     CapabilityDegradedEvent,
@@ -55,7 +56,6 @@ from chemclaw.api.events import (
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace
-from chemclaw.api.runner_usage import TurnUsage
 from chemclaw.api.tool_results import session_sink
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings

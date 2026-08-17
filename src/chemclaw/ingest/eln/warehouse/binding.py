@@ -68,7 +68,12 @@ class BindingError(PathSyntaxError):
 
 def _check_identifier(value: str, what: str) -> str:
     """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate."""
-    if not _IDENTIFIER.match(value):
+    # `fullmatch` rather than `match`: with a trailing `$` anchor, `match` also accepts one
+    # trailing newline, so a function name ending in one passed and reached the statement text.
+    # Nothing could follow that newline — the rest of the value would have to match as well — so
+    # this was hygiene rather than a hole. But a checker whose whole job is "the value is exactly
+    # this shape" should not rest on which of two anchor semantics it happened to get.
+    if not _IDENTIFIER.fullmatch(value):
         raise BindingError(
             f"{what} {value!r} is not a plain SQL identifier; a binding may only name relations "
             "and columns, and every value it contributes is a bound parameter"
@@ -506,6 +511,15 @@ class VectorBinding(BaseModel):
             _check_identifier(column, "vector filter column")
         if self.embedding == "server" and not self.server_embed_function:
             raise BindingError("embedding 'server' needs a server_embed_function to call")
+        if self.embedding == "server":
+            # Checked for the same reason every other interpolated name is: `sql.vector_statement`
+            # writes this one into the statement text as `f"{fn}({placeholder}, {placeholder})"`,
+            # so an unchecked value closes the call and continues the query. It was the single
+            # field this validator skipped, which made `sql.py`'s "only checked identifiers are
+            # written here" false for exactly one field — and it is also the one field a site
+            # author edits rather than a reviewer. A dotted name passes, so the real
+            # `SNOWFLAKE.CORTEX.EMBED_TEXT_768` is unaffected.
+            _check_identifier(self.server_embed_function, "server embed function")
         if self.embedding == "local" and (self.server_embed_function or self.server_embed_model):
             raise BindingError(
                 "server_embed_function/server_embed_model are only used when embedding is "

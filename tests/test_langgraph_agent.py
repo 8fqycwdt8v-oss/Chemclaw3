@@ -41,7 +41,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
-from chemclaw.agent.plan_gate import plan_approval_refusal, plan_identity
+from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import scratchpad_tools
@@ -51,14 +51,18 @@ from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
+from chemclaw.api.events import ToolFailedEvent
+from chemclaw.api.graph_stream import _signal_event, graph_events
+from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
-from chemclaw.core.turn_signals import Signal
+from chemclaw.core.turn_signals import Signal, ToolFailureSignal
 from chemclaw.kg.note import NoteError
 from tests.fakes import ScriptedModel
+from tests.fakes_langgraph import ScriptedChatModel
 
 
 def _listed_skills(prompt: str) -> set[str]:
@@ -566,8 +570,74 @@ def test_a_state_changing_call_is_refused_without_an_approved_plan(
     finally:
         reset_current_session_id(session)
 
+    # The whole refusal, built from the same function the gate raises — so this pins what the
+    # *model* is handed exactly. The substring check that used to sit beside it ("has not been
+    # approved yet") was strictly weaker than this line and asserted the same thing twice, which
+    # is how a phrase of prose came to look load-bearing: three tests spelled it out, so it read
+    # like a contract, and `evals/live.py` classified on a copy of it. What a consumer must key on
+    # is the discriminator, and that is asserted on the wire in the test below.
     assert content == denial_result(plan_approval_refusal(write_tool))
-    assert "has not been approved yet" in content
+
+
+def test_a_plan_refusal_reaches_the_stream_with_its_own_discriminator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated refusal is a `tool_failed` event that says *why*, not one a reader has to parse.
+
+    A refusal and a database outage arrive on the chemist's stream as the same event type, and the
+    only thing that told them apart was one phrase of the refusal's sentence, copied into
+    `evals/live.py`. Those are opposite findings — the control holding versus a fault — so a
+    reword of prose written for chemists would have silently reclassified every gated turn, with
+    every test still green, because the tests pinned the same copy.
+
+    Driven through `graph_events` rather than asserted on `_signal_event`, because the stamp has to
+    survive the whole path the defect lived on: the gate raises, `announce_tool_failures` records a
+    signal carrying two *strings*, and the translator has only those strings left to classify from.
+    An exception type that stopped reaching the detail line would fail here and nowhere else.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    write_tool = sorted(set(side_effecting_tools()) & {t.__name__ for t in _capability_tools()})[0]
+    # `ScriptedChatModel` rather than `_scripted`, because this is the one test in the file driven
+    # through `graph_events`: that reads `stream_mode="messages"`, and the plain fake yields no
+    # chunks for a tool-call turn (its content is empty) — LangChain then raises rather than
+    # running the turn. `tests/fakes_langgraph` exists for exactly this.
+    graph = build_langgraph_agent(
+        model=ScriptedChatModel([{"name": write_tool, "args": {}}, "done"]),
+        audit_sink=NullAuditSink(),
+    )
+
+    class _Usage:
+        def add(self, _usage: Any) -> None:
+            """The ledger's shape; this test does not assert on tokens."""
+
+    async def _drive() -> list[Any]:
+        return [
+            event
+            async for event in graph_events(
+                graph,
+                "help",
+                config={"configurable": {"thread_id": "t-plan-gate"}},
+                trace=ToolCallTrace(),
+                on_signal=lambda _s: None,
+                usage=_Usage(),
+            )
+        ]
+
+    session = set_current_session_id("session-discriminator")
+    try:
+        events = asyncio.run(_drive())
+    finally:
+        reset_current_session_id(session)
+
+    failures = [e for e in events if isinstance(e, ToolFailedEvent)]
+    assert [(f.tool, f.reason) for f in failures] == [(write_tool, PLAN_GATE_REASON)]
+    # And the negative half, so the field is a *classification* rather than a constant: an ordinary
+    # tool fault carries no reason at all, which is what every failure emitted before this field
+    # existed still means to a surface that reads it.
+    fault = _signal_event(ToolFailureSignal(tool="x", message="ConnectionError: down"))
+    assert isinstance(fault, ToolFailedEvent) and fault.reason is None
 
 
 def test_a_read_only_call_is_untouched_by_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,7 +654,10 @@ def test_a_read_only_call_is_untouched_by_the_gate(monkeypatch: pytest.MonkeyPat
     finally:
         reset_current_session_id(session)
 
-    assert "has not been approved yet" not in content
+    # Expressed against the refusal the gate would have produced, not against a phrase of it: the
+    # claim is "this call was not gated", and a substring check made that claim depend on wording
+    # nobody promised to keep.
+    assert content != denial_result(plan_approval_refusal("ask_clarifying_question"))
 
 
 def test_both_engines_hash_a_plan_to_the_same_identity() -> None:
@@ -623,7 +696,9 @@ def test_the_gate_is_absent_when_the_deployment_did_not_ask_for_it(
     finally:
         reset_current_session_id(session)
 
-    assert "has not been approved yet" not in content
+    # Same negative, same reason as above — the exact refusal this tool would have earned, rather
+    # than a sentence fragment that only happens to appear in it.
+    assert content != denial_result(plan_approval_refusal(write_tool))
 
 
 def test_the_harness_adds_its_plan_tool_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

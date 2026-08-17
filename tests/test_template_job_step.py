@@ -371,6 +371,68 @@ def test_every_template_step_activity_is_registered_on_a_worker() -> None:
     )
 
 
+def test_the_run_is_started_with_a_whole_procedure_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template run had no execution timeout, so its only bound was step budget × step count.
+
+    That product is a number nothing declares: it grows silently every time an author adds a step,
+    no operator can read it off any setting, and a wedged procedure — as opposed to a wedged
+    *step* — had nothing to stop it. `ConnectorJobWorkflow` gives the children it starts
+    `connector_job_timeout_seconds` for precisely this reason (`durable/connector_job.py`), and a
+    template is core's own sequencer of the same kind of work.
+
+    Asserted at the launch rather than on the setting, because the setting existing is not the fix:
+    the defect was a `start_workflow` call that never passed one.
+    """
+    from datetime import timedelta
+
+    from chemclaw.templates.manifest import Template
+    from chemclaw.templates.registry import build_template_tool
+
+    started: list[dict[str, Any]] = []
+
+    class _FakeClient:
+        async def start_workflow(self, _run: Any, arg: Any, **kwargs: Any) -> Any:
+            started.append({"input": arg, **kwargs})
+            return type("Handle", (), {"id": kwargs["id"]})()
+
+    async def connect() -> _FakeClient:
+        return _FakeClient()
+
+    monkeypatch.setattr("chemclaw.templates.registry.connect", connect)
+    monkeypatch.setattr("chemclaw.templates.registry.require_actor", lambda: "chemist@lab")
+
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Do the thing.",
+            "inputs": [],
+            "steps": [{"id": "brief", "kind": "agent", "prompt": "write it up"}],
+        }
+    )
+    asyncio.run(build_template_tool(template)(params={}))
+
+    (call,) = started
+    assert call["execution_timeout"] == timedelta(seconds=settings.template_run_timeout_seconds), (
+        "TemplateWorkflow is started with no run-level ceiling, so an N-step template's only "
+        "bound is template_step_timeout_seconds x N"
+    )
+
+
+def test_the_run_ceiling_must_be_able_to_contain_one_step() -> None:
+    """A run ceiling at or below the step budget kills the procedure inside its own first step.
+
+    And it does so with a bare `WorkflowExecutionTimedOut` naming neither setting, while making the
+    per-step timeout that was *meant* to fire unreachable. Refused by the config rather than
+    discovered in production — the same rule `_the_fan_out_ceiling_covers_the_section_it_bounds`
+    already states for the other parent/child pair that has a ceiling.
+    """
+    from chemclaw.core.config import Settings
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(template_step_timeout_seconds=900.0, template_run_timeout_seconds=900.0)
+    assert "template_run_timeout_seconds" in str(caught.value)
+
+
 def test_a_failed_template_step_wakes_the_session_and_names_which_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

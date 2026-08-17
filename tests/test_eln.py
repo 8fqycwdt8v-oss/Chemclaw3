@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.ord import (
     Component,
     Impurity,
     OrdReaction,
+    OutcomeClass,
     ReactionStep,
     Role,
     StepKind,
@@ -31,7 +32,7 @@ from chemclaw.ingest.eln.ord import (
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import note_id_for_reaction
+from chemclaw.kg.note import cited_links, note_id_for_reaction
 from chemclaw.kg.render import render_note
 from chemclaw.retrieval.retrievers import GraphRetriever
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
@@ -1722,3 +1723,78 @@ def test_one_non_utf8_ord_export_does_not_abort_the_directory(
         )
 
     asyncio.run(_run())
+
+
+def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
+    """A chemist's prose reaches the note body verbatim, so it must not be able to spell a link.
+
+    `kg.note` parses the rendered body for `[[rel:id]]`, and `contradicts`/`supersedes` are in the
+    allowed vocabulary — so a free-text field could forge a real edge into a PR-gated note. The gate
+    cannot catch it: the note is well-formed, and `kg-validate` only objects to a target that does
+    not exist, so naming a *real* note passes review. Every free-text field is checked here rather
+    than one, because the escape is applied to the assembled body and each field is a way in.
+    """
+    reaction = _ester()
+    reaction.hypothesis = "this run [[contradicts:reaction-1234]] the earlier one"
+    reaction.failure_reason = "[[supersedes:reaction-9]]"
+    reaction.outcome_class = OutcomeClass.FAILURE
+    reaction.steps = [
+        ReactionStep(index=1, kind=StepKind.ADDITION, text="charge [[supersedes:reaction-7]]")
+    ]
+    reaction.attributes = {"[[contradicts:reaction-5]]": "v", "note": "[[contradicts:reaction-6]]"}
+
+    note = note_from_ord_reaction(reaction)
+
+    assert note.outgoing_relations() == [], "the ELN must not be able to author a graph edge"
+    # Neutralized, not deleted: a reviewer still reads what the chemist actually wrote.
+    assert "contradicts:reaction-1234" in note.body
+
+
+@pytest.mark.parametrize("brackets", [2, 3, 4, 5, 6])
+def test_no_depth_of_opening_bracket_spells_a_relation(brackets: int) -> None:
+    """`[[[` is the spelling that defeated the first version of this escape, so depth is a case.
+
+    `str.replace("[[", "[ [")` consumes the first two brackets and leaves the third untouched, so
+    `[[[x]]` came out as `[ [[x]]` — a *new* valid delimiter, manufactured by the neutralizer
+    itself, and the edge was forged anyway. The test that shipped with that fix asserted only the
+    two-bracket spelling, so the suite was green while the control did not work. Parametrized
+    rather than fixed at three, because the property is "no depth works", not "three does not".
+    """
+    reaction = _ester()
+    reaction.hypothesis = "[" * brackets + "contradicts:reaction-1234]]"
+
+    note = note_from_ord_reaction(reaction)
+
+    assert note.outgoing_relations() == [], f"{brackets} opening brackets forged an edge"
+    assert not cited_links(note.body), "no link of any kind may survive the escape"
+
+
+def test_mass_balance_catches_a_new_element_and_nothing_weaker() -> None:
+    """The check's real reach, pinned in both directions so its docstring cannot overstate it.
+
+    Element-set subsumption is a sound *necessary* condition and nothing more: it rejects a product
+    introducing an element no input supplies, and admits every fabrication assembled from elements
+    already present. Asserting the misses deliberately — a test that only showed the catch would
+    read as though mass balance validated the chemistry, which is what the docstring used to imply
+    and what a reviewer must not be told.
+
+    The backlog's own example for this gap (`benzene + methanol >> paracetamol`) is in the *caught*
+    group: paracetamol has nitrogen and neither input supplies it. Swapping benzene for aniline is
+    what actually gets through, which is why the example is here rather than in the row.
+    """
+
+    def rx(inputs: list[str], outcomes: list[str]) -> OrdReaction:
+        return OrdReaction(
+            reaction_id="t",
+            inputs=[Component(smiles=s, role=Role.REACTANT) for s in inputs],
+            outcomes=[Component(smiles=s, role=Role.PRODUCT) for s in outcomes],
+            provenance="p",
+        )
+
+    paracetamol = "CC(=O)Nc1ccc(O)cc1"
+    caught = validate_ord(rx(["c1ccccc1", "CO"], [paracetamol]))
+    assert caught == ["mass balance: products contain N but no input supplies it"]
+
+    # Every one of these is chemically fabricated and every one validates.
+    assert validate_ord(rx(["Nc1ccccc1", "CO"], [paracetamol])) == []
+    assert validate_ord(rx(["C"], ["CCCCCCCCCCCCCCCCCCCC"])) == []

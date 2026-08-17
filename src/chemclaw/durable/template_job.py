@@ -109,6 +109,12 @@ class TemplateWorkflow:
             # The run *is* the correlation, so its own workflow id is the id that ties its steps
             # together in the audit trail — no second identifier to generate or reconcile.
             correlation_id=workflow.info().workflow_id,
+            # The launching chat, carried down to every step rather than only to the push-backs.
+            # It was already in this input and used only on the way *out*, so each step stamped no
+            # ambient session and `agent/audit.py` booked `session_id=""` on every row a template
+            # ever wrote — the trail could name the actor and the run but not the conversation the
+            # run came from. Empty off the service path, exactly as it is here.
+            session_id=run.session_id,
         )
         scope: dict[str, Any] = {f"inputs.{key}": value for key, value in run.inputs.items()}
         results: dict[str, Any] = {}
@@ -172,6 +178,15 @@ class TemplateWorkflow:
         self, step: Any, scope: dict[str, Any], identity: StepIdentity, timeout: timedelta
     ) -> Any:
         """Dispatch one step on its kind, with its references already substituted."""
+        # Both dispatched activities beat while they wait (`durable/heartbeat.beating`), so both
+        # carry the timeout that beat is derived from. Without it `start_to_close_timeout` was the
+        # only liveness signal a step had, and a worker killed mid-step was indistinguishable from
+        # one still working: the whole per-step budget had to elapse before the attempt was retried,
+        # so a pod eviction one minute into an `agent` step cost the run 15 idle minutes. It is
+        # deliberately *not* on the `job` step below — that one is a local activity, and Temporal's
+        # local activities do not heartbeat at all (`execute_local_activity` takes no
+        # `heartbeat_timeout`); it is also a cached in-process lookup with nothing to wait on.
+        heartbeat = timedelta(seconds=settings.template_step_heartbeat_timeout_seconds)
         if isinstance(step, ToolStep):
             return await workflow.execute_activity(
                 run_tool_step,
@@ -179,6 +194,7 @@ class TemplateWorkflow:
                     tool=step.tool, arguments=resolve(step.arguments, scope), identity=identity
                 ),
                 start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat,
                 retry_policy=BAD_DATA_RETRY,
             )
         if isinstance(step, AgentStep):
@@ -199,8 +215,15 @@ class TemplateWorkflow:
                     # definition keeps an edit from changing its steps.
                     write_tools=step.write_tools,
                     identity=identity,
+                    # Which step this is, so the turn it runs costs a `turn_costs` row of its own.
+                    # That ledger is keyed on the correlation id and *upserts*
+                    # (`agent/turn_cost_store.py`), and every step of a run shares the run's
+                    # correlation id — so without this a two-`agent`-step template would book the
+                    # second step's spend over the first's and report half of what it cost.
+                    step_id=step.id,
                 ),
                 start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat,
                 retry_policy=agent_step_retry(),
             )
         if isinstance(step, JobStep):

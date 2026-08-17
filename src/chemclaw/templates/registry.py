@@ -13,6 +13,7 @@ around a wrapper with nothing in between.
 """
 
 import logging
+from datetime import timedelta
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -203,6 +204,13 @@ def build_template_tool(template: Template) -> CapabilityTool:
                 id=workflow_id,
                 task_queue=settings.background_task_queue,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                # The run-level ceiling, the same one `ConnectorJobWorkflow` gives the children it
+                # starts (`durable/connector_job.py`) and for the same reason. There was none, so
+                # an N-step template's only bound was `template_step_timeout_seconds` × N — a
+                # product nothing declares, that grows silently when an author adds a step, and
+                # that no operator can read off any setting. A per-step timeout bounds a wedged
+                # *step*; only this bounds a wedged *procedure*.
+                execution_timeout=timedelta(seconds=settings.template_run_timeout_seconds),
             )
         except WorkflowAlreadyStartedError:
             return workflow_id

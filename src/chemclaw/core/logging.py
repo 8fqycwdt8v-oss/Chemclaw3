@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +80,11 @@ def configure_logging() -> None:
         if not any(isinstance(existing, SecretRedactingFilter) for existing in handler.filters):
             handler.addFilter(context)
             handler.addFilter(redaction)
+        # The filter is fail-open by design, so a record it could not redact still reaches
+        # logging's own error path with its original text. That path prints to stderr; this makes
+        # it print a redacted copy. Unconditional because it is idempotent by construction — see
+        # the function.
+        _install_redacting_handle_error(handler, redaction)
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
 
@@ -110,6 +116,13 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
     call, or this sweep needs to become a `logging.setLoggerClass` hook.
     """
     handlers: list[logging.Handler] = list(logging.getLogger().handlers)
+    # `logging.lastResort` is neither a root handler nor any logger's own, and it is what a
+    # non-propagating logger with no handlers of its own falls back to — an ordinary library shape,
+    # and the same shape the rest of this sweep exists for. Measured: such a logger printed
+    # `token=<value>` to stderr through it, unfiltered, on a *successful* emit rather than on any
+    # error path. Swept here so the fallback carries the same redaction as everything else.
+    if logging.lastResort is not None:
+        handlers.append(logging.lastResort)
     # Snapshot under the logging module's own lock. `loggerDict` is mutated by `getLogger()`, and
     # this runs in the app factory while worker startup, a lazy connector import or OTel's first use
     # may be creating loggers on another thread — iterating the live view raised
@@ -124,6 +137,105 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
         if isinstance(existing, logging.Logger) and not existing.propagate:
             handlers.extend(existing.handlers)
     return handlers
+
+
+def _redacted_for_diagnostic(value: object, extra_secrets: tuple[str, ...]) -> str:
+    """One field of logging's own error diagnostic, rendered and scrubbed, never raising.
+
+    `repr` for a non-string, because that is what `handleError` would have printed anyway, and a
+    bare `***` if even rendering raises: this runs *inside* logging's error path, on a record that
+    has already failed to render once, so a `msg` whose `__str__` raises or an argument with a
+    hostile `__repr__` is the expected input rather than an exotic one. A diagnostic that cannot be
+    produced safely must not become a second exception in the handler that was reporting the first.
+    """
+    try:
+        return redact_secrets(value if isinstance(value, str) else repr(value), extra_secrets)
+    except Exception:
+        return _REDACTED
+
+
+def _install_redacting_handle_error(
+    handler: logging.Handler, redaction: "SecretRedactingFilter"
+) -> None:
+    r"""Bind a `handleError` on `handler` that scrubs the record before stderr sees it.
+
+    **The leak this closes.** `SecretRedactingFilter.filter` is deliberately fail-open: a record it
+    cannot process is kept and passed on, because a silently dropped log line is worse than a
+    malformed one. That stays exactly as it is — but its own docstring names the consequence, which
+    nothing acted on: the record continues carrying its **original** `msg` and `args`. A record the
+    filter could not render is one `Formatter.format` cannot render either, so `Handler.emit`
+    raises and `Handler.handleError` runs. Read from CPython 3.11.15, `handleError` writes
+
+        'Message: %r\nArguments: %s\n' % (record.msg, record.args)
+
+    straight to `sys.stderr` — the pre-redaction message *and* the pre-redaction arguments, which
+    is precisely where a credential lives (`logger.info("dsn=%s", dsn)` keeps the DSN in `args`
+    until format time). `logging.raiseExceptions` defaults to True, so this path is live in every
+    deployment, and it is reached by the ordinary malformations the filter was hardened to survive
+    rather than by anything unusual.
+
+    **Not `logging.raiseExceptions = False`.** That is the tempting one-liner and it is the wrong
+    fix: it closes the leak by silencing *every* handler diagnostic in the process — a failing
+    `emit`, a broken formatter, a closed stream all stop being reported anywhere at all. It trades
+    one credential for a permanent, process-wide blind spot over the logging stack itself, which is
+    the component you most need to be able to see fail. Redacting the two fields the diagnostic
+    prints keeps the diagnostic.
+
+    **Idempotent by construction**, because `configure_logging()` is documented safe to call more
+    than once: the bound function delegates to `type(handler).handleError` — the class
+    implementation — never to whatever this attribute held before. A second call therefore rebinds
+    an equivalent function instead of stacking a wrapper around the first, and a `Handler` subclass
+    with its own `handleError` still gets its own behaviour.
+    """
+
+    def handle_error(record: logging.LogRecord) -> None:
+        """Print logging's own diagnostic for `record` with its credentials removed.
+
+        **Nothing here may raise, and the diagnostic must print even if the scrubbing fails.**
+        `Handler.handleError` is the one method in the logging stack that is defensive to the point
+        of re-raising only `RecursionError`, because anything it lets escape surfaces at the
+        application's own `logger.info(...)` line — logging crashing its caller. The first version
+        of this wrapper reintroduced exactly that: `record.args` was treated as a tuple *or*
+        anything-else-with-`.items()`, so a bare string or a `Mapping`-registered object without
+        `items` raised `AttributeError` out through `emit` into the caller, **and** swallowed the
+        diagnostic on the way. That is the property `SecretRedactingFilter.filter` spends a
+        paragraph guaranteeing, given up one level down.
+
+        So: the scrub is attempted, any failure drops the arguments rather than propagating, and
+        the delegation sits outside the `try` where it always runs.
+
+        The token names are read per call rather than captured at install time. Captured, a second
+        `configure_logging()` left one handler with two inventories — the filter kept the first and
+        this closure held the second — with the *stale* one on the ordinary path.
+        """
+        msg, args = record.msg, record.args
+        try:
+            record.msg = _redacted_for_diagnostic(msg, redaction._connector_token_envs)
+            if isinstance(args, tuple):
+                record.args = tuple(
+                    _redacted_for_diagnostic(arg, redaction._connector_token_envs) for arg in args
+                )
+            elif isinstance(args, Mapping):
+                record.args = {
+                    key: _redacted_for_diagnostic(value, redaction._connector_token_envs)
+                    for key, value in args.items()
+                }
+            elif args is not None:
+                record.args = _redacted_for_diagnostic(args, redaction._connector_token_envs)
+        except Exception:
+            # An unscrubbable argument is dropped, never printed: this runs because formatting
+            # already failed once, so the value is exactly the kind that might carry a secret.
+            record.args = None
+        try:
+            type(handler).handleError(handler, record)
+        finally:
+            # Restored, because the record is not ours. The logger hands the same object to every
+            # handler in turn, so a later handler must format the caller's own values — a `%d`
+            # argument left replaced by its rendered text would spread one handler's failure to
+            # all of them.
+            record.msg, record.args = msg, args
+
+    handler.handleError = handle_error  # type: ignore[method-assign]
 
 
 # Set once per process: `metrics.set_meter_provider` refuses a second call and warns, and the only
@@ -843,6 +955,11 @@ class SecretRedactingFilter(logging.Filter):
         malformation `Formatter.format` hits too, so the handler routes it to `handleError` ->
         stderr, which is exactly what happens with no filter installed. Returning `False` would
         trade a crash for a silently dropped log line, which is worse than either.
+
+        That route is *also* how an unredacted credential reached stderr, because `handleError`
+        prints the record's original `msg` and `args`. Fail-open is still right; what changed is
+        that `configure_logging` binds a redacting `handleError` on every handler it sweeps, so the
+        record this method gave up on is scrubbed by the path that reports it.
         """
         try:
             self._redact(record)

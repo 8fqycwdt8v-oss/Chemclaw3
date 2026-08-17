@@ -5,7 +5,7 @@ live pass this repository ran between 2026-07-24 and 2026-08-15, in the order th
 Rows here are *provenance*: they say what was measured, on what date, by which pass, and with what
 evidence. Nothing here is scheduled, and nothing here is a commitment.
 
-**The queue is `docs/planning/BACKLOG.md`.** It carries the forty things worth doing next, written
+**The queue is `docs/planning/BACKLOG.md`.** It carries the things worth doing next, written
 as what they ask for rather than as which review produced them. A row that matters is promoted into
 that file; a row that is done is deleted from it. This archive is where the reasoning behind a
 promoted row stays readable without the queue having to carry it.

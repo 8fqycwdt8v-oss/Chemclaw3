@@ -123,6 +123,33 @@ def test_a_reaction_already_merged_as_a_note_is_not_surfaced_twice(
     assert [c.source_note_id for c in chunks] == ["eln-warehouse:RX-2"]
 
 
+def test_a_row_key_cannot_reach_a_file_outside_the_graph(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The suppression check is confined to `knowledge_path`, whatever the warehouse's key says.
+
+    The key is warehouse-controlled and lands in a path by string join, so `../../` used to walk
+    out of the graph. Nothing is read and only a `stat` runs, but the answer decides whether a hit
+    is *suppressed* — so a key escaping onto any file that happens to exist hides evidence, which is
+    the failure that matters here rather than disclosure.
+    """
+    graph = tmp_path / "graph"
+    (graph / "reaction").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # The file the traversal is aiming at: real, and nothing to do with the knowledge graph.
+    (outside / "reaction-escaped.md").write_text("not a note", encoding="utf-8")
+    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: graph))
+
+    hits = _hits()
+    # Four, not two: the `reaction-` prefix makes the first component a name rather than a `..`,
+    # so the shallower spellings land back inside the graph and prove nothing.
+    hits["V_EMBEDDING"][0]["REACTION_ID"] = "../../../../outside/reaction-escaped"
+    chunks = _retrieve(_binding(), hits)
+
+    assert len(chunks) == 2, "a key that escapes the graph has no note, so nothing is suppressed"
+
+
 def test_suppression_can_be_switched_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A deployment that ingests nothing has no duplicates to suppress and pays nothing for it."""
     reactions = tmp_path / "reaction"
@@ -250,3 +277,24 @@ def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
         return ticks
 
     assert asyncio.run(_run()) > 5, "the loop kept running while the provider was blocking"
+
+
+def test_a_key_the_filesystem_cannot_resolve_costs_its_own_row_and_no_other(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The confinement must not be stricter than the question it answers.
+
+    `is_file()` returns False for a path with an embedded NUL; `resolve()` raises `ValueError` on
+    one. Confining the path without guarding that turned a single unusable row into a raise that
+    propagated to `retrieve()`'s backstop and returned `[]` for the **whole leg** — discarding
+    every other legitimate hit. That is the same "hide evidence" outcome the confinement exists to
+    prevent, so it is asserted here from the other side.
+    """
+    (tmp_path / "reaction").mkdir()
+    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: tmp_path))
+
+    hits = _hits()
+    hits["V_EMBEDDING"][0]["REACTION_ID"] = "RX-\x00-nul"
+    chunks = _retrieve(_binding(), hits)
+
+    assert len(chunks) == 2, "one unusable key must not zero the other rows in the same result"

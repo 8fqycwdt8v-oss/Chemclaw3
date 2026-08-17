@@ -61,14 +61,29 @@ CrestEffort = Literal["quick", "normal", "extensive"]
 # entropy that a single-conformer free energy is missing.
 ReactionLevel = Literal["quick", "standard", "thorough"]
 
+# Decimal places coordinates are rounded to before a `Structure` is hashed. 4 decimals = 0.1 pm,
+# far below any chemical significance, so run-to-run float noise cannot fork the cache.
+#
+# **A constant rather than a setting, deliberately.** It was `settings.xtb_geometry_decimals`, an
+# ordinary ENV-overridable field advertised in `.env.example` — and these are the bytes that cross
+# the wire, so it is what the *server* derives `input_hash` from. An operator who changed it was
+# not re-addressing a local cache, which is what its comment claimed: they were making every
+# relaxation, Hessian, scan point and CREST search in that deployment miss forever, silently, and
+# diverge from every other deployment against the same server. Nothing raises on a key that does
+# not match; the calculation simply runs again, every time.
+#
+# Changing this value is therefore a cross-repository change that has to land on both sides at
+# once, which is exactly the kind of decision a deployment must not be able to take alone.
+_GEOMETRY_DECIMALS = 4
+
 
 class Structure(BaseModel):
     """One 3D molecular structure, addressed by the hash of its chemical content.
 
     `elements` and `positions` are parallel: atom `i` has atomic number `elements[i]` at
     `positions[i]` (Angstrom). Positions are normalized on construction (rounded to
-    `settings.xtb_geometry_decimals`) so that float noise from a re-run cannot fork the cache while
-    the stored coordinates still *are* the ones that were hashed.
+    `_GEOMETRY_DECIMALS`) so that float noise from a re-run cannot fork the cache while the stored
+    coordinates still *are* the ones that were hashed.
 
     **This model is a cross-repository contract now.** It is what `relax_structure`,
     `compute_hessian`, `scan_point` and the two CREST searches take and return over the wire, and
@@ -100,18 +115,15 @@ class Structure(BaseModel):
         as well as the server's, because a `Structure` is built here — by the thermochemistry
         refinement loop's displacement — and not only received.
         """
-        # Imported here rather than at module scope: `core.config` reads the environment, and this
-        # module is imported by `connectors/calc/results.py` on a path that must stay leaf-light.
-        from chemclaw.core.config import settings
-
         if len(self.positions) != len(self.elements):
             raise ValueError(f"{len(self.positions)} positions for {len(self.elements)} elements")
         if any(len(row) != 3 for row in self.positions):
             raise ValueError("every position must have exactly three coordinates")
-        decimals = settings.xtb_geometry_decimals
         # `+ 0.0` normalizes the negative zero that rounding can produce, so two geometrically
         # identical structures cannot differ in their hash by a sign bit.
-        self.positions = [[round(value, decimals) + 0.0 for value in row] for row in self.positions]
+        self.positions = [
+            [round(value, _GEOMETRY_DECIMALS) + 0.0 for value in row] for row in self.positions
+        ]
         unpaired = self.multiplicity - 1
         electrons = sum(self.elements) - self.charge
         if electrons < unpaired or (electrons - unpaired) % 2:

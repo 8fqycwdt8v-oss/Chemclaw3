@@ -8,8 +8,12 @@ procedure** in prose so a detailed development recipe survives ingestion intact 
 reviewer signs off on the recipe, not just a SMILES). Its `tags` are the record's project, so
 the documented project filter (`gather_evidence(tag=…)`) reaches reaction notes at all. It
 carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the very PR this
-opens); compound cross-links are a later step once compound notes exist.
+opens); compound cross-links are a later step once compound notes exist. That last sentence is
+enforced by `_without_wikilinks` rather than merely asserted — the source's free text reaches this
+body verbatim, so until it was enforced the ELN could spell a relation the graph then believed.
 """
+
+import re
 
 from chemclaw.ingest.eln.ord import (
     Component,
@@ -21,10 +25,47 @@ from chemclaw.ingest.eln.ord import (
 )
 from chemclaw.kg.note import Note, note_id_for_reaction
 
+# Each `[` that another `[` follows. A lookahead so the match consumes one character and the next
+# is re-examined, which is what makes the substitution unable to manufacture the delimiter it is
+# removing — see `_without_wikilinks`.
+_OPENING_BRACKET_PAIR = re.compile(r"\[(?=\[)")
+
+
+def _without_wikilinks(body: str) -> str:
+    """Neutralize any `[[rel:id]]` span the source's own free text spelled.
+
+    This module's docstring promises the note "carries no `[[wikilink]]`", and that promise was
+    false: `kg.note` parses the rendered body for links, so a chemist typing
+    `[[contradicts:reaction-1234]]` into a hypothesis, a failure reason, a procedure step or an
+    unmapped attribute forged a real relation into a PR-gated note. The gate cannot catch it — a
+    forged link is indistinguishable from an authored one, `contradicts` and `supersedes` are in
+    the allowed vocabulary, and `kg.validate` only objects when the target does not exist, so
+    naming a *real* note passes review as a well-formed note. Which it is.
+
+    Applied once to the assembled body rather than at each of the five free-text sites, so the next
+    field added to this mapping cannot forget it — and so that the values which are not obviously
+    free text (`reaction_id`, an attribute *key*) are covered by the same line as the ones that are.
+    A cross-block spelling was considered and is not the reason: the blocks are joined by newlines
+    and label prefixes, so two `[` from adjacent fields never actually meet.
+
+    The substitution is visible and lossless rather than a strip. The note is prose a human signs
+    off on, so the reviewer should see what the source actually wrote — and deleting a chemist's
+    characters to make them safe is the same mistake as trusting them.
+
+    **A lookahead, not `str.replace("[[", "[ [")`, and that distinction is the whole control.**
+    `str.replace` scans left to right and never re-reads what it has just emitted, so it consumes
+    the *first* two brackets of `[[[` and appends the third untouched: `[[[x]]` becomes `[ [[x]]`,
+    which contains a brand-new valid delimiter and forges the edge anyway. Substituting each `[`
+    that is *followed* by a `[` cannot be outrun that way, because the decision is made per
+    character against the original text. Measured over 200,000 random bracket-dense bodies: the
+    replace form leaks 5, this form leaks 0.
+    """
+    return _OPENING_BRACKET_PAIR.sub("[ ", body)
+
 
 def note_from_ord_reaction(reaction: OrdReaction) -> Note:
     """Map an `OrdReaction` to an agent-authored `reaction` note (idempotent id)."""
-    body = (
+    body = _without_wikilinks(
         f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
         f"{_hypothesis_block(reaction)}"
         f"{_conditions_block(reaction)}"

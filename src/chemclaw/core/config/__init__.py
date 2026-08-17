@@ -277,6 +277,31 @@ class Settings(
         return self
 
     @model_validator(mode="after")
+    def _the_template_run_ceiling_covers_one_step(self) -> Self:
+        """The same rule again, on the template run and the step it has to contain.
+
+        `templates/registry.py` starts `TemplateWorkflow` with `template_run_timeout_seconds` as an
+        execution timeout, and the longest thing inside it is one step at
+        `template_step_timeout_seconds`. A run ceiling at or below the step budget kills the
+        procedure inside its own first step — with a bare `WorkflowExecutionTimedOut` naming
+        neither setting, and with the per-step timeout that was *meant* to fire made unreachable,
+        so `agent_step_retry`'s attempts become a number that can never be spent.
+
+        Strictly greater rather than at least, because equality is the defect. Only one step is
+        required rather than N: how many steps a template has is a property of a YAML file this
+        object cannot see, so the honest machine-checkable floor is "a single step fits", and the
+        setting's own comment carries the sizing advice for a longer procedure.
+        """
+        if self.template_run_timeout_seconds <= self.template_step_timeout_seconds:
+            raise ValueError(
+                f"template_run_timeout_seconds={self.template_run_timeout_seconds} does not cover "
+                f"the step it bounds: one step may take {self.template_step_timeout_seconds}s "
+                "(template_step_timeout_seconds), so the run would time out inside its own first "
+                "step. Raise the run ceiling above it, or lower the step budget."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _the_job_ceiling_covers_the_poll_it_bounds(self) -> Self:
         """A parent ceiling no larger than its child's longest activity is not a ceiling.
 

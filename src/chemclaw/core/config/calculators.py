@@ -55,11 +55,10 @@ class CalculatorSettings(BaseSettings):
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
     # reproducible; it is part of the cache key so changing it recomputes.
     xtb_method: str = "GFN2-xTB"
-    # Decimal places coordinates are rounded to before a `calc.structure.Structure` is
-    # hashed. 4 decimals = 0.1 pm, far below any chemical significance, so run-to-run
-    # float noise cannot fork the cache; it is part of the structure id, so changing it
-    # re-addresses every structure and therefore recomputes.
-    xtb_geometry_decimals: int = 4
+    # `xtb_geometry_decimals` was here and is now `science.calc.models._GEOMETRY_DECIMALS`. It
+    # rounds the coordinates the *server* derives `input_hash` from, so a deployment that set it
+    # did not re-address a local cache as this comment used to claim — it missed every remote
+    # calculation forever, silently, and diverged from every other deployment.
     # Default number of atoms a site-reactivity ranking reports. Enough to see the
     # ordering of a ring plus its substituents without flooding the agent's context.
     xtb_fukui_top_n: int = 15
