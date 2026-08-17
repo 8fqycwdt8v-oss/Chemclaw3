@@ -98,7 +98,7 @@ def _stand_in(name: str, calls: list[str]) -> Any:
     return _fake
 
 
-def _scripted(script: list[Any]) -> ScriptedChatModel:
+def _scripted(script: list[Any] | ScriptedChatModel) -> ScriptedChatModel:
     """The step's model: the shared fake's script shorthand, or ready-made messages.
 
     `ScriptedChatModel`'s shorthand (a string, or a `{"name", "args"}` mapping) has nowhere to put
@@ -106,6 +106,11 @@ def _scripted(script: list[Any]) -> ScriptedChatModel:
     script written as `AIMessage`s is handed to the fake's own `messages` iterator instead. One
     function, so every test in this file drives the same model whichever shape it wrote.
     """
+    if isinstance(script, ScriptedChatModel):
+        # Already a model: a test that needs the provider itself to misbehave (a mid-turn outage)
+        # cannot express that as a script, because the behaviour under test is the *absence* of a
+        # further message rather than its content.
+        return script
     if script and isinstance(script[0], AIMessage):
         return ScriptedChatModel(messages=iter(script))
     return ScriptedChatModel(script)
@@ -121,7 +126,11 @@ class _Step(NamedTuple):
     costs: list[TurnCost]
 
 
-def _drive(monkeypatch: pytest.MonkeyPatch, step: AgentStepInput, script: list[Any]) -> _Step:
+def _drive(
+    monkeypatch: pytest.MonkeyPatch,
+    step: AgentStepInput,
+    script: list[Any] | ScriptedChatModel,
+) -> _Step:
     """Run the real `run_agent_step` against a scripted model, and report what happened.
 
     Only three things are substituted, and none is on the path under test:
@@ -383,6 +392,84 @@ def test_the_steps_tokens_reach_the_counters_the_deployment_bills_from(
         "chemclaw_input_tokens_total": 200.0,
         "chemclaw_output_tokens_total": 40.0,
     }, moved
+
+
+class _ProviderOutage(ScriptedChatModel):
+    """A model that serves `paid` calls and then fails, counting what the provider actually billed.
+
+    The call count is kept provider-side because a failing turn has no message list to read: the
+    whole defect being guarded is that spend was totalled from `result["messages"]`, which does not
+    exist when `ainvoke` raises.
+    """
+
+    served: int = 0
+
+    # `*args, **kwargs` on both, deliberately: upstream calls `_generate` with a run manager and
+    # `_stream` with a different arity, and pinning either signature here would make this fake fail
+    # on a LangChain bump for a reason that has nothing to do with what it tests.
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        self._bill_or_fail()
+        return super()._generate(*args, **kwargs)
+
+    def _stream(self, *args: Any, **kwargs: Any) -> Any:
+        self._bill_or_fail()
+        yield from super()._stream(*args, **kwargs)
+
+    def _bill_or_fail(self) -> None:
+        """Serve two calls the provider would have charged for, then fail the turn."""
+        if self.served >= 2:
+            raise RuntimeError("provider 529 / worker evicted mid-turn")
+        self.served += 1
+
+
+def test_a_step_whose_provider_fails_still_books_the_calls_it_already_paid_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step that broke after two model calls still spent them.
+
+    Measured before the fix: a provider error after two paid calls wrote `turn_costs (0, 0)` and
+    moved `chemclaw_tokens_total` by 0.0, because the sum was taken from `result["messages"]` after
+    `ainvoke` returned — and an exception skips that. The `finally` then booked an all-zero row,
+    which is worse than no row: it asserts the step cost nothing. The runaway case is the same
+    defect and is the one the metering was added to make visible, so the accumulation had to move
+    to a callback that fires as each call ends.
+    """
+    # Two *tool-call* turns, so the graph still wants a third model call when the provider dies:
+    # a script ending in an answer would finish the turn and never reach the outage.
+    paid = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "screen_hazards", "args": {"smiles": "CCO"}, "id": f"call-{n}"}],
+            usage_metadata=_USAGE,
+        )
+        for n in (1, 2)
+    ]
+    model = _ProviderOutage(messages=iter(paid))
+    before = METRICS.value("chemclaw_tokens_total")
+    with pytest.raises(RuntimeError):
+        _drive(monkeypatch, _step(), model)
+    moved = METRICS.value("chemclaw_tokens_total") - before
+
+    assert model.served == 2, "the provider billed exactly the calls this asserts"
+    assert moved == 240.0, f"two paid calls booked as {moved}"
+
+
+def test_a_successful_step_books_each_model_call_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard on the other side: the callback must replace the post-hoc sum, not join it.
+
+    Keeping both accumulation paths is the obvious way to make the failure test pass, and it
+    double-bills every successful step — 480 for a two-call turn. Asserted as `calls x per-call
+    usage` so neither a doubled nor a dropped call satisfies it.
+    """
+    before = METRICS.value("chemclaw_tokens_total")
+    run = _drive(monkeypatch, _step(), _metered_script())
+    moved = METRICS.value("chemclaw_tokens_total") - before
+
+    assert run.answer == "no flags"
+    # Two calls at 120 total each, spelled out the way the sibling counter test does.
+    assert moved == 240.0, f"two calls at 120 booked as {moved}"
 
 
 def test_the_step_writes_a_cost_row_attributed_to_the_requester(
