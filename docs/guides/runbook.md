@@ -987,17 +987,28 @@ the pods simply failed to pull, which reads as a broken image rather than a miss
 
 ### When a supply-chain gate goes red
 
-Three blocking gates run in `.github/workflows/image.yml`, and each fails differently:
+Two blocking gates run in `.github/workflows/image.yml`, and each fails differently:
 
 | Gate | What it read | First move |
 | --- | --- | --- |
 | `pip-audit` | the exported lockfile — the exact versions the image installs | `uv lock --upgrade-package <name>`; reproduce locally with `make deps-audit` |
-| `trivy` | the built image: base OS packages plus the xtb/crest layers | usually a stale base — rebuild picks up the current UBI9 |
 | SBOM step | nothing; it records | it only fails if `syft` cannot run |
 
-`trivy` runs with `ignore-unfixed: true` on HIGH and CRITICAL. That is a deliberate narrowing, not
-an oversight: a gate that fires on every LOW in a distro base is one an operator disables within a
-week. A finding that genuinely cannot be fixed gets an explicit `--ignore-vuln` **with its reason in
+**There is no image scan, and this section used to say there was.** It listed `trivy` as the second
+of three blocking gates and described how it was tuned, in the present tense; `trivy` appears
+nowhere in the workflow, the Makefile or anything else that runs. That is worse than a missing
+control — an operator reading this page would have believed the base OS layers were being scanned
+and that a red build would tell them. The scan is a real gap, tracked in `BACKLOG.md`, and it is
+held for a stated reason rather than forgotten: per
+`D-2026-08-01-a-tag-is-a-pointer-not-a-build`, the candidate scan kept reporting packages
+(`setuptools` 70.3.0, `msgpack` 1.1.2) that an exhaustive `find / -xdev` in the same build could not
+locate, and a gate whose last word contradicts the artifact it scanned makes every future red build
+ambiguous.
+
+When the scan is merged, it should run with `ignore-unfixed: true` on HIGH and CRITICAL. That is a
+deliberate narrowing, not an oversight: a gate that fires on every LOW in a distro base is one an
+operator disables within a week. A finding that genuinely cannot be fixed gets an explicit
+`--ignore-vuln` **with its reason in
 the diff** — never a downgrade of the whole gate, which is how a control becomes a badge.
 
 The SBOM (SPDX) and the built image's digest are retained on the run for 90 days. That is what makes

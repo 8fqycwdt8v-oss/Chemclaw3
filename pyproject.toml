@@ -149,7 +149,6 @@ dependencies = [
     # vibrations from its translations and rotations.
     "scipy>=1.11",
     "sse-starlette>=3.4.5",
-    "tblite>=0.7.0",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]
@@ -167,6 +166,18 @@ dev = [
     "scipy-stubs>=1.17.1.5",
     "hypothesis>=6.100",
     "mutmut>=3.0",
+    # Not a runtime dependency any more, and deliberately still installed here. No module in `src/`
+    # imports it — `tests/test_third_party_layering.py` forbids one — because the GFN2 physics moved
+    # to `Chemclaw3-mcp` (D-2026-08-16-the-physics-leaves-the-cache-stays). What kept it in the
+    # runtime closure was a *test*: `tests/test_solvents.py` re-derives `ALPB_SOLVENTS` against the
+    # installed copy, which is the right check in the wrong place to pay for it — the image was
+    # carrying a compiled quantum-chemistry library so that a unit test could read a constant.
+    #
+    # Moving it here does not close the whole row. The solvent gate that decides five durable jobs
+    # is derived here while the parameterisation behind it is now the server's, so the two can
+    # still diverge in both directions; making them provably agree needs the server to publish the
+    # list, which is a cross-repo contract rather than a dependency move.
+    "tblite>=0.7.0",
 ]
 
 [project.scripts]

@@ -479,3 +479,30 @@ def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
         "httpx's read timeout must stay strictly behind the session's, or the answer is lost "
         "silently instead of raising"
     )
+
+
+def test_no_setting_shapes_the_bytes_the_server_hashes() -> None:
+    """The sibling rule to the version check, and it failed the same way: silently.
+
+    `Structure` normalization used to round coordinates to `settings.xtb_geometry_decimals`, an
+    ordinary ENV-overridable field. Those bytes are what crosses the wire, so it was a local knob
+    shaping half of a *remote* cache key: an operator who changed it made every relaxation, Hessian,
+    scan point and CREST search miss forever and diverge from every other deployment, with nothing
+    raising — a miss is not an error, it is a recomputation.
+
+    Checked statically over the model that *is* the wire contract, because the failure has no
+    observable symptom other than a bill.
+    """
+    module = _SRC / "science" / "calc" / "models.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    reads = [
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "settings"
+    ]
+    assert not reads, (
+        f"{module.name} reads settings {sorted(set(reads))} — every value it contributes to a "
+        "`Structure` is hashed by the server, so a deployment could re-key its own calculations."
+    )

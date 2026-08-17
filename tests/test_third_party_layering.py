@@ -82,6 +82,7 @@ coverage:
 from __future__ import annotations
 
 import ast
+import tomllib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -537,3 +538,27 @@ def test_no_declared_private_import_is_stale() -> None:
     observed = {(imp.path, imp.target) for imp in _private_imports()}
     stale = sorted(set(_KNOWN_PRIVATE_IMPORTS) - observed)
     assert not stale, f"declared private import(s) no longer in the tree — delete: {stale}"
+
+
+def test_the_xtb_engine_is_not_in_the_runtime_closure() -> None:
+    """The sibling of the `tblite` row above, asked of `pyproject.toml` instead of the imports.
+
+    Forbidding the *import* left the *dependency* declared, so the runtime image
+    (`deploy/Containerfile`, `uv sync --frozen --no-dev`) still installed a compiled
+    quantum-chemistry library that nothing in `src/` could legally call. What kept it there was a
+    test: `tests/test_solvents.py` re-derives `ALPB_SOLVENTS` against the installed copy. That is
+    the right check, so the package stays — in the dev group, where a test dependency belongs,
+    rather than in every deployed pod.
+    """
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime = pyproject["project"]["dependencies"]
+    dev = pyproject["dependency-groups"]["dev"]
+
+    assert not [spec for spec in runtime if spec.startswith("tblite")], (
+        "tblite is a runtime dependency again. No module in src/ may import it (see the row "
+        "above), so declaring it here ships a compiled engine to every pod for nothing."
+    )
+    assert [spec for spec in dev if spec.startswith("tblite")], (
+        "tblite left the dev group too — tests/test_solvents.py derives ALPB_SOLVENTS from the "
+        "installed copy and will fail without it. Keep it here, not in the runtime closure."
+    )

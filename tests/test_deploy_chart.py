@@ -1528,3 +1528,35 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     assert referenced, "no PromQL expressions were parsed — the extraction is broken, not the rules"
     unknown = referenced - declared
     assert not unknown, f"alerts reference metrics the app never emits: {sorted(unknown)}"
+
+
+def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
+    """A documented control that does not run is worse than a missing one.
+
+    The runbook's supply-chain section described **three** blocking gates and explained how the
+    middle one was tuned, in the present tense. `trivy` appeared nowhere in the workflow, the
+    Makefile, or anything else that executes — so an operator reading that page believed the image's
+    base OS layers were scanned and that a red build would tell them. Prose is not covered by any
+    gate, which is exactly why this assertion exists rather than a fourth careful sentence.
+
+    Deliberately keyed on the gate *names in the table*, not on a count: adding a real scan should
+    make this pass by making the claim true, and re-adding a phantom one should make it fail.
+    """
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
+
+    section = runbook.split("### When a supply-chain gate goes red", 1)[1].split("\n## ", 1)[0]
+    table = [line for line in section.splitlines() if line.startswith("| `")]
+    assert table, "the gate table was not found — this check is reading the wrong section"
+
+    named = {re.match(r"\|\s*`([^`]+)`", line).group(1) for line in table}  # type: ignore[union-attr]
+    # `make deps-audit` is how the workflow spells pip-audit; the Makefile target is the real name.
+    runs = {
+        gate
+        for gate in named
+        if gate in workflow or gate.replace("pip-audit", "deps-audit") in workflow
+    }
+    assert named == runs, (
+        f"the runbook names supply-chain gate(s) that nothing runs: {sorted(named - runs)}. "
+        "Either merge the gate or stop documenting it as one."
+    )
