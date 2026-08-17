@@ -17,6 +17,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.verifier import (
@@ -724,10 +725,46 @@ def test_the_function_calling_rendering_demands_only_confidence() -> None:
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
     rendered = convert_to_openai_tool(VerificationResult)["function"]["parameters"]
-    assert set(rendered["required"]) == {"confidence"}, (
-        "the function-calling rendering changed; if it now requires `claims`, this test's premise "
-        "is stale and the `method=` argument below may no longer be load-bearing"
+    assert set(rendered["required"]) == {"claims", "confidence"}, (
+        "the function-calling rendering changed; if it now requires `verified_by` too, this test's "
+        "premise is stale and the `method=` argument below may no longer be load-bearing"
     )
+    # `claims` is in that set only because it was made a required field (below); `verified_by` still
+    # carries a default and is still dropped, which is what keeps the premise alive.
+    assert "verified_by" not in rendered["required"]
+
+
+def test_the_structured_schema_demands_the_claims_list() -> None:
+    """The judge named no claims on most turns, and the schema is why — not the prompt.
+
+    `_verifier_prompt` asks, in words, for "each distinct factual claim". A model is free to ignore
+    that; what it is not free to ignore is the schema `method="json_schema"` makes the provider
+    enforce. While `claims` carried `default_factory=list` the emitted schema required `confidence`
+    alone, so `{"confidence": 0.9}` was a complete, valid verdict — it validated, `verified_by` was
+    stamped "judge", and `score_answer` read `result.unsupported` as empty. A verdict naming nothing
+    is indistinguishable from a verdict finding nothing wrong, which is the one distinction this
+    module exists to make.
+
+    Required now, with an empty list still legal and meaning exactly one thing: the answer makes no
+    factual claim. Asserted on the schema rather than on a call, for the same reason as the pair
+    above — this is where the defect lived and it needs no credential to see.
+    """
+    assert "claims" in VerificationResult.model_json_schema()["required"]
+
+
+def test_a_verdict_omitting_claims_no_longer_validates() -> None:
+    """The other half: what the required field actually rejects.
+
+    The schema assertion above says what the provider is asked to enforce; this says what happens
+    when one does not. A judge answering `{"confidence": 0.9}` used to produce a certified verdict
+    with an empty claim list. It is now a validation error, which lands in `verify_answer`'s
+    `except` and degrades to the citation gate — visible on `chemclaw_verifier_degraded_total` and
+    flagged by `score_answer`, rather than silently passing as a clean judgement.
+    """
+    with pytest.raises(ValidationError):
+        VerificationResult.model_validate({"confidence": 0.9})
+    # An answer with no factual claim to check is still a legal, complete verdict.
+    assert VerificationResult.model_validate({"claims": [], "confidence": 1.0}).claims == []
 
 
 def test_the_judge_is_bound_with_json_schema_enforcement(

@@ -79,6 +79,11 @@ def configure_logging() -> None:
         if not any(isinstance(existing, SecretRedactingFilter) for existing in handler.filters):
             handler.addFilter(context)
             handler.addFilter(redaction)
+        # The filter is fail-open by design, so a record it could not redact still reaches
+        # logging's own error path with its original text. That path prints to stderr; this makes
+        # it print a redacted copy. Unconditional because it is idempotent by construction — see
+        # the function.
+        _install_redacting_handle_error(handler, redaction)
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
 
@@ -124,6 +129,79 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
         if isinstance(existing, logging.Logger) and not existing.propagate:
             handlers.extend(existing.handlers)
     return handlers
+
+
+def _redacted_for_diagnostic(value: object, extra_secrets: tuple[str, ...]) -> str:
+    """One field of logging's own error diagnostic, rendered and scrubbed, never raising.
+
+    `repr` for a non-string, because that is what `handleError` would have printed anyway, and a
+    bare `***` if even rendering raises: this runs *inside* logging's error path, on a record that
+    has already failed to render once, so a `msg` whose `__str__` raises or an argument with a
+    hostile `__repr__` is the expected input rather than an exotic one. A diagnostic that cannot be
+    produced safely must not become a second exception in the handler that was reporting the first.
+    """
+    try:
+        return redact_secrets(value if isinstance(value, str) else repr(value), extra_secrets)
+    except Exception:
+        return _REDACTED
+
+
+def _install_redacting_handle_error(
+    handler: logging.Handler, redaction: "SecretRedactingFilter"
+) -> None:
+    r"""Bind a `handleError` on `handler` that scrubs the record before stderr sees it.
+
+    **The leak this closes.** `SecretRedactingFilter.filter` is deliberately fail-open: a record it
+    cannot process is kept and passed on, because a silently dropped log line is worse than a
+    malformed one. That stays exactly as it is — but its own docstring names the consequence, which
+    nothing acted on: the record continues carrying its **original** `msg` and `args`. A record the
+    filter could not render is one `Formatter.format` cannot render either, so `Handler.emit`
+    raises and `Handler.handleError` runs. Read from CPython 3.11.15, `handleError` writes
+
+        'Message: %r\nArguments: %s\n' % (record.msg, record.args)
+
+    straight to `sys.stderr` — the pre-redaction message *and* the pre-redaction arguments, which
+    is precisely where a credential lives (`logger.info("dsn=%s", dsn)` keeps the DSN in `args`
+    until format time). `logging.raiseExceptions` defaults to True, so this path is live in every
+    deployment, and it is reached by the ordinary malformations the filter was hardened to survive
+    rather than by anything unusual.
+
+    **Not `logging.raiseExceptions = False`.** That is the tempting one-liner and it is the wrong
+    fix: it closes the leak by silencing *every* handler diagnostic in the process — a failing
+    `emit`, a broken formatter, a closed stream all stop being reported anywhere at all. It trades
+    one credential for a permanent, process-wide blind spot over the logging stack itself, which is
+    the component you most need to be able to see fail. Redacting the two fields the diagnostic
+    prints keeps the diagnostic.
+
+    **Idempotent by construction**, because `configure_logging()` is documented safe to call more
+    than once: the bound function delegates to `type(handler).handleError` — the class
+    implementation — never to whatever this attribute held before. A second call therefore rebinds
+    an equivalent function instead of stacking a wrapper around the first, and a `Handler` subclass
+    with its own `handleError` still gets its own behaviour.
+    """
+    extra_secrets = redaction._connector_token_envs
+
+    def handle_error(record: logging.LogRecord) -> None:
+        """Print logging's own diagnostic for `record` with its credentials removed."""
+        msg, args = record.msg, record.args
+        try:
+            record.msg = _redacted_for_diagnostic(msg, extra_secrets)
+            if isinstance(args, tuple):
+                record.args = tuple(_redacted_for_diagnostic(arg, extra_secrets) for arg in args)
+            elif args is not None:
+                record.args = {
+                    key: _redacted_for_diagnostic(value, extra_secrets)
+                    for key, value in args.items()
+                }
+            type(handler).handleError(handler, record)
+        finally:
+            # Restored, because the record is not ours. The logger hands the same object to every
+            # handler in turn, so a later handler must format the caller's own values — a `%d`
+            # argument left replaced by its rendered text would spread one handler's failure to
+            # all of them.
+            record.msg, record.args = msg, args
+
+    handler.handleError = handle_error  # type: ignore[method-assign]
 
 
 # Set once per process: `metrics.set_meter_provider` refuses a second call and warns, and the only
@@ -843,6 +921,11 @@ class SecretRedactingFilter(logging.Filter):
         malformation `Formatter.format` hits too, so the handler routes it to `handleError` ->
         stderr, which is exactly what happens with no filter installed. Returning `False` would
         trade a crash for a silently dropped log line, which is worse than either.
+
+        That route is *also* how an unredacted credential reached stderr, because `handleError`
+        prints the record's original `msg` and `args`. Fail-open is still right; what changed is
+        that `configure_logging` binds a redacting `handleError` on every handler it sweeps, so the
+        record this method gave up on is scrubbed by the path that reports it.
         """
         try:
             self._redact(record)

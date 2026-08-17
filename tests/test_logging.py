@@ -1007,6 +1007,52 @@ def test_a_malformed_log_call_is_reported_by_logging_not_raised_at_the_caller(
     )
 
 
+def test_logging_own_error_report_does_not_print_the_unredacted_record(
+    _secrets: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r"""The exit the fail-open filter left open: `handleError` prints the *original* msg and args.
+
+    `SecretRedactingFilter.filter` swallows anything `_redact` raises and keeps the record — right,
+    and unchanged. The consequence its docstring names is that the record travels on carrying the
+    text redaction never touched, and the test above pins where it ends up: `Formatter.format` hits
+    the same malformation, `emit` raises, and `Handler.handleError` reports it. CPython 3.11.15
+    writes `'Message: %r\nArguments: %s\n' % (record.msg, record.args)` to stderr, so the argument
+    holding the DSN is printed verbatim — with `logging.raiseExceptions` True by default, i.e. in
+    every deployment.
+
+    Asserts both halves. Absence of the credential alone would also be satisfied by
+    `logging.raiseExceptions = False`, which is the tempting one-liner and the wrong fix: it buys
+    the redaction by deleting every handler diagnostic in the process. So the diagnostic — and the
+    surviving argument that makes it diagnostic at all — must still be there.
+    """
+    private = logging.getLogger("chemclaw.test.handle_error_redaction")
+    private.handlers.clear()
+    private.propagate = False
+    private.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    private.addHandler(handler)
+    try:
+        configure_logging()  # sweeps this handler, exactly as it does uvicorn's
+        capsys.readouterr()  # discard anything configuration itself wrote
+        # `%d` handed a string: the filter cannot render it, and neither can the formatter.
+        private.info("connecting to %s after %d retries", _DSN, "not-a-number")
+    finally:
+        private.handlers.clear()
+        private.propagate = True
+    err = capsys.readouterr().err
+    assert _DSN not in err, f"handleError printed the DSN to stderr: {err}"
+    assert "sup3rs3cret-password" not in err, f"handleError printed the DSN password: {err}"
+    assert "--- Logging error ---" in err, (
+        "the malformation must still be reported; silencing `raiseExceptions` would pass the "
+        "assertions above while deleting every handler diagnostic in the process"
+    )
+    assert "Message: " in err and "Arguments: " in err, f"the diagnostic lost its fields: {err}"
+    assert "not-a-number" in err, (
+        "the argument that explains the malformation must survive redaction, or the report names "
+        "no cause"
+    )
+
+
 def test_the_filter_survives_a_second_test_that_built_the_front_door() -> None:
     """The order dependence that hid the bug above from every per-lane test run.
 

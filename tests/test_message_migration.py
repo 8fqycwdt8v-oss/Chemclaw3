@@ -452,6 +452,75 @@ def test_a_row_answering_parallel_calls_is_refused_rather_than_truncated() -> No
     assert message_from_row(row, MAF_SHAPE).content
 
 
+def test_a_malformed_langchain_row_degrades_instead_of_failing_the_transcript() -> None:
+    """The guarded branch was the rare one: only the MAF conversion sat inside the `try`.
+
+    Since M6 every row this system writes is stamped `langchain`, so the unguarded branch is the
+    one nearly every read takes. `messages_from_dict` refuses a type it does not know — asserted
+    below rather than assumed, because the whole defect is what that refusal does next — and the
+    one caller of `get_messages` is `GET /sessions/{id}/messages`, which has no handler. One bad
+    row therefore answered the *entire* transcript with a 500, which is the outcome this
+    function's own docstring has always promised it would not produce.
+    """
+    row = {"type": "not-a-message-type", "data": {"content": "the pKa of phenol is 9.95"}}
+
+    with pytest.raises(ValueError, match="unexpected message type"):
+        messages_from_dict([row])
+
+    assert message_from_row(row, LANGCHAIN_SHAPE).content == "the pKa of phenol is 9.95"
+
+
+def test_a_refused_row_is_attributed_to_whoever_spoke_it() -> None:
+    """The fallback said `AIMessage` for every shape, so a chemist's question became agent speech.
+
+    Worse than a blank bubble, because nothing about it looks wrong: the transcript shows the
+    system stating what it was asked. The row names its speaker even when its contents cannot be
+    converted, so both stored vocabularies are read — MAF's `role`, LangChain's `type` — and only
+    a payload that names neither falls back to the model's own voice.
+    """
+    asked = legacy_message(
+        "user",
+        text_content("what is the pKa of phenol?"),
+        # An unknown content type is what makes the row refusable at all; the question is still in
+        # it, and the speaker still stated.
+        {"type": "image", "uri": "s3://bucket/spectrum.png"},
+    )
+    restored = message_from_row(asked, MAF_SHAPE)
+    assert isinstance(restored, HumanMessage), "a chemist's question rendered as agent speech"
+    assert restored.content == "what is the pKa of phenol?"
+
+    # The same rule through the other vocabulary: `data` is unusable, `type` is not.
+    langchain_row: dict[str, Any] = {"type": "human", "data": None}
+    assert isinstance(message_from_row(langchain_row, LANGCHAIN_SHAPE), HumanMessage)
+
+    # And the default stays the model's voice for a payload that names no speaker at all.
+    assert isinstance(message_from_row({"contents": ["oops"]}, MAF_SHAPE), AIMessage)
+
+
+def test_a_contents_list_holding_a_non_dict_degrades_rather_than_raising() -> None:
+    """The refusal handler named one exception type and this row raises a different one.
+
+    `_reject_unknown_content` skips non-dict parts, so a `contents` element that is not a mapping
+    reaches the text join and raises `AttributeError` from inside the converter — past a handler
+    watching for `UnconvertibleMessage`, and out through the transcript route. Asserted on the
+    converter first, so the test proves the payload really is one that raises rather than trusting
+    that it is.
+    """
+    row: dict[str, Any] = {
+        "type": "message",
+        "role": "assistant",
+        "contents": ["oops"],
+        "additional_properties": {},
+    }
+
+    with pytest.raises(AttributeError):
+        to_langchain(row)
+
+    restored = message_from_row(row, MAF_SHAPE)
+    assert isinstance(restored, AIMessage)
+    assert restored.content == "", "a row with no readable prose renders empty, not raising"
+
+
 def test_an_unknown_content_type_is_refused_as_both_the_docstring_and_the_ddl_promise() -> None:
     """The claim was in two places and true in neither: unknown parts were dropped to empty text.
 

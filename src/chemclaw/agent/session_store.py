@@ -44,13 +44,19 @@ from datetime import datetime
 from typing import Any
 
 import psycopg
-from langchain_core.messages import AIMessage, BaseMessage, message_to_dict, messages_from_dict
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    message_to_dict,
+    messages_from_dict,
+)
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.message_migration import (
     LANGCHAIN_SHAPE,
-    UnconvertibleMessage,
     to_langchain,
 )
 from chemclaw.core import db
@@ -80,12 +86,24 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     but this is the *read* path, and the reader is a chemist reloading a conversation. Failing the
     whole transcript because one historical row holds a content type this system no longer writes
     would lose the conversation to protect it.
+
+    **Both branches are guarded, and the unguarded one was the common one.** Only the MAF
+    conversion used to sit inside the `try`, so a `langchain` row the library refuses raised
+    `ValueError: Got unexpected message type` straight through — and since M6 every row this
+    system writes is a `langchain` row. The one caller of `get_messages` is
+    `GET /sessions/{id}/messages`, which has no handler of its own, so a single bad row answered
+    the whole transcript with a 500. `UnconvertibleMessage` is likewise not the only way a stored
+    payload fails to convert: a `contents` list holding a non-dict raises `AttributeError` from
+    inside the converter, past a handler that named one exception type. Which is why the catch is
+    `Exception` and not a tuple — the whole promise of this branch is that *no* stored payload can
+    cost a chemist their conversation, and a tuple is a list of the ways that have been seen so
+    far.
     """
-    if shape == LANGCHAIN_SHAPE:
-        return messages_from_dict([payload])[0]
     try:
+        if shape == LANGCHAIN_SHAPE:
+            return messages_from_dict([payload])[0]
         return to_langchain(payload)
-    except UnconvertibleMessage:
+    except Exception:
         log.warning("could not render a stored message; showing its prose", exc_info=True)
         # The prose out of `contents`, not `payload["text"]` — the stored shape has no top-level
         # `text` key and never did, so the fallback rendered **every** refused row as an empty
@@ -93,7 +111,40 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
         # reader who cannot convert a row should still see what was said in it, and a blank message
         # says the turn was silent. Refusals became commonplace when the converter started stopping
         # on parallel results and unknown content types instead of quietly dropping them.
-        return AIMessage(content=_stored_prose(payload))
+        return _degraded_class(payload)(content=_stored_prose(payload))
+
+
+# Which speaker each stored shape's label names. MAF stamps `role`, LangChain's `message_to_dict`
+# stamps `type`; the two vocabularies are disjoint, so one mapping reads both without having to
+# know which shape a refused row holds — which is exactly what is in doubt when this is consulted.
+_DEGRADED_CLASSES: dict[str, type[BaseMessage]] = {
+    "user": HumanMessage,
+    "human": HumanMessage,
+    "system": SystemMessage,
+}
+
+
+def _degraded_class(payload: dict[str, Any]) -> type[BaseMessage]:
+    """The message class a refused row should render as, taken from the speaker it names.
+
+    **The fallback returned `AIMessage` unconditionally, which put words in the agent's mouth.** A
+    chemist's own question rendered as agent speech — attributed, in the transcript, to the system
+    that answered it — which is a worse failure than a blank bubble because nothing about it looks
+    wrong. The row says who spoke even when it cannot say what a `ToolMessage` answers, so the
+    label is read rather than assumed.
+
+    `AIMessage` stays the default for everything else — the assistant's own `role`, a `tool` row
+    (a `ToolMessage` needs a `tool_call_id` this row may not carry), and a payload with no label
+    at all — because the model's voice is the one attribution that claims nothing about a person.
+
+    Args:
+        payload: The stored `message` column of the row that would not convert.
+
+    Returns:
+        The `BaseMessage` subclass to render its prose as.
+    """
+    label = payload.get("role") or payload.get("type")
+    return _DEGRADED_CLASSES.get(str(label), AIMessage)
 
 
 def _stored_prose(payload: dict[str, Any]) -> str:

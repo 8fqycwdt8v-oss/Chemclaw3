@@ -9,11 +9,17 @@ is simply written with no record that it was.
 """
 
 import ast
+import asyncio
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from deepagents.backends import CompositeBackend, StateBackend
+from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg_pool import AsyncConnectionPool
 
+from chemclaw.agent import checkpointer as ckpt
+from chemclaw.agent import scratchpad
 from chemclaw.agent.scratchpad import (
     MEMORY_ROOT,
     filesystem_permissions,
@@ -23,6 +29,7 @@ from chemclaw.agent.scratchpad import (
     scratchpad_tools,
 )
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
@@ -197,3 +204,101 @@ def test_write_todos_is_never_gated_by_either_write_gate() -> None:
     assert not side_effecting_call(
         "write_todos", {"todos": [{"content": "step", "status": "pending"}]}
     )
+
+
+def test_concurrent_first_turns_get_one_migrated_memory_store() -> None:
+    """The cold start the checkpointer was fixed for, repeated one module over.
+
+    `memory_store()` published `_store` *before* awaiting `setup()`, so a second turn arriving
+    inside that await got a store whose two tables do not exist — `relation "store" does not
+    exist`, the same failure and the same window as `checkpointer()`'s
+    (`tests/test_checkpointer_schema.py` runs the sibling of this test). It is not a rare
+    interleaving: `api/runner._turn_memory_store` is awaited once per turn and the shipped chart
+    runs two replicas.
+
+    **`setup()` is slowed here, which is what gives the test power rather than luck**, exactly as
+    in the checkpointer's version: what the defect needs is a second caller *inside* the first
+    one's await, so the await is widened to be observable instead of raced for.
+
+    Four assertions, and the last two are about a different global. One `setup()` and one store
+    identity are the store half. `_checkpoint_pool` has the same check-then-await-then-act around
+    `open()`, and this is the caller that made it a second *caller* — its docstring used to say it
+    had one, which held its lock around it. Unguarded, each concurrent caller builds and opens its
+    own pool, the last assignment wins, and the rest leak their connections for the life of the
+    process while a store is left holding one the module no longer knows about.
+
+    **`open()` is widened for the same reason `setup()` is, and here it is the only way to see the
+    defect at all.** Measured: with `wait=False` and `min_size=0`, `AsyncConnectionPool.open`
+    reaches no suspension point — an uncontended `asyncio.Lock` acquires without awaiting — so the
+    unguarded body is atomic *today*, by a property of a dependency's internals that nothing
+    promises and no first-party test would notice changing. Widening the await is what turns "this
+    happens not to interleave in psycopg-pool 3.2" into an assertion about this module's own
+    discipline.
+    """
+    setups = {"started": 0, "done": 0}
+    opens = {"count": 0}
+    original_setup = AsyncPostgresStore.setup
+    original_open = AsyncConnectionPool.open
+
+    async def _slow_setup(self: Any) -> None:
+        """Stand in for the store's own migrations, widened so the window is observable."""
+        setups["started"] += 1
+        await asyncio.sleep(0.05)
+        await original_setup(self)
+        setups["done"] += 1
+
+    async def _slow_open(self: Any, wait: bool = False, timeout: float = 30.0) -> None:
+        """The pool's own opening, widened to the suspension point it does not currently reach."""
+        opens["count"] += 1
+        await asyncio.sleep(0.05)
+        await original_open(self, wait=wait, timeout=timeout)
+
+    async def _run() -> dict[str, Any]:
+        await migrated_db_or_skip()
+        await ckpt.close_checkpointer()
+
+        async def _take(_index: int) -> tuple[int, int, bool]:
+            store = await scratchpad.memory_store()
+            return id(store), id(store.conn), setups["done"] > 0
+
+        # Patched after the migration check, so only the pool this test provokes is widened.
+        patch = pytest.MonkeyPatch()
+        patch.setattr(AsyncPostgresStore, "setup", _slow_setup)
+        patch.setattr(AsyncConnectionPool, "open", _slow_open)
+        try:
+            taken = list(await asyncio.gather(*(_take(index) for index in range(4))))
+            return {
+                "stores": {store for store, _, _ in taken},
+                "pools": {pool for _, pool, _ in taken},
+                "published_pool": id(ckpt._pool),
+                "migrated": [ready for _, _, ready in taken],
+            }
+        finally:
+            patch.undo()
+            await ckpt.close_checkpointer()
+
+    result = asyncio.run(_run())
+
+    assert all(result["migrated"]), "a turn got a memory store whose tables had not been created"
+    assert setups["started"] == 1, f"setup() ran {setups['started']} times for one process"
+    assert len(result["stores"]) == 1, "one process, one memory store"
+    assert opens["count"] == 1, f"{opens['count']} pools were opened for one process"
+    assert result["pools"] == {result["published_pool"]}, (
+        "a store was handed a pool the module did not publish, so an opened pool leaked"
+    )
+
+
+def test_closing_the_checkpointer_drops_the_store_that_sits_on_its_pool() -> None:
+    """`close_memory_store` had no caller, which made the close order unenforceable.
+
+    The store borrows the checkpointer's pool, so a shutdown that closed the pool and left `_store`
+    published would hand the next caller a store over closed connections. Ordering is the fix and
+    the caller is what makes it exist; this asserts the wiring rather than the docstring.
+    """
+
+    async def _run() -> AsyncPostgresStore | None:
+        scratchpad._store = cast(AsyncPostgresStore, cast(Any, object()))
+        await ckpt.close_checkpointer()
+        return scratchpad._store
+
+    assert asyncio.run(_run()) is None
