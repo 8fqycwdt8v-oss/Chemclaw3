@@ -424,3 +424,15 @@ roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real E
 Temporal broker, real cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
+
+## Backfill the ORD corpus on the four-repo lane's first bring-up
+
+`infra/live/e2e-full-stack/up.sh` seeds `CHEMCLAW_DATA_SOURCES=graph,eln-json,eln-ord` and points
+`CHEMCLAW_ORD_EXPORT_DIR` at `Chemclaw3_mock`'s 10,011 ORD exports, and then never syncs them from
+an early enough cursor. All 10,011 share one mtime — the moment the repo was cloned — and carry
+older payload timestamps, so once the sync cursor passes that instant none of them can ever
+qualify again. Chemclaw3 handles this correctly and loudly (`adapter.py::warn_late_arrivals`, one
+aggregated WARNING naming the remedy); the gap is that the harness never takes the remedy. A first
+bring-up should run `ElnSyncWorkflow` with an explicit early `since` before anything advances the
+cursor, so the ORD half of the mock's data is actually reachable in an end-to-end pass. Found by
+the 2026-08-17 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
