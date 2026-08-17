@@ -52,6 +52,17 @@ is a policy a deployment has to be able to state and act on.
   across three keys with no foreign key to enforce it — `_prune_checkpoints` says what committing
   them separately would cost.
 
+  **No migration can add an index to them**, and that is why the thread query has to be bounded by
+  its own shape. `infra/sql` is applied by a `pre-install` hook Job that completes before any app
+  container starts, so on a fresh install these tables do not exist when it runs; a migration is
+  recorded in `schema_migrations` on that first run and never re-executed, so a `CREATE INDEX`
+  guarded on the table's existence would be a permanent no-op that reads like a control — the
+  `map_to_hpc_identity` shape D-2026-08-15 deleted. Measured, the index nobody can add is worth
+  little anyway: adding `(thread_id, (checkpoint->>'ts'))` to a 3.2 M-row table moved the thread
+  query from 309 ms to 291 ms, because `max((checkpoint->>'ts')::timestamptz)` reads the *cast* and
+  the index stores text, so the per-thread lookup stays a bitmap heap scan either way. What bounds
+  the pass is `_EXPIRED_THREADS`, which explains it.
+
 - `audit_events` is **refused**, by design, not by omission. The trail is the record of who ran
   what, and for a tool call that changed nothing durable it is the *only* record — so disposing of
   it is not a cache decision, it is deciding to stop being able to answer a question about the past.
@@ -125,20 +136,65 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
 }
 
-# The expired threads, newest-checkpoint-first by age. Grouped rather than filtered row by row
-# because the unit of disposal is a thread: `parent_checkpoint_id` chains a thread's checkpoints,
-# so removing the old ones from a thread still in use would leave the survivors pointing at rows
-# that are gone. `HAVING max(...)` is what makes "this conversation is finished with" the question
-# being asked, rather than "this checkpoint is old".
+# The expired threads: a **loose index scan** that walks `checkpoints` one distinct `thread_id` at a
+# time and asks, per thread, whether its newest checkpoint has expired.
 #
-# `LIMIT` for the reason `_EXPIRED_SESSIONS` has one: a first pass against a deployment that has
-# never pruned faces every thread it has ever had under a 30 s `statement_timeout`, and a pass that
-# times out is retried, times out again and deletes nothing. The caller asks for one *over* its cap
-# for the other reason `_EXPIRED_SESSIONS` does — to learn whether there is a tail to report.
+# The rule is unchanged and is the only correct one: **a thread is expired exactly when its newest
+# checkpoint is older than the cutoff.** The unit of disposal is a thread — `parent_checkpoint_id`
+# chains a thread's checkpoints, so removing the old ones from a thread still in use would leave the
+# survivors pointing at rows that are gone.
+#
+# What changed is where the `LIMIT` bites. This used to be a single
+# `GROUP BY thread_id HAVING max(...) < cutoff ORDER BY thread_id LIMIT %s`, and the comment here
+# claimed that `LIMIT` was what stopped the pass timing out. It is not: an aggregate has to build
+# every group before anything above it can discard one. Measured on real tables, the plan is
+# `Seq Scan -> HashAggregate -> Sort -> Limit`, and its cost tracks the table rather than the cap —
+# 344 ms over 1.2 M rows, 1 225 ms over 3.2 M, 1 062 ms to group 200 000 threads. Under
+# `pg_statement_timeout_seconds` (30 s) a first pass against a deployment that has never pruned is
+# therefore cancelled, retried by Temporal, cancelled again, and deletes nothing — permanently, with
+# a timeout as the only symptom and the table it exists to bound still growing.
+#
+# Rewriting it so the `LIMIT` bounds the *scan* took the one shape Postgres cannot re-plan into a
+# whole-table aggregate. `DISTINCT` is not it: `SELECT DISTINCT thread_id ... ORDER BY thread_id
+# LIMIT n` is planned `Limit -> Unique -> Index Scan` on some tables and
+# `Seq Scan -> HashAggregate -> Sort -> Limit` on others (measured: the same query, both plans, the
+# difference being whether the table had statistics yet — and a table created by
+# `AsyncPostgresSaver.setup()` has none until autovacuum first analyzes it, which is exactly the
+# first-pass case).
+#
+# The recursive term is a skip scan: `min(thread_id) WHERE thread_id > <previous>` is an
+# `Index Only Scan` on `checkpoints_pkey` stopped after one row, so the walk costs one index probe
+# per *thread*, never a row per checkpoint. The `LIMIT` then stops the recursion itself, because a
+# recursive CTE is produced on demand — measured, 556 threads visited to fill a cap of 501 out of
+# 3 000 in the table, and 556 out of 200 000.
+#
+# The expiry test is a **correlated scalar subquery on purpose**, not the `NOT EXISTS` that reads
+# more naturally. `NOT EXISTS` is a join the planner may hash, and when it does it materialises the
+# whole CTE first — measured: the recursion ran to all 2 000 threads instead of 23, and the answer
+# lost its order. A `SubPlan` cannot be hoisted out of the row it belongs to, so laziness stops
+# being a plan the optimiser might pick and becomes a property of the statement. `max(...)` also
+# states the disposal rule literally, which `NOT EXISTS` only implies.
+#
+# Rows come out in ascending `thread_id` with no `ORDER BY` — that is how the walk generates them,
+# and adding the clause would put a `Sort` above the CTE and materialise it, which is the one thing
+# this statement is built to avoid. Nothing here depends on the order for correctness; a capped pass
+# takes some `cap` expired threads and the next pass takes the next ones.
+#
+# One over the cap is asked for, for the reason `_EXPIRED_SESSIONS` does: to learn whether there is
+# a tail to report. It counts genuinely expired threads, as it always did.
 _EXPIRED_THREADS = (
-    "SELECT thread_id FROM checkpoints GROUP BY thread_id "
-    "HAVING max((checkpoint->>'ts')::timestamptz) < now() - make_interval(days => %s) "
-    "ORDER BY thread_id LIMIT %s"
+    "WITH RECURSIVE thread AS ("
+    "    SELECT (SELECT min(thread_id) FROM checkpoints) AS thread_id"
+    "  UNION ALL"
+    "    SELECT (SELECT min(c.thread_id) FROM checkpoints c WHERE c.thread_id > thread.thread_id)"
+    "    FROM thread WHERE thread.thread_id IS NOT NULL"
+    ") "
+    "SELECT thread_id FROM thread "
+    "WHERE thread_id IS NOT NULL "
+    "  AND (SELECT max((k.checkpoint->>'ts')::timestamptz) FROM checkpoints k "
+    "       WHERE k.thread_id = thread.thread_id) "
+    "      < now() - make_interval(days => %s) "
+    "LIMIT %s"
 )
 
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
@@ -331,6 +387,15 @@ async def _prune_checkpoints(
 
     Returns `(rows deleted per table, tables skipped with the reason, threads not reached)`.
 
+    **The cap bounds the work, which is what it never used to do.** `_EXPIRED_THREADS` says how; the
+    short version is that a `LIMIT` above an aggregate discards nothing until every group in the
+    table has been built, so the previous statement's cost tracked the table and not the cap, and a
+    first pass on a large one could only ever time out. The walk it was replaced by visits threads
+    until it has filled the cap and then stops — 556 visited to find 501, whether the table holds
+    3 000 threads or 200 000. What a pass *answers* is unchanged, which is the point: this is a plan
+    fix, not a policy change, and the two statements return the same threads in the same order on
+    every shape it was measured on.
+
     **The cap is reported, for the reason `_prune_session_messages` reports its own.** One over the
     cap is selected purely to learn whether there is a tail and is never worked; without it, a first
     pass against a deployment with fifty thousand expired threads returns the cap as its deleted
@@ -341,9 +406,9 @@ async def _prune_checkpoints(
     independent. These three are not: they are one thread's state split across three keys with no
     foreign key to enforce it. Committing them separately gives a crash between two commits a choice
     of two bad outcomes — surviving `checkpoints` rows referring to blobs that are gone (a thread
-    that now raises when read) or orphaned blobs no later pass can find (because the `HAVING` is
-    over `checkpoints`, and that thread no longer has any). One transaction has neither, and it is
-    bounded by the batch cap rather than by the backlog.
+    that now raises when read) or orphaned blobs no later pass can find (because the thread walk
+    runs over `checkpoints`, and that thread no longer has any). One transaction has neither, and it
+    is bounded by the batch cap rather than by the backlog.
 
     **A malformed `ts` fails this pass loudly, and that is the answer rather than an oversight.**
     The thread query casts `checkpoint->>'ts'` to `timestamptz`, and Postgres has no `TRY_CAST` — a
@@ -354,7 +419,10 @@ async def _prune_checkpoints(
     success while a table grows — the exact reading `sessions_deferred` and `threads_deferred` exist
     to prevent. No guard is written for it because none has been needed: `ts` is a field of
     LangGraph's own `Checkpoint`, written by `create_checkpoint` on every write, and a release that
-    changed it would break `AsyncPostgresSaver` before it reached this sweep.
+    changed it would break `AsyncPostgresSaver` before it reached this sweep. The cast now runs only
+    over the threads the walk visits rather than over every row in the table, so a malformed `ts`
+    surfaces on the pass that reaches its thread instead of on the first pass of all — later, and
+    still loudly, which is the half that matters.
 
     **Skipped, not failed, when the tables are absent.** They are created by
     `AsyncPostgresSaver.setup()` rather than by a migration, so a deployment that has never run the

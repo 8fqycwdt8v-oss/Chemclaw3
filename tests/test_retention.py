@@ -22,6 +22,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable import retention
 from chemclaw.durable.retention import (
+    _EXPIRED_THREADS,
     _PRUNABLE,
     RetentionOutcome,
     _window_days,
@@ -653,4 +654,257 @@ def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
     )
     assert "session_events" in outcome.deleted, (
         "a missing checkpointer stopped the sweep reaching the tables it can prune"
+    )
+
+
+# --- The thread query's LIMIT has to bound the scan, not just the answer ------------------------
+
+# The shape the plan assertions are measured against. Enough threads that a `HashAggregate` over
+# every group is what the planner reaches for on a table with no statistics — which is the state
+# `checkpoints` is in until autovacuum first analyzes it, because `AsyncPostgresSaver.setup()`
+# creates it outside `infra/sql` and a first retention pass can easily arrive before that. Below
+# roughly this size Postgres happens to pick a streaming plan for the old query too, and the defect
+# hides.
+_SCAN_THREADS = 2000
+_SCAN_CHECKPOINTS_PER_THREAD = 5
+# One thread in ten is *still in use*: its oldest checkpoints are past the cutoff while its newest
+# is not. The walk has to skip those without reading past its `LIMIT`, so they belong in the fixture
+# the plan is measured on, not only in the behavioural test.
+_SCAN_LIVE_EVERY = 10
+# Far below the seeded thread count, so "the scan stopped early" is a difference of two orders of
+# magnitude rather than a rounding one.
+_SCAN_CAP = 20
+
+
+async def _seed_checkpoint_threads(threads: int, per_thread: int, live_every: int) -> None:
+    """Bulk-seed `threads` threads of `per_thread` checkpoints each, in one statement.
+
+    Every checkpoint is 400 days old except the last one of every `live_every`-th thread, which is a
+    day old — so that thread holds expired checkpoints and is not itself expired. One
+    `INSERT … SELECT` rather than a Python loop because the plan under test only becomes the
+    pathological one at a few thousand threads, and ten thousand round trips would dominate the
+    suite's runtime.
+
+    The `ts` is written in the ISO-8601 form `create_checkpoint` actually produces
+    (`2026-08-17T09:00:00.000000+00:00`), not Postgres's own `::text` rendering, so what the sweep
+    parses here is what it parses in production.
+
+    Clears all three tables first: the assertions below are about a *global* scan bound, so a thread
+    another test left behind changes the number.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                await cur.execute(f"DELETE FROM {table}")
+            await cur.execute(
+                "INSERT INTO checkpoints "
+                "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                "SELECT 'retention-scan-' || to_char(t, 'FM000000'), '', 'ckpt-' || c, "
+                "       jsonb_build_object('v', 1, 'id', 'ckpt-' || c, 'ts', "
+                "           to_char((now() - make_interval(days => "
+                "               CASE WHEN t %% %s = 0 AND c = %s THEN 1 ELSE 400 END)) "
+                "               AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00')), "
+                "       '{}'::jsonb "
+                "FROM generate_series(1, %s) t, generate_series(1, %s) c",
+                (live_every, per_thread, threads, per_thread),
+            )
+        await conn.commit()
+
+
+async def _clear_checkpoint_tables() -> None:
+    """Empty all three checkpoint tables, so a bulk fixture cannot leak into another test."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                await cur.execute(f"DELETE FROM {table}")
+        await conn.commit()
+
+
+async def _plan_of(sql: str, params: tuple[object, ...]) -> dict[str, Any]:
+    """The executed plan tree of `sql`, as `EXPLAIN (ANALYZE, FORMAT JSON)` reports it.
+
+    `ANALYZE` rather than a cost-only explain because the claim under test is about what the
+    statement *did* — how many rows the scan actually touched — and an estimate is exactly the thing
+    that was wrong about the old query.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF) " + sql, params)
+        row = await cur.fetchone()
+    assert row is not None
+    plan: dict[str, Any] = row[0][0]["Plan"]
+    return plan
+
+
+def _plan_nodes(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node of a plan tree, parents before children."""
+    nodes = [plan]
+    for child in plan.get("Plans", []):
+        nodes.extend(_plan_nodes(child))
+    return nodes
+
+
+def _rows_examined(plan: dict[str, Any]) -> int:
+    """How many rows the plan's scan nodes actually read, filtered-out rows included.
+
+    `Actual Rows` alone would undercount: a `Seq Scan` that discards everything reports zero rows
+    out while having read the whole table, which is precisely the cost this fix is about.
+    """
+    return sum(
+        (node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"]
+        for node in _plan_nodes(plan)
+        if node["Node Type"].endswith("Scan")
+    )
+
+
+def test_the_thread_query_lets_the_limit_bound_the_scan() -> None:
+    """The defect: the old `LIMIT` bounded the deletes and not the work that produced them.
+
+    `SELECT thread_id FROM checkpoints GROUP BY thread_id HAVING max(...) < cutoff ORDER BY
+    thread_id LIMIT n` plans, on a real table, as `Seq Scan → HashAggregate → Sort → Limit`: every
+    row read and every group built before the `LIMIT` can discard one. Work grows with the table and
+    not with the cap, so past the size where it exceeds `pg_statement_timeout_seconds` the activity
+    is cancelled, retried by Temporal, cancelled again, and the table it exists to bound grows
+    forever with a timeout as the only symptom.
+
+    Three properties, each of which the old statement fails:
+
+    * **nothing sequentially scans `checkpoints`** — every access is through `checkpoints_pkey`, so
+      the cost of a pass is a number of index probes rather than a fraction of the table;
+    * **the recursion stops at the cap** — the walk enumerates barely more threads than it was asked
+      for, out of a table holding two orders of magnitude more;
+    * **the rows actually read are a small fraction of the table**, which is the plain statement of
+      "the `LIMIT` bounded the scan".
+
+    Asserted on measured row counts and on the absence of a sequential scan rather than on an exact
+    plan shape, because the point is that this statement has only one plan available to it — which
+    is itself the fix. `DISTINCT` was tried first and rejected for failing exactly here: measured,
+    it plans `Limit → Unique → Index Scan` on a table with statistics and
+    `Seq Scan → HashAggregate → Sort → Limit` on the same table without them.
+    """
+
+    async def _run() -> tuple[dict[str, Any], list[str]]:
+        await migrated_db_or_skip()
+        await _create_checkpoint_tables()
+        try:
+            await _seed_checkpoint_threads(
+                _SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_LIVE_EVERY
+            )
+            plan = await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1))
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(_EXPIRED_THREADS, (30, _SCAN_CAP + 1))
+                threads = [str(row[0]) for row in await cur.fetchall()]
+            return plan, threads
+        finally:
+            await _clear_checkpoint_tables()
+
+    plan, threads = asyncio.run(_run())
+    seeded_rows = _SCAN_THREADS * _SCAN_CHECKPOINTS_PER_THREAD
+    nodes = _plan_nodes(plan)
+
+    assert len(threads) == _SCAN_CAP + 1, (
+        "the thread query must return one over the cap, so the pass can tell a drained backlog "
+        f"from a capped one; got {len(threads)}"
+    )
+
+    sequential = [node["Node Type"] for node in nodes if node["Node Type"] == "Seq Scan"]
+    assert sequential == [], (
+        "the thread query sequentially scans `checkpoints`; its cost is then the table's size, "
+        "which is what makes a first pass on a large one time out for ever"
+    )
+
+    walked = [node["Actual Rows"] for node in nodes if node["Node Type"] == "Recursive Union"]
+    assert walked and max(walked) <= _SCAN_CAP + 3, (
+        f"the walk enumerated {walked} threads of {_SCAN_THREADS} to answer for {_SCAN_CAP + 1}; "
+        "the LIMIT is bounding the answer, not the scan"
+    )
+
+    examined = _rows_examined(plan)
+    assert examined < seeded_rows // 10, (
+        f"the query read {examined} of {seeded_rows} rows for {_SCAN_CAP + 1} threads — "
+        "the LIMIT is bounding the answer, not the scan"
+    )
+
+
+async def _seed_thread_with_ages(thread_id: str, ages: tuple[int, ...]) -> None:
+    """One thread holding a checkpoint at each of `ages` (in days), plus its blob and write rows.
+
+    The multi-checkpoint counterpart of `_seed_thread`: a thread whose *oldest* checkpoints have
+    expired while its newest has not cannot be expressed with one row, and it is the only shape that
+    separates "has an expired checkpoint" from "is finished with".
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for index, age_days in enumerate(ages):
+                await cur.execute(
+                    "INSERT INTO checkpoints "
+                    "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                    "VALUES (%s, '', %s, jsonb_build_object('v', 1, 'id', %s::text, 'ts', "
+                    "    to_char((now() - make_interval(days => %s::int)) AT TIME ZONE 'UTC', "
+                    "            'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00')), '{}'::jsonb)",
+                    (thread_id, f"ckpt-{index}", f"ckpt-{index}", age_days),
+                )
+            await cur.execute(
+                "INSERT INTO checkpoint_blobs "
+                "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                "VALUES (%s, '', 'messages', '1', 'msgpack', %s)",
+                (thread_id, b"payload"),
+            )
+            await cur.execute(
+                "INSERT INTO checkpoint_writes "
+                "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                "VALUES (%s, '', 'ckpt-0', 'task-1', 0, 'messages', 'msgpack', %s)",
+                (thread_id, b"payload"),
+            )
+        await conn.commit()
+
+
+def test_a_thread_whose_oldest_checkpoints_expired_but_is_still_in_use_is_not_deleted() -> None:
+    """The bound had to be bought without changing what "expired" means.
+
+    The cheap way to bound the scan is to ask a per-row question — "which threads hold a checkpoint
+    older than the cutoff" — and take the first `n` answers. That set includes every conversation
+    resumed across the window, old checkpoints plus recent ones, and deleting on it would destroy
+    the turn state of exactly the threads still in daily use, silently, because nothing reads a
+    checkpoint until someone resumes the conversation and finds no state.
+
+    So the walk asks `max(ts) < cutoff` of each thread it visits rather than "does this thread hold
+    an expired checkpoint", and this is the test that it still does. The straddling thread
+    deliberately gets a lower-sorting id than the fully expired one, so the walk reaches it first.
+    """
+
+    async def _run() -> tuple[dict[str, int], dict[str, int], RetentionOutcome]:
+        await migrated_db_or_skip()
+        await _create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            # Sorts first, so a pass that trusted the candidate query would delete it first.
+            await _seed_thread_with_ages("retention-a-resumed", (400, 380, 1))
+            await _seed_thread_with_ages("retention-b-finished", (400, 380))
+
+            outcome = await prune_expired_rows()
+
+            return (
+                await _thread_row_counts("retention-a-resumed"),
+                await _thread_row_counts("retention-b-finished"),
+                outcome,
+            )
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    resumed, finished, outcome = asyncio.run(_run())
+
+    assert resumed == {"checkpoints": 3, "checkpoint_blobs": 1, "checkpoint_writes": 1}, (
+        "a conversation resumed inside the window was pruned because its *older* checkpoints had "
+        f"expired; its turn state is now gone: {resumed}"
+    )
+    assert finished == {"checkpoints": 0, "checkpoint_blobs": 0, "checkpoint_writes": 0}, (
+        f"the finished thread was not disposed of: {finished}"
+    )
+    assert outcome.deleted["checkpoints"] == 2, (
+        f"exactly the finished thread's two checkpoints should have gone: {outcome.deleted}"
     )
