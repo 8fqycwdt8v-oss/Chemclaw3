@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -115,6 +116,13 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
     call, or this sweep needs to become a `logging.setLoggerClass` hook.
     """
     handlers: list[logging.Handler] = list(logging.getLogger().handlers)
+    # `logging.lastResort` is neither a root handler nor any logger's own, and it is what a
+    # non-propagating logger with no handlers of its own falls back to — an ordinary library shape,
+    # and the same shape the rest of this sweep exists for. Measured: such a logger printed
+    # `token=<value>` to stderr through it, unfiltered, on a *successful* emit rather than on any
+    # error path. Swept here so the fallback carries the same redaction as everything else.
+    if logging.lastResort is not None:
+        handlers.append(logging.lastResort)
     # Snapshot under the logging module's own lock. `loggerDict` is mutated by `getLogger()`, and
     # this runs in the app factory while worker startup, a lazy connector import or OTel's first use
     # may be creating loggers on another thread — iterating the live view raised
@@ -179,20 +187,46 @@ def _install_redacting_handle_error(
     an equivalent function instead of stacking a wrapper around the first, and a `Handler` subclass
     with its own `handleError` still gets its own behaviour.
     """
-    extra_secrets = redaction._connector_token_envs
 
     def handle_error(record: logging.LogRecord) -> None:
-        """Print logging's own diagnostic for `record` with its credentials removed."""
+        """Print logging's own diagnostic for `record` with its credentials removed.
+
+        **Nothing here may raise, and the diagnostic must print even if the scrubbing fails.**
+        `Handler.handleError` is the one method in the logging stack that is defensive to the point
+        of re-raising only `RecursionError`, because anything it lets escape surfaces at the
+        application's own `logger.info(...)` line — logging crashing its caller. The first version
+        of this wrapper reintroduced exactly that: `record.args` was treated as a tuple *or*
+        anything-else-with-`.items()`, so a bare string or a `Mapping`-registered object without
+        `items` raised `AttributeError` out through `emit` into the caller, **and** swallowed the
+        diagnostic on the way. That is the property `SecretRedactingFilter.filter` spends a
+        paragraph guaranteeing, given up one level down.
+
+        So: the scrub is attempted, any failure drops the arguments rather than propagating, and
+        the delegation sits outside the `try` where it always runs.
+
+        The token names are read per call rather than captured at install time. Captured, a second
+        `configure_logging()` left one handler with two inventories — the filter kept the first and
+        this closure held the second — with the *stale* one on the ordinary path.
+        """
         msg, args = record.msg, record.args
         try:
-            record.msg = _redacted_for_diagnostic(msg, extra_secrets)
+            record.msg = _redacted_for_diagnostic(msg, redaction._connector_token_envs)
             if isinstance(args, tuple):
-                record.args = tuple(_redacted_for_diagnostic(arg, extra_secrets) for arg in args)
-            elif args is not None:
+                record.args = tuple(
+                    _redacted_for_diagnostic(arg, redaction._connector_token_envs) for arg in args
+                )
+            elif isinstance(args, Mapping):
                 record.args = {
-                    key: _redacted_for_diagnostic(value, extra_secrets)
+                    key: _redacted_for_diagnostic(value, redaction._connector_token_envs)
                     for key, value in args.items()
                 }
+            elif args is not None:
+                record.args = _redacted_for_diagnostic(args, redaction._connector_token_envs)
+        except Exception:
+            # An unscrubbable argument is dropped, never printed: this runs because formatting
+            # already failed once, so the value is exactly the kind that might carry a secret.
+            record.args = None
+        try:
             type(handler).handleError(handler, record)
         finally:
             # Restored, because the record is not ours. The logger hands the same object to every

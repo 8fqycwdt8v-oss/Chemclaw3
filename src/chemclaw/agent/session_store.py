@@ -62,6 +62,7 @@ from chemclaw.agent.message_migration import (
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
+from chemclaw.core.metrics_bridge import degraded
 
 log = logging.getLogger(__name__)
 
@@ -99,12 +100,24 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     cost a chemist their conversation, and a tuple is a list of the ways that have been seen so
     far.
     """
+    if not isinstance(payload, dict):
+        # `message` is a bare `jsonb` column — only `message_shape` is constrained — so a scalar or
+        # an array is storable, and every branch below assumes a mapping. Nothing writes such a row
+        # today; without this, three payload shapes still raised `AttributeError` past both callers
+        # and answered the whole transcript with a 500, which is the promise this function makes.
+        degraded(log, "session_transcript", "a stored message was not an object; rendering nothing")
+        return AIMessage(content="")
     try:
         if shape == LANGCHAIN_SHAPE:
             return messages_from_dict([payload])[0]
         return to_langchain(payload)
     except Exception:
-        log.warning("could not render a stored message; showing its prose", exc_info=True)
+        # `degraded` rather than a bare warning, because the catch is deliberately wide: it also
+        # swallows the shape of a *converter bug* — an `AttributeError` from a typo degrades every
+        # row in every transcript into plausible prose, and a log line nobody alerts on makes "one
+        # legacy row" and "the converter is broken for everyone" observationally identical. The
+        # counter is what separates them.
+        degraded(log, "session_transcript", "could not render a stored message; showing its prose")
         # The prose out of `contents`, not `payload["text"]` — the stored shape has no top-level
         # `text` key and never did, so the fallback rendered **every** refused row as an empty
         # bubble. That is the failure this branch exists to avoid, reached by the branch itself: a
@@ -168,7 +181,16 @@ def _stored_prose(payload: dict[str, Any]) -> str:
             return "\n".join(r for r in results if r)
     data = payload.get("data")
     if isinstance(data, dict):
-        return str(data.get("content", ""))
+        content = data.get("content", "")
+        if isinstance(content, list):
+            # A LangChain assistant message carries block content, so `str()` of it is a Python
+            # repr of the wire format — including a tool call's `input` arguments — presented in
+            # the transcript as the agent's own words. This branch was unreachable while the
+            # `langchain` shape returned before the `try`; widening the guard made it live, so it
+            # has to flatten the way `api/schemas.message_text` already does.
+            blocks = [str(b.get("text", "")) for b in content if isinstance(b, dict)]
+            return "".join(block for block in blocks if block)
+        return str(content)
     return str(payload.get("text", ""))
 
 
