@@ -528,3 +528,84 @@ def test_the_connector_job_wrapper_imports_no_connector() -> None:
         f"durable/connector_job.py imports {reaches}; the wrapper is the one module in this "
         "package that must name no connector, because that is what lets a bundle own its workflow"
     )
+
+
+# The libraries that arrive *only* through a bundle, so seeing one in a process is proof a bundle
+# loaded even when the module names do not say so. Same roots as
+# `test_workflow_registry.py::test_cores_workers_import_no_bundle` checks for core's worker.
+_BUNDLE_ONLY_DEPENDENCIES = ("bofire", "botorch", "gpytorch", "tblite", "xgboost")
+
+# The agent-side modules that start durable work, plus the front door that hosts them — i.e. every
+# way the conversation process comes to hold a workflow launcher.
+_AGENT_LAUNCH_SURFACE = (
+    "chemclaw.agent.durable_tools",
+    "chemclaw.agent.interaction_tools",
+    "chemclaw.api.app",
+)
+
+_BUNDLE_CHECK = """
+import importlib
+import sys
+
+target, bundles, heavy = sys.argv[1], sys.argv[2].split(","), sys.argv[3].split(",")
+importlib.import_module(target)
+
+prefixes = tuple(f"chemclaw.connectors.{b}." for b in bundles)
+exact = {f"chemclaw.connectors.{b}" for b in bundles}
+loaded_bundles = sorted(n for n in sys.modules if n in exact or n.startswith(prefixes))
+loaded_heavy = sorted(n for n in sys.modules if n.split(".")[0] in heavy)
+if loaded_bundles or loaded_heavy:
+    # Roots and a count, never the full list: one bundle import pulls ~600 `bofire`/`botorch`
+    # modules, and a failure a reader has to scroll past is a failure that hides its own cause.
+    roots = sorted({n.split(".")[0] for n in loaded_heavy})
+    raise SystemExit(
+        f"{target} loaded bundle module(s) {loaded_bundles}, "
+        f"pulling in {len(loaded_heavy)} modules from bundle-only dependency(ies) {roots}"
+    )
+"""
+
+
+@pytest.mark.parametrize("module", _AGENT_LAUNCH_SURFACE)
+def test_the_agent_layer_imports_no_bundle_workflow(module: str) -> None:
+    """The agent may name a *core-queue* workflow type; it may never name a bundle's (D-2026-08-17).
+
+    `agent/durable_tools.py` importing `DevelopmentReportWorkflow` to launch it looks like the
+    conversation layer reaching into the durable one, and it is not: D-002 forbids merging the two
+    *durability models*, and that module stores nothing — it is the thin adapter D-002 asks for.
+    Measured, the two workflow-class imports add **10 modules and zero third-party packages** to
+    this process, because the report's closure is what core already carries for `gather_evidence`.
+    What the typed reference buys is real: `mypy --strict` rejects a wrong argument through
+    `start_workflow(Workflow.run, ...)` and is silent through the by-name form.
+
+    The rule that *does* protect this process is therefore one layer down — a bundle's workflow is
+    reached by name across its queue, so `bofire`/`botorch`/`tblite` load in the bundle's own worker
+    and nowhere else. That held and nothing asserted it. The policy above cannot: it is *package*
+    granular and `chemclaw.agent -> chemclaw.connectors` is legitimately allowed for the generated
+    tool surface, so importing `chemclaw.connectors.bo.workflows` into an agent tool would have
+    passed every other test in this file — the same hole that produced
+    `test_the_connector_job_wrapper_imports_no_connector` on the other side of the same seam.
+
+    Bundles are derived from the registry rather than listed, so one added tomorrow is covered on
+    the day it is created. Checked in a clean interpreter, because the failure is *transitive*:
+    the import that drags a bundle in is rarely the one that names it.
+    """
+    from chemclaw.connectors.registry import discovered
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _BUNDLE_CHECK,
+            module,
+            ",".join(discovered()),
+            ",".join(_BUNDLE_ONLY_DEPENDENCIES),
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"{result.stderr.strip()}\n\na bundle's durable work is launched by *name* across its own "
+        "queue precisely so its heavy closure never loads here; import the workflow type only when "
+        "this process already carries it"
+    )
