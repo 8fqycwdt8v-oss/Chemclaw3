@@ -1722,3 +1722,68 @@ def test_one_non_utf8_ord_export_does_not_abort_the_directory(
         )
 
     asyncio.run(_run())
+
+
+# Every dash that stands in for a minus sign in a real procedure. ACS and RSC typeset cryogenic
+# temperatures with U+2212; Word's autocorrect produces U+2013 from a typed hyphen; the rest turn up
+# in text pasted between systems. Only U+002D used to be read as a sign.
+_MINUS_DASHES = [
+    pytest.param("-", id="ascii-hyphen-minus"),
+    pytest.param("−", id="minus-sign"),
+    pytest.param("–", id="en-dash"),
+    pytest.param("—", id="em-dash"),
+    pytest.param("‐", id="hyphen"),
+    pytest.param("‑", id="non-breaking-hyphen"),
+    pytest.param("‒", id="figure-dash"),
+    pytest.param("―", id="horizontal-bar"),
+]
+
+
+@pytest.mark.parametrize("dash", _MINUS_DASHES)
+def test_a_typographic_minus_before_a_temperature_is_still_a_minus(dash: str) -> None:
+    """`−78 °C` must not be ingested as `+78 °C`.
+
+    A dry-ice/acetone lithiation is one of the most common cryogenic conditions in synthesis, and
+    the sign used to be `-?` — U+002D alone. Seven of these eight characters were therefore not
+    consumed at all and the number was read bare, so `−78 °C` became `78.0`: a 156-degree error in
+    the wrong direction, rendered into the proposed note as `temperature: 78.0 °C`, and entirely
+    plausible to the reviewer at the PR-gate because the verbatim prose beside it still reads `−78`.
+    """
+    raw = RawEntry(
+        entry_id="e-cryo",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO", "role": "reactant"}],
+            "products": [{"smiles": "CCO", "yield_percent": 50}],
+            "procedure": f"Cooled to {dash}78 °C, then n-BuLi was added dropwise.",
+            "operator": "chemist-c",
+        },
+    )
+
+    assert JsonExportAdapter().map_to_ord(raw).temperature_c == -78.0
+
+
+@pytest.mark.parametrize("dash", _MINUS_DASHES)
+def test_a_dash_between_two_numbers_is_a_range_and_not_a_sign(dash: str) -> None:
+    """The control the lookbehind exists for: `60–80 °C` is the upper bound, never `-80`."""
+    raw = RawEntry(
+        entry_id="e-range",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO", "role": "reactant"}],
+            "products": [{"smiles": "CCO", "yield_percent": 50}],
+            "procedure": f"Heated to 60{dash}80 °C over 2 h.",
+            "operator": "chemist-c",
+        },
+    )
+
+    assert JsonExportAdapter().map_to_ord(raw).temperature_c == 80.0
+
+
+def test_a_typographic_minus_survives_step_segmentation_too() -> None:
+    """`_segment_steps` runs the regex unconditionally, so every step of every entry was hit."""
+    from chemclaw.ingest.eln.json_adapter import _segment_steps
+
+    steps = _segment_steps("Cool the solution to −78 °C. Add n-BuLi dropwise. Warm to 20 °C.")
+
+    assert [step.temperature_c for step in steps] == [-78.0, None, 20.0]
