@@ -214,6 +214,17 @@ def _is_merged_note(key: str) -> bool:
 
     Deliberately not cached: a merge lands between two queries, and a stale answer would keep
     surfacing a reaction a reviewer had just signed off on — the exact duplication this prevents.
+
+    The key is a warehouse-controlled string, so the joined path is confined to the graph before it
+    is stat'd. `reaction-../../../etc/passwd` used to build a path outside `knowledge_path`; the
+    stat is the only operation and nothing is read, but the answer it produces is the one that
+    decides whether a hit is *suppressed*, so a key escaping the graph could hide evidence by
+    landing on any file that happens to exist. Confinement rather than a slug pattern, because a
+    site's own row keys are its business — one containing a slash is unusual, not hostile, and it
+    still has no note, which is exactly what this returns for it.
     """
-    note = Path(settings.knowledge_path) / note_relative_path("reaction", note_id_for_reaction(key))
+    root = Path(settings.knowledge_path).resolve()
+    note = (root / note_relative_path("reaction", note_id_for_reaction(key))).resolve()
+    if not note.is_relative_to(root):
+        return False
     return note.is_file()

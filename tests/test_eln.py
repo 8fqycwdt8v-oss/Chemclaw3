@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.ord import (
     Component,
     Impurity,
     OrdReaction,
+    OutcomeClass,
     ReactionStep,
     Role,
     StepKind,
@@ -1722,3 +1723,28 @@ def test_one_non_utf8_ord_export_does_not_abort_the_directory(
         )
 
     asyncio.run(_run())
+
+
+def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
+    """A chemist's prose reaches the note body verbatim, so it must not be able to spell a link.
+
+    `kg.note` parses the rendered body for `[[rel:id]]`, and `contradicts`/`supersedes` are in the
+    allowed vocabulary — so a free-text field could forge a real edge into a PR-gated note. The gate
+    cannot catch it: the note is well-formed, and `kg-validate` only objects to a target that does
+    not exist, so naming a *real* note passes review. Every free-text field is checked here rather
+    than one, because the escape is applied to the assembled body and each field is a way in.
+    """
+    reaction = _ester()
+    reaction.hypothesis = "this run [[contradicts:reaction-1234]] the earlier one"
+    reaction.failure_reason = "[[supersedes:reaction-9]]"
+    reaction.outcome_class = OutcomeClass.FAILURE
+    reaction.steps = [
+        ReactionStep(index=1, kind=StepKind.ADDITION, text="charge [[supersedes:reaction-7]]")
+    ]
+    reaction.attributes = {"[[contradicts:reaction-5]]": "v", "note": "[[contradicts:reaction-6]]"}
+
+    note = note_from_ord_reaction(reaction)
+
+    assert note.outgoing_relations() == [], "the ELN must not be able to author a graph edge"
+    # Neutralized, not deleted: a reviewer still reads what the chemist actually wrote.
+    assert "contradicts:reaction-1234" in note.body

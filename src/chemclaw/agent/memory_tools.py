@@ -12,6 +12,7 @@ moment of ranking, which is the distinction the human gate exists to preserve. K
 distinct call is what makes the separation structural rather than a naming convention.
 """
 
+from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_proposal
@@ -77,4 +78,18 @@ async def recall_observations(limit: int = 0) -> list[Observation]:
     """
     if not settings.observations_enabled:
         return []
-    return await open_observations(limit or None)
+    # An observation's `statement` is corpus-mined free text — it is assembled from note bodies
+    # nobody wrote for this purpose, which makes it retrieved data exactly like an evidence chunk,
+    # and it reached the model unframed while `gather_evidence` framed the very notes it rests on.
+    # Framed here rather than at the store, so what is persisted stays the plain statement and the
+    # envelope belongs to the one channel that feeds a model.
+    return [
+        observation.model_copy(
+            update={
+                "statement": frame_untrusted(
+                    observation.statement, note_id=observation.id or "observation"
+                )
+            }
+        )
+        for observation in await open_observations(limit or None)
+    ]
