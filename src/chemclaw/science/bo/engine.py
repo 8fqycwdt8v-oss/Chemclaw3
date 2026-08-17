@@ -833,18 +833,64 @@ def _full_design(
 ) -> ScreeningDesign:
     """Every combination: categorical levels crossed with each continuous factor's two bounds.
 
-    `n_center` is passed explicitly on **every** path, including the default of 0, because BoFire's
-    own default is **1** (measured, M-5) — leaving it unset would have this function silently start
-    returning midpoint rows nobody asked for the moment a continuous factor was admitted.
+    **The cross product is built here rather than asked of BoFire, because BoFire does not return
+    one for a mixed domain.** `FractionalFactorialStrategy._ask` combines its continuous and
+    categorical frames by tiling *both* — `concat([design] * len(cat))` beside
+    `concat([cat] * len(design))` — where a cross product repeats one and tiles the other. Row *i*
+    therefore pairs `continuous[i % N]` with `categorical[i % C]`, which enumerates the product only
+    when `gcd(N, C) == 1` and otherwise yields `lcm(N, C)` distinct rows each repeated `gcd(N, C)`
+    times.
+
+    Measured on this tree, two-level factors throughout, before this changed:
+
+        cat=1 cont=1: rows=4  distinct=2  expected=4   missing=2
+        cat=2 cont=1: rows=8  distinct=4  expected=8   missing=4
+        cat=2 cont=2: rows=16 distinct=4  expected=16  missing=12
+        cat=3 cont=1: rows=16 distinct=8  expected=16  missing=8
+
+    Three quarters of a 2x2 design absent, the survivors duplicated, and one factor perfectly
+    confounded with another — while `ScreeningDesign.resolution` stayed `None` and
+    `ScreeningDesign.summary` said "Exhaustive over the levels stated: every combination of them is
+    run." A screening design exists to attribute an effect to a factor; an aliased one cannot, and a
+    chemist reading that sentence has no way to know. `itertools.product` is what "full factorial"
+    means, it is three lines, and it cannot drift from the claim the summary makes.
+
+    The homogeneous paths went through the same combining step and are covered by the same product:
+    a categorical-only or continuous-only problem has nothing to cross, so the result is identical
+    to what BoFire returned for it.
+
+    `n_center` still means what it did — midpoint rows for the continuous factors, per combination
+    of the categorical ones, as `summary` describes — and `n_repetitions` replicates the factorial
+    part.
     """
-    frame = strategies.map(
-        FractionalFactorialStrategy(
-            domain=_to_domain(problem), n_center=n_center, n_repetitions=n_repetitions
-        )
-    ).ask()
-    runs: list[dict[str, ParamValue]] = [
-        {p.name: _cast(p, row[p.name]) for p in problem.parameters} for _, row in frame.iterrows()
+    levels: list[list[ParamValue]] = []
+    for parameter in problem.parameters:
+        if isinstance(parameter, CategoricalParameter):
+            levels.append(list(parameter.categories))
+        else:
+            # A continuous factor is screened at its two bounds and nothing between, which is what
+            # `two_level_continuous` discloses and what BoFire did for this case too.
+            levels.append([parameter.lower, parameter.upper])
+
+    factorial = [
+        {p.name: _cast(p, value) for p, value in zip(problem.parameters, combination, strict=True)}
+        for combination in itertools.product(*levels)
     ]
+    runs: list[dict[str, ParamValue]] = list(factorial) * n_repetitions
+
+    if n_center:
+        categoricals = [p for p in problem.parameters if isinstance(p, CategoricalParameter)]
+        continuous = [p for p in problem.parameters if not isinstance(p, CategoricalParameter)]
+        if continuous:
+            midpoints = {p.name: _cast(p, (p.lower + p.upper) / 2) for p in continuous}
+            cat_combinations = list(itertools.product(*(list(p.categories) for p in categoricals)))
+            for combination in cat_combinations or [()]:
+                labelled = {
+                    p.name: _cast(p, value)
+                    for p, value in zip(categoricals, combination, strict=True)
+                }
+                runs.extend([{**labelled, **midpoints}] * n_center)
+
     return ScreeningDesign(
         runs=runs,
         two_level_continuous=_two_level_names(problem),
