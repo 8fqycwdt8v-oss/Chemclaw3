@@ -266,13 +266,53 @@ Two things worth recording, neither a Chemclaw3 defect:
   a first bring-up should sync ORD from an explicit early `since` before anything advances the
   cursor. Filed below rather than fixed, because it is a harness change that wants its own run.
 
-## What did not run
+## Storm — 27/31, run on the mock-model lane
 
-- **The storm and soak pass.** `make live-storm` needs the lane pointed at the mock model
-  (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`), which is a different bring-up from the
-  four-repo real-model lane and would have torn down the stack the rest of this run needed. The
-  preflight added in bug 7 is what makes that requirement legible; the pass itself is still owed.
-- **`make live-plan-gate`**, for the same reason — it needs `CHEMCLAW_HARNESS_AUTONOMY=plan_only`.
+Run after everything above, by bringing the four-repo stack back up with
+`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`. No API cost; 516 mock requests served. Full
+findings in `tasks/live-test/storm.md`.
+
+The admission sweep found the knee, which is the number this exists to produce:
+
+| cap | accepted / 48 | p50 | goodput |
+| ---: | ---: | ---: | ---: |
+| 2 | 4 | 6.2 s | 0.58/s |
+| 4 | 7 | 7.4 s | 0.80/s |
+| 8 | 10 | 8.2 s | 0.93/s |
+| 16 | 16 | 12.5 s | **1.11/s** |
+| 32 | 32 | 27.3 s | 1.15/s |
+
+**16 is the knee.** Going to 32 buys 4% more goodput for 2.2× the median latency — a bad trade,
+and the sweep is what makes it visible rather than arguable.
+
+Four checks failed. **None is fixed here**, because three of them need diagnosis this run cannot
+give them and the fourth is a harness timeout:
+
+| family | check | observed |
+| --- | --- | --- |
+| D | 12 simultaneous identical launches produce exactly one run | 0 `job_records` rows across 12 turns |
+| E | a job survives its connector worker being SIGKILLed | FAILED 597 s after the kill (heartbeat timeout is 600 s); 0 `job_records` rows |
+| F | a truncated argument document is reported, not swallowed | HTTP 200, `answered=False`, `error=empty_answer`, `tools_failed=[]` |
+| E | broker outage | the check itself raised — `bootstrap.sh start-temporal` did not see Temporal healthy within 60 s |
+
+**The thread worth pulling is the zero.** Both D and E report **0 `job_records` rows**, and that is
+not obviously a product defect: `make live-jobs` wrote those rows correctly earlier in this same
+session (`calc/compute_reaction_energy by service-account`), and the table held 4 rows. The
+difference is that the storm drives jobs *through the agent with a mock model*, so the honest
+reading is that either the mock's tool calls never reach a durable launch — in which case the two
+checks are measuring the mock, not the system — or job recording really does break on the agent
+path. Those are different bugs and this run cannot distinguish them. Deciding which is a follow-up.
+
+The broker-outage failure is the least interesting: the Temporal container was never actually
+unhealthy — it shows `Up 2 hours` afterwards and the front door answered `200` throughout — so what
+failed is `bootstrap.sh`'s 60-second readiness window, not the broker.
+
+The `F` failure is real but small: an empty answer *was* surfaced loudly (`answered=False`,
+`error=empty_answer`), so nothing was swallowed; what is missing is the truncation being named.
+
+## What did not run
+- **The soak pass.** `make live-soak` repeats the storm for hours; the storm itself ran (above).
+- **`make live-plan-gate`** — it needs `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, a third bring-up.
   Scenario 6 exercised the durable path without the gate in front of it.
 - **`make live-degradation`** as a suite. Its property — `capability_degraded` precedes the first
   token — was checked by hand in the chaos round above, with Temporal up rather than stopped.
@@ -301,6 +341,12 @@ function in `live_storm.py`, and documents.
 
 ## Follow-ups
 
+- **Settle the storm's `0 job_records` finding**: drive a durable job through the *agent* path and
+  check whether the row appears. If it does, families D and E are measuring the mock model and
+  their checks need rewriting; if it does not, job recording is broken on the agent path and the
+  direct-launch path that `live-jobs` exercises is hiding it. One script decides it.
+- Give `bootstrap.sh start-temporal` a readiness window longer than 60 s, or have the storm's
+  broker-outage check own its own wait — the container was healthy, the harness just gave up early.
 - Backfill ORD on first bring-up in `up.sh` (see above).
 - Run the storm/soak lane and the two M12 suites, each in its own correctly-configured bring-up.
 - `Chemclaw3_mock`'s `yield_percent = 119.43` record: either correct the fixture or decide that an
