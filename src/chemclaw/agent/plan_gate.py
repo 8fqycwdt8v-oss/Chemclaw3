@@ -45,6 +45,7 @@ from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
+from chemclaw.core.config.agent import HarnessAutonomy
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.session_context import get_current_session_id
@@ -127,7 +128,7 @@ def gated_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
 # decisions compare against it (whether the tool gate is attached at all, and whether a finished
 # turn spends its approval), and a deployment that ran one of the two would be one that cannot do
 # anything or one that cannot be stopped.
-PLAN_ONLY = "plan_only"
+PLAN_ONLY: HarnessAutonomy = "plan_only"
 
 
 def harness_enabled_for(profile: AgentProfile) -> bool:

@@ -12,6 +12,19 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+# The two postures the plan/execute harness can start in, named once so every model that accepts
+# the value rejects the same set.
+#
+# It lived inline on `AgentSettings.harness_autonomy` while that was the only place it was written
+# down, and `AgentProfile.harness_autonomy` was declared `str | None` — so the environment variable
+# was validated and the profile file was not. A profile spelling it `plan-only` loaded silently and
+# `gate_applies` came back False, which does not merely fail to add the gate: it *removes* the one
+# the profile would otherwise have inherited from this default, while `TodoListMiddleware` keeps
+# running. `GET /plan` then answers `approved=false` while state-changing tools execute — the
+# harness looks plan-gated and is not. A constraint spelled in one of the two places it is needed
+# is a constraint the other place can contradict.
+HarnessAutonomy = Literal["plan_only", "execute"]
+
 
 class AgentSettings(BaseSettings):
     """The conversational agent: model, skills, capabilities, compaction, harness.
@@ -139,7 +152,7 @@ class AgentSettings(BaseSettings):
     # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
     # loop so a stuck plan aborts instead of spinning (the runaway guard).
     harness_enabled: bool = False
-    harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
+    harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
