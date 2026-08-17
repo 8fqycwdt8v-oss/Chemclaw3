@@ -77,19 +77,70 @@ def test_full_lifecycle(_launcher_env: None) -> None:
 
 
 def test_launch_sends_deterministic_idempotency_key(_launcher_env: None) -> None:
-    """The launch POST carries an Idempotency-Key = the QM job key, stable on retry (COR-2)."""
+    """The launch POST carries an Idempotency-Key stable across the retries of one execution.
+
+    Stability is what the header is for: Temporal retries `submit_to_hpc` at-least-once, so two
+    POSTs from one execution must collapse onto one cluster run.
+    """
     launcher = _FakeLauncher()
     transport = httpx.MockTransport(launcher.handler)
     job = _job()
 
     async def _launch_twice() -> None:
-        await nextflow.launch_run(job, transport=transport)
-        await nextflow.launch_run(job, transport=transport)  # a retry of the same job
+        await nextflow.launch_run(job, run_scope="run-abc", transport=transport)
+        await nextflow.launch_run(job, run_scope="run-abc", transport=transport)  # a retry
 
     asyncio.run(_launch_twice())
     keys = [r.headers["Idempotency-Key"] for r in launcher.launched]
-    assert keys[0] == qm_job_key(job)  # derived from the job's stable identity
+    assert keys[0].startswith(qm_job_key(job))  # derived from the job's stable identity
     assert keys[0] == keys[1]  # a retry of the same job reuses the key, so the launcher can dedupe
+
+
+def test_a_re_drive_after_failure_does_not_reuse_the_dead_runs_key(_launcher_env: None) -> None:
+    """Re-driving a failed job must reach the launcher as a new run, not as the old dead one.
+
+    The key used to be `qm_job_key(job)` alone — molecule, method, basis, pipeline — which cannot
+    distinguish "Temporal retried this attempt" (must collapse onto one run) from "a human re-drove
+    a failed job" (must not). Measured against the companion mock launcher: after a run FAILED,
+    `ALLOW_DUPLICATE_FAILED_ONLY` let the job be re-asked, the identical key went out, and a
+    header-honouring launcher returned *the old dead run id* — so the poll raised
+    `NextflowRunFailed` in milliseconds and that molecule at that level of theory stayed unrunnable
+    for the launcher's whole key-retention window, with the error naming a run nobody had launched.
+
+    `workflow_run_id` is the right scope precisely because it is stable across attempts and fresh
+    across executions. Cross-execution deduplication is not this header's job — the workflow id and
+    the calculation store already do it, one attempt earlier.
+    """
+    launcher = _FakeLauncher()
+    transport = httpx.MockTransport(launcher.handler)
+    job = _job()
+
+    async def _first_execution_then_a_re_drive() -> None:
+        await nextflow.launch_run(job, run_scope="run-first", transport=transport)
+        await nextflow.launch_run(job, run_scope="run-second", transport=transport)
+
+    asyncio.run(_first_execution_then_a_re_drive())
+    keys = [r.headers["Idempotency-Key"] for r in launcher.launched]
+    assert keys[0] != keys[1]
+    assert all(key.startswith(qm_job_key(job)) for key in keys)
+
+
+def test_the_launch_names_the_chemist_who_asked(_launcher_env: None) -> None:
+    """The requesting user reaches the launcher, which four docstrings claimed and none delivered.
+
+    The POST body carried molecule, method and basis and nothing else, so Tower's run list and the
+    cluster's accounting saw only the shared HPC service identity — the one place the attribution is
+    actually needed, since inside Chemclaw the `JobRecord` and the note already hold it.
+    """
+    launcher = _FakeLauncher()
+    transport = httpx.MockTransport(launcher.handler)
+    job = QMJobInput(
+        molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP", requested_by="oid-alice-9f2"
+    )
+
+    asyncio.run(nextflow.launch_run(job, transport=transport))
+
+    assert "oid-alice-9f2" in launcher.launched[0].content.decode()
 
 
 def test_unknown_status_is_an_error(_launcher_env: None) -> None:

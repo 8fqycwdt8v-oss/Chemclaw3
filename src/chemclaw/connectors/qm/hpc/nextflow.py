@@ -88,9 +88,19 @@ async def _client(transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClie
 
 
 async def launch_run(
-    job: QMJobInput, *, transport: httpx.AsyncBaseTransport | None = None
+    job: QMJobInput,
+    *,
+    run_scope: str = "",
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> HpcJobHandle:
     """Submit the QM pipeline for `job` and return a handle carrying the launcher's run id.
+
+    Args:
+        job: The prepared calculation.
+        run_scope: An opaque token identifying *this execution* of the job, mixed into the
+            idempotency key. The caller supplies Temporal's `workflow_run_id`; empty (a direct
+            call, a test) falls back to the science-only key.
+        transport: Injected for tests.
 
     Raises:
         NextflowError: When the launcher rejects the launch or returns no run id.
@@ -102,14 +112,34 @@ async def launch_run(
             "smiles": job.molecule_smiles,
             "method": job.method,
             "basis_set": job.basis_set,
+            # **The chemist, on the run itself.** Four places — this bundle's manifest, the
+            # workflow, the activity and `QmJobSpec` — say the requesting user is carried to the
+            # launcher, and none of them was true: the POST body carried molecule, method and basis
+            # and nothing else, so Tower's run list and the cluster's own accounting saw only the
+            # shared HPC service identity. That is the one place the attribution is actually needed,
+            # since inside Chemclaw the `JobRecord` and the note already hold it.
+            "requested_by": job.requested_by,
         },
     }
     # Idempotency (COR-2): Temporal retries `submit_to_hpc` at-least-once, so a lost launch response
-    # would otherwise re-POST and double-submit an expensive HPC run. Send a deterministic
-    # `Idempotency-Key` derived from the QM job's stable identity (the same molecule+method+basis
-    # hash used for the workflow id and result cache) so a launcher that honors the RFC header
-    # collapses the retry onto the first run instead of starting a second.
-    headers = {"Idempotency-Key": qm_job_key(job)}
+    # would otherwise re-POST and double-submit an expensive HPC run. The key is deterministic so a
+    # launcher that honors the RFC header collapses the retry onto the first run.
+    #
+    # **Scoped to the execution, not to the science, and that distinction was a live defect.** The
+    # key used to be `qm_job_key(job)` alone — molecule + method + basis + pipeline — which cannot
+    # tell "Temporal retried this attempt" (must collapse) from "a human re-drove a failed job"
+    # (must not). Measured: after a run FAILED, `ALLOW_DUPLICATE_FAILED_ONLY` let the same job be
+    # re-asked, the identical key went out, a header-honouring launcher returned the *old dead run
+    # id*, and the poll raised non-retryable `NextflowRunFailed` in milliseconds. That molecule at
+    # that level of theory was unrunnable for the launcher's whole key-retention window, and the
+    # error named a run the chemist had never launched.
+    #
+    # `workflow_run_id` is exactly the right scope: stable across activity attempts (which is what
+    # the header must collapse) and fresh on every re-drive. Deduplication *across* executions is
+    # not this header's job — the workflow id and the calculation store already do it, one attempt
+    # earlier and without asking the launcher.
+    key = f"{qm_job_key(job)}-{run_scope}" if run_scope else qm_job_key(job)
+    headers = {"Idempotency-Key": key}
     async with await _client(transport) as client:
         response = await client.post("/workflow/launch", json=payload, headers=headers)
     if response.status_code != httpx.codes.OK:

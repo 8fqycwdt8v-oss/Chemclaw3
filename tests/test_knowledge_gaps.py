@@ -238,3 +238,32 @@ def test_the_distilled_types_are_all_real_note_types() -> None:
     class of defect as an unregistered note type (KNW-6), one level in.
     """
     assert analytics._DISTILLED_TYPES <= KNOWN_NOTE_TYPES
+
+
+def test_hubs_never_name_a_note_that_does_not_exist(tmp_path: Path) -> None:
+    """A dangling link target is reported as dangling, never as the graph's top hub.
+
+    `build_graph` deliberately keeps a link to an unknown id as a node with no `note` attribute so
+    `kg-validate` can report it, and `_hubs` ranked those nodes by the very citations that make
+    them dangling. Measured before the fix: four notes citing a `compound-pending` that does not
+    exist put it back as *the most-cited note in the graph*.
+
+    This is the state D-018 calls normal, not a corruption — a fingerprint-indexed reaction is
+    citable before its note clears the PR-gate — so the tool was telling a chemist to check the
+    hub that matters most and `expand_note` on it then raised.
+    """
+    for index in range(4):
+        _write(
+            tmp_path,
+            Note(id=f"reaction-{index}", type="reaction", body="rests on [[compound-pending]]"),
+        )
+    _write(tmp_path, Note(id="hub", type="playbook", body="the rule"))
+    _write(tmp_path, Note(id="reaction-x", type="reaction", body="see [[hub]]"))
+
+    gaps = analyze(build_graph(tmp_path), load_notes(tmp_path))
+
+    assert [note_id for note_id, _ in gaps.most_cited] == ["hub"]
+    assert gaps.most_cited[0] == ("hub", 1)
+    # Not dropped — reported as what it is, by the same call, from the same graph.
+    assert len(gaps.dangling_links) == 4
+    assert "reaction-0 -> compound-pending" in gaps.dangling_links

@@ -367,3 +367,33 @@ def test_a_regex_transform_is_compiled_when_the_binding_loads() -> None:
     ]
     with pytest.raises(BindingError, match="asks for group 5"):
         load_binding(binding)
+
+
+def test_the_server_embed_function_is_checked_like_every_other_interpolated_name() -> None:
+    """The one field `sql.py` writes into the statement text that this validator used to skip.
+
+    `vector_statement` renders it as `f"{fn}({placeholder}, {placeholder})"`, so a value that is not
+    an identifier closes the call and continues the query — and unlike a relation or a column, this
+    is a field a site author fills in rather than a reviewer. A dotted name still passes, because
+    the real Cortex embedder is one.
+    """
+
+    def _with(function: str) -> dict[str, Any]:
+        return {
+            "connection": {"driver": "tests.warehouse_fake:open_fake"},
+            "vector": {
+                "relation": "V_EMBEDDING",
+                "key": "REACTION_ID",
+                "vector_column": "REACTION_VECTOR",
+                "content_columns": ["PROTOCOL_TEXT"],
+                "embedding": "server",
+                "server_embed_function": function,
+            },
+        }
+
+    with pytest.raises(BindingError, match="server embed function"):
+        load_binding(_with("CAST(1 AS INT))=1 OR (1"))
+
+    assert load_binding(_with("SNOWFLAKE.CORTEX.EMBED_TEXT_768")).vector is not None, (
+        "a qualified function name is still accepted"
+    )

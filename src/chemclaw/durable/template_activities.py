@@ -5,28 +5,47 @@ network work, so neither can live in the workflow. `chemclaw.durable.template_jo
 works.
 
 The part worth reading carefully is the identity restoration. A workflow has no request context, so
-the turn's actor and roles travel in the activity's input and are stamped ambient here *before* the
-tool runs — which is what makes the audit trail name the real user and, more importantly, makes
-`enforce_tool_authz` decide against that user rather than against nobody. A template must not become
-a way to run a tool the requester could not run directly, and this is where that is enforced.
+the turn's actor, roles and session travel in the activity's input and are stamped ambient here
+*before* the work runs (`_acting_as`) — which is what makes the audit trail name the real user, in
+the real conversation, and, more importantly, makes `enforce_tool_authz` decide against that user
+rather than against nobody. A template must not become a way to run a tool the requester could not
+run directly, and this is where that is enforced.
+
+**The same sentence applies to what a step costs, and used to be false of it.** An `agent` step is a
+model turn, so it is metered like one: the token counters, the `turn_costs` ledger and the per-turn
+repeat guard are all started and booked by `run_agent_step`. Before that they were not, and the
+consequence was measured on this activity — `chemclaw_tokens_total` 0.0 before and 0.0 after a turn
+reporting 240 tokens — which made a template a way to spend model tokens that nothing counted. What
+is deliberately *not* here is enforcement: `api/budget.py` lives in the front door's memory and a
+worker is a different process, so this meters honestly rather than pretending to cap.
 """
 
 import logging
-from collections.abc import Callable, Sequence
-from contextlib import AsyncExitStack
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AsyncExitStack, contextmanager
 from typing import Any
 
+from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.outputs import LLMResult
 from langchain_core.tools import tool as tool_decorator
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
 from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
+from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
+from chemclaw.agent.turn_usage import TurnUsage, graph_usage_tokens
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_connector_specs
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.metrics import METRICS
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
 
 logger = logging.getLogger(__name__)
@@ -60,6 +79,12 @@ class StepIdentity(BaseModel):
     # Ties this run's audit events together, exactly as a conversation's correlation id does, so a
     # template's steps are one traceable unit in the trail rather than N unrelated tool calls.
     correlation_id: str = Field(min_length=1)
+    # The chat that launched the run, stamped ambient by each step exactly as the actor is, so
+    # `agent/audit.py` books the conversation on every row a template writes. It read `""` on every
+    # one of them before this field existed — the id was carried in `TemplateRunInput` and used
+    # only for the completion push-back, so the trail could say who and which run but never which
+    # conversation. Empty off the service path, where there is no session (`TemplateRunInput`).
+    session_id: str = ""
 
 
 class ToolStepInput(BaseModel):
@@ -87,6 +112,13 @@ class AgentStepInput(BaseModel):
     profile: str | None = None
     write_tools: list[str] = Field(default_factory=list)
     identity: StepIdentity
+    # This step's id within the template, carried for one reason: the cost ledger. `turn_costs`
+    # upserts on the correlation id (`agent/turn_cost_store.py`) and every step of a run shares the
+    # run's, so two `agent` steps would collapse into one row reporting the second's spend as the
+    # whole run's. Defaulted rather than required so an input already in flight when this shipped
+    # still decodes — such a run books one row per step id it has, which for the shipped template
+    # is one step.
+    step_id: str = ""
 
 
 class JobStepInput(BaseModel):
@@ -118,6 +150,30 @@ class ResolvedJob(BaseModel):
     task_queue: str
     publish_to_graph: bool
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+@contextmanager
+def _acting_as(identity: StepIdentity) -> Iterator[None]:
+    """Run a step as its requester, in the requester's conversation, unstamping on the way out.
+
+    One bracket for both ambients because they are one fact — a step acts for a person *in a chat* —
+    and because splitting them is how they drifted: the actor was stamped by all three step
+    activities from the day they were written and the session by none of them, so every audit row a
+    template produced named the user and booked `session_id=""`. Two `set`/`reset` pairs written out
+    three times is also three chances to forget a reset, which leaks one run's identity into
+    whatever the worker picks up next.
+
+    A context manager rather than a decorator: two callers want the stamp around only part of their
+    body (the resolution, not the `ResolvedJob` built from it), and `run_agent_step` reads the
+    identity again inside it.
+    """
+    identity_token = set_current_identity(identity.actor, frozenset(identity.roles))
+    session_token = set_current_session_id(identity.session_id)
+    try:
+        yield
+    finally:
+        reset_current_session_id(session_token)
+        reset_current_identity(identity_token)
 
 
 @durable_activity("background")
@@ -177,16 +233,13 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     it fails on the first attempt with the message naming the declared jobs.
     """
     connector, job = find_job(step.job)
-    tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
-    try:
+    with _acting_as(step.identity):
         payload = await _audited(
             step.identity,
             job.name,
             step.arguments,
             lambda: prepare_job_launch(connector, job, step.arguments),
         )
-    finally:
-        reset_current_identity(tokens)
     return ResolvedJob(
         connector=connector,
         job=job.name,
@@ -257,13 +310,20 @@ async def run_tool_step(step: ToolStepInput) -> Any:
     whole assembly.
     """
     capability_tools, connector_specs = _agent_surface()
-    tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
-    try:
+    with _acting_as(step.identity):
         async with AsyncExitStack() as stack:
             connector_tools, unreachable = await open_connector_specs(stack, connector_specs())
-            return await _invoke([*capability_tools(), *connector_tools], step, unreachable)
-    finally:
-        reset_current_identity(tokens)
+            # Beating while the tool runs, because a `tool` step is the one place a template does
+            # genuinely opaque work — an MCP call into a real calculation, with no unit boundary to
+            # report progress at, which is exactly the case `durable/heartbeat.beating` exists for.
+            # Without it `start_to_close_timeout` was the only liveness signal: a worker killed
+            # mid-call was indistinguishable from one still calculating, so the run waited out the
+            # whole per-step budget before retrying an attempt that had died in its first second.
+            return await beating(
+                _invoke([*capability_tools(), *connector_tools], step, unreachable),
+                f"template tool step {step.tool}",
+                settings.template_step_heartbeat_timeout_seconds,
+            )
 
 
 async def _invoke(tools: list[Any], step: ToolStepInput, unreachable: list[str]) -> Any:
@@ -346,6 +406,52 @@ def _mcp_text(result: Any) -> Any:
     return result
 
 
+class _StepMeter(AsyncCallbackHandler):
+    """Accumulates a step's token spend as each model call *ends*, rather than after the turn does.
+
+    **This is the whole difference between a ledger and a ledger of the tidy runs.** The spend used
+    to be summed off `result["messages"]` once `ainvoke` returned, which is a line that only runs
+    when the turn returns — so a step that raised booked an all-zero row, and a row that exists
+    saying zero is worse than no row: it asserts the step cost nothing. Measured on this activity
+    against a scripted model reporting 120 tokens per call: a provider error after two paid calls
+    booked `(0, 0)` and moved `chemclaw_tokens_total` by 0.0, and a runaway that made **52** paid
+    model calls (6,240 tokens) before the recursion ceiling stopped it booked the same. The runaway
+    is the case the metering was added for.
+
+    A callback rather than a `try`/`except` around the sum, because the messages of an *abandoned*
+    turn are not reachable at all — `GraphRecursionError` and a provider exception both propagate
+    out of `ainvoke` with no result to read. The only place the numbers exist is the moment each
+    call returns them, which is what `on_llm_end` is.
+
+    `graph_usage_tokens` is the same reader the chat path uses (`agent/turn_usage.py`), so the two
+    paths cannot disagree about what a cached token costs. It is handed the generation's `message`,
+    and meters 0 for a generation that carries none — the duck-typing that keeps a provider
+    reporting no usage from failing a step.
+
+    **One `on_llm_end` per model call, whether the provider streamed or not**, which is why this
+    cannot double-count: LangChain aggregates a stream's chunks and fires this hook once with the
+    summed message. It is also the only accumulation path left — the post-hoc loop is deleted, not
+    kept beside it.
+    """
+
+    def __init__(self) -> None:
+        self.usage = TurnUsage()
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        """Add what one finished model call reported to this step's running total.
+
+        Args:
+            response: The call's result. `generations` is a list per prompt, each a list of
+                candidates; both are walked because the shape is upstream's, and a chat call's
+                single generation is the degenerate case of it rather than a different thing.
+            kwargs: `run_id`, `parent_run_id` and the rest of the callback contract, unused here —
+                a step's spend is one number, not a per-call breakdown.
+        """
+        for generation in response.generations:
+            for candidate in generation:
+                self.usage.add(graph_usage_tokens(getattr(candidate, "message", None)))
+
+
 @durable_activity("background")
 @activity.defn
 async def run_agent_step(step: AgentStepInput) -> str:
@@ -380,35 +486,151 @@ async def run_agent_step(step: AgentStepInput) -> str:
     shape in which a narrowing silently covers half a surface: `compute_xtb_energy` is a *connector
     endpoint* tool, so narrowing only the builder's copy would leave it (and every other connector
     write) bound to the graph while the in-process half looked correctly closed.
+
+    **This is a model turn, so it is metered like one** — and it was not, which made a template a
+    hole in every number the deployment has about what it spends. Measured on this activity against
+    a scripted model reporting 120 tokens per call: `chemclaw_tokens_total` read 0.0 before and
+    0.0 after, and the audit row booked `session_id=""`. The chat path
+    (`api/runner.run_turn`) stamps the session, watches the turn's repeated calls, sums the usage,
+    books a `turn_costs` row and publishes five counters; this path did none of it, so a chemist
+    who wanted work unmetered only had to ask for it through a template. What that costs is not
+    just a dashboard: `turn_costs` is the per-actor attribution ledger, and a spend it never sees is
+    a spend nobody can bill or find.
+
+    **What is *not* wired here is enforcement, and that is a property of the process rather than an
+    omission.** `api/budget.py` is explicitly in-process and best-effort — LRU maps living in the
+    front door's memory, read by the admission check before the *next* turn on that connection. A
+    Temporal worker is a different process with no access to them, and booking a template's spend
+    into a worker-local copy would produce a second, invisible ledger that refuses nothing. So this
+    meters (the counters, and the durable row that outlives the process) and does not pretend to
+    cap. A run-level cap on template spend needs a durable counter, which is a decision, not a call.
+
+    **The repeat guard is watched here too**, because it is per-turn ambient state that the middle-
+    ware reads and its caller owns the lifetime of (`agent/repeat_guard.py`). Without
+    `begin_call_watch` the guard is inert — its contextvar is `None`, so the counter it increments
+    is discarded — and a step's model could ask one tool the identical question indefinitely, which
+    is precisely the shape the guard was measured against (`find_past_jobs` ×8 in one turn).
     """
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
     _capability_tools, connector_specs = _agent_surface()
     profile = step_profile(step.profile, step.write_tools)
-    tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
-    try:
-        async with AsyncExitStack() as stack:
-            connectors, _unreachable = await open_connector_specs(stack, connector_specs(profile))
-            # Compiled here, with this step's connectors, for the reason `build_langgraph_agent`
-            # gives: a graph binds its tools at construction and a connector session belongs to
-            # exactly one caller. A step is that caller.
+    started = time.perf_counter()
+    meter = _StepMeter()
+    answered = False
+    calls_token = begin_call_watch()
+    with _acting_as(step.identity):
+        try:
+            async with AsyncExitStack() as stack:
+                connectors, _unreachable = await open_connector_specs(
+                    stack, connector_specs(profile)
+                )
+                # Compiled here, with this step's connectors, for the reason
+                # `build_langgraph_agent` gives: a graph binds its tools at construction and a
+                # connector session belongs to exactly one caller. A step is that caller.
+                #
+                # No checkpointer. A template step is one bounded turn with no conversation before
+                # or after it — Temporal is what makes the *run* durable, and giving the step its
+                # own checkpointed thread would be a second durability mechanism inside the first
+                # (D-002).
+                graph = build_langgraph_agent(
+                    profile=profile,
+                    actor=step.identity.actor,
+                    correlation_id=step.identity.correlation_id,
+                    connectors=connectors,
+                )
+                # No thread — a template step is one bounded turn — but the step ceiling still
+                # applies, and it is the only thing that applies: this path runs with the harness
+                # off, and `_harness_middleware` attaches `enforce_loop_cap` only with the harness,
+                # so nothing here stops the loop gracefully. `turn_config()` sets
+                # `agent_recursion_limit` unconditionally (verified — the config carries no
+                # thread-dependent branch), which is what keeps a looping step from inheriting
+                # `create_agent`'s baked 9999. The cap is deliberately *not* attached instead: it
+                # comes bundled with `TodoListMiddleware`, and a todo list is the discretion this
+                # step exists without. What the ceiling cannot do is let the partial answer out, so
+                # a step that reaches it raises with no result to read — which is exactly why the
+                # meter is a callback on `turn_config()` rather than a sum over the returned
+                # messages, and is what makes that runaway visible in `chemclaw_tokens_total`
+                # rather than free and silent. Measured: 52 paid model calls, 6,240 tokens, booked.
+                result = await beating(
+                    graph.ainvoke(turn_input(step.prompt), {**turn_config(), "callbacks": [meter]}),
+                    f"template agent step {step.step_id or step.profile or 'agent'}",
+                    settings.template_step_heartbeat_timeout_seconds,
+                )
+                answer = _answer_text(result)
+                answered = True
+                return answer
+        finally:
+            # Booked on every path, including a failure, a runaway and a cancelled attempt: a step
+            # that broke after three model calls still spent them, and a ledger that kept only the
+            # tidy runs would be wrong in the direction that hides a runaway. Same stance as
+            # `api/runner.run_turn`'s `finally`. What makes that true here is `_StepMeter`, not this
+            # line — a sum taken after `ainvoke` returned never ran on the paths where it mattered.
             #
-            # No checkpointer. A template step is one bounded turn with no conversation before or
-            # after it — Temporal is what makes the *run* durable, and giving the step its own
-            # checkpointed thread would be a second durability mechanism inside the first (D-002).
-            graph = build_langgraph_agent(
-                profile=profile,
-                actor=step.identity.actor,
-                correlation_id=step.identity.correlation_id,
-                connectors=connectors,
-            )
-            # No thread — a template step is one bounded turn — but the step ceiling still
-            # applies, and it matters more here: this path runs with the harness off, so
-            # the loop cap is not attached and this is the only bound on the loop.
-            result = await graph.ainvoke(turn_input(step.prompt), turn_config())
-            return _answer_text(result)
-    finally:
-        reset_current_identity(tokens)
+            # The residual limit, stated because it is small rather than absent: the meter books a
+            # call when the call *ends*, so a turn cancelled or failing **mid-call** does not book
+            # that one in-flight call — the provider reported no usage for it, and there is nothing
+            # to read. Every call that completed is booked. So the ledger can under-report by at
+            # most one call, never by a whole turn.
+            end_call_watch(calls_token)
+            _book_step_spend(step, meter.usage, time.perf_counter() - started, answered)
+
+
+def _book_step_spend(
+    step: AgentStepInput, usage: TurnUsage, duration_seconds: float, answered: bool
+) -> None:
+    """Publish one agent step's spend: the five counters, and the durable per-turn cost row.
+
+    The same two instruments the chat path publishes, with the same labels, because they answer two
+    different questions and neither substitutes for the other: the counters are the fleet-wide rate
+    (labelled `profile`, low cardinality by construction) and `turn_costs` is the per-actor
+    attribution ledger, which needs an unbounded key and quarters of history — `agent/turn_cost.py`
+    records why one instrument cannot be both. Each counter is guarded on a non-zero value so a
+    provider that reports none of a dimension leaves its series untouched rather than publishing a
+    fabricated zero, which is the rule `core/metrics.py` states for gauges.
+
+    **The cost row's key is the run's correlation id plus the step id.** `turn_costs` upserts on
+    `correlation_id` (`agent/turn_cost_store.py`) — deliberately, so a retried write replaces rather
+    than doubles — and every step of a template run shares the run's id, which is what ties them
+    together in the audit trail. Booking each step under the bare run id would therefore have made
+    a five-`agent`-step template report the *last* step's spend as the whole run's. The prefix keeps
+    the join to `audit_events` a prefix match rather than an equality, which is the smaller loss.
+
+    Args:
+        step: The step whose turn just ended — its profile labels the spend, its identity bills it.
+        usage: What that turn's model calls reported, already summed.
+        duration_seconds: Wall clock for the step, for the ledger's duration column.
+        answered: Whether the step produced its answer. Recorded, not filtered — see `TurnCost`.
+    """
+    labels = {"profile": step.profile or "default"}
+    record_turn_cost(
+        TurnCost(
+            correlation_id=(
+                f"{step.identity.correlation_id}:{step.step_id}"
+                if step.step_id
+                else step.identity.correlation_id
+            ),
+            session_id=step.identity.session_id,
+            actor=step.identity.actor,
+            profile=step.profile or "default",
+            input_tokens=usage.input,
+            output_tokens=usage.output,
+            cache_read_tokens=usage.cache_read,
+            cache_write_tokens=usage.cache_write,
+            duration_seconds=duration_seconds,
+            completed=answered,
+        )
+    )
+    if usage.total:
+        METRICS.increment("chemclaw_tokens_total", float(usage.total), labels)
+    for name, value in (
+        ("chemclaw_input_tokens_total", usage.input),
+        ("chemclaw_output_tokens_total", usage.output),
+        ("chemclaw_cache_read_tokens_total", usage.cache_read),
+        ("chemclaw_cache_write_tokens_total", usage.cache_write),
+    ):
+        if value:
+            METRICS.increment(name, float(value), labels)
 
 
 def _answer_text(result: Any) -> str:

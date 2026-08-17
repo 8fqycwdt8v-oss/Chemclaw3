@@ -40,11 +40,13 @@ import pytest
 import yaml
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.agent.plan_gate import PLAN_GATE_REASON as GATE_REASON
 from chemclaw.agent.plan_gate import plan_approval_refusal
+from chemclaw.api.events import ToolFailedEvent
 from chemclaw.cli.live_probes import _M12_SUITES, _findings_report, _m12_probes
 from chemclaw.core.config import settings
 from chemclaw.evals.live import (
-    PLAN_GATE_MARKER,
+    PLAN_GATE_REASON,
     Finding,
     PlanGateRun,
     PlanSnapshot,
@@ -133,11 +135,7 @@ def test_a_plan_refusal_is_not_counted_as_a_broken_tool() -> None:
     outcome = _run_one(
         _probe(),
         {"type": "tool_call", "tool": "compute_reaction_energy", "arguments": "{}"},
-        {
-            "type": "tool_failed",
-            "tool": "compute_reaction_energy",
-            "message": str(plan_approval_refusal("compute_reaction_energy")),
-        },
+        _refused("compute_reaction_energy"),
         {"type": "tool_failed", "tool": "gather_evidence", "message": "the index is unreachable"},
         {"type": "answer", "text": "I need your approval before I can run that."},
     )
@@ -145,15 +143,66 @@ def test_a_plan_refusal_is_not_counted_as_a_broken_tool() -> None:
     assert outcome.tools_failed == ["gather_evidence"]
 
 
-def test_the_plan_gate_marker_is_still_a_substring_of_the_live_refusal() -> None:
-    """The declaration-versus-surface check for the one sentence this harness copies.
+def test_the_classifier_reads_the_discriminator_and_not_the_refusal_prose() -> None:
+    """Reword the refusal and the tally must not move; drop the field and it must.
 
-    `PLAN_GATE_MARKER` is a literal so that loading a probe run does not build the agent layer. That
-    is only safe while something asserts the literal still matches what the gate actually says — a
-    reworded refusal would otherwise make every plan-gate refusal read as a broken tool, and both
-    the "refused before approval" and "executed after approval" findings would flip at once.
+    This is the property the substring match could not have: it classified on a sentence written
+    for chemists, so improving that sentence would have moved every gated turn from `plan_refusals`
+    to `tools_failed` — the control holding, reported as the tools falling over — and nothing here
+    would have gone red, because the tests pinned the same copy of the same phrase. Both halves are
+    asserted, because either alone is satisfiable by the old behaviour: the first frame is worded
+    nothing like the gate and must still count as a refusal, the second is worded exactly like it
+    and must not.
+
+    The second half is also the deliberate consequence worth stating: classification is the
+    *producer's*, so an unstamped `tool_failed` is an ordinary failure whatever it says. A front
+    door too old to stamp the field would be scored as broken tools rather than as refusals — loud
+    and in the direction that under-credits the gate, which is the safe way for a harness to be
+    wrong about a deployment it was not built against.
     """
-    assert PLAN_GATE_MARKER in str(plan_approval_refusal("propose_knowledge_note"))
+    reworded = _run_one(
+        _probe(),
+        {
+            "type": "tool_failed",
+            "tool": "propose_knowledge_note",
+            "message": "Sign-off on the plan is outstanding, so this step was held.",
+            "reason": PLAN_GATE_REASON,
+        },
+        {"type": "answer", "text": "I need your approval before I write that up."},
+    )
+    assert reworded.plan_refusals == ["propose_knowledge_note"]
+    assert reworded.tools_failed == []
+
+    unstamped = _run_one(
+        _probe(),
+        {
+            "type": "tool_failed",
+            "tool": "propose_knowledge_note",
+            "message": str(plan_approval_refusal("propose_knowledge_note")),
+        },
+        {"type": "answer", "text": "I need your approval before I write that up."},
+    )
+    assert unstamped.plan_refusals == []
+    assert unstamped.tools_failed == ["propose_knowledge_note"]
+
+
+def test_the_plan_gate_reason_is_the_one_the_wire_actually_carries() -> None:
+    """The declaration-versus-surface check for the one value this harness copies.
+
+    `PLAN_GATE_REASON` is a literal so that loading a probe run does not build the agent layer.
+    That is only safe while something asserts the literal still matches what is emitted — if it
+    stopped matching, every plan-gate refusal would read as a broken tool, and both the "refused
+    before approval" and "executed after approval" findings would flip at once.
+
+    Two surfaces, because the copy has to agree with both: the gate's own constant, and the closed
+    set `ToolFailedEvent.reason` declares — a `Literal` pydantic validates, so a value the event
+    could never carry fails here rather than in a live run. This replaces a check that the
+    *sentence* still contained a particular phrase, which is what made prose written for chemists
+    load-bearing for a metric: the phrase could be improved by anyone, and the improvement would
+    have silently reclassified every gated turn while this file stayed green.
+    """
+    assert PLAN_GATE_REASON == GATE_REASON
+    assert ToolFailedEvent(tool="t", message="m", reason=PLAN_GATE_REASON).reason == GATE_REASON
 
 
 def _plan_gate_transport(
@@ -194,8 +243,20 @@ def _plan(hash_: str, items: list[str], *, approved: bool = False) -> dict[str, 
 
 
 def _refused(tool: str) -> dict[str, object]:
-    """A `tool_failed` frame carrying the plan gate's own refusal sentence."""
-    return {"type": "tool_failed", "tool": tool, "message": str(plan_approval_refusal(tool))}
+    """A `tool_failed` frame as the front door emits one for a plan-gate refusal.
+
+    Carries the refusal sentence *and* the `reason` discriminator, because that is the frame the
+    wire holds: `api/graph_stream` stamps the reason and the sentence still reaches the chemist.
+    The classifier reads only the discriminator — which is the point, and is why the sentence is
+    still built from `plan_approval_refusal` rather than written out here. A test whose fixture is
+    a hand-typed sentence would keep passing after the gate stopped emitting one.
+    """
+    return {
+        "type": "tool_failed",
+        "tool": tool,
+        "message": str(plan_approval_refusal(tool)),
+        "reason": PLAN_GATE_REASON,
+    }
 
 
 def _healthy_run() -> PlanGateRun:

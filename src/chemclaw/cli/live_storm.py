@@ -41,7 +41,9 @@ from temporalio.client import WorkflowExecutionStatus
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
+from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
+from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -1167,7 +1169,7 @@ def report(
 
     lines = ["# Storm — mock-driven stress, chaos and adversarial pass\n"]
     lines.append(f"Front door `{FRONT_DOOR}` · Temporal `{settings.temporal_address}` · ")
-    lines.append(f"Postgres `{settings.postgres_dsn.rsplit('@', 1)[-1]}`\n")
+    lines.append(f"Postgres `{_redact(settings.postgres_dsn)}`\n")
 
     for key, value in notes.items():
         lines.append(f"- **{key}**: {value}")
@@ -1285,7 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         parser.error(f"unknown families {unknown}; known: {sorted(FAMILIES)}")
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    configure_logging()
 
     started = time.monotonic()
     findings, sweep = asyncio.run(

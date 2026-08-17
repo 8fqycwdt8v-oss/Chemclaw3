@@ -5,7 +5,7 @@ live pass this repository ran between 2026-07-24 and 2026-08-15, in the order th
 Rows here are *provenance*: they say what was measured, on what date, by which pass, and with what
 evidence. Nothing here is scheduled, and nothing here is a commitment.
 
-**The queue is `docs/planning/BACKLOG.md`.** It carries the forty things worth doing next, written
+**The queue is `docs/planning/BACKLOG.md`.** It carries the things worth doing next, written
 as what they ask for rather than as which review produced them. A row that matters is promoted into
 that file; a row that is done is deleted from it. This archive is where the reasoning behind a
 promoted row stays readable without the queue having to carry it.
@@ -164,41 +164,6 @@ does not start by re-checking.
       `LangChainBetaWarning` lives in `langchain_core._api`, which `tests/test_third_party_layering.py`
       forbids importing — suppress by message, not by category.
 
-- [ ] **Approvals on `HumanInTheLoopMiddleware`** — [L]. `InterruptOnConfig` in the pinned
-      `langchain 1.3.14` carries `when` (a `ToolCallRequest` predicate), `allowed_decisions`, a
-      description factory, and the four decision types (`approve`/`edit`/`reject`/`respond`), with
-      resumption by `Command(resume={"decisions": […]})`. The `when` predicate is the shape
-      `gate_applies` and `rewrites_the_plan_in_this_batch` already have. Cross-turn durability moves
-      from the `plan_approvals` table to the checkpointer, which removes the second, disagreeing
-      answer to "may this session act" that defect DARK-1 was about. Also closes the acknowledged
-      gap that there is no mechanism for a short in-turn clarification. *Two real risks the existing
-      row already names and this must handle:* a `thread_id` collision silently discarding a pending
-      interrupt, and `propose_note`'s 12 call sites. *Supersede the reason, not the decision* — the
-      declining reason is measurably false (`invoke()` returns normally with `__interrupt__`).
-- [ ] **`RubricMiddleware` in the turn loop** — [M]. `agent/verifier.py`'s own docstring says a
-      low-confidence answer is "marked, not blocked": nothing routes a `review_required` answer back
-      into the model. `deepagents 0.7.5` — **already pinned, no bump needed** — ships
-      `RubricMiddleware(model=…, system_prompt=…, tools=…, max_iterations=3, on_evaluation=…)`, an
-      LLM-as-judge with a bounded revision loop, verdicts `satisfied`/`needs_revision`/`failed`/
-      `max_iterations_reached`/`grader_error`, and a grader prompt that already frames `<transcript>`
-      as untrusted observation and only `<rubric>` as authoritative — which is the injection concern
-      that killed `SummarizationMiddleware`, answered upstream. Keep the *deterministic* half of
-      `verifier.py` (the citation gate over `retrieval.harness.verify_claims`, `turn_evidence`,
-      `ungrounded_parameter_shapes`, `promised_uncalled_tools`) and expose it as rubric criteria and
-      grader `tools`; delete the hand-rolled `with_structured_output` judge and its timeout/fallback
-      plumbing. `on_evaluation` feeds `evals/phoenix.py` for free. *Ship behind a setting*, because
-      it changes what a turn returns.
-      **Two interactions to settle first, both found by reading the middleware rather than the
-      docs.** (1) `after_agent` is declared `@hook_config(can_jump_to=["model"])` and loops by
-      jumping *back into the same run*, so every revision iteration passes `before_model` and is
-      counted by `CappedModelCallLimit`'s `run_limit`. With `max_iterations=3` the revisions spend
-      the turn's runaway budget, and if the cap fires first the turn ends capped rather than
-      revised — the two bounds must be chosen together, and `agent_recursion_limit` re-measured
-      again underneath both. (2) The grader reads the *transcript*, whereas `verifier.py` scores
-      against this turn's `ToolCallTrace` — which lives in the runner, not in graph state. Making
-      the deterministic citation gate a grader `tool` therefore needs it bound to the turn's trace
-      the way `skill_read_tool` is bound to a backend; a grader that only reads the transcript is a
-      weaker check than the one already shipped, so this is a design step, not wiring.
 - [ ] **The audit trail as OpenTelemetry spans, and the transcript from the checkpointer** — [L].
       Unblocked by GxP no longer being a constraint (ADR §5), and **partly overtaken**: `#176`/`#177`
       (`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks`) landed
@@ -258,8 +223,11 @@ deletes the features they were measurements of.
       reason the feature went — old 14/15 against new 14/15 with the old arm at ceiling, and 14/15
       against D-2026-08-12's 2/15 on the same corpus, so **neither number was the deployment's rate**.
 - [x] **Measure whether the challenge panel finds real defects or over-flags — closed, not answered.**
-      Same reason. `deepagents.RubricMiddleware` is the upstream shape if in-loop self-critique is
-      wanted back; the ADR names its two measured obstacles.
+      Same reason. This row used to point at `deepagents.RubricMiddleware` as the upstream shape if
+      in-loop self-critique were wanted back;
+      `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` has since declined it on
+      measurement — revision cleared 10 of 39 flagged answers and **8 of the 10 were deletions**, a
+      benefit of zero over doing nothing. Follow that ADR, not this pointer.
 - [x] **A sixth copy of the Temporal launch idiom — closed by deletion.** `challenge.start_answer_review`
       is gone and its `_KNOWN_LEAKS` row with it. **Five copies remain** and the fix is unchanged:
       one `start_job()` in `durable/`, with `id_reuse_policy` a required argument — two of the five

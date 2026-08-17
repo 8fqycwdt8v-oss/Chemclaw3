@@ -82,9 +82,17 @@ logger = logging.getLogger(__name__)
 _store: AsyncPostgresStore | None = None
 
 # The tables `AsyncPostgresStore.setup()` creates, named here for the reason `CHECKPOINT_TABLES` is
-# named in `agent/checkpointer.py`: two things need the list and neither can derive it. The erasure
-# sweep has to delete a departing person's memories, and the retention sweep has to prune them by
-# age. `store_vectors` carries the embeddings and is keyed on `(prefix, key)`.
+# named in `agent/checkpointer.py`: nothing can derive the list, because these tables are upstream's
+# and appear in no migration in `infra/sql`. The erasure sweep has to reach a departing person's
+# memories, and it spells both names itself (`agent/leaver.py`, one `DELETE` per table, dependent
+# side first). `store_vectors` carries the embeddings and is keyed on `(prefix, key)`.
+#
+# **The retention sweep does not touch either table**, and an earlier version of this comment said
+# it "has to prune them by age", which was never true: `durable/retention.py`'s `_PRUNABLE` names
+# `session_events`, `session_messages`, `tool_result_blobs` and `checkpoints`, and no fifth entry.
+# The omission is the design — a memory is written to persist, so disposing of one is a capability
+# decision with its own policy, not something an age cutoff may decide. Turn state is the opposite
+# and is pruned; that is `checkpoints`, not `store`.
 STORE_TABLES: tuple[str, ...] = ("store", "store_vectors")
 
 # The root the memories route is mounted at. A constant because three places spell it — the route
@@ -141,26 +149,56 @@ async def memory_store() -> AsyncPostgresStore:
     applies to this store's own `setup()` for the same reason. A second pool against the same DSN
     would double the connection budget to buy nothing.
 
+    **Published only once it is usable, under the checkpointer's `_init_lock`.** This was a
+    check-then-*await*-then-act that assigned `_store` *before* awaiting `setup()` — the exact
+    defect `checkpointer()` was fixed for, failing the same way: a second turn arriving inside that
+    await saw a non-`None` global and got a store whose two tables do not exist yet (`relation
+    "store" does not exist` on a cold start with traffic). It also called `_checkpoint_pool()` with
+    no lock held, which that function then documented as safe only because its *one* caller held
+    `_init_lock` first; two coroutines racing it could each pass the pool's `if _pool is None` check
+    and construct a distinct `AsyncConnectionPool` against the same DSN, so one opened pool was
+    overwritten and leaked its connections for the life of the process.
+
+    That second half is now closed inside `_checkpoint_pool` itself rather than here, because a
+    guarantee that depends on every caller remembering to hold a lock is the guarantee that just
+    failed. The consequence is the ordering below: the pool is awaited *outside* the lock, since
+    `_checkpoint_pool` takes the same one and `asyncio.Lock` is not reentrant. The lock is the
+    checkpointer's rather than a second of this module's own, because both initializations sit on
+    that one pool and one lock is what lets `close_checkpointer` drop the pair together.
+
     Returns:
         A ready store over this process's session pool.
     """
     global _store
-    if _store is None:
-        # Imported here rather than at module scope: `checkpointer` imports `state`, which imports
-        # config, and a module-scope import would put this module in that cycle for one call.
-        from chemclaw.agent.checkpointer import _checkpoint_pool
+    if _store is not None:
+        return _store
+    # Imported here rather than at module scope: `checkpointer` imports `state`, which imports
+    # config, and a module-scope import would put this module in that cycle for one call.
+    from chemclaw.agent.checkpointer import _checkpoint_pool, _initialization_lock
 
-        _store = AsyncPostgresStore(await _checkpoint_pool())
-        await _store.setup()
-        logger.info("memory store ready (%d tables)", len(STORE_TABLES))
+    # Awaited outside the lock, and it must stay outside: `_checkpoint_pool` takes the same lock,
+    # and `asyncio.Lock` is not reentrant. Holding it across that call deadlocks every cold start.
+    pool = await _checkpoint_pool()
+    async with _initialization_lock():
+        if _store is None:
+            store = AsyncPostgresStore(pool)
+            await store.setup()
+            _store = store
+            logger.info("memory store ready (%d tables)", len(STORE_TABLES))
     return _store
 
 
 async def close_memory_store() -> None:
-    """Drop the process's store — for tests and orderly shutdown.
+    """Drop the process's store — called by `close_checkpointer`, which owns the pool beneath it.
 
     The pool belongs to the checkpointer, so this releases the store and leaves the pool to
     `close_checkpointer`. Closing it here would pull the connections out from under the saver.
+
+    **Its caller is `close_checkpointer`, and the ordering is the point**: the store is dropped
+    *before* the pool it sits on is closed, so nothing can be handed a store over closed
+    connections. It had no caller at all, which left `close_checkpointer` closing the pool while
+    `_store` still pointed at it — the next `memory_store()` would have returned that store and
+    every operation on it would have failed against a closed pool.
     """
     global _store
     _store = None

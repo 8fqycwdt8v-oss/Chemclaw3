@@ -1528,3 +1528,121 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     assert referenced, "no PromQL expressions were parsed — the extraction is broken, not the rules"
     unknown = referenced - declared
     assert not unknown, f"alerts reference metrics the app never emits: {sorted(unknown)}"
+
+
+# Supply-chain tooling the runbook's gate section is allowed to name, and the only vocabulary this
+# check knows. A named watch-list rather than every backticked token in the section, for the reason
+# `tests/test_third_party_layering.py` gives its `_STACKS`: the prose around the table legitimately
+# backticks `uv lock`, `BACKLOG.md`, an ADR id and two CVE'd package names, and a check that read
+# all of them as gate claims would fail on the next paragraph anyone writes. That is a real limit —
+# a scanner nobody named cannot be policed — so a tool that enters this conversation belongs here in
+# the same commit that documents it.
+_SUPPLY_CHAIN_TOOLS = frozenset(
+    {
+        "trivy",
+        "grype",
+        "syft",
+        "pip-audit",
+        "osv-scanner",
+        "snyk",
+        "cosign",
+        "gitleaks",
+        "trufflehog",
+        "semgrep",
+        "bandit",
+    }
+)
+
+# What lets a sentence name a tool *without* claiming it runs. The runbook's own vocabulary for a
+# control it does not have, kept deliberately short: every marker here is an exemption, so a loose
+# one (a bare "no", a bare "not") would let a phantom claim back in through the sentence beside it.
+_ABSENCE_MARKERS = ("nowhere", "there is no", "used to say", "is a real gap", "does not run")
+
+
+def _executable_workflow_text(workflow: str) -> str:
+    """Every string in `image.yml` a runner would actually execute: each step's `uses` and `run`.
+
+    Parsed as YAML rather than read as one blob, because a comment is not a control. Comments are
+    the largest thing in this workflow — the file is more rationale than command — so a substring
+    search over its text answers "is this word written down here", which is the question the runbook
+    already answers and not the one worth asking of CI.
+
+    Shell comments inside a `run:` block survive YAML parsing, so they are stripped too: a `#` line
+    in a script is exactly as inert as a `#` line in the YAML around it. Only `#` at a line start or
+    after whitespace is treated as one, which is the shell's own rule closely enough for scripts
+    that quote their arguments.
+    """
+    document: Any = yaml.safe_load(workflow)
+    executed: list[str] = []
+    for job in (document.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            uses = step.get("uses")
+            if isinstance(uses, str):
+                executed.append(uses)
+            run = step.get("run")
+            if isinstance(run, str):
+                executed.append(re.sub(r"(?m)(^|\s)#.*$", r"\1", run))
+    return "\n".join(executed)
+
+
+def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
+    """A documented control that does not run is worse than a missing one.
+
+    The runbook's supply-chain section described **three** blocking gates and explained how the
+    middle one was tuned, in the present tense. `trivy` appeared nowhere in the workflow, the
+    Makefile, or anything else that executes — so an operator reading that page believed the image's
+    base OS layers were scanned and that a red build would tell them. Prose is not covered by any
+    gate, which is exactly why this assertion exists rather than a fourth careful sentence.
+
+    **Both halves of it were defeatable, and an audit defeated both while it stayed green.**
+
+    1. *A comment satisfied it.* `gate in workflow` was a substring over the whole file, and this
+       workflow is mostly rationale — so `# NOTE: a trivy image scan is deliberately not run here
+       yet.` made the phantom row pass, which is the same phantom control with a second document
+       now agreeing with it. Fixed by asking whether the gate *runs*: the workflow is parsed as
+       YAML and only each step's `uses`/`run` counts, with shell comments inside a `run:` block
+       stripped for the same reason.
+    2. *Prose was invisible.* Only rows starting with ``| ` `` were read, so the sentence beside
+       the table — which is how this section describes `trivy` today — claimed whatever it liked.
+       Fixed by reading the section's sentences too: a sentence naming a supply-chain tool claims
+       it runs unless it carries one of `_ABSENCE_MARKERS`, which is how the current text says the
+       scan is a gap rather than a gate.
+
+    Still keyed on the gate *names*, not on a count: adding a real scan should make this pass by
+    making the claim true, and re-adding a phantom one — in the table or in a sentence — should
+    make it fail.
+    """
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
+
+    section = runbook.split("### When a supply-chain gate goes red", 1)[1].split("\n## ", 1)[0]
+    table = [line for line in section.splitlines() if line.startswith("| `")]
+    assert table, "the gate table was not found — this check is reading the wrong section"
+
+    named = {re.match(r"\|\s*`([^`]+)`", line).group(1) for line in table}  # type: ignore[union-attr]
+
+    # The prose half. Lines are joined before sentences are split because the section wraps mid
+    # sentence, and the table lines are dropped because they are claims already counted above.
+    prose = " ".join(line for line in section.splitlines() if not line.startswith("|"))
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", prose) if s.strip()]
+    assert sentences, "no prose was parsed — this check is reading the wrong section"
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(marker in lowered for marker in _ABSENCE_MARKERS):
+            continue
+        named |= {
+            tool for tool in _SUPPLY_CHAIN_TOOLS if re.search(rf"\b{re.escape(tool)}\b", lowered)
+        }
+
+    executed = _executable_workflow_text(workflow)
+    # `make deps-audit` is how the workflow spells pip-audit; the Makefile target is the real name.
+    runs = {
+        gate
+        for gate in named
+        if gate in executed or gate.replace("pip-audit", "deps-audit") in executed
+    }
+    assert named == runs, (
+        f"the runbook names supply-chain gate(s) that nothing runs: {sorted(named - runs)}. "
+        "Either merge the gate or stop documenting it as one — a comment in the workflow is not "
+        "a gate, and neither is a sentence next to the table."
+    )

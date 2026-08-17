@@ -269,6 +269,18 @@ class ToolFailedEvent(BaseModel):
     tool: str
     message: str
     agent: str = _AGENT_FIELD
+    # Which *kind* of failure this is, where the kind is a decision someone made rather than a
+    # fault. Today there is exactly one: `plan_gate`, the pre-execution approval refusing a
+    # state-changing call (`agent/plan_gate`). That refusal is the control working, and a consumer
+    # that folds it in with a database outage reports a correctly-gated turn as a broken one —
+    # which is what `evals/live.py` did, by matching one phrase of the refusal *sentence*, so a
+    # reword would have flipped the finding with every test still green.
+    #
+    # `None` is "an ordinary failure", which is every failure that was ever emitted before this
+    # field existed. Additive, defaulted and a closed set, because this shape is a contract two
+    # other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`): a surface that ignores it is
+    # unchanged, and one that switches on it can be exhaustive.
+    reason: Literal["plan_gate"] | None = None
 
 
 class ToolResultEvent(BaseModel):
@@ -407,6 +419,14 @@ class EvidenceSourceEvent(BaseModel):
     source had nothing to say" from "this source was crowded out of the budget", which are
     different problems with different fixes.
 
+    `failed` is the third of those, and it was missing: a branch whose retriever raises degrades to
+    an empty list, so it reported `chunks=0` and became indistinguishable from a source that was
+    simply asked and had nothing — the same collapse this event exists to undo, one level down.
+    The distinction matters because the remedies do not overlap: a dark source is a question about
+    the corpus, a broken one is a page for whoever owns the index. Additive and defaulted, because
+    this shape is a contract two other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`); a
+    surface that ignores it renders exactly what it rendered before.
+
     Emitted only where a consumer is draining the graph's custom stream — the front door is, the
     CLI and a Temporal activity are not. Those still run the same branches and record the same
     counter; they simply have no channel to say so. A surface must therefore treat the absence of
@@ -416,6 +436,7 @@ class EvidenceSourceEvent(BaseModel):
     type: Literal["evidence_source"] = "evidence_source"
     source: str
     chunks: int
+    failed: bool = False
 
 
 class HandoffEvent(BaseModel):

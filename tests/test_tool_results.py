@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, ToolMessage, message_to_dict, messages_from_dict
 
 import chemclaw.api.runner_trace as runner_trace
-from chemclaw.agent.graph_tools import NoteRef, NoteView
+from chemclaw.agent.graph_tools import NeighborRef, NoteRef, NoteView
 from chemclaw.agent.message_migration import to_langchain
 from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import _transcript, create_app
@@ -423,7 +423,7 @@ def test_a_cited_note_resolves_to_the_view_the_agent_tool_returns(
     view = NoteView(
         note=NoteRef(id="compound-4-bromoanisole", type="compound"),
         body="<retrieved-note>mp 12 C</retrieved-note>",
-        neighbors=[NoteRef(id="reaction-suzuki-1", type="reaction")],
+        neighbors=[NeighborRef(id="reaction-suzuki-1", type="reaction")],
     )
 
     async def _expand(note_id: str, hops: int = 1) -> NoteView:

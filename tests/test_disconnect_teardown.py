@@ -424,18 +424,28 @@ def test_a_client_gone_before_the_event_stream_starts_frees_its_per_user_slot(
 
 
 def test_a_disconnected_turn_still_resets_every_ambient_context_var() -> None:
-    """`run_turn`'s `finally` must stay synchronous, or a disconnect leaks the turn's identity.
+    """`run_turn`'s `finally` must stay synchronous, or a disconnect skips the turn's spend ledger.
 
     D-167 added approval-consumption to the end of a turn, and the obvious home for it — the
-    `finally` — is wrong here. Production reaches teardown by *cancellation* rather than
-    `aclose()` (D-130), and an `await` in that block re-raises the cancellation on the spot: every
-    step after it is skipped, including `end_turn` and the five `reset_current_*` calls. The next
-    turn on the worker would then run under the disconnected user's ambient identity, which is a
-    worse defect than the one the consumption fixes.
+    `finally` — is wrong here. Production reaches teardown by *cancellation* rather than `aclose()`
+    (D-130), and an `await` in that block re-raises the cancellation on the spot, skipping every
+    step after it.
 
-    Asserted on the *source* rather than by driving a disconnect, because the failure is a
-    property of the block: any future `await` added there reintroduces it, whatever that await
-    happens to do.
+    **What that block holds has changed, and this docstring is corrected rather than left to rot.**
+    It used to carry the five `reset_current_*` calls, so the failure it named was the next turn on
+    the worker running under the disconnected user's identity. Those resets now live in
+    `api/runner._turn_ambient`, a *synchronous* `@contextmanager` — an `await` cannot be spelled in
+    its `finally` at all, and its `__exit__` runs while the cancellation propagates, so the identity
+    guarantee is structural rather than dependent on this assertion. What is left here is
+    `_book_turn_spend`, and the defect an `await` would reintroduce is a cancelled turn that books
+    no tokens and no duration: abandon-and-retry becomes free, which is the cheapest attack on the
+    runaway-cost guard.
+
+    Asserted on the *source* rather than by driving a disconnect, because the failure is a property
+    of the block: any future `await` added there reintroduces it, whatever that await happens to do.
+    The property it used to stand in for is now asserted directly, by driving a real cancellation
+    and reading the ambients back — `tests/test_turn_cancellation.py`'s
+    `test_a_cancelled_turn_unstamps_every_ambient_it_stamped`.
     """
     import ast
     from pathlib import Path

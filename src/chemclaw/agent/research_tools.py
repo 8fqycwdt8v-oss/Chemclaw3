@@ -19,7 +19,7 @@ from datetime import date
 from itertools import zip_longest
 from typing import Any
 
-from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
@@ -252,9 +252,25 @@ async def gather_evidence(
         ranked = _interleave_dedup(ranked_lists)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
+    #
+    # `source` is neutralized on the same pass and for the same reason, having been missed on the
+    # first: it is a *second* retrieved-text channel on the very same object. The warehouse
+    # retriever builds it as `<source>:<relation>:<row key>`, so a warehouse row's own key reaches
+    # the prompt through it — outside the envelope, where a forged delimiter would be read as the
+    # envelope closing. `defang` rather than `frame_untrusted`, because a label is not evidence and
+    # wrapping it would make the citation unreadable.
     return [
         chunk.model_copy(
-            update={"content": frame_untrusted(chunk.content, note_id=chunk.source_note_id)}
+            update={
+                "content": frame_untrusted(chunk.content, note_id=chunk.source_note_id),
+                "source": defang(chunk.source),
+                # `source_note_id` for the same reason and from the same producer: the warehouse
+                # retriever builds both from one row key, one statement apart. `safe_id` sanitizes
+                # only the *copy* interpolated into the envelope's `id=` attribute — the field on
+                # the returned model is what the tool result serializes, and it reached the model
+                # raw. Defanged rather than `safe_id`'d, because a citation has to stay resolvable.
+                "source_note_id": defang(chunk.source_note_id),
+            }
         )
         for chunk in ranked[: settings.gather_evidence_max_chunks]
     ]

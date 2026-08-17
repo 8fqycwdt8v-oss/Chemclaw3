@@ -36,7 +36,7 @@ session can research and propose and can do nothing else.
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Final, Literal
 
 from langchain.agents.middleware import wrap_tool_call
 
@@ -111,6 +111,38 @@ def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
         f"{tool_name} changes stored data or starts work, and the plan it is part of "
         "has not been approved yet; review the plan and approve it, then ask again"
     )
+
+
+# The name a consumer tells this gate's refusal by, once the refusal has left the process as a
+# `tool_failed` event. `api/events.ToolFailedEvent.reason` carries it; `evals/live.py` classifies on
+# it; `api/graph_stream._signal_event` stamps it.
+#
+# **It replaces a substring match on the sentence above**, and that is the whole point. A refusal is
+# prose written for a chemist, so it is exactly the kind of text somebody improves — and the eval
+# harness held a *copy* of one phrase of it ("has not been approved yet") as its only way to tell
+# "the gate held" from "a tool fell over". Those two findings are opposites: one is the control
+# working, the other is a fault. A reword would have flipped every gated turn from the first to the
+# second, silently and retroactively, with every test still green because the tests pinned the same
+# copy. A discriminator on the wire cannot drift that way — a consumer either reads the field or
+# does not.
+PLAN_GATE_REASON: Final = "plan_gate"
+
+
+def plan_gate_failure_reason(detail: str) -> Literal["plan_gate"] | None:
+    """`PLAN_GATE_REASON` if this tool-failure detail is this gate's refusal, else `None`.
+
+    `detail` is what `agent/tool_authz.failure_detail` built from the raised exception and put on
+    the turn's failure signal: `"<exception class>: <message>"`. So what is matched here is the
+    **class**, not the sentence — a Python identifier that a rename has to touch at its definition,
+    under `mypy --strict` and this module's own tests, rather than prose anyone may reword.
+
+    Read from the detail line rather than from the exception itself because the exception does not
+    survive the trip: `announce_tool_failures` records a signal carrying two strings, and by the
+    time `api/graph_stream` turns that signal into an event there is nothing left to `isinstance`.
+    The alternative — a new field on `ToolFailureSignal` — is a third repository's contract for a
+    fact this side can already derive, so it is not worth the coordination.
+    """
+    return PLAN_GATE_REASON if detail.startswith(f"{PlanNotApprovedError.__name__}:") else None
 
 
 def gated_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:

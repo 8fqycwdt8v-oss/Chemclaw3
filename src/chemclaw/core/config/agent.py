@@ -216,6 +216,26 @@ class AgentSettings(BaseSettings):
     # Per-step wall clock for a template run. Generous because an `agent` step is a model turn and
     # a `tool` step may be a real calculation, but bounded so one wedged step cannot pin a run.
     template_step_timeout_seconds: float = Field(default=900.0, gt=0)
+    # How long a step may go without saying anything before Temporal declares its worker dead.
+    #
+    # A `start_to_close` timeout alone cannot tell a step that is working from a worker that was
+    # killed: both look like silence, and the whole 900 s above has to elapse before the attempt is
+    # retried. `run_tool_step` and `run_agent_step` therefore beat while they wait
+    # (`durable/heartbeat.beating`, the same idiom the document and ELN syncs use), and this is the
+    # timeout that both the workflow's `heartbeat_timeout` and the beat interval derive from — one
+    # number, so the two can never drift. Sized like `eln_sync_heartbeat_timeout_seconds` rather
+    # than like the step budget: it measures worker liveness, not the work.
+    template_step_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Whole-run wall clock for one template execution, the ceiling the per-step budget cannot give.
+    #
+    # Without it an N-step template's only bound was `template_step_timeout_seconds` × N — a number
+    # nothing declares, that changes when an author adds a step, and that no operator can read off
+    # any setting. `ConnectorJobWorkflow` gives its children `connector_job_timeout_seconds` for
+    # exactly this reason (`durable/connector_job.py`), and a template is core's own sequencer of
+    # the same kind of work. Eight steps at the default step budget; a longer procedure raises this
+    # deliberately rather than inheriting an unbounded run. The cross-field validator in
+    # `core/config/__init__.py` refuses a run ceiling that cannot contain a single step.
+    template_run_timeout_seconds: float = Field(default=7200.0, gt=0)
 
     @property
     def templates_dirs(self) -> list[str]:

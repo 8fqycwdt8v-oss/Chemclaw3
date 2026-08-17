@@ -44,6 +44,11 @@ _EXPECTED_SUBSYSTEMS = {
     "log_redaction",
     "plan_approval",
     "preferences",
+    # `agent/session_store.message_from_row`, added when its catch was widened to `Exception`. The
+    # counter is the point of that widening: a catch that broad also swallows a converter *bug*,
+    # which degrades every row of every transcript into plausible prose, and a log line nobody
+    # alerts on cannot tell that apart from one unreadable legacy row.
+    "session_transcript",
     "skill_manifest",
     "tool_result_store",
     "transcript_projection",

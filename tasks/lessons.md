@@ -37,7 +37,15 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
 3. **A stale local clone is not evidence about a remote.** I told the user four of my own pushed
    commits "do not exist" and that a sibling session's work was gone; all of it was on `origin` the
    whole time and the container's clone was behind. Fetch before asserting anything about what is
-   or is not on the remote.
+   or is not on the remote. **The same shape applies to a launch receipt: a tool result saying an
+   async subagent started is not evidence that it is running.** Six triage agents were launched,
+   all six returned "launched successfully", and a user interrupt in the same turn killed every one
+   of them — I then reported "waiting on triage" across several turns while nothing was running.
+   `ListAgents` is the check, and it costs one call; a completion notification that has not arrived
+   is not the same as work in progress. Related: an environment daemon is not durable either —
+   `dockerd` died twice unprompted mid-session, and every Postgres test would have *skipped green*
+   rather than failed if it had gone unnoticed. Start it with `setsid` and re-check before
+   trusting a suite result.
 
 4. **The working tree is not your baseline when other agents are in it, and `git add -A` is a claim
    about a tree you no longer control.** A verification pass reported a feature "already
@@ -46,6 +54,18 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    swept into a commit by `git add -A`. Diff against a named commit, stage by path, and treat
    another agent's own "gate is green" report as a claim, not evidence — one such package arrived
    five lines over the lint limit.
+
+   **File ownership is the whole safety property when you fan out, so assign it like a lock: one
+   writer per path, checked before launch.** Two agents were given `tests/test_template_agent_step.py`
+   in the same batch — one to add tests, one to strengthen them. The second had been told to undo
+   its mutations by `cp f f.bak` … `mv f.bak f` (rule 1, correctly), and its `.bak` predated the
+   first agent's additions, so restoring its own mutation **deleted the other agent's new tests**.
+   The source fix they proved stayed; the tests vanished; the suite went green at 35 passed, because
+   a deleted test cannot fail. That is rule 2 arriving by a route rule 2 does not mention, and rule 1
+   supplying the weapon. Before launching a batch, list every path in every prompt and check for a
+   duplicate — a two-minute check that no amount of careful prompting substitutes for. When it does
+   happen, the tell is a diffstat that omits a file an agent reported writing; `git diff --stat`
+   over each agent's declared paths on completion catches it immediately.
 
 5. **Run the gate's own command, at the gate's own scope, unpiped.** Pushed red twice for the same
    reason in two disguises: verifying a narrower scope than CI checks. And `| head` under
@@ -81,7 +101,14 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    *comment* can satisfy is a test of the comment; a fixture that hardcodes the value being measured
    buys the assertion; inverting a test is not rewriting it, and the inverted one usually stops
    testing; and a change whose test was *edited to fit it* passed a full gate twice. Verify a new
-   test by breaking the code it guards.
+   test by breaking the code it guards. **Do this per fix, not per batch**: reverting four fixes
+   together and seeing red proves only that *one* of the four tests works. Reverting each
+   separately caught one of mine that passed both ways — a test for a wikilink spelled across two
+   note blocks, which cannot happen because the blocks are joined by newlines and label prefixes,
+   so the two `[` never meet. The test was deleted *and the docstring claim it came from was
+   corrected*, because the invented justification had already been written into the code as fact.
+   A test that passes both ways is not weak coverage, it is a false statement about the tree, and
+   it usually arrives attached to a second false statement in prose.
 
 10. **Green tests prove the paths you thought of.** Every defect in one heavy review sat in tested
     code — tested at the wrong layer. A stub blinds the test to the contract it stubs (a total
@@ -112,6 +139,20 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
     three places is three rules, and a refactor's first job is to work out which of two copies is
     right — every finding in one review was a rule stated twice with a docstring asserting the other
     agreed. Where a document makes a checkable promise, make it a test instead of restating it.
+    Three more instances on 2026-08-17, all found by opening the anchor rather than reading the
+    prose: the runbook described a blocking `trivy` image scan that runs nowhere, `pyproject.toml`
+    shipped a compiled engine to every pod that no module is *allowed* to import, and a config
+    comment said an ENV knob "re-addresses every structure and therefore recomputes" when those
+    bytes are what a *remote* server hashes — so changing it missed forever, silently. Each became
+    a test. The tell they share: prose in the **present tense** about a control ("runs with
+    `ignore-unfixed`", "drives the mass-balance check") is the highest-yield thing to go and check,
+    because nobody writes a false sentence about a control they just looked at.
+
+    **The counterpart is knowing when *not* to build the thing the row asks for.** The proposed
+    mass-balance fix — products cannot outweigh inputs — is sound at any stoichiometry, and
+    measured, no shipped outcome records a mass at all, so it would have run on nothing. A control
+    that always passes is worse than a missing one, because it reads as coverage. Before
+    implementing a check, confirm the data it reads exists.
 
 16. **Delete the row in the commit that closes it — including your own.** A row that outlives its
     closure reads as live state; a status note appended under a stale row is how `DEFERRED.md` grew
@@ -382,3 +423,41 @@ either be omitted from the request or re-applied locally after the cache.
     conditions that make it real *before* pushing** — here, `git fetch --unshallow` first. And expect
     a finding: a guard nobody has been able to violate-and-fail against has, in this repo's
     experience, always had something behind it.
+
+40. **This sandbox's clone is shallow, and the migration-immutability check reads that as a
+    finding — recognize it instead of re-diagnosing it.**
+    `tests/test_migrations_are_additive.py::test_no_grandfathered_edit_outlives_its_reason` reported
+    `002_molecule_fingerprints.sql` / `003_reaction_fingerprints.sql` as exemptions with nothing left
+    to permit. The cause is lesson 39's, seen from the other side: nothing differs from the commit
+    that introduced it when the history is not there.
+
+    **What makes it easy to misread is that it presents two ways depending on how deep the clone
+    happens to be.** At 170 commits the `compared < 30` skip guard did not fire, so it *failed*.
+    After merging `origin/main`, only 8 migrations could be compared, the guard fired, and the same
+    check *skipped*. Same cause, opposite symptom, and neither is about the code under review.
+
+    **The rule: when a suite comes back with exactly one failure that is nowhere near what you
+    touched, stash and re-run before reading a line of the diff.** It cost me one round here and it
+    is a two-command check: `git stash -u && pytest <the one test> && git stash pop`. Then say in the
+    PR that it is pre-existing *and how you verified that*, because "unrelated" asserted without the
+    stash is indistinguishable from not having looked.
+
+## A line count is not a measure of reading cost (2026-08-17)
+
+**What happened.** Asked to make the agentic backend "lean to read", I profiled it, found `agent/`
+at 58% prose (11,217 lines, 2,895 of them code) and a 165-module import fan-out, and proposed three
+fixes — one structural, two derived from those two ratios. The user approved all three. Both
+ratio-derived ones then failed on measurement: relocating the biggest docstring yielded **0 lines**
+once readability was held constant, and the best available import work reached 37% only by moving
+eight dependencies into function bodies, which makes the tree *harder* to read. The structural one
+— a single 483-line function — was the entire real problem and went to 194.
+
+**The rule.** Measure a candidate *before* pitching it, not after it is approved. A ratio is a
+smell, not a finding: prose that records a measurement is not overhead, and this tree's long
+docstrings are mostly that. What actually costs a reader is structure — a function too big to hold
+in your head, a duplicated loop, a rule stated as a comment where it could be a type.
+
+**The tell I should have caught.** I had already measured the docstring distribution — median 9
+lines, mean 12.8 — which says the prose is healthy and the mass sits in a tail of deliberate
+records. I read that number and still proposed a mass relocation, because the *total* looked large.
+Medians answer "is this bloated"; totals do not.

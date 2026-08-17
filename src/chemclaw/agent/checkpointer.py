@@ -34,21 +34,22 @@ has no migration system: a channel the checkpoint never held simply stays empty,
 indexes it raises a bare `KeyError` naming the field — from inside the node, with nothing in it
 naming the thread, the schema change or a remedy.
 
-**The direction that fails is not the intuitive one, so it was measured**
-(`tests/test_checkpointer_schema.py` runs each of these):
+**The direction that fails is not the intuitive one, so it was measured.** Each finding below names
+the test in `tests/test_checkpointer_schema.py` that asserts it, because that test is the record
+that cannot go stale — the prose restating its numbers here could, and this file is where a reader
+decides whether the guard still means what it says:
 
-- What raises is a channel **this build declares that the checkpoint does not hold** — an *added*
-  name. A rename is an addition plus a removal, and it is the addition half that raises.
-- A *removed* channel is harmless: nothing declares it any more, so nothing indexes it. Measured
-  `OK` on resume, both at a turn boundary and mid-turn.
-- It only bites where the resumed run does not re-run the node that writes the channel — a turn
-  resumed *inside* the graph, which is what `interrupt()` produces. At a turn boundary the run
-  starts at `START`, so a node indexing an unwritten channel fails identically on a brand-new
-  thread: `KeyError: 'todos'` measured on the resumed thread *and* on a fresh one, which means the
-  checkpoint contributed nothing to that one.
-- `NotRequired` is not a filter this can use: measured `KeyError: 'extra'` for a `NotRequired`
-  channel a resumed node indexes, and `OK` for the same channel read with `.get()`. The declaration
-  says how the *input* may be spelled, not how a node reads the channel.
+- An **added** name is what raises — a channel this build declares that the checkpoint does not
+  hold. A rename is an addition plus a removal, and it is the addition half that raises
+  (`..._the_added_half_of_a_rename_that_raises_and_not_the_removed_half`).
+- A **removed** channel is harmless: nothing declares it any more, so nothing indexes it
+  (`..._a_channel_this_build_no_longer_declares_does_not_refuse_the_thread`).
+- It only bites a turn resumed *inside* the graph, which is what `interrupt()` produces. At a turn
+  boundary the run starts at `START` and a node indexing an unwritten channel fails identically on
+  a brand-new thread, so the checkpoint contributed nothing to that one
+  (`..._a_moved_channel_strands_a_turn_resumed_inside_the_graph`).
+- `NotRequired` is not a filter this can use: it says how the *input* may be spelled, not how a
+  node reads the channel (`..._notrequired_does_not_make_an_added_channel_safe`).
 
 `SchemaStampedSaver` writes `FIRST_PARTY_CHANNELS` into every checkpoint's metadata, and on resume
 refuses a checkpoint whose stamp is missing one of them, raising `CheckpointSchemaMismatch` naming
@@ -82,14 +83,13 @@ turn-failure event — classified `internal` and non-retryable, which is exactly
 retrying cannot give a checkpoint a channel it never held — while the log carries this module's own
 ERROR naming the session, the missing channels and the ones the thread does hold.
 
-**An *unstamped* checkpoint is accepted, and so is a stamp this build cannot read.** Every
-checkpoint written before this guard existed has no stamp, and refusing those would brick every
-live session at the deploy that introduces the guard — the exact outcome the guard exists to
-prevent, caused by the guard. They resume as they always did, and the first write of each thread
-stamps it from then on. The same rule covers a *rolling* deploy in both directions: the stamp lives
-under its own metadata key, so a build running the earlier schema-hash version of this guard reads
-these checkpoints as unstamped rather than as a mismatch, and this build reads that version's
-checkpoints the same way.
+**An *unstamped* checkpoint is accepted, and so is a stamp this build cannot read.** Refusing those
+would brick every live session at the deploy that introduces the guard — the exact outcome the
+guard exists to prevent, caused by the guard. They resume as they always did, and the first write
+of each thread stamps it from then on. The same rule covers a *rolling* deploy in both directions,
+because the stamp lives under its own metadata key
+(`test_a_checkpoint_from_before_the_guard_resumes_rather_than_being_refused`,
+`test_a_stamp_this_build_cannot_read_is_treated_as_absent`).
 """
 
 import asyncio
@@ -118,7 +118,8 @@ logger = logging.getLogger(__name__)
 _saver: AsyncPostgresSaver | None = None
 _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 
-# Guards the two lazy initializations below, which are each a check-then-*await*-then-act.
+# Guards the two lazy initializations below — and `scratchpad.memory_store()`, which shares this
+# lock because it shares the pool — each of them a check-then-*await*-then-act.
 #
 # **Publishing before the await is what made this a race rather than a style question.** Both
 # `checkpointer()` and `_checkpoint_pool()` assigned their global *before* awaiting the work that
@@ -340,9 +341,12 @@ async def checkpointer() -> AsyncPostgresSaver:
     global _saver
     if _saver is not None:
         return _saver
+    # Awaited outside the lock, because `_checkpoint_pool` takes that same lock itself and
+    # `asyncio.Lock` is not reentrant.
+    pool = await _checkpoint_pool()
     async with _initialization_lock():
         if _saver is None:
-            saver = SchemaStampedSaver(await _checkpoint_pool())
+            saver = SchemaStampedSaver(pool)
             await saver.setup()
             _saver = saver
             logger.info("checkpointer ready")
@@ -356,23 +360,30 @@ async def _checkpoint_pool() -> Any:
     should not hold connections open for a checkpointer it will not use, and the pool fills on
     demand.
 
-    **Called only from `checkpointer()`, which already holds `_init_lock` — so this takes no lock
-    of its own**, and must not: `asyncio.Lock` is not reentrant and a second acquire here would
-    deadlock the first turn of every process. The global is nevertheless published only after
-    `open()` returns, so the ordering is right on its own terms rather than by inheritance from
-    its one caller.
+    **Takes `_init_lock` itself, so no caller may hold it.** This used to say it had exactly one
+    caller — `checkpointer()`, which held the lock around it — and that stopped being true when
+    `scratchpad.memory_store()` became the second: two cold callers then raced the same
+    check-then-*await*-then-act the lock exists for, each building a pool and awaiting `open()`
+    before either published `_pool`, so one opened pool was overwritten and leaked its connections
+    for the life of the process while a store was left sitting on a pool the module no longer
+    knows about. Owning the lock here rather than borrowing a caller's is what makes the guarantee
+    independent of who calls: `asyncio.Lock` is not reentrant, so both callers await this *before*
+    taking the lock for their own object.
     """
     global _pool
-    if _pool is None:
-        pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
-            conninfo=_session_dsn(),
-            kwargs={"autocommit": True, "connect_timeout": settings.pg_connect_timeout_seconds},
-            min_size=0,
-            max_size=settings.pg_pool_max_size,
-            open=False,
-        )
-        await pool.open()
-        _pool = pool
+    if _pool is not None:
+        return _pool
+    async with _initialization_lock():
+        if _pool is None:
+            pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
+                conninfo=_session_dsn(),
+                kwargs={"autocommit": True, "connect_timeout": settings.pg_connect_timeout_seconds},
+                min_size=0,
+                max_size=settings.pg_pool_max_size,
+                open=False,
+            )
+            await pool.open()
+            _pool = pool
     return _pool
 
 
@@ -383,6 +394,12 @@ async def close_checkpointer() -> None:
     in; keeping one without the other is how a second caller in a second event loop gets a saver
     pinned to a loop that has closed.
 
+    **The memory store is dropped first, for the same reason and in that order.** It sits on this
+    pool too (`scratchpad.memory_store`), so closing the pool while it is still published would
+    hand the next caller a store over closed connections — the store has to go before what it
+    stands on does. This is `close_memory_store`'s only caller, which is what makes the pair a
+    lifecycle rather than two functions that happen to exist.
+
     **A pool whose loop has already closed is dropped, not awaited.** `psycopg_pool` schedules its
     workers' shutdown on the loop it was opened in, so closing it from a *different* live loop
     raises `RuntimeError: Event loop is closed` — from inside the close, after the reference would
@@ -392,6 +409,11 @@ async def close_checkpointer() -> None:
     released with their dead loop either way, so there is nothing left to leak.
     """
     global _saver, _pool, _init_lock
+    # Imported here rather than at module scope: `scratchpad` pulls the deepagents backends in, and
+    # a worker that only needs `CHECKPOINT_TABLES` should not import the agent's filesystem stack.
+    from chemclaw.agent.scratchpad import close_memory_store
+
+    await close_memory_store()
     _saver = None
     # Dropped with the pool for the same reason the saver is: an `asyncio.Lock` belongs to the loop
     # it was created in, so a lock kept across `close_checkpointer` would be one the next loop's
