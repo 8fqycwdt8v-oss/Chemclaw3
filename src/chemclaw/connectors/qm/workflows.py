@@ -48,7 +48,12 @@ from chemclaw.durable.registry import durable_workflow
 
 
 @durable_workflow(bundle_queue("qm"))
-@workflow.defn
+# Its failures must be able to *be* failures: without this the SDK parks a plain exception raised
+# in workflow code in an unbounded workflow-task-failure loop, so the parent
+# `ConnectorJobWorkflow` waits forever and the chemist is told "running" indefinitely. Measured on
+# a child reading an absent optional key from its payload (`exclude_none=True` drops one) — child
+# RUNNING forever, parent waiting, session never told. See `durable/connector_job.py` for the trade.
+@workflow.defn(failure_exception_types=[Exception])
 class QMJobWorkflow:
     """Run one QM calculation durably and return it in the connector envelope."""
 
@@ -100,7 +105,11 @@ class QMJobWorkflow:
         handle = await workflow.execute_activity(
             submit_to_hpc,
             prepared,
-            start_to_close_timeout=activity_timeout,
+            # Not `activity_timeout`: this activity contains an HTTP call of its own, and the two
+            # bounds are equal at the shipped defaults, so the launch POST raced its own
+            # start-to-close and a retry double-submitted a cluster run. The property derives this
+            # bound from the POST's, which is why there is no second setting to keep in step.
+            start_to_close_timeout=timedelta(seconds=settings.hpc_submit_timeout_seconds),
             retry_policy=BAD_DATA_RETRY,
         )
         # The poll's start-to-close budget must cover the *entire* run in one attempt —
@@ -109,7 +118,10 @@ class QMJobWorkflow:
         # different budgets (F5, review finding: a mock-derived 36s cap would kill every real run).
         if settings.hpc_launch_interface == "nextflow":
             poll_budget = settings.hpc_run_timeout_seconds
-            poll_heartbeat = settings.hpc_run_heartbeat_timeout_seconds
+            # Floored by the gap the loop can actually achieve — one HTTP round trip plus its
+            # sleep — so raising `hpc_http_timeout_seconds` for a slow launcher cannot turn a
+            # healthy poll into a dead-worker retry. See the property for the measurement.
+            poll_heartbeat = settings.hpc_effective_heartbeat_timeout_seconds
         else:
             poll_budget = settings.hpc_mock_run_seconds + settings.qm_activity_timeout_seconds
             poll_heartbeat = settings.qm_poll_heartbeat_timeout_seconds

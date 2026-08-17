@@ -23,6 +23,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.registry import durable_activity
 
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -167,6 +168,13 @@ async def fan_out(
                 # logged child would silently swallow the cancellation intent).
                 raise outcome
             if isinstance(outcome, BaseException):
+                # Counted as well as logged, because the parent is about to complete
+                # *successfully* with a short list and a log line is not a signal anyone watches.
+                # The failure this makes visible: the PR-gate's git credential expires, every
+                # child fails, and the memory-synthesis jobs return `[]` every night while
+                # `/schedules` shows runs climbing and no failures. `metrics_bridge` is already
+                # proven callable from workflow code (`durable/publish.py`).
+                record_metric(lambda m: m.increment("chemclaw_fan_out_children_dropped_total"))
                 workflow.logger.warning(
                     "fan-out child %s-%s-%d failed and was dropped: %s",
                     parent_id,
