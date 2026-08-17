@@ -32,6 +32,8 @@ in the tree. No new pattern is introduced.
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.config.agent import HarnessAutonomy
+
 
 class AgentProfile(BaseModel):
     """Override-bundle over `build_langgraph_agent`'s dimensions; unset fields fall back to global.
@@ -52,7 +54,10 @@ class AgentProfile(BaseModel):
     tool_names: frozenset[str] | None = None
     mcp_server_names: frozenset[str] | None = None
     harness_enabled: bool | None = None
-    harness_autonomy: str | None = None
+    # `HarnessAutonomy`, not `str`: `extra="forbid"` above rejects a misspelled field *name*, and
+    # this rejects a misspelled *value*. Without it a profile saying `plan-only` loaded silently and
+    # took the plan gate off — see the alias's own note for why that is worse than not adding one.
+    harness_autonomy: HarnessAutonomy | None = None
 
 
 # The one profile that exists today: every field unset, so it resolves to the global agent verbatim.

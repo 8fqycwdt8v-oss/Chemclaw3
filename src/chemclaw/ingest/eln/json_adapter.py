@@ -61,7 +61,28 @@ logger = logging.getLogger(__name__)
 # the dash is a separator, so the match is the upper bound 80, never a sign-flipped -80.
 # Extracting the upper bound is the deliberate (documented) reading of a range; a genuine
 # "-10 °C" still matches because nothing numeric precedes its sign.
-_TEMPERATURE = re.compile(r"(?<![\d.])(-?\d+(?:\.\d+)?)\s*°\s*C\b")
+# **Every dash a real procedure uses as a minus sign, not only the ASCII one.** A cryogenic
+# temperature is typeset with U+2212 MINUS SIGN by ACS and RSC house style, and Word's autocorrect
+# turns a typed hyphen into U+2013 EN DASH. The sign used to be `-?`, which matches U+002D alone, so
+# the dash was simply not consumed and the number read bare: measured on this tree, seven of the
+# eight dash characters that occur in practice silently dropped the sign, and `−78 °C` — a
+# dry-ice/acetone lithiation, one of the most common cryogenic conditions there is — was ingested as
+# `+78 °C`. A 156-degree error in the wrong direction, rendered into the proposed note as
+# `temperature: 78.0 °C`, and entirely plausible to the reviewer at the PR-gate because the verbatim
+# prose beside it still reads `−78`.
+_MINUS_SIGNS = "-‐‑‒–—―−"
+
+# The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
+# whereas a space-less/degree-less "13C" (as in "13C NMR") or "pH 7 C" is not — demanding `°`
+# avoids fabricating a temperature from spectroscopy or label text. The lookbehind stops a dash
+# preceded by a digit/dot from being read as a minus sign: in a range like "60-80 °C" — or
+# "60–80 °C" — the dash is a separator, so the match is the upper bound 80, never a flipped -80.
+# Extracting the upper bound is the deliberate (documented) reading of a range; a genuine
+# "-10 °C" still matches because nothing numeric precedes its sign.
+_TEMPERATURE = re.compile(rf"(?<![\d.])([{_MINUS_SIGNS}]?\d+(?:\.\d+)?)\s*°\s*C\b")
+
+# `str.translate` table mapping every one of them onto the ASCII hyphen-minus `float()` accepts.
+_TO_ASCII_MINUS = str.maketrans(dict.fromkeys(_MINUS_SIGNS, "-"))
 _TIME_HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b")
 
 # Procedure segmentation. A numbered marker ("1.", "2)", "Step 3:") is the strongest signal
@@ -244,9 +265,15 @@ def _classify(segment: str) -> StepKind:
 
 
 def _search(pattern: re.Pattern[str], text: str) -> float | None:
-    """First numeric group the pattern matches in `text`, as a float, else `None`."""
+    """First numeric group the pattern matches in `text`, as a float, else `None`.
+
+    Typographic dashes are normalised to the ASCII hyphen-minus first: `_TEMPERATURE` now *matches*
+    the whole minus family (see `_MINUS_SIGNS`), and `float("−78")` raises `ValueError` on every one
+    of them but U+002D. Normalising here rather than in the pattern keeps the matched text faithful
+    to the source prose, which is what the reviewer at the PR-gate compares against.
+    """
     match = pattern.search(text)
-    return float(match.group(1)) if match else None
+    return float(match.group(1).translate(_TO_ASCII_MINUS)) if match else None
 
 
 def _require_list(payload: dict[str, Any], key: str) -> list[Any]:

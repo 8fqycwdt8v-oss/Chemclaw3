@@ -23,6 +23,7 @@ import hashlib
 import logging
 import math
 import re
+import threading
 from functools import lru_cache
 from typing import Any
 
@@ -43,6 +44,9 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 # process.
 _CacheKey = tuple[str, str]
 _CACHE: dict[_CacheKey, list[float]] = {}
+# Guards every read, insert and trim of `_CACHE`. Held only around dict work, never around the
+# provider call — see `embed_texts`.
+_CACHE_LOCK = threading.Lock()
 
 
 def embedding_config_key() -> str:
@@ -162,27 +166,41 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         return _embed_uncached(texts)
 
     keys = [_cache_key(text) for text in texts]
-    missing = [text for text, key in zip(texts, keys, strict=True) if key not in _CACHE]
+    # **The answer is assembled from values this call holds, never re-read from `_CACHE`.**
+    # `_CACHE` is a plain dict reached from several threads — `asyncio.to_thread` puts every
+    # concurrent turn's retrieval on the default executor — and the earlier shape read the batch
+    # back out of it after inserting. Two races followed, both reproduced at the shipped
+    # `embedding_cache_size` of 2048: another thread's trim could evict a key between the insert and
+    # the read (bare `KeyError`, naming nothing, on the interactive retrieval path), and two trims
+    # running together could `del` the same oldest key or mutate the dict mid-iteration
+    # (`RuntimeError: dictionary changed size during iteration`). Taking a snapshot under the lock
+    # and answering from it removes the class rather than narrowing the window: what the cache holds
+    # by the time we return can no longer affect what we return.
+    with _CACHE_LOCK:
+        holding = {key: _CACHE[key] for key in keys if key in _CACHE}
+    missing = [text for text, key in zip(texts, keys, strict=True) if key not in holding]
     if missing:
         # Deduplicated before the call: a batch naming the same text twice should cost one
-        # embedding, not two, whichever provider is behind it.
+        # embedding, not two, whichever provider is behind it. Outside the lock on purpose — this
+        # is a network round trip under the real provider, and serialising every turn's retrieval
+        # behind one mutex would trade a rare crash for a permanent stall.
         unique = list(dict.fromkeys(missing))
-        for text, vector in zip(unique, _embed_uncached(unique), strict=True):
-            _CACHE[_cache_key(text)] = vector
-    # Read the batch out *before* trimming. The trim is a bound on the cache, not on the answer,
-    # and it deletes oldest-first from the whole dict — including keys this very call just inserted
-    # or is still holding. Trimming first therefore raised `KeyError` on the line below whenever the
-    # batch was larger than `embedding_cache_size`, or when it named a cached text old enough to be
-    # evicted by its own insert. `reindex_notes` embeds one text per note in a single batch, so the
-    # note-index rebuild failed outright — with a bare `KeyError` naming nothing — for any corpus
-    # above 2048 notes, and hybrid retrieval depends on that index.
-    vectors = [_CACHE[key] for key in keys]
-    # FIFO, oldest first. Not LRU: keeping a recency order costs a move per *hit*, on the hot
-    # path, to better serve a workload — repeated identical queries — that a FIFO of this size
-    # already serves. A cheaper policy that is right for the actual access pattern.
-    while len(_CACHE) > size:
-        del _CACHE[next(iter(_CACHE))]
-    return vectors
+        holding.update(
+            (_cache_key(text), vector)
+            for text, vector in zip(unique, _embed_uncached(unique), strict=True)
+        )
+    with _CACHE_LOCK:
+        _CACHE.update(holding)
+        # FIFO, oldest first. Not LRU: keeping a recency order costs a move per *hit*, on the hot
+        # path, to better serve a workload — repeated identical queries — that a FIFO of this size
+        # already serves. A cheaper policy that is right for the actual access pattern.
+        #
+        # The trim no longer has to be ordered against the read, which is what the previous
+        # "read before trimming" rule bought: it may evict a key this very call just inserted, and
+        # the caller still gets its vector because that vector is in `holding`.
+        while len(_CACHE) > size:
+            del _CACHE[next(iter(_CACHE))]
+    return [holding[key] for key in keys]
 
 
 def _embed_uncached(texts: list[str]) -> list[list[float]]:

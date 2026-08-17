@@ -35,6 +35,11 @@ _COUNTER = "chemclaw_degraded_total"
 # space: a label whose values are not enumerable is how a registry ends up with unbounded series.
 _EXPECTED_SUBSYSTEMS = {
     "cost_ledger",
+    # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
+    # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one
+    # degradation a chemist actually feels (evidence missing from an answer) was the one missing
+    # from `chemclaw_degraded_total`.
+    "evidence_source",
     "job_resume",
     "log_redaction",
     "plan_approval",

@@ -21,6 +21,7 @@ from typing import Any
 
 from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
@@ -163,7 +164,8 @@ async def gather_evidence(
     Runs each text source (the knowledge graph, and any future literature/analytics source)
     on `query`, and — when an anchor reaction is given — also pulls structurally similar past
     reactions (DRFP). Results are merged and de-duplicated. Empty is a valid answer (nothing
-    on file), never invented.
+    on file), never invented — and it now *means* that: if every source was unreachable this
+    raises instead of returning empty, so "nothing on file" is never how an outage is reported.
 
     Args:
         query: The natural-language question or key terms (matched over note id/tags/body).
@@ -208,7 +210,26 @@ async def gather_evidence(
     # source order (RRF takes a note's representative chunk from the first list that found it, and
     # the round-robin interleaves in list order), so completion order would make one sweep's
     # evidence differ from the next for no visible reason.
-    ranked_lists = await sweep_sources(_sources(reaction_smiles), query, filters)
+    sources = _sources(reaction_smiles)
+    ranked_lists, failed = await sweep_sources(sources, query, filters)
+    if failed and len(failed) == len(sources):
+        # **Every source was unreachable, so `[]` would be a lie.** This tool's docstring is the
+        # model's contract and it says empty means "nothing on file, never invented" — so returning
+        # an empty list here tells a chemist asking "have we run this nitration before?" that the
+        # company has no prior art, when the truth is that nothing could be asked. A raised
+        # `ChemclawError` reaches the model as a tool failure it can say out loud, which is the
+        # honest answer and the one the runner already gives for an unreachable Temporal broker.
+        #
+        # Only when *all* of them failed. A single flaky source must still cost its own source and
+        # not the turn — `fanout._sweep`'s docstring argues that and it is right. The partial case
+        # is narrower and still imperfect: the model gets a real but incomplete hit-list with the
+        # degradation visible on the stream (`{"evidence_source": …, "failed": true}`) and not in
+        # the tool's return value. Closing that needs the return type to carry provenance, which is
+        # a contract change beyond this fix; it is recorded in the audit rather than left implied.
+        raise ChemclawError(
+            f"evidence sources unavailable: {', '.join(sorted(failed))}. No source could be "
+            f"queried, so this is not an answer about what the knowledge base contains."
+        )
 
     # `hybrid` fuses the per-source rankings (a note any source ranks highly rises); `graph` (the
     # default) round-robins them. Both are cross-source-fair under the cap below, differing in

@@ -365,7 +365,7 @@ def _shallow_grafts(repo: Path) -> frozenset[str]:
     return frozenset(shallow.read_text(encoding="utf-8").split())
 
 
-def _statements_changed_since_merge() -> tuple[list[str], int]:
+def _statements_changed_since_merge(migrations: Path | None = None) -> tuple[list[str], int]:
     """Which merged migrations differ from the commit that added them, and how many were compared.
 
     Extracted so the immutability check and its exemption's staleness check ask git the *same*
@@ -391,14 +391,15 @@ def _statements_changed_since_merge() -> tuple[list[str], int]:
     the source rather than absorbed by a larger threshold: a bigger number would only move the depth
     at which the same silence returns.
     """
-    repo = _MIGRATIONS.parents[1]
+    migrations = migrations if migrations is not None else _MIGRATIONS
+    repo = migrations.parents[1]
     head = _git(repo, "rev-parse", "HEAD")
     grafts = _shallow_grafts(repo)
     edited: list[str] = []
     compared = 0
-    for path in sorted(_MIGRATIONS.glob("*.sql")):
+    for path in sorted(migrations.glob("*.sql")):
         introduced = _git(
-            _MIGRATIONS, "log", "--diff-filter=A", "--format=%H", "--", path.name
+            migrations, "log", "--diff-filter=A", "--format=%H", "--", path.name
         ).split()
         if not introduced:
             continue  # added in the working tree; not merged, so not yet immutable
@@ -568,4 +569,51 @@ def test_no_grandfathered_edit_outlives_its_reason() -> None:
         f"grandfathered edit(s) that no longer differ from the commit that introduced them: "
         f"{sorted(_GRANDFATHERED_EDITS - set(edited))}. The exemption has nothing left to permit, "
         "so delete it — leaving it granted means the next edit to that file goes unexamined."
+    )
+
+
+def test_truncating_history_never_raises_the_number_of_sound_comparisons(tmp_path: Path) -> None:
+    """`compared` must fall when history is cut away, because that is the only reason to trust it.
+
+    Both checks above abstain on `compared < 30` when git reports a shallow repository, and that
+    threshold is only meaningful if the number actually tracks how much history is present. It did
+    not. Measured on this repository before the graft exclusion was added: a 171-commit clone
+    reported **47** comparisons against the **44** of a complete one, because truncation gives
+    *more* files an earliest-commit that is not `HEAD` — the graft stands in for the real
+    introduction. The skip therefore never fired above depth 1, and it had been unreachable since
+    the tree crossed thirty migrations.
+
+    What that cost was not hypothetical. On such a clone the immutability check compared every
+    migration against its graft-boundary content and passed having verified nothing about any edit
+    made earlier, while its sibling failed and told the reader to delete two exemptions that are
+    live on full history — an instruction that would have removed the control it exists to keep.
+
+    Asserted as an inequality rather than a fixed number so it keeps holding as migrations are
+    added: cutting history away can only remove comparisons, never invent them.
+    """
+    repo = _MIGRATIONS.parents[1]
+    if _git(repo, "rev-parse", "--is-shallow-repository") != "false":
+        pytest.skip("this checkout is itself truncated, so there is no complete run to compare to")
+
+    _, complete = _statements_changed_since_merge()
+
+    clone = tmp_path / "truncated"
+    cloned = subprocess.run(
+        # Deeper than 1 on purpose: at depth 1 the graft *is* `HEAD`, which the walk already
+        # excludes, so a depth-1 clone cannot tell the graft exclusion from its absence.
+        ["git", "clone", "--quiet", "--depth", "50", f"file://{repo}", str(clone)],
+        capture_output=True,
+        text=True,
+    )
+    if cloned.returncode != 0:
+        pytest.skip(f"could not build a truncated clone: {cloned.stderr.strip()}")
+
+    _, truncated = _statements_changed_since_merge(clone / "infra" / "sql")
+
+    assert truncated <= complete, (
+        f"a 50-commit clone reported {truncated} sound comparisons against {complete} on the "
+        f"complete history. `compared` is what both checks above read to decide whether they are "
+        "looking at real history, so a number that rises as history is removed makes that decision "
+        "backwards: the checks run, compare each migration against a graft-boundary version of "
+        "itself, and report success having asked nothing."
     )

@@ -79,7 +79,7 @@ from chemclaw.core.ids import stable_hash
 # search rather than being silently compared against rows built under a newer one — the guard
 # `science/fingerprints/store.py` already applies to a changed radius or bit width, extended to the
 # other thing that decides what a row *is*.
-STANDARDIZATION_VERSION = "std4"
+STANDARDIZATION_VERSION = "std5"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -117,7 +117,30 @@ _METALS = _REACTIVE_METALS | frozenset(
 
 # One `TautomerEnumerator` for the process. Constructing it parses its transform catalogue, which
 # is not free, and this runs per component per ingested reaction.
+#
+# **Both stereo flags are turned off, and that is the whole point of configuring it at all.**
+# RDKit defaults `removeSp3Stereo` and `removeBondStereo` to True: when a tautomer transform fires,
+# it discards the stereochemistry at the atoms it touched, on the reasoning that a centre which
+# tautomerises is not configurationally stable. That reasoning is about a molecule in solution over
+# time. It is the wrong rule for an *identity* function, which is what this pipeline is — the output
+# is folded into `compound_id`, into the ECFP4 and DRFP fingerprint rows, and into the knowledge
+# graph's note ids.
+#
+# Left at the default, every stereocentre alpha to a carbonyl is erased, and that is most chiral
+# drug molecules. Measured on this tree: (S)- and (R)-naproxen, L- and D-alanine, and R- and
+# S-thalidomide each collapsed to one standardized string, one `compound_id`, one fingerprint row
+# and one note; 11 of 20 surveyed chiral drugs lost a stereocentre. Worse than a merged record, the
+# graph then *reasons* on the collision — chain detection built a product→reactant edge between a
+# run that made (S)-naproxen and a run that consumed (R)-naproxen, a chemical relationship that does
+# not exist. Thalidomide is the pair every pharmacology course opens with.
+#
+# `removeBondStereo` is off for the same reason and was measured the same way: E/Z is only lost when
+# a transform actually fires, so it survives on a molecule with no enolizable centre and disappears
+# on one that has both — `C/C=C/CC(=O)C` and `C/C=C\CC(=O)C` both standardized to `CC=CCC(C)=O`.
+# Maleic and fumaric acid are not the same compound either.
 _TAUTOMERS = rdMolStandardize.TautomerEnumerator()
+_TAUTOMERS.SetRemoveSp3Stereo(False)
+_TAUTOMERS.SetRemoveBondStereo(False)
 
 
 @lru_cache(maxsize=4096)

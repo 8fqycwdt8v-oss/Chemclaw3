@@ -312,3 +312,62 @@ def test_the_tool_reaches_every_knob() -> None:
     assert design.n_center == 1
     assert design.n_repetitions == 2
     assert design.randomized is True
+
+
+def _crossed_problem(n_categorical: int, n_continuous: int) -> OptimizationProblem:
+    """A mixed domain: `n_categorical` two-level factors and `n_continuous` continuous ones."""
+    return OptimizationProblem(
+        parameters=[
+            *(
+                CategoricalParameter(name=f"cat{i}", categories=[f"a{i}", f"b{i}"])
+                for i in range(n_categorical)
+            ),
+            *(
+                ContinuousParameter(name=f"cont{i}", lower=0.0, upper=100.0)
+                for i in range(n_continuous)
+            ),
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+
+
+@pytest.mark.parametrize(
+    ("n_categorical", "n_continuous"), [(1, 1), (2, 1), (1, 2), (2, 2), (3, 1)]
+)
+def test_a_mixed_full_factorial_is_the_whole_cross_product(
+    n_categorical: int, n_continuous: int
+) -> None:
+    """A "full factorial" must contain every combination — the mixed case did not.
+
+    `test_factorial_design_enumerates_every_combination` above covers a categorical-only problem,
+    where there is nothing to cross, so it could not see this. BoFire's combining step tiles both
+    its continuous and its categorical frame where a cross product repeats one and tiles the other,
+    so row *i* paired `continuous[i % N]` with `categorical[i % C]` — the product only when
+    `gcd(N, C) == 1`, which no all-two-level problem satisfies.
+
+    Measured before the fix: 2 distinct rows of 4 at 1x1, and **4 of 16** at 2x2 — three quarters of
+    the design absent, the survivors duplicated, and one factor perfectly confounded with another,
+    while `summary` said "every combination of them is run". A screening design exists to attribute
+    an effect to a factor; an aliased one cannot.
+    """
+    problem = _crossed_problem(n_categorical, n_continuous)
+    expected = 2 ** (n_categorical + n_continuous)
+
+    runs = factorial_design(problem).runs
+    distinct = {tuple(sorted(run.items())) for run in runs}
+
+    assert len(distinct) == expected, (
+        f"{n_categorical} categorical x {n_continuous} continuous: {len(distinct)} distinct "
+        f"combinations of {expected}. A design missing combinations is aliased, and the summary "
+        f"calls it exhaustive."
+    )
+    assert len(runs) == expected, "no combination should be duplicated in an unreplicated design"
+
+
+def test_a_mixed_factorial_crosses_categories_against_both_bounds() -> None:
+    """The property behind the counting test: every category meets every bound."""
+    problem = _crossed_problem(1, 1)
+
+    pairs = {(run["cat0"], run["cont0"]) for run in factorial_design(problem).runs}
+
+    assert pairs == {("a0", 0.0), ("a0", 100.0), ("b0", 0.0), ("b0", 100.0)}
