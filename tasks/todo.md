@@ -1,122 +1,114 @@
-# Deep review of knowledge management (layer 4 + its read paths)
+# Make the agentic backend lean to read
 
-Scope: `src/chemclaw/kg/` and everything that reads it on a hot path —
-`agent/graph_tools.py`, `retrieval/retrievers.py`, `durable/digest.py`.
+Scope: readability only. No behaviour change anywhere — every gate, event, refusal, metric and
+audit row must be byte-identical in effect. The suite is the proof, not the argument.
 
-Every item below was **measured before being called a defect**, on a synthetic
-programme-shaped corpus (2,000 notes, 3.91 MB of body, 7 substrates, 16 note types)
-built by `tasks/live-test/`-style generation rather than argued from the code.
+## Why these three and not "cut the docstrings"
 
-## Baseline, measured before any change
+Measured before planning, because the obvious move is the wrong one. `agent/` holds **422
+docstrings, 5,400 lines, median 9 lines, mean 12.8** — a healthy median with a long tail: **42
+docstrings over 30 lines carry 1,770 of those lines**. So the prose is not uniformly bloated and a
+mass cut would destroy the measurements this tree keeps deliberately. The reading cost is
+concentrated in three structural places instead.
 
-Docker, Postgres and Temporal started first (`sudo -n dockerd`, `make up`, `make db-migrate`),
-because a local `pytest` without them skips ~157 Postgres tests and still prints green.
+## 1 — `api/runner.py::run_turn` is one 483-line async generator
 
-| | result |
-|---|---|
-| `pytest tests/test_{graph,note,note_search,conflicts,crosslink,graph_tools,note_proposals}.py` | 148 passed |
-| cold `load_notes`, 1 thread | 198 ms |
-| cold `load_notes`, 4 threads | **2,521 ms** |
-| cold `load_notes`, 8 threads | **6,219 ms** |
-| `collect_digests` match loop, 50 subscriptions | 352 ms |
+- [ ] `_TurnLedger` dataclass for the state that crosses stage boundaries (`answered`,
+      `run_complete`, `answer_parts`, `started_jobs`, `tool_exchanges`, usage).
+- [ ] `_turn_ambient(...)` sync `@contextmanager` stamping and resetting all five contextvars —
+      makes "nothing in the teardown may await" structural rather than a comment.
+- [ ] `_stream_into(...)` async generator shared by the main run and the mid-turn resume (the
+      answer-part loop is currently written twice).
+- [ ] `_resume_on_job_results(...)` for the mid-turn resume block.
+- [ ] `_loop_cap_event(...)` / `_empty_answer_event(...)` returning `ErrorEvent | None`.
+- [ ] `_book_turn_spend(...)` for the metrics + cost-ledger tail (sync, no await).
+- [ ] `run_turn` left as orchestration a reader can hold in their head.
 
-## The findings
+**Hazards, each of which the current code documents and must keep:** the teardown clause must
+still catch `CancelledError` as well as `GeneratorExit` (D-130 — production disconnects arrive as
+the former); the rollback predicate stays `run_complete`, never `answered`; `finally` must not
+`await`; `consume_turn_approval` stays out of `finally`; `empty_answer` must still `return` rather
+than fall through.
 
-- [x] **K1 — concurrent cold reads of the corpus each parse it in full.** `kg/graph.py`'s
-      double-checked caches release `_CACHE_LOCK` before `_dir_fingerprint`/`_parse_notes`, so
-      every thread that misses together parses the whole tree. Measured 198 ms at one thread,
-      **2,521 ms at four, 6,219 ms at eight** — 31× the work for 8× the callers, because the
-      duplicated parses contend on the GIL. Reachable on every process start and after every
-      `invalidate_cache()` (the PR-gate's `_repair_parked_checkout` and the note reindex both
-      call it), with three retrieval sources and the report harness all offloading `load_notes`
-      to threads at once. `kg/conflicts.py` already holds its lock across the computation and
-      argues exactly this ("a second caller waiting is strictly better than a second caller
-      duplicating"); its sibling in `graph.py` did not.
-      **Fix:** a per-directory computation lock, so one caller computes and the rest wait.
+## 2 — Relocate the long-tail prose — **attempted on the worst case, and it yields nothing**
 
-- [x] **K2 — two notes with one id collapse in the served tree, silently.** Measured: a corpus
-      with `reaction/rxn-1.md` and `compound/rxn-1.md` yields 5 parsed notes and 5 graph nodes;
-      whichever file sorts last wins `add_node`, and the other note is unreachable by every
-      query. `kg-validate` catches it in the repository, which is not the tree a pod serves — the
-      same argument that made `chemclaw_notes_unparseable_total` exist. Worse, the winner
-      *disagreed* between readers: `_parse_notes` (list, both present) and
-      `note_file_fingerprints` (dict, last-wins) named different files, so the reindex could
-      embed one note's text under the other's id.
-      **Fix:** one deterministic winner (first in path order, matching `kg/validate.py`'s
-      `id_to_path`), applied in both scans, with a WARNING and
-      `chemclaw_notes_duplicate_id_total`.
+The plan assumed these docstrings were narrative that could move to a README behind a pointer, and
+estimated 1,000–1,400 lines. **That estimate was wrong and the attempt is what showed it.**
 
-- [x] **K3 — `find_knowledge_gaps` reports notes that do not exist as the graph's top hubs.**
-      Measured: on a corpus where four notes cite a still-pending `compound-pending`, `analyze`
-      returns it as the **most-cited note in the graph**. `_hubs` ranks every node by in-degree,
-      and `build_graph` deliberately keeps a dangling target as a node with no `note` attribute.
-      D-018 makes this the normal state, not a corruption: a fingerprint-indexed reaction whose
-      note is still in PR-gate review is cited before it exists. The agent is told to check that
-      hub first and `expand_note` then raises.
-      **Fix:** rank only nodes that carry a note; dangling targets keep their own field.
+Tried on the single biggest, `agent/checkpointer.py`'s 93-line module docstring, which looked like
+the best possible case: it explicitly says its measurements are run by
+`tests/test_checkpointer_schema.py`, and each of its four measured bullets does correspond to a
+test whose *name* states the same finding. Real duplication, provably.
 
-- [x] **K4 — the digest re-tokenizes its query once per note.** `durable/digest.py::_matches`
-      calls `query_terms(subscription.query)` inside the per-note loop: for 50 subscriptions over
-      2,000 notes that is 100,000 regex splits of a string that never changes. Measured
-      **352 ms → 225 ms** by hoisting it, on an hourly activity.
+- First attempt — bullets collapsed into a prose pointer: **93 → 88 lines**, and materially worse
+  to read. A dense paragraph carrying four test names is not leaner than the list it replaced.
+- Second attempt — keep the bullets, append the test name to each, drop the restated numbers:
+  **93 → 93 lines.** Zero.
 
-- [x] **K5 — typed edges reach no reader.** D-134 put `rel`, `confidence` and per-edge validity
-      on the graph; `Relation`, `outgoing_relations` and `graph.related` all work. But
-      `expand_note` returns neighbours as bare `NoteRef`s, so the model cannot tell a
-      `contradicts` neighbour from a `cites` one — including the `contradicts` edge
-      `record_failure` writes for the express purpose that a refuted note "arrives marked as
-      disputed". Direction is load-bearing here: "A supersedes B" and "B supersedes A" are
-      opposite claims.
-      **Fix (feature):** neighbours carry the typed edges that connect them to the anchor, with
-      the two directions kept apart.
+**So the compression is not available.** These are measurement records attached to the code they
+constrain, not narrative wrapped around it. Three things block the move independently: merged ADRs
+are never edited, so the natural destination is unavailable; a README breaks the locality that
+makes a measurement useful, since it is read when standing at the code; and a pointer to prose
+elsewhere is the stale-pointer defect the previous PR existed to fix.
 
-- [x] **K6 — `find_notes` assembles a graph it never traverses.** It calls `build_graph` for a
-      pure substring sweep over note metadata, so a cold call pays node/edge insertion for
-      nothing, and the sweep then iterates dangling ids that can never match.
-      **Fix:** read `load_notes`, sort by id (the order the cap warning already claims).
+- [x] Measured on the worst case rather than assumed across all 26.
+- [x] The checkpointer edit is **kept** — same length, but every measured claim now names the
+      executable test that proves it, so the prose can no longer drift from the behaviour. That is
+      a staleness fix, and it is honestly not a leanness one.
+- [ ] The remaining 25 are **not** touched. There is no yield to have.
 
-## Verification plan
+## 3 — Cut the import fan-out — **measured, and not done, because it works against the goal**
 
-- [x] A regression test per finding, each proving the *behaviour*, not the shape:
-      concurrent cold parses count one parse; a duplicate id logs, counts and resolves the same
-      way in both scans; a dangling hub is absent from `most_cited` and present in
-      `dangling_links`; `_matches` is unchanged for every query; a `contradicts` neighbour is
-      reported with its direction; `find_notes` returns exactly what it returned before.
-- [x] Re-measure K1 and K4 after the change and record the numbers.
-- [x] `make lint type test` green with infrastructure up (no skipped Postgres tests).
+Static closure of `api.runner`: **156 modules, 529 internal edges.** Every edge was tried.
+
+- **447 of the 529 save nothing at all.** The graph is densely reconnected, so a cut usually just
+  routes around itself — `kg.note` alone is imported by **22** modules inside the closure.
+- The best single cut is `durable.connector_job -> durable.memory_jobs` (−10), and it is the
+  riskiest place in the tree to touch: it sits inside `workflow.unsafe.imports_passed_through()`,
+  where an import change is a Temporal determinism/replay question.
+- Greedily stacking the eight best cuts reaches **156 → 98 (37%)**.
+
+**The 37% is real and is still the wrong trade.** Each of the eight is an import moved from a
+module header into a function body, and the eight are `langgraph_agent`, `graph_tools`,
+`research_tools`, `memory_tools`, `report_workflow`, `note_index`, `template_job`, `memory_jobs` —
+every one of which a live front door imports on its *first turn* anyway. So the saving is startup
+latency, not steady state, and it is bought by hiding the dependency structure inside function
+bodies. That makes the tree harder to read, which is the thing this task exists to fix.
+
+- [x] Measured exhaustively rather than argued.
+- [ ] **Not implemented.** Reported to the requester with the numbers; theirs to overrule if the
+      startup-time win is wanted for its own sake.
+
+The fan-out does point at one genuine layering question — `agent/durable_tools.py` imports workflow
+*implementations* in order to launch them, where D-002 says durability lives only in Temporal. That
+is an architectural change needing its own ADR, not a readability edit.
+
+## Verification
+
+- [ ] `make lint type test` on a **full clone** with Docker up, so nothing skips for want of
+      Postgres/Temporal. Report what skipped, if anything.
+- [ ] PR, merge on green CI.
 
 ## Review
 
-**Shipped.** `make lint` and `make type` clean over 593 files; `make test` with Postgres and
-Temporal up: **4,051 passed, 1 failed**. That one failure,
-`test_no_grandfathered_edit_outlives_its_reason`, **reproduces on the unmodified tree** (verified by
-stashing) — this environment's clone is shallow with 170 commits, so the test's `compared < 30` skip
-guard never fires while its history diff finds nothing edited. An environment coupling in that
-guard, left for the module that owns it. 12 new tests, each verified to fail without its fix.
+**One of the three was worth doing, and the other two are worth having measured.**
 
-| measurement | before | after |
-|---|---|---|
-| cold `load_notes`, 4 concurrent threads | 2,521 ms | **201 ms** (12.5×) |
-| cold `load_notes`, 8 concurrent threads | 6,219 ms | **252 ms** (24.7×) |
-| corpus parses for 8 concurrent cold readers | 8 | **1** |
-| graph assemblies for 8 concurrent cold builders | 8 | **1** |
-| `collect_digests` match loop, 50 subscriptions | 352 ms | **220 ms** (1.6×) |
-| cold `find_notes` | 220 ms + sweep | **192 ms** |
+`run_turn` was the whole reading cost: **483 lines → 194, of which 90 are code**. Nothing was
+deleted — every hazard comment moved onto the function that now owns it, which is the actual gain.
+The D-130 cancellation rule now sits on the rollback that depends on it; the
+`run_complete`-not-`answered` distinction is stated once, on the field; the "nothing here may
+`await`" rule stopped being a comment and became the type of the thing, because `_turn_ambient` and
+`_book_turn_spend` are synchronous and cannot acquire an `await`. One duplicated loop
+(`_stream_into`, written twice — once for the model run, once for the resume) became one.
 
-The decision record is
-[`D-2026-08-16-a-cache-that-lets-every-caller-miss-together.md`](../docs/decisions/D-2026-08-16-a-cache-that-lets-every-caller-miss-together.md).
+The other two were both **estimates I made before measuring, and both were wrong in the same
+direction**: I sized them by eye from a line count and proposed them as wins. Measured, the docstring
+compression yields *zero* lines once readability is held constant, and the import work yields 37%
+of a number that only describes process startup — bought by hiding eight dependencies inside
+function bodies, which makes the tree harder to read. Neither is a defensible trade for a task whose
+whole purpose is readability.
 
-**What was considered and deliberately not done**, so it is not re-derived:
-
-- *Caching the lowered search haystack per note.* Measured 4.48 ms → 2.02 ms on an interactive
-  query over 2,000 notes. Real, and not worth a fourth fingerprint-keyed cache layer plus ~4 MB
-  of duplicated text held live; K4's hoist took the part that was free.
-- *Validating that a note's file sits in a `<type>/` directory.* The layout is a convention the
-  code does not depend on — only `path.stem` is an index key — and the suite writes note trees
-  flat in `tmp_path` in dozens of places. A check would enforce a rule nothing reads.
-- *Clearing `conflicts._INDEX_CACHE` from `graph.invalidate_cache`.* It is already correct: the
-  conflict index re-derives its fingerprint through `cached_notes`, so a bust upstream
-  invalidates it downstream. A registration hook for two caches is an abstraction with no third
-  caller.
-- *Making `analytics._DISTILLED_TYPES` connector-extensible.* Consistent with the `note_types:`
-  seam in principle, with no bundle today declaring a type that distils anything.
+**Lesson for `tasks/lessons.md`:** a line count is not a measure of reading cost. `agent/` is 58%
+prose and that prose is mostly measurements; the file that was genuinely hard to read was the one
+with a 483-line function in it. Size the work by structure, not by ratio — and measure the
+candidate before pitching it, not after it is approved.
