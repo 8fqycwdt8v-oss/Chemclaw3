@@ -165,9 +165,18 @@ genuinely executed rather than skipping — `pytest tests/test_retention.py` rep
   150 passed in 36.87s
   ```
 
-  Neither trap fired: the whole front-door turn path — SSE streaming, cancellation, mid-turn
-  signals, the M12 probes — runs 150 tests without `feed` being entered once, and `flush` is
-  always called on an empty buffer.
+  and, more broadly, over the whole suite minus the four files that call `feed` directly:
+
+  ```
+  $ uv run pytest tests/ -q --ignore=tests/test_runner.py --ignore=tests/test_tool_results.py \
+      --ignore=tests/test_review_2026_08_05.py --ignore=tests/test_service_events.py \
+      -k "service or stream or turn or graph or event or cli or storm or dialogue or m12 or runner"
+  614 passed, 3377 deselected in 462.15s
+  ```
+
+  Neither trap fired in either run: the whole front-door turn path — SSE streaming, cancellation,
+  mid-turn signals, the CLI drivers, the M12 probes — runs 614 tests without `feed` being entered
+  once, and `flush` is always called on an empty buffer.
 - **Fix**: decide whether the MAF-era reassembly is still wanted. If not, delete `feed`/`_take`/`_arguments_complete`/`_result_text`/`_names`/`_fragments`, `flush` and its call in `runner.py:324`, and `FakeUpdate`/`fed` with the ~47 assertions that drive them — the coverage that matters (`issued`, `returned`, the argument budget, `outputs`) stays. If it is wanted for a future non-LangGraph provider, it needs a production caller and a test that reaches it *through* one; a private method exercised only by a hand-built double is the shape `tests/test_upstream_surface.py`'s own docstring warns about ("a behaviour assertion that runs in isolation is exactly the kind that passes while the thing it describes is disconnected").
 
 ---
