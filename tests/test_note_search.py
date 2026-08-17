@@ -116,7 +116,7 @@ def test_the_digest_matches_what_find_notes_matches() -> None:
     subscription = Subscription(id=1, owner="chemist", query="biaryl coupling")
     terms = query_terms(subscription.query)
 
-    assert _matches(note, subscription)
+    assert _matches(note, subscription, terms)
     assert term_coverage(note, terms) == len(terms)
 
 
