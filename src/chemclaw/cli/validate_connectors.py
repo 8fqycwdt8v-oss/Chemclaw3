@@ -34,11 +34,13 @@ Read-only; touches nothing.
 
 import asyncio
 import inspect
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 from chemclaw.connectors.jobs import _params_model, build_job_tool, resolve_precondition
 from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
+from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import (
     ConnectorError,
     discovered,
@@ -48,6 +50,7 @@ from chemclaw.connectors.registry import (
 )
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.durable.registry import registered_workflows, temporal_name
 
 # Name prefixes that mark a tool as mutating. A prefix list rather than an exact allowlist because
 # the rule is about *intent*: a connector author naming a tool `index_*`, `write_*`, `delete_*` or
@@ -214,6 +217,23 @@ def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
     ]
 
 
+def _registered_workflow_names(connector: str) -> set[str] | None:
+    """The Temporal type names this bundle's own modules register, or `None` if it has no worker.
+
+    Importing `connectors.<name>.workflows` is what registers them — the same side-effect-import
+    contract the workers themselves rely on — so this validator has to do the import the worker
+    would do. `None` (no such module) is not a problem to report here: a bundle may legitimately
+    declare jobs whose workflow lives elsewhere in a future arrangement, and a missing module is
+    already an unmistakable failure at worker start. What this function exists to catch is the
+    silent case: a module that *is* there and does not register the name the manifest promises.
+    """
+    try:
+        import_module(f"chemclaw.connectors.{connector}.workflows")
+    except ImportError:
+        return None
+    return {temporal_name(cls) for cls in registered_workflows(bundle_queue(connector))}
+
+
 def _job_problems(manifest: ConnectorManifest) -> list[str]:
     """Build each declared job's tool, so an unresolvable `params_model` fails here (rule 4).
 
@@ -224,12 +244,28 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
     been. The manifest cannot see the deployment's timeout; this check can.
     """
     problems: list[str] = []
+    served = _registered_workflow_names(manifest.name)
     for job in manifest.jobs:
         try:
             build_job_tool(manifest.name, job)
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: job {job.name!r} cannot be built: {exc}")
         problems.extend(_precondition_problems(manifest.name, job))
+        # **The last unchecked string in a seam whose design is two plain strings.** `workflow` is a
+        # Temporal type name, resolved at dispatch against whatever the bundle's worker registered —
+        # so `mypy` cannot see it, no test covered it, and a typo passed lint, type, pytest and
+        # every other rule in this file. What it costs at runtime: the child starts on a queue whose
+        # worker serves no such type, the parent waits `connector_job_timeout_seconds` (25 h at the
+        # shipped default), and the chemist is told "running" for a day. That is the failure
+        # `durable/registry.py` exists to prevent, one level above where it can see.
+        if served is not None and job.workflow not in served:
+            queue = bundle_queue(manifest.name)
+            problems.append(
+                f"connector {manifest.name!r}: job {job.name!r} names workflow {job.workflow!r}, "
+                f"which the bundle's own modules do not register on {queue!r} "
+                f"(registered: {sorted(served) or 'none'}) — the job would start and then wait "
+                "for a worker that serves no such type"
+            )
         budget = job.inline_wait_seconds
         if budget is not None and budget >= settings.service_turn_timeout_seconds:
             problems.append(

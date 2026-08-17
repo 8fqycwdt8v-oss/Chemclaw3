@@ -27,6 +27,7 @@ from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.memory.failure import close_refuted_note, failure_note
 
@@ -52,12 +53,34 @@ class NoteRef(BaseModel):
     valid_to: date | None = None
 
 
+class NeighborRef(NoteRef):
+    """A neighbouring note, plus the typed edges that connect it to the note being expanded.
+
+    **Direction is kept, and that is the whole point of two fields rather than one.** "A supersedes
+    B" and "B supersedes A" are opposite claims about which note is the current answer, and
+    `contradicts`, `precursor-of` and `computed-from` are the same shape. Flattening them into one
+    list of relation names would hand the model a set of edges it could read either way round.
+
+    Both lists are empty for a neighbour that is not *directly* linked — at `hops=2` most are not —
+    and for one linked only by a bare `[[wikilink]]`, whose relation is `cites` and which carries no
+    claim worth reporting. An empty pair therefore means "adjacent in the neighbourhood, nothing
+    asserted about how", which is exactly what the untyped view said before D-134 gave edges types
+    and nothing read them.
+    """
+
+    # Asserted by the expanded note *about* this neighbour, and by this neighbour about it. Sorted
+    # and deduplicated: an edge carries a tuple of `Relation`s (see `kg.graph._assemble_graph`), and
+    # what a reader needs here is which relations hold, not how many times each was written.
+    relations_out: list[str] = Field(default_factory=list)
+    relations_in: list[str] = Field(default_factory=list)
+
+
 class NoteView(BaseModel):
     """A note's body plus the notes within a few links of it (graph neighborhood)."""
 
     note: NoteRef
     body: str
-    neighbors: list[NoteRef]
+    neighbors: list[NeighborRef]
 
 
 def _ref(note: Note) -> NoteRef:
@@ -91,7 +114,12 @@ async def find_notes(text: str) -> list[NoteRef]:
         no current note contains every word — it does not mean the topic is absent from the
         graph; a single differently-worded term (e.g. just "suzuki") may still find it.
     """
-    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+    # `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
+    # body, and it never follows an edge. Assembling the graph made a cold call pay node and edge
+    # insertion for a traversal it does not do, and made the sweep iterate dangling link targets —
+    # nodes with no note behind them, skipped one line later. Both caches sit behind the same stat
+    # fingerprint, so a warm call is unchanged.
+    notes = await asyncio.to_thread(load_notes, settings.knowledge_path)
     # The same tokenizer and the same haystack every other note search uses
     # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.
     # A bare `text.lower().split()` here made "the biaryl" require the literal word "the".
@@ -102,10 +130,9 @@ async def find_notes(text: str) -> list[NoteRef]:
     # `retrieval_top_k`), and warn on truncation so it is never a silent cap (D-066 #4).
     cap = settings.graph_max_results
     matches = []
-    for node_id in sorted(graph.nodes):
-        note = graph.nodes[node_id].get("note")
-        if note is None:
-            continue
+    # Id order, which is what the truncation warning below promises and what the graph's node
+    # iteration used to supply; `load_notes` yields path order.
+    for note in sorted(notes, key=lambda candidate: candidate.id):
         # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
@@ -121,6 +148,41 @@ async def find_notes(text: str) -> list[NoteRef]:
                 )
                 break
     return matches
+
+
+def _edge_relations(graph: nx.DiGraph, source: str, target: str) -> list[str]:
+    """The relation names asserted on the `source -> target` edge, sorted; empty if there is none.
+
+    Reads the `relations` attribute `chemclaw.kg.graph._assemble_graph` puts on every edge, which
+    until now no caller in this repository read at all — `graph.related` is the only other reader
+    and nothing calls it (see `kg/README.md`). A bare `[[wikilink]]` yields `cites`, which is
+    filtered out by `_neighbor_ref` rather than here: this function answers what the graph says,
+    and what is worth reporting is the caller's question.
+    """
+    if not graph.has_edge(source, target):
+        return []
+    return sorted({relation.rel for relation in graph[source][target].get("relations", ())})
+
+
+def _neighbor_ref(graph: nx.DiGraph, anchor_id: str, note: Note) -> NeighborRef:
+    """One neighbour of `anchor_id`, carrying the typed edges between the two.
+
+    `cites` is dropped from both directions deliberately. It is `relations.DEFAULT_RELATION` — what
+    every untyped `[[wikilink]]` in the corpus already means — so reporting it would put the word
+    "cites" on the majority of neighbours while saying nothing the neighbourhood itself does not
+    already say. What survives is the set of edges an author typed *on purpose*, which is the set
+    a reader has to weigh: a `contradicts` neighbour is not the same evidence as an `analogue-of`
+    one, and before this the two arrived indistinguishable.
+    """
+    return NeighborRef(
+        **_ref(note).model_dump(),
+        relations_out=[
+            rel for rel in _edge_relations(graph, anchor_id, note.id) if rel != DEFAULT_RELATION
+        ],
+        relations_in=[
+            rel for rel in _edge_relations(graph, note.id, anchor_id) if rel != DEFAULT_RELATION
+        ],
+    )
 
 
 def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
@@ -147,12 +209,20 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     Retrieval is graph traversal, not vector similarity: neighbors are stated
     relations. Raises if the id is unknown.
 
+    Each directly-linked neighbor carries the *typed* edges between it and this note, in
+    `relations_out` (what this note asserts about the neighbor) and `relations_in` (what the
+    neighbor asserts about this note) — so a `contradicts` or `supersedes` neighbor is legible as
+    one, in the right direction, rather than arriving as an ordinary link. Untyped `[[wikilinks]]`
+    and neighbors reached in two hops carry no relations, which is what "nothing is asserted about
+    how these are connected" looks like.
+
     Args:
         note_id: The id of the entry note.
         hops: How many link steps to expand (1 or 2).
 
     Returns:
-        The note's body plus its neighborhood as references.
+        The note's body plus its neighborhood as references, each with the relations that link it
+        to this note.
 
     Raises:
         ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
@@ -172,7 +242,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # The anchor is an explicit by-id lookup, so it is returned even if expired; its neighbors are a
     # discovery sweep, so non-current ones are dropped from the current-evidence view (KM-7).
     neighbors = [
-        _ref(graph.nodes[nid]["note"])
+        _neighbor_ref(graph, note_id, graph.nodes[nid]["note"])
         for nid in sorted(neighborhood(graph, note_id, hops=hops))
         if graph.nodes[nid].get("note") is not None and graph.nodes[nid]["note"].is_current(today)
     ]

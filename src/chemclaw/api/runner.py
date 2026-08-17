@@ -22,8 +22,9 @@ import copy
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from contextlib import AsyncExitStack, contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
@@ -159,432 +160,245 @@ async def run_turn(
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
-    turn_started = time.perf_counter()
+    ledger = _TurnLedger(correlation_id=uuid.uuid4().hex, usage=TurnUsage())
     # Whether this turn's approval is spendable, asked exactly as `build_langgraph_agent` asks
     # whether to attach the gate — one predicate, so the two cannot disagree about a profile that
     # overrides the deployment's autonomy.
     plan_gated = gate_applies(get_profile(profile))
-    # Whether this turn produced its answer — the cost ledger's question ("did the user get an
-    # answer for the money"), and only that. It is deliberately *not* the rollback predicate:
-    # `answered` becomes true only after the verifier and any mid-turn resume have run, windows in
-    # which the model run has already settled the session state, so gating the rollback on it
-    # undid finished runs whose teardown merely landed in one of those windows. `run_complete`
-    # below is the rollback's predicate; the two questions have different right answers.
-    answered = False
-    # Whether the last model run returned. That is the fact the state rollback cares about: it
-    # exists to undo bookkeeping a turn advanced for work it never finished, and once the run has
-    # returned there is no unfinished work left to disown, however much of it (loop-cap reporting,
-    # job-result waits, answer verification) still lies between here and the AnswerEvent. Cleared
-    # again for the mid-turn resume's second run, which can be cut short exactly like the first.
-    run_complete = False
-    answer_parts: list[str] = []
-    # Metered across the turn's updates and booked once on teardown (even on failure — a failed
-    # turn still spent tokens up to the point it broke, so its cost must count toward the next
-    # check).
-    turn_usage = TurnUsage()
-    # Stamp the turn's session so a job-launching tool (compute_dft_energy) records push-back to the
-    # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
-    session_token = set_current_session_id(session.session_id)
-    # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
-    identity_token = set_current_identity(actor, roles) if actor is not None else None
-    # One correlation id per *turn*, stamped here rather than bound inside `build_langgraph_agent`:
-    # agents are cached per profile for the process's lifetime, so a build-time id was shared by
-    # every turn from every user on the pod — the audit trail could not tell two conversations
-    # apart, which is the one thing a correlation id exists to do.
-    correlation_id = uuid.uuid4().hex
-    correlation_token = set_current_correlation_id(correlation_id)
-    # Count this turn's tool calls, so the identical question asked a third time is refused rather
-    # than re-executed (`chemclaw.agent.repeat_guard`). Started here beside the signal buffer
-    # because it is a per-turn ambient the middleware reads and the runner owns the lifetime of.
-    calls_token = begin_call_watch()
-    # Watch the loop's stop decisions, so a turn stopped by the runaway cap can say so instead of
-    # looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op without the
-    # harness, which is what attaches the cap.
-    loop_token = begin_loop_watch()
-    # Durable jobs this turn launched, for the optional mid-turn resume below.
-    started_jobs: list[str] = []
-    # The tool-bearing messages this turn produced, for the transcript projection: the events
-    # carry no call id, so a projection rebuilt from them could not pair a result with its call.
-    tool_exchanges: list[Any] = []
-    dry_run_token = set_dry_run(dry_run)
     # Snapshot the session state before the turn so a client disconnect can roll it back
-    # (ISSUE-B-10). `session.state` is the harness's own bookkeeping — the todo list, the plan
-    # hash, the approval marks — and a turn torn down half-way through has advanced it for work
-    # that never finished, so the next turn would read a plan claiming steps it never took.
-    #
-    # Only `session.state` is rolled back, and that is the whole rollback now. It used to have a
-    # durable half: a pre-turn watermark over `session_messages`, because the previous engine wrote
-    # the stored thread incrementally and fed it back to the model, so a disconnect mid-tool-call
-    # committed a
-    # `tool_use` with no matching `tool_result` and every later turn replayed it — the model
-    # rejected the thread outright ("tool_use ids found without tool_result blocks") and one
-    # dropped connection permanently bricked the conversation. The graph reads its own
-    # checkpointer instead, and `_record_transcript` writes the user message and the answer
-    # together in one call once the answer exists, so there is no window in which half an exchange
-    # is committed and nothing to delete on the way out (D-2026-08-10 §2).
+    # (ISSUE-B-10). What the snapshot is for, and why only `session.state` is in it, is in
+    # `_roll_back_unfinished`.
     state_snapshot = copy.deepcopy(session.state)
-    try:
-        async with AsyncExitStack() as stack:
-            # The turn span, which is the parent every other span in this request hangs from — the
-            # model calls the graph emits, the tool spans `agent/audit.py` opens, and (through
-            # `traceparent`) whatever a connector does on our behalf. Pushed onto the stack that is
-            # already here rather than wrapping the body, so the span's lifetime is exactly the
-            # turn's teardown and there is no second place that has to remember to close it.
-            stack.enter_context(
-                start_span(
-                    "chemclaw.turn",
-                    **{"session.id": session.session_id, "profile": profile or ""},
+    with _turn_ambient(session.session_id, actor, roles, dry_run, ledger.correlation_id):
+        try:
+            async with AsyncExitStack() as stack:
+                # The turn span, which is the parent every other span in this request hangs from —
+                # the model calls the graph emits, the tool spans `agent/audit.py` opens, and
+                # (through `traceparent`) whatever a connector does on our behalf. Pushed onto the
+                # stack that is already here rather than wrapping the body, so the span's lifetime
+                # is exactly the turn's teardown and there is no second place that has to remember
+                # to close it.
+                stack.enter_context(
+                    start_span(
+                        "chemclaw.turn",
+                        **{"session.id": session.session_id, "profile": profile or ""},
+                    )
                 )
-            )
-            # This turn's own connector tools, connected for its duration and torn down after.
-            # Built per turn rather than held on the agent because a connector's connection must
-            # belong to exactly one turn — see `chemclaw.connectors.transport`. The graph binds
-            # them alongside the profile's in-process tools at construction, so the model sees one
-            # combined surface. An unreachable connector costs its tools, not the turn.
-            #
-            # Surfaced before the first token rather than discarded (REV-6): the model cannot tell
-            # the chemist that a tool was missing, because it never saw one missing — it answers
-            # from the surface it was handed. Only this layer knows the surface was short.
-            #
-            # Opening returns the tools as well as the casualties because a connector's tools do
-            # not exist until its session is live — `load_mcp_tools` needs an open session — which
-            # is why this is not "open these and reuse the list you passed in".
-            turn_tools, unreachable = await open_connector_specs(
-                stack, connectors if connectors is not None else connector_specs()
-            )
-            # The durable subsystem is announced the same way and for the same reason. It was not,
-            # and connectors were: Temporal was never probed, so a turn whose every durable
-            # launcher was going to fail planned exactly like a turn that could run one. Measured
-            # in the 190-probe live run: 0 of 7 durable launchers ran, and the model repeatedly
-            # read the launch failure as bad input from the chemist and re-asked for parameters it
-            # already had. Before the first token, so the model plans against the surface it will
-            # actually get rather than discovering the outage by calling into it.
-            if not await _durable_subsystem_reachable():
-                unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
-            if unreachable:
-                yield CapabilityDegradedEvent(connectors=unreachable)
-            # The sink is built here, and only here, because this is where the two things a stored
-            # result has to be filed under exist: the session that owns it (which is what the fetch
-            # route's ownership gate resolves against) and the turn's correlation id (which is what
-            # ties a fetched result back to the audit trail). `ToolCallTrace` deliberately knows
-            # neither — see its module docstring.
-            tool_trace = ToolCallTrace(sink=session_sink(session.session_id, correlation_id))
-            # This turn's compiled graph. Held in a local rather than built inline because a
-            # mid-turn resume has to continue *this* graph on *this* thread — a second build would
-            # bind a second set of connector sessions and start the continuation from an empty
-            # conversation. Compiled *inside* the turn because it binds this turn's connector tools
-            # at construction (M7).
-            graph = graph_factory(
-                profile=profile,
-                actor=actor or "",
-                correlation_id=correlation_id,
-                connectors=turn_tools,
-                checkpointer=await _turn_checkpointer(),
-                store=await _turn_store(),
-            )
-            # `turn_config`, not a bare `configurable`: it also carries the graph's step ceiling,
-            # which nothing here had ever chosen — the framework bakes 9999, and reaching it raises
-            # rather than degrading. The mid-turn resume below reuses this same config, so the
-            # continuation runs under the same bound as the run it continues.
-            graph_config = turn_config(session.session_id)
-            # The graph drives itself and emits the contract directly
-            # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream is
-            # that module's job rather than this loop's. What stays here is the whole rest of the
-            # turn — the budget ledger, the rollback gate, the cancellation teardown, the metrics —
-            # because none of it was ever a property of which framework produced the tokens, which
-            # is what made deleting the other engine a deletion rather than a rewrite.
-            async for event in graph_events(
-                graph,
-                user_message,
-                config=graph_config,
-                trace=tool_trace,
-                on_signal=lambda s: (
-                    started_jobs.append(s.job_id) if isinstance(s, JobSignal) else None
-                ),
-                usage=turn_usage,
-                exchanges=tool_exchanges,
-            ):
-                # `not event.agent`: a specialist's tokens stream to the surface for the trace
-                # and are *not* the answer. Concatenating them would interleave one agent's
-                # working prose with the supervisor's, in the durable transcript as well as on
-                # screen, because both ends of this turn are built from `answer_parts`.
-                if isinstance(event, TokenEvent) and not event.agent:
-                    answer_parts.append(event.text)
-                yield event
-            # The stream is exhausted, so the graph has returned and the history provider has
-            # committed this turn's rows as a complete, paired exchange. From here on a teardown
-            # has nothing half-written to discard — set the fact the rollback gate reads at the
-            # moment it becomes true, not at the answer, which is still a verifier call and
-            # possibly a job-result wait away.
-            run_complete = True
-            # A tool call whose arguments finished on the *final* update has nothing following it
-            # to close it out, so flush the trace before the answer. (Signals used to need the same
-            # treatment and no longer do: they ride the stream itself, so the last one is yielded
-            # by the same loop as every other.)
-            for call in tool_trace.flush():
-                yield call
-
-            # Mid-turn resume (gap AGT-2): if this turn launched durable jobs, optionally wait
-            # for them and continue the *same* turn with their results, so "compute this, then
-            # reason about the result" is one exchange rather than two. Off by default; bounded
-            # by config and, above it, by the front door's whole-turn deadline.
-            if started_jobs and settings.mid_turn_resume_enabled:
-                results = await await_job_results(
-                    session.session_id,
-                    started_jobs,
-                    timeout_seconds=settings.mid_turn_resume_timeout_seconds,
+                turn_tools, unreachable = await _open_turn_surface(stack, connectors)
+                if unreachable:
+                    yield CapabilityDegradedEvent(connectors=unreachable)
+                # The sink is built here, and only here, because this is where the two things a
+                # stored result has to be filed under exist: the session that owns it (which is what
+                # the fetch route's ownership gate resolves against) and the turn's correlation id
+                # (which is what ties a fetched result back to the audit trail). `ToolCallTrace`
+                # deliberately knows neither — see its module docstring.
+                tool_trace = ToolCallTrace(
+                    sink=session_sink(session.session_id, ledger.correlation_id)
                 )
-                if results:
-                    # The resume drives a *second* model run, which can half-write exactly like
-                    # the first — so the exchange is incomplete again until it returns, and a
-                    # teardown landing inside it must roll the turn back after all.
-                    run_complete = False
-                    # A second `graph_events` over the *same* graph and the same `thread_id`,
-                    # because the continuation has to see the conversation the first half produced.
-                    # It is `on_signal=` no-op rather than the ledger's appender deliberately: a
-                    # resume that fed its own job ids back into `started_jobs` would be the
-                    # recursion this feature is without, so that one chemist turn cannot chain
-                    # durable jobs indefinitely inside a single request.
-                    continuation = graph_events(
+                # This turn's compiled graph. Held in a local rather than built inline because a
+                # mid-turn resume has to continue *this* graph on *this* thread — a second build
+                # would bind a second set of connector sessions and start the continuation from an
+                # empty conversation. Compiled *inside* the turn because it binds this turn's
+                # connector tools at construction (M7).
+                graph = graph_factory(
+                    profile=profile,
+                    actor=actor or "",
+                    correlation_id=ledger.correlation_id,
+                    connectors=turn_tools,
+                    checkpointer=await _turn_checkpointer(),
+                    store=await _turn_store(),
+                )
+                # `turn_config`, not a bare `configurable`: it also carries the graph's step
+                # ceiling, which nothing here had ever chosen — the framework bakes 9999, and
+                # reaching it raises rather than degrading. The mid-turn resume below reuses this
+                # same config, so the continuation runs under the same bound as the run it
+                # continues.
+                graph_config = turn_config(session.session_id)
+                # The graph drives itself and emits the contract directly
+                # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream is
+                # that module's job rather than this loop's. What stays here is the whole rest of
+                # the turn — the budget ledger, the rollback gate, the cancellation teardown, the
+                # metrics — because none of it was ever a property of which framework produced the
+                # tokens, which is what made deleting the other engine a deletion rather than a
+                # rewrite.
+                async for event in _stream_into(
+                    graph_events(
                         graph,
-                        _job_results_message(results),
+                        user_message,
                         config=graph_config,
                         trace=tool_trace,
-                        on_signal=lambda _signal: None,
-                        usage=turn_usage,
-                        exchanges=tool_exchanges,
-                    )
-                    async for event in continuation:
-                        if isinstance(event, TokenEvent) and not event.agent:
-                            answer_parts.append(event.text)
-                        yield event
-                    run_complete = True
-        # The runaway guard fired: the harness loop still had work it wanted to do and its
-        # iteration cap stopped it (`chemclaw.agent.loop_cap`). Said out loud, before the answer,
-        # for the same reason `CapabilityDegradedEvent` precedes the tokens — the answer that
-        # follows is whatever the last iteration managed, and a surface must be able to mark it
-        # partial rather than present it as the finished work. The turn is not failed by this: the
-        # answer still goes out, and the ledger still bills it as completed.
-        if loop_hit_cap():
-            METRICS.increment("chemclaw_turn_loop_caps_total")
-            logger.warning(
-                "the harness loop for session %s hit its %d-iteration cap with work still open",
-                session.session_id,
-                settings.harness_max_loop_iterations,
+                        on_signal=ledger.note_signal,
+                        usage=ledger.usage,
+                        exchanges=ledger.exchanges,
+                    ),
+                    ledger,
+                ):
+                    yield event
+                # The stream is exhausted, so the graph has returned and the history provider has
+                # committed this turn's rows as a complete, paired exchange. From here on a teardown
+                # has nothing half-written to discard — set the fact the rollback gate reads at the
+                # moment it becomes true, not at the answer, which is still a verifier call and
+                # possibly a job-result wait away.
+                ledger.run_complete = True
+                # A tool call whose arguments finished on the *final* update has nothing following
+                # it to close it out, so flush the trace before the answer. (Signals used to need
+                # the same treatment and no longer do: they ride the stream itself, so the last one
+                # is yielded by the same loop as every other.)
+                for call in tool_trace.flush():
+                    yield call
+                async for event in _resume_on_job_results(
+                    graph,
+                    config=graph_config,
+                    trace=tool_trace,
+                    session=session,
+                    ledger=ledger,
+                ):
+                    yield event
+            capped = _loop_cap_event(session, ledger)
+            if capped is not None:
+                yield capped
+            silent = _empty_answer_event(session, tool_trace, ledger)
+            if silent is not None:
+                yield silent
+                # **`return`, not fall through**, which is what this did. `events.py` names
+                # `loop_cap_reached` as the *only* error that shares its turn with an answer, and
+                # falling through broke that for `empty_answer` in three ways at once: the client
+                # got an `AnswerEvent` whose text is `""` (the reference page renders it as an empty
+                # assistant bubble), `build_answer_event` spent a judge call under
+                # `verifier_enabled` grading an empty string, and `answered = True` reached
+                # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user got
+                # an answer for the money" for precisely the silent-death turn that branch exists to
+                # name. The teardown below still books the spend and the duration, which is right:
+                # the turn cost what it cost.
+                return
+            answer = await build_answer_event(
+                ledger.answer_text,
+                tool_trace.outputs,
+                tool_trace.called_tools,
             )
-            yield ErrorEvent(
-                message=(
-                    f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
-                    "and stopped with work still open, so the answer below is partial "
-                    f"(session {session.session_id})."
-                ),
-                code="loop_cap_reached",
-                # Not retryable unchanged: the same request drives the same loop into the same
-                # cap. The useful next step is a narrower request, not another 25 iterations.
-                retryable=False,
-                correlation_id=correlation_id,
+            await _record_transcript(
+                history, session, user_message, ledger.answer_text, ledger.exchanges
             )
-        # A turn that produced no prose at all is a *silent* failure, and it must not be one.
-        #
-        # There is already a guard for the harness loop hitting its cap, but that path only runs
-        # with `harness_enabled` — and the case measured on 2026-08-04 had the harness off: du-03
-        # made 29 tool calls (find_past_jobs ×8, load_skill ×6, find_notes ×5, …), never reached the
-        # capability the question needed, and ended with an empty `AnswerEvent` after 197 s. No
-        # error, no tokens, nothing to read. `evals.live` scores exactly this as `failed_loudly=
-        # False` because it is the worst shape a turn can take: a user cannot retry what never said
-        # it went wrong, and every prior live pass has found one (`docs/archive/vibe-test-2026-07`).
-        #
-        # An `ErrorEvent` rather than inventing an answer: the system genuinely has nothing to say,
-        # and saying so is the honest outcome. Retryable, unlike the loop cap — a turn that spent
-        # its budget circling retrieval may well succeed on a narrower question, and the message
-        # says so.
-        text = "".join(answer_parts)
-        if not text.strip():
-            METRICS.increment("chemclaw_turn_empty_answers_total")
-            logger.warning(
-                "turn for session %s ended with no answer text after %d tool call(s)",
-                session.session_id,
-                len(tool_trace.called_tools),
-            )
-            yield ErrorEvent(
-                message=(
-                    "The turn ended without producing an answer, after "
-                    f"{len(tool_trace.called_tools)} tool call(s). Nothing was written, so "
-                    "there is nothing below to read — this is a failure, not an empty result. "
-                    "A narrower or more specific question is the useful next step "
-                    f"(session {session.session_id})."
-                ),
-                code="empty_answer",
-                retryable=True,
-                correlation_id=correlation_id,
-            )
-            # **`return`, not fall through**, which is what this did. `events.py` names
-            # `loop_cap_reached` as the *only* error that shares its turn with an answer, and
-            # falling through broke that for `empty_answer` in three ways at once: the client got an
-            # `AnswerEvent` whose text is `""` (the reference page renders it as an empty assistant
-            # bubble), `build_answer_event` spent a judge call under `verifier_enabled` grading an
-            # empty string, and `answered = True` reached
-            # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user got an
-            # answer for the money" for precisely the silent-death turn this branch exists to name.
-            # The `finally` below still books the spend and the duration, which is right: the turn
-            # cost what it cost.
-            return
-        answer = await build_answer_event(
-            text,
-            tool_trace.outputs,
-            tool_trace.called_tools,
-        )
-        await _record_transcript(history, session, user_message, text, tool_exchanges)
-        # **Before the yield, not after it.** The turn's rows are committed by now and they are a
-        # complete, paired exchange — there is nothing half-written left to undo. The cancellation
-        # that reaches a finished turn is delivered *while suspended in the yield below*, as
-        # sse-starlette sends the answer, so a flag set after it is still false exactly when the
-        # teardown clause needs it to be true.
-        answered = True
-        yield answer
-        # The turn used its authorization, so the authorization is spent (D-167). Here rather than
-        # in `finally`, which also runs on the disconnect path where an `await` would re-raise the
-        # cancellation and skip every teardown step after it — see `consume_turn_approval`.
-        if plan_gated:
-            await consume_turn_approval(session.session_id)
-    except (GeneratorExit, asyncio.CancelledError):
-        # The turn is being torn down from outside — the client went away, or the front door's
-        # wall-clock deadline expired. Roll the session back to its pre-turn state: a half-written
-        # turn is worth less than the conversation it would otherwise poison (see the snapshot
-        # above). Needs its own clause because both derive from BaseException, not Exception;
-        # re-raised so the generator still closes and a timeout still surfaces as one.
-        #
-        # **`CancelledError` belongs here and its absence made this clause dead code on the only
-        # path that matters** (D-130). sse-starlette answers `http.disconnect` by cancelling its
-        # task group; it never calls `aclose()` on the body iterator, so a real disconnect
-        # delivers `CancelledError` and this rollback was skipped every single time. It looked
-        # covered because the suite closed the stream by hand — the one thing production does
-        # not do. Measured on a live front door: the agent's stream received `CancelledError`,
-        # never `GeneratorExit`. The read-time repair in `agents.session_store` is why this was a
-        # silent weakness rather than an outage; it strips the unmatched tool call on the next
-        # read, but only the rollback discards the rest of the abandoned turn.
-        #
-        # **Only a turn whose exchange is incomplete is rolled back.** Once the last `agent.run`
-        # returned, the history provider committed a complete user+assistant pair and no
-        # `tool_use` is left without its result — the sole failure the rollback exists to
-        # prevent. Undoing it anyway deleted a finished exchange from the conversation because
-        # the client dropped during the send of its answer. A silently vanished
-        # answer is worse than a lost turn. (The spent-plan marker used to ride along in that
-        # snapshot, so reverting an answered turn's state re-armed the approval it had just used
-        # as well; consumption is a durable column now — `plan_approvals.consumed_at` — so the
-        # committed exchange alone is the reason, which is the reason that was always sufficient.)
-        #
-        # The predicate is `run_complete`, not `answered`, and the gap between them is real time:
-        # after the stack closes the turn still awaits loop-cap reporting, an optional job-result
-        # wait plus resume, and the verifier's judge call — and `answered` only becomes true after
-        # all of them. A teardown landing in any of those windows used to take the rollback branch
-        # and delete an exchange `agent.run` had already committed complete and correctly paired —
-        # the exact outcome this comment says must not happen. `answered` is kept beside it for
-        # the cost ledger, whose question genuinely is "did the user get an answer".
-        if answered or run_complete:
-            logger.warning(
-                "turn for session %s was torn down after its exchange completed (client "
-                "disconnect or the front door's turn deadline); the committed turn is kept",
-                session.session_id,
-            )
+            # **Before the yield, not after it.** The turn's rows are committed by now and they are
+            # a complete, paired exchange — there is nothing half-written left to undo. The
+            # cancellation that reaches a finished turn is delivered *while suspended in the yield
+            # below*, as sse-starlette sends the answer, so a flag set after it is still false
+            # exactly when the teardown clause needs it to be true.
+            ledger.answered = True
+            yield answer
+            # The turn used its authorization, so the authorization is spent (D-167). Here rather
+            # than in the teardown, which also runs on the disconnect path where an `await` would
+            # re-raise the cancellation and skip every teardown step after it — see
+            # `consume_turn_approval`.
+            if plan_gated:
+                await consume_turn_approval(session.session_id)
+        except (GeneratorExit, asyncio.CancelledError):
+            _roll_back_unfinished(session, state_snapshot, ledger)
             raise
-        logger.warning(
-            "turn for session %s was torn down before it answered (client disconnect or the "
-            "front door's turn deadline); rolling session state back",
-            session.session_id,
-        )
-        # No durable delete accompanies this any more, and its absence is the point: the
-        # transcript is written once, after the answer, so a teardown either lands before
-        # `_record_transcript` and leaves nothing behind, or lands after it and finds a complete
-        # exchange — the `answered or run_complete` branch above. There is no third outcome.
-        session.state.clear()
-        session.state.update(state_snapshot)
-        raise
-    except Exception as exc:
-        # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked
-        # trace. The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays
-        # server-side in the log; the client gets a *classified* failure plus the correlation id
-        # the audit trail is keyed on, so a bug report is findable without leaking internals.
-        logger.exception("turn failed for session %s", session.session_id)
-        code, retryable = _classify(exc)
-        yield ErrorEvent(
-            message=(
-                "The turn could not be completed due to an internal error "
-                f"(session {session.session_id})."
-            ),
-            code=code,
-            retryable=retryable,
-            correlation_id=correlation_id,
-        )
-        # A turn that spent the authorization and then broke has still spent it: tools may have
-        # run before it failed, and re-running under the same approval is exactly what a person
-        # would want asked about again.
-        if plan_gated:
-            await consume_turn_approval(session.session_id)
+        except Exception as exc:
+            yield _failure_event(exc, session, ledger)
+            # A turn that spent the authorization and then broke has still spent it: tools may have
+            # run before it failed, and re-running under the same approval is exactly what a person
+            # would want asked about again.
+            if plan_gated:
+                await consume_turn_approval(session.session_id)
+        finally:
+            _book_turn_spend(ledger, session=session, actor=actor, profile=profile, budget=budget)
+
+
+@dataclass(slots=True)
+class _TurnLedger:
+    """What one turn accumulates that more than one of its stages has to read.
+
+    Extracted from `run_turn`'s locals because the stages below are the readers: the stream
+    collector appends to `answer_parts`, the resume flips `run_complete` twice, the teardown reads
+    `answered` and `usage`, and the two guard events read `correlation_id`. Passing eight locals
+    between them would be the same coupling written out longhand, and a mutable object is what the
+    original already was — a set of names in one frame that every branch could reach.
+
+    **`answered` and `run_complete` are two questions, not one, and conflating them was a defect.**
+    `answered` is the cost ledger's question ("did the user get an answer for the money") and
+    becomes true only after the verifier and any mid-turn resume have run. `run_complete` is the
+    rollback's predicate: it says the last model run returned, so there is no unfinished work left
+    to disown, however much of it still lies between there and the `AnswerEvent`. Gating the
+    rollback on `answered` undid finished runs whose teardown merely landed in one of those windows.
+    """
+
+    correlation_id: str
+    usage: TurnUsage
+    # Started at construction, which is `run_turn`'s first statement, so the duration this books is
+    # the whole turn rather than the part after setup.
+    started: float = field(default_factory=time.perf_counter)
+    answered: bool = False
+    run_complete: bool = False
+    answer_parts: list[str] = field(default_factory=list)
+    # Durable jobs this turn launched, for the optional mid-turn resume.
+    started_jobs: list[str] = field(default_factory=list)
+    # The tool-bearing messages this turn produced, for the transcript projection: the events carry
+    # no call id, so a projection rebuilt from them could not pair a result with its call.
+    exchanges: list[Any] = field(default_factory=list)
+
+    @property
+    def answer_text(self) -> str:
+        """The supervisor's own prose, which is both the answer and what the transcript stores."""
+        return "".join(self.answer_parts)
+
+    def note_signal(self, signal: Any) -> None:
+        """Record a durable job launch, so the resume below knows what to wait for.
+
+        A method rather than the lambda this was, because the resume passes a *different* callback
+        deliberately (a no-op) and a named pair reads as the decision it is rather than as one
+        lambda that lost its body.
+        """
+        if isinstance(signal, JobSignal):
+            self.started_jobs.append(signal.job_id)
+
+
+@contextmanager
+def _turn_ambient(
+    session_id: str, actor: str | None, roles: frozenset[str], dry_run: bool, correlation_id: str
+) -> Iterator[None]:
+    """Stamp the five ambients a turn runs under, and unstamp every one on the way out.
+
+    **Synchronous on purpose, and that is the point of extracting it.** These resets used to sit at
+    the bottom of `run_turn`'s `finally`, under a comment warning that nothing in that block may
+    `await` — because the disconnect path reaches it by cancellation rather than `aclose()` (D-130),
+    and an `await` there re-raises the cancellation on the spot and skips everything below it,
+    leaking one turn's ambient identity into the next turn on this worker. A `with` block cannot
+    acquire an `await` between the last statement and the reset, so the rule is now structural
+    rather than a comment somebody has to keep obeying.
+
+    Each of the five, and why it is ambient rather than an argument:
+
+    - the session, so a job-launching tool records push-back to the right session (F3-T3) — never a
+      model-supplied argument;
+    - the authenticated identity (F4), so audit, authorization and attribution see the user;
+    - one correlation id per *turn*, generated by the caller and stamped here. Not bound inside
+      `build_langgraph_agent`: agents are cached per profile for the process's lifetime, so a
+      build-time id was shared by every turn from every user on the pod, and the audit trail could
+      not tell two conversations apart;
+    - the tool-call counter, so the identical question asked a third time is refused rather than
+      re-executed (`chemclaw.agent.repeat_guard`);
+    - the loop watch, so a turn stopped by the runaway cap can say so instead of looking exactly
+      like one that finished (`chemclaw.agent.loop_cap`). A no-op without the harness, which is what
+      attaches the cap.
+
+    `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
+    clear it (IDEA-4).
+
+    Reset order is the reverse-ish order the original spelled out and is preserved exactly: the two
+    watches, the dry-run flag, then the three identity vars. `set_current_identity` is skipped
+    entirely when there is no actor, so the unauthenticated path stamps nothing to reset.
+    """
+    session_token = set_current_session_id(session_id)
+    identity_token = set_current_identity(actor, roles) if actor is not None else None
+    correlation_token = set_current_correlation_id(correlation_id)
+    calls_token = begin_call_watch()
+    loop_token = begin_loop_watch()
+    dry_run_token = set_dry_run(dry_run)
+    try:
+        yield
     finally:
-        # **Nothing in this block may `await`.** It runs on the disconnect path too, which
-        # production reaches by cancellation rather than `aclose()` (D-130) — an `await` here
-        # re-raises the cancellation on the spot and silently skips everything below it, including
-        # the five context-var resets, which would leak one turn's ambient identity into the next
-        # turn on this worker.
-        if budget is not None:
-            budget.record(session.session_id, actor, turn_usage.total)
-        # Observed on every path — success, failure and disconnect — because a turn that failed
-        # after 40 s is exactly the sample an operator needs, and excluding it would make the
-        # histogram look best when the service is worst. The token counter is the same number the
-        # budget guard meters, published as a rate rather than only used to refuse.
-        METRICS.observe("chemclaw_turn_duration_seconds", time.perf_counter() - turn_started)
-        # Labelled by profile (REV-10): "what is this costing" is only actionable once it can be
-        # attributed, and a narrowed profile is exactly the thing a deployment adopts to spend less.
-        # `default` rather than an absent label for a session on no profile, so every series carries
-        # the same label set and the sum over the family is the deployment's whole spend.
-        spend_labels = {"profile": profile or "default"}
-        # The same numbers, booked a second time against the identity the metric cannot carry. Not a
-        # duplicate: `core/metrics` refuses a counter past 64 label series (D-152) because a label
-        # value is attacker-influenced, and an Entra oid is exactly such a key — so per-actor spend
-        # needs a table, and the fleet-wide rate needs a counter. Booked here rather than on the
-        # success path so a turn torn down by a disconnect is billed too: that is the runaway this
-        # ledger exists to find, not an edge case to drop. `record_turn_cost` does not await — see
-        # the block comment above and its own docstring.
-        record_turn_cost(
-            TurnCost(
-                correlation_id=correlation_id,
-                session_id=session.session_id,
-                actor=actor or "",
-                profile=profile or "default",
-                input_tokens=turn_usage.input,
-                output_tokens=turn_usage.output,
-                cache_read_tokens=turn_usage.cache_read,
-                cache_write_tokens=turn_usage.cache_write,
-                duration_seconds=time.perf_counter() - turn_started,
-                completed=answered,
-            )
-        )
-        if turn_usage.unreadable:
-            # The provider reported usage and we could not read it, which is not the same as a
-            # provider that reports none: this turn was metered at zero against a budget that is
-            # enabled by default in the chart, so the cost guard is not binding. ERROR because the
-            # remedy is a code change, and counted because a per-turn log line during an outage is
-            # noise that nobody aggregates.
-            logger.error(
-                "usage_unreadable: %d usage content(s) carried no token count; this turn metered "
-                "zero and the budget guard did not bind",
-                turn_usage.unreadable,
-            )
-            METRICS.increment("chemclaw_usage_unreadable_total", float(turn_usage.unreadable))
-        if turn_usage.total:
-            METRICS.increment("chemclaw_tokens_total", float(turn_usage.total), spend_labels)
-        # Published separately from the total because they are priced separately (REV-10). Each is
-        # guarded so a provider that reports none of them leaves its counter untouched rather than
-        # publishing a fabricated zero — the same rule `core.metrics` applies to gauges.
-        for name, value in (
-            ("chemclaw_input_tokens_total", turn_usage.input),
-            ("chemclaw_output_tokens_total", turn_usage.output),
-            ("chemclaw_cache_read_tokens_total", turn_usage.cache_read),
-            ("chemclaw_cache_write_tokens_total", turn_usage.cache_write),
-        ):
-            if value:
-                METRICS.increment(name, float(value), spend_labels)
         end_call_watch(calls_token)
         end_loop_watch(loop_token)
         reset_dry_run(dry_run_token)
@@ -592,6 +406,349 @@ async def run_turn(
         reset_current_correlation_id(correlation_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
+
+
+async def _open_turn_surface(
+    stack: AsyncExitStack, connectors: Sequence[Any] | None
+) -> tuple[list[Any], list[str]]:
+    """Open this turn's out-of-process capability, and name whatever did not answer.
+
+    This turn's own connector tools are connected for its duration and torn down after. Built per
+    turn rather than held on the agent because a connector's connection must belong to exactly one
+    turn — see `chemclaw.connectors.transport`. The graph binds them alongside the profile's
+    in-process tools at construction, so the model sees one combined surface. An unreachable
+    connector costs its tools, not the turn.
+
+    Opening returns the tools as well as the casualties because a connector's tools do not exist
+    until its session is live — `load_mcp_tools` needs an open session — which is why this is not
+    "open these and reuse the list you passed in".
+
+    **The durable subsystem is announced the same way and for the same reason.** It was not, and
+    connectors were: Temporal was never probed, so a turn whose every durable launcher was going to
+    fail planned exactly like a turn that could run one. Measured in the 190-probe live run: 0 of 7
+    durable launchers ran, and the model repeatedly read the launch failure as bad input from the
+    chemist and re-asked for parameters it already had.
+
+    The caller announces the result before the first token rather than discarding it (REV-6): the
+    model cannot tell the chemist that a tool was missing, because it never saw one missing — it
+    answers from the surface it was handed. Only this layer knows the surface was short, and only
+    before the first token does the model get to plan against the surface it will actually get.
+
+    Returns:
+        The turn's bound tools, and the names of every capability that did not answer.
+    """
+    turn_tools, unreachable = await open_connector_specs(
+        stack, connectors if connectors is not None else connector_specs()
+    )
+    if not await _durable_subsystem_reachable():
+        unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
+    return turn_tools, unreachable
+
+
+async def _stream_into(events: AsyncIterator[Event], ledger: _TurnLedger) -> AsyncIterator[Event]:
+    """Re-yield a graph stream unchanged, collecting the supervisor's own tokens as the answer.
+
+    One definition because the turn streams twice — the model run and the mid-turn resume — and
+    both halves of the answer are built from `answer_parts`. Written out twice, the resume could
+    silently stop collecting and the turn would answer with only its first half.
+
+    **`not event.agent` is the whole filter, and it is load-bearing.** A specialist's tokens stream
+    to the surface for the trace and are *not* the answer. Concatenating them would interleave one
+    agent's working prose with the supervisor's, in the durable transcript as well as on screen.
+    """
+    async for event in events:
+        if isinstance(event, TokenEvent) and not event.agent:
+            ledger.answer_parts.append(event.text)
+        yield event
+
+
+async def _resume_on_job_results(
+    graph: Any,
+    *,
+    config: dict[str, Any],
+    trace: ToolCallTrace,
+    session: TurnSession,
+    ledger: _TurnLedger,
+) -> AsyncIterator[Event]:
+    """Continue this same turn with the results of the durable jobs it launched (gap AGT-2).
+
+    If this turn launched durable jobs, optionally wait for them and continue the *same* turn with
+    their results, so "compute this, then reason about the result" is one exchange rather than two.
+    Off by default; bounded by config and, above it, by the front door's whole-turn deadline. Yields
+    nothing at all when the feature is off, no job was launched, or none finished in time — which is
+    why the caller can loop over it unconditionally.
+
+    A second `graph_events` over the *same* graph and the same `thread_id`, because the continuation
+    has to see the conversation the first half produced.
+
+    **`on_signal` is a no-op here rather than the ledger's appender, deliberately.** A resume that
+    fed its own job ids back into `started_jobs` would be the recursion this feature is without, so
+    that one chemist turn cannot chain durable jobs indefinitely inside a single request.
+
+    `run_complete` is cleared for the duration and set again after: the resume drives a *second*
+    model run, which can half-write exactly like the first — so the exchange is incomplete again
+    until it returns, and a teardown landing inside it must roll the turn back after all.
+    """
+    if not (ledger.started_jobs and settings.mid_turn_resume_enabled):
+        return
+    results = await await_job_results(
+        session.session_id,
+        ledger.started_jobs,
+        timeout_seconds=settings.mid_turn_resume_timeout_seconds,
+    )
+    if not results:
+        return
+    ledger.run_complete = False
+    async for event in _stream_into(
+        graph_events(
+            graph,
+            _job_results_message(results),
+            config=config,
+            trace=trace,
+            on_signal=lambda _signal: None,
+            usage=ledger.usage,
+            exchanges=ledger.exchanges,
+        ),
+        ledger,
+    ):
+        yield event
+    ledger.run_complete = True
+
+
+def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
+    """Say out loud that the runaway guard fired, or `None` if it did not.
+
+    The harness loop still had work it wanted to do and its iteration cap stopped it
+    (`chemclaw.agent.loop_cap`). Said before the answer, for the same reason
+    `CapabilityDegradedEvent` precedes the tokens — the answer that follows is whatever the last
+    iteration managed, and a surface must be able to mark it partial rather than present it as the
+    finished work.
+
+    The turn is not failed by this: the answer still goes out, and the ledger still bills it as
+    completed. `loop_cap_reached` is the one error `events.py` names as sharing its turn with an
+    answer.
+    """
+    if not loop_hit_cap():
+        return None
+    METRICS.increment("chemclaw_turn_loop_caps_total")
+    logger.warning(
+        "the harness loop for session %s hit its %d-iteration cap with work still open",
+        session.session_id,
+        settings.harness_max_loop_iterations,
+    )
+    return ErrorEvent(
+        message=(
+            f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
+            "and stopped with work still open, so the answer below is partial "
+            f"(session {session.session_id})."
+        ),
+        code="loop_cap_reached",
+        # Not retryable unchanged: the same request drives the same loop into the same cap. The
+        # useful next step is a narrower request, not another 25 iterations.
+        retryable=False,
+        correlation_id=ledger.correlation_id,
+    )
+
+
+def _empty_answer_event(
+    session: TurnSession, trace: ToolCallTrace, ledger: _TurnLedger
+) -> ErrorEvent | None:
+    """Name a turn that produced no prose at all, or `None` if it produced some.
+
+    A turn that produced no prose is a *silent* failure, and it must not be one.
+
+    There is already a guard for the harness loop hitting its cap, but that path only runs with
+    `harness_enabled` — and the case measured on 2026-08-04 had the harness off: du-03 made 29 tool
+    calls (find_past_jobs ×8, load_skill ×6, find_notes ×5, …), never reached the capability the
+    question needed, and ended with an empty `AnswerEvent` after 197 s. No error, no tokens, nothing
+    to read. `evals.live` scores exactly this as `failed_loudly=False` because it is the worst shape
+    a turn can take: a user cannot retry what never said it went wrong, and every prior live pass
+    has found one (`docs/archive/vibe-test-2026-07`).
+
+    An `ErrorEvent` rather than inventing an answer: the system genuinely has nothing to say, and
+    saying so is the honest outcome. Retryable, unlike the loop cap — a turn that spent its budget
+    circling retrieval may well succeed on a narrower question, and the message says so.
+    """
+    if ledger.answer_text.strip():
+        return None
+    METRICS.increment("chemclaw_turn_empty_answers_total")
+    logger.warning(
+        "turn for session %s ended with no answer text after %d tool call(s)",
+        session.session_id,
+        len(trace.called_tools),
+    )
+    return ErrorEvent(
+        message=(
+            "The turn ended without producing an answer, after "
+            f"{len(trace.called_tools)} tool call(s). Nothing was written, so "
+            "there is nothing below to read — this is a failure, not an empty result. "
+            "A narrower or more specific question is the useful next step "
+            f"(session {session.session_id})."
+        ),
+        code="empty_answer",
+        retryable=True,
+        correlation_id=ledger.correlation_id,
+    )
+
+
+def _failure_event(exc: Exception, session: TurnSession, ledger: _TurnLedger) -> ErrorEvent:
+    """Turn one turn's failure into one user-safe event, never a 500 mid-stream or a leaked trace.
+
+    The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays server-side in the
+    log; the client gets a *classified* failure plus the correlation id the audit trail is keyed on,
+    so a bug report is findable without leaking internals.
+    """
+    logger.exception("turn failed for session %s", session.session_id)
+    code, retryable = _classify(exc)
+    return ErrorEvent(
+        message=(
+            "The turn could not be completed due to an internal error "
+            f"(session {session.session_id})."
+        ),
+        code=code,
+        retryable=retryable,
+        correlation_id=ledger.correlation_id,
+    )
+
+
+def _roll_back_unfinished(
+    session: TurnSession, snapshot: dict[str, Any], ledger: _TurnLedger
+) -> None:
+    """Undo the bookkeeping of a turn torn down before its exchange completed.
+
+    The turn is being torn down from outside — the client went away, or the front door's wall-clock
+    deadline expired. `session.state` is the harness's own bookkeeping — the todo list, the plan
+    hash, the approval marks — and a turn torn down half-way through has advanced it for work that
+    never finished, so the next turn would read a plan claiming steps it never took. A half-written
+    turn is worth less than the conversation it would otherwise poison.
+
+    **`CancelledError` belongs in the caller's clause beside `GeneratorExit`, and its absence made
+    that clause dead code on the only path that matters** (D-130). sse-starlette answers
+    `http.disconnect` by cancelling its task group; it never calls `aclose()` on the body iterator,
+    so a real disconnect delivers `CancelledError` and this rollback was skipped every single time.
+    It looked covered because the suite closed the stream by hand — the one thing production does
+    not do. Measured on a live front door: the agent's stream received `CancelledError`, never
+    `GeneratorExit`.
+
+    **Only a turn whose exchange is incomplete is rolled back.** Once the last model run returned,
+    the history provider committed a complete user+assistant pair and no `tool_use` is left without
+    its result — the sole failure the rollback exists to prevent. Undoing it anyway deleted a
+    finished exchange from the conversation because the client dropped during the send of its
+    answer. A silently vanished answer is worse than a lost turn. (The spent-plan marker used to
+    ride along in that snapshot, so reverting an answered turn's state re-armed the approval it had
+    just used as well; consumption is a durable column now — `plan_approvals.consumed_at` — so the
+    committed exchange alone is the reason, which is the reason that was always sufficient.)
+
+    The predicate is `run_complete`, not `answered`, and the gap between them is real time: after
+    the stack closes the turn still awaits loop-cap reporting, an optional job-result wait plus
+    resume, and the verifier's judge call — and `answered` only becomes true after all of them. A
+    teardown landing in any of those windows used to take the rollback branch and delete an exchange
+    the model run had already committed complete and correctly paired — the exact outcome this
+    docstring says must not happen. `answered` is kept beside it for the cost ledger, whose question
+    genuinely is "did the user get an answer".
+
+    **Only `session.state` is rolled back, and that is the whole rollback now.** It used to have a
+    durable half: a pre-turn watermark over `session_messages`, because the previous engine wrote
+    the stored thread incrementally and fed it back to the model, so a disconnect mid-tool-call
+    committed a `tool_use` with no matching `tool_result` and every later turn replayed it — the
+    model rejected the thread outright ("tool_use ids found without tool_result blocks") and one
+    dropped connection permanently bricked the conversation. The graph reads its own checkpointer
+    instead, and `_record_transcript` writes the user message and the answer together in one call
+    once the answer exists, so the transcript is written once, after the answer: a teardown either
+    lands before it and leaves nothing behind, or lands after it and finds a complete exchange.
+    There is no third outcome (D-2026-08-10 §2).
+    """
+    if ledger.answered or ledger.run_complete:
+        logger.warning(
+            "turn for session %s was torn down after its exchange completed (client "
+            "disconnect or the front door's turn deadline); the committed turn is kept",
+            session.session_id,
+        )
+        return
+    logger.warning(
+        "turn for session %s was torn down before it answered (client disconnect or the "
+        "front door's turn deadline); rolling session state back",
+        session.session_id,
+    )
+    session.state.clear()
+    session.state.update(snapshot)
+
+
+def _book_turn_spend(
+    ledger: _TurnLedger,
+    *,
+    session: TurnSession,
+    actor: str | None,
+    profile: str | None,
+    budget: BudgetTracker | None,
+) -> None:
+    """Book what the turn cost, on every path — success, failure and disconnect alike.
+
+    **Nothing in here may `await`, and it is synchronous so that it cannot.** This runs on the
+    disconnect path too, which production reaches by cancellation rather than `aclose()` (D-130) —
+    an `await` here re-raises the cancellation on the spot and silently skips everything below it.
+
+    The duration is observed on every path because a turn that failed after 40 s is exactly the
+    sample an operator needs, and excluding it would make the histogram look best when the service
+    is worst. The token counter is the same number the budget guard meters, published as a rate
+    rather than only used to refuse.
+
+    Labelled by profile (REV-10): "what is this costing" is only actionable once it can be
+    attributed, and a narrowed profile is exactly the thing a deployment adopts to spend less.
+    `default` rather than an absent label for a session on no profile, so every series carries the
+    same label set and the sum over the family is the deployment's whole spend.
+
+    `record_turn_cost` books the same numbers a second time against the identity the metric cannot
+    carry. Not a duplicate: `core/metrics` refuses a counter past 64 label series (D-152) because a
+    label value is attacker-influenced, and an Entra oid is exactly such a key — so per-actor spend
+    needs a table, and the fleet-wide rate needs a counter. Booked here rather than on the success
+    path so a turn torn down by a disconnect is billed too: that is the runaway this ledger exists
+    to find, not an edge case to drop. It does not await — see its own docstring.
+    """
+    elapsed = time.perf_counter() - ledger.started
+    if budget is not None:
+        budget.record(session.session_id, actor, ledger.usage.total)
+    METRICS.observe("chemclaw_turn_duration_seconds", elapsed)
+    spend_labels = {"profile": profile or "default"}
+    record_turn_cost(
+        TurnCost(
+            correlation_id=ledger.correlation_id,
+            session_id=session.session_id,
+            actor=actor or "",
+            profile=profile or "default",
+            input_tokens=ledger.usage.input,
+            output_tokens=ledger.usage.output,
+            cache_read_tokens=ledger.usage.cache_read,
+            cache_write_tokens=ledger.usage.cache_write,
+            duration_seconds=elapsed,
+            completed=ledger.answered,
+        )
+    )
+    if ledger.usage.unreadable:
+        # The provider reported usage and we could not read it, which is not the same as a provider
+        # that reports none: this turn was metered at zero against a budget that is enabled by
+        # default in the chart, so the cost guard is not binding. ERROR because the remedy is a code
+        # change, and counted because a per-turn log line during an outage is noise that nobody
+        # aggregates.
+        logger.error(
+            "usage_unreadable: %d usage content(s) carried no token count; this turn metered "
+            "zero and the budget guard did not bind",
+            ledger.usage.unreadable,
+        )
+        METRICS.increment("chemclaw_usage_unreadable_total", float(ledger.usage.unreadable))
+    if ledger.usage.total:
+        METRICS.increment("chemclaw_tokens_total", float(ledger.usage.total), spend_labels)
+    # Published separately from the total because they are priced separately (REV-10). Each is
+    # guarded so a provider that reports none of them leaves its counter untouched rather than
+    # publishing a fabricated zero — the same rule `core.metrics` applies to gauges.
+    for name, value in (
+        ("chemclaw_input_tokens_total", ledger.usage.input),
+        ("chemclaw_output_tokens_total", ledger.usage.output),
+        ("chemclaw_cache_read_tokens_total", ledger.usage.cache_read),
+        ("chemclaw_cache_write_tokens_total", ledger.usage.cache_write),
+    ):
+        if value:
+            METRICS.increment(name, float(value), spend_labels)
 
 
 async def _turn_checkpointer() -> Any:

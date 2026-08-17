@@ -34,12 +34,13 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
 
-from chemclaw.connectors.registry import _READ_TIMEOUT_GRACE_SECONDS
+from chemclaw.connectors.registry import _CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
@@ -88,6 +89,73 @@ class CalcToolError(ChemclawError):
 # `CalcToolError` and `CalcServerError` are two classes.
 _REQUEST_FAULT_CODES = frozenset({PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS})
 
+# What the calculation server says when a tool raised something that was *not* a deliberate domain
+# message. `Chemclaw3-mcp`'s `mcp_server_kit.app._sanitize_tool_errors` re-raises a `ValueError`
+# cause untouched — that is the worded refusal, "unknown ALPB solvent …" — and replaces everything
+# else with this exact string, logging the real exception server-side.
+#
+# **Matching it is the difference between a retry and a dead job.** FastMCP turns *every* exception
+# in a tool body into `isError=True`, so an xtb subprocess timeout, a non-zero exit, a full scratch
+# directory and an OOM all arrive here looking exactly like an unparameterised solvent — and
+# `CalcToolError` is registered non-retryable in `durable/publish.py`. Traced:
+# `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/xtb_cli.py` makes `CliError` a
+# `RuntimeError` *deliberately* so it takes the sanitized path, which means the
+# single most likely infrastructure fault on that server (a loaded pod timing out one Hessian in a
+# six-species reaction job) failed the whole durable job on attempt 1 with `activity_max_attempts`
+# untouched. That is the exact inversion `CalcServerError` was split out to prevent, reached through
+# the one door nobody had checked.
+#
+# A string is a weak contract, and it is the only signal on the wire: both shapes are `isError` with
+# a message. If the server ever rewords it, this stops matching and the behaviour degrades to what
+# it was before — a misclassification, not a new failure — which is why the constant is here with
+# the other repo's file named rather than inlined at the call site.
+_SERVER_INTERNAL_ERROR = "an internal error occurred"
+
+
+def _short_connect_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """The MCP client, but with a *connect* bound that matches every other connector's.
+
+    `streamablehttp_client(timeout=…)` composes one `httpx.Timeout` for connect, write and pool
+    alike, so setting it to `calc_server_timeout_seconds` — which has to be large, because these are
+    the calculations themselves — also gave a black-holed endpoint 900 s to accept a TCP connection.
+    Measured: `connect 900.0, write 900.0, pool 900.0`. A deleted pod or a NetworkPolicy drop
+    therefore stalled a durable activity for fifteen minutes per attempt, while `_beating` reported
+    it healthy the whole time, before Temporal retried into the same wall.
+
+    `connectors/registry.py` already draws this distinction for every other connector, with the
+    reason written out: a slow *answer* is normal here and must be waited for, while a host that
+    will not accept a connection is not going to start after 15 minutes. This reuses that module's
+    constant rather than a second copy, so the two cannot drift.
+
+    The read bound is untouched — it is the one the session's own bound must beat, and getting that
+    ordering wrong is the measured hang `calc_session` documents.
+
+    **The client is built here rather than delegated to `mcp.shared._httpx_utils`**, which is the
+    SDK's own factory and a *private* module. `tests/test_third_party_layering.py` keeps its
+    private-import allow-list deliberately empty — the two rows it once held were removed rather
+    than re-blessed — and a row here would have been the third. What that factory adds over a plain
+    client is `follow_redirects=True`, so that is what is restated, next to the reason: an MCP
+    endpoint behind an ingress that redirects `/mcp` to `/mcp/` is ordinary, and httpx does not
+    follow by default. `connectors/registry.py` builds its own client for every other connector for
+    the same reason.
+    """
+    bound = timeout if timeout is not None else httpx.Timeout(settings.calc_server_timeout_seconds)
+    return httpx.AsyncClient(
+        headers=headers,
+        auth=auth,
+        follow_redirects=True,
+        timeout=httpx.Timeout(
+            bound.read,
+            connect=_CONNECT_TIMEOUT_SECONDS,
+            write=bound.write,
+            pool=bound.pool,
+        ),
+    )
+
 
 @asynccontextmanager
 async def calc_session() -> AsyncIterator[ClientSession]:
@@ -125,6 +193,9 @@ async def calc_session() -> AsyncIterator[ClientSession]:
             headers=headers,
             timeout=timedelta(seconds=bound),
             sse_read_timeout=timedelta(seconds=bound + _READ_TIMEOUT_GRACE_SECONDS),
+            # So a host that will not accept a connection fails in seconds rather than in
+            # quarter-hours — see the factory.
+            httpx_client_factory=_short_connect_client,
         ) as (read, write, _):
             async with ClientSession(
                 read, write, read_timeout_seconds=timedelta(seconds=bound)
@@ -204,7 +275,18 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
             "This is an outage rather than a problem with what was asked."
         ) from exc
     if result.isError:
-        raise CalcToolError(f"{tool} failed: {_text(result.content)}")
+        message = _text(result.content)
+        if _SERVER_INTERNAL_ERROR in message:
+            # The server's own "this was a bug or an infrastructure fault" notice — see the
+            # constant. Retryable, because the identical call may well succeed once the pod is not
+            # out of scratch space, and because the alternative is failing an expensive durable job
+            # on its first attempt.
+            raise CalcServerError(
+                f"the calculation service hit an internal error running {tool}, so no result was "
+                "produced. This is a fault on the calculation service rather than a problem with "
+                "what was asked; the same request may work on a retry."
+            )
+        raise CalcToolError(f"{tool} failed: {message}")
     text = _text(result.content)
     try:
         return json.loads(text)

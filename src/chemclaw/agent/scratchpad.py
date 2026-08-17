@@ -153,9 +153,18 @@ async def memory_store() -> AsyncPostgresStore:
     check-then-*await*-then-act that assigned `_store` *before* awaiting `setup()` — the exact
     defect `checkpointer()` was fixed for, failing the same way: a second turn arriving inside that
     await saw a non-`None` global and got a store whose two tables do not exist yet (`relation
-    "store" does not exist` on a cold start with traffic). The checkpointer's lock is shared rather
-    than a second one of this module's own, because both initializations sit on that one pool and
-    one lock is what lets `close_checkpointer` drop the pair together.
+    "store" does not exist` on a cold start with traffic). It also called `_checkpoint_pool()` with
+    no lock held, which that function then documented as safe only because its *one* caller held
+    `_init_lock` first; two coroutines racing it could each pass the pool's `if _pool is None` check
+    and construct a distinct `AsyncConnectionPool` against the same DSN, so one opened pool was
+    overwritten and leaked its connections for the life of the process.
+
+    That second half is now closed inside `_checkpoint_pool` itself rather than here, because a
+    guarantee that depends on every caller remembering to hold a lock is the guarantee that just
+    failed. The consequence is the ordering below: the pool is awaited *outside* the lock, since
+    `_checkpoint_pool` takes the same one and `asyncio.Lock` is not reentrant. The lock is the
+    checkpointer's rather than a second of this module's own, because both initializations sit on
+    that one pool and one lock is what lets `close_checkpointer` drop the pair together.
 
     Returns:
         A ready store over this process's session pool.
@@ -168,7 +177,7 @@ async def memory_store() -> AsyncPostgresStore:
     from chemclaw.agent.checkpointer import _checkpoint_pool, _initialization_lock
 
     # Awaited outside the lock, and it must stay outside: `_checkpoint_pool` takes the same lock,
-    # and `asyncio.Lock` is not reentrant.
+    # and `asyncio.Lock` is not reentrant. Holding it across that call deadlocks every cold start.
     pool = await _checkpoint_pool()
     async with _initialization_lock():
         if _store is None:

@@ -92,16 +92,38 @@ def calculation_key(spec: QmJobSpec) -> CalculationKey:
     the same normalization `qm_job_key` and `prepare_input` already apply, so the note id and the
     store key agree on what counts as the same calculation. Raises `InvalidSmilesError` on an
     unparseable structure.
+
+    **The pipeline's name is in the key beside its version, because a version alone does not name a
+    pipeline.** Measured before it was: `nf-core/qm-dft` at `1.0.0` and an internal fork at `1.0.0`
+    produced the byte-identical key `dft@nextflow-1.0.0:a7d334ebee616d78:2f253b746a0fcd8d`, so every
+    molecule computed under one was served from the store under the other — carrying a `calc_refs`
+    provenance stamp naming the pipeline that had not run it. This is the failure `calc_version`
+    closes for the *backend* (a mock energy may never be served to a real deployment), left open one
+    field down, and it is the worse of the two: two DFT pipelines disagree by fractions of a hartree
+    rather than obviously, so nothing looks wrong. Pinning the version cannot cover it — `1.0.0` is
+    the likeliest tag on both sides of a fork, and re-pointing `hpc_pipeline_name` while keeping a
+    revision pin is an ordinary operator action.
+
+    Added **only when configured**, which is what makes this invalidate exactly the ambiguous rows
+    and no others: `mock` (dev, CI, every offline test) sets no pipeline name, so its params mapping
+    is unchanged and its stored keys still resolve. `_hpc_launch_config` requires the name under
+    `nextflow`, so no real deployment can land in the omitted branch. The asymmetry with
+    `pipeline_version` above — always present, `None` when unset — is deliberate: that field's
+    always-present form is already in the keys on disk, and changing it to match would invalidate
+    them for nothing.
     """
+    params: dict[str, str | None] = {
+        "method": spec.method,
+        "basis_set": spec.basis_set,
+        # The raw value, not the slug: this is the half that guarantees distinct pipeline
+        # *versions* never share a key (see the module docstring).
+        "pipeline_version": settings.hpc_pipeline_version or None,
+    }
+    if settings.hpc_pipeline_name:
+        params["pipeline_name"] = settings.hpc_pipeline_name
     return CalculationKey.build(
         calc_type=CALC_TYPE,
         calc_version=calc_version(),
         inputs={"smiles": require_canonical_smiles(spec.molecule_smiles)},
-        params={
-            "method": spec.method,
-            "basis_set": spec.basis_set,
-            # The raw value, not the slug: this is the half that guarantees distinct pipelines
-            # never share a key (see the module docstring).
-            "pipeline_version": settings.hpc_pipeline_version or None,
-        },
+        params=params,
     )

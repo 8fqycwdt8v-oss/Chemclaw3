@@ -43,14 +43,14 @@ the pair applies in filename order and neither shadows the other.
 | --- | --- | --- | --- |
 | `schema_migrations` | 000 | `core/migrate.py` | never — the ledger is the record of its own work, and the runtime role cannot write it at all |
 | `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an HPC run (D-011). Bounded by cost policy, not by a clock |
-| `molecule_fingerprints` | 002 (+004) | `science/fingerprints/store.py` | — |
-| `reaction_fingerprints` | 003 (+004) | `science/fingerprints/store.py` | — |
+| `molecule_fingerprints` | 002 (+004, 046 index) | `science/fingerprints/store.py` | — |
+| `reaction_fingerprints` | 003 (+004, 046 index) | `science/fingerprints/store.py` | — |
 | `audit_events` | 006 (+010, 011, 026, 044, 045) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
-| `session_messages` | 008 (+022, 026, 043) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
+| `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
 | `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
-| `session_owners` | 013 (+021, 043) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
+| `session_owners` | 013 (+021, 043, 046 index) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
 | `user_preferences` | 015 | `agent/preferences.py` | — |
 | `predictions` | 016 | `science/calc/calibration.py` | — |
 | `subscriptions` | 017 (+029) | `agent/subscriptions.py` | deleted on unsubscribe |

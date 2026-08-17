@@ -6,6 +6,7 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 (1–2 hops), not a vector index.
 """
 
+import contextlib
 import logging
 import os
 import threading
@@ -51,6 +52,42 @@ _GRAPH_CACHE: dict[str, tuple[NotesFingerprint, nx.DiGraph]] = {}
 # it is the floor on interactive latency (DA-5). Monotonic, not wall-clock: a clock adjustment
 # must not make a scan look arbitrarily old (harmless) or arbitrarily fresh (a stale read).
 _LAST_SCAN: dict[str, float] = {}
+
+# One re-entrant lock per directory, held across the *filling* of the caches above rather than
+# merely around the dict accesses — the distinction `chemclaw.kg.conflicts` already draws for the
+# conflict index and this module did not.
+#
+# Measured, on a 2,000-note corpus: one thread parsing a cold tree costs 198 ms, four concurrent
+# threads cost 2,521 ms and eight cost 6,219 ms. Eight callers did not pay 8× the work, they paid
+# 31×, because eight parses of the same tree contend on the GIL as well as duplicating each other.
+# That shape is not exotic here: a `gather_evidence` sweep runs its sources under `asyncio.gather`
+# with `load_notes` offloaded to a thread each, and every cold start and every `invalidate_cache`
+# (the PR-gate's parked-checkout repair, the note reindex) puts them all on a miss together.
+#
+# Re-entrant because `build_graph` holds it across `cached_notes`, so the parse and the assembly
+# behind one fingerprint happen once between all callers rather than once each.
+#
+# Never removed, including by `invalidate_cache`: dropping a lock another thread is standing in
+# would hand the next caller a different lock object and quietly restore the duplication this
+# exists to prevent. A `threading.RLock` per notes directory is a few dozen bytes and production
+# reads one directory.
+_COMPUTE_LOCKS: dict[str, threading.RLock] = {}
+
+
+@contextlib.contextmanager
+def _corpus_lock(key: str) -> Iterator[None]:
+    """Hold the computation lock for one notes directory, unless caching is off.
+
+    With `graph_cache_enabled` false there is nothing to fill and nothing to share, so every
+    caller is asking for its own parse and serializing them would answer a question nobody asked.
+    """
+    if not settings.graph_cache_enabled:
+        yield
+        return
+    with _CACHE_LOCK:
+        lock = _COMPUTE_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        yield
 
 
 def invalidate_cache(notes_dir: Path | None = None) -> None:
@@ -113,10 +150,17 @@ def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
     rebuild needs — `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its
     entry here differs from what was stored at the last index run, instead of the whole corpus on
     every scheduled pass (D-2026-08-02-embed-only-what-changed).
+
+    Two files claiming one id resolve **first in path order**, the same way `_parse_notes` and
+    `chemclaw.kg.validate` resolve one. It used to be a dict comprehension, where the *last* file
+    won — so the served corpus held one note and the reindex diffed the other, and `reindex_notes`
+    could embed one file's text under the other's id. Two scans of one tree disagreeing about which
+    file is a note is worse than either answer.
     """
-    return {
-        path.stem: f"{stat.st_mtime_ns}:{stat.st_size}" for path, stat in scan_notes_dir(notes_dir)
-    }
+    fingerprints: dict[str, str] = {}
+    for path, stat in scan_notes_dir(notes_dir):
+        fingerprints.setdefault(path.stem, f"{stat.st_mtime_ns}:{stat.st_size}")
+    return fingerprints
 
 
 def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
@@ -148,8 +192,19 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
     `kg-validate` reports it, which is true of the repository and not of the tree a pod is
     serving: a note corrupted by a partial sync leaves a deployment retrieving less than it
     should with nothing anywhere saying so.
+
+    **A second file claiming an id already taken is skipped on exactly the same terms**, and for
+    exactly the same reason. It used to be neither reported nor decided: the notes were both
+    returned, `_assemble_graph` then called `add_node` twice on one id, and whichever file sorted
+    *last* silently replaced the other — so one of two curated notes was unreachable by every
+    query, with the winner depending on a directory name. `kg-validate` fails a duplicate id, which
+    again is a property of the repository rather than of the tree a pod is serving; an rsync that
+    lands a renamed note before removing the old one produces this state in a healthy deployment.
+
+    First in path order wins, matching `chemclaw.kg.validate`'s `id_to_path` and
+    `note_file_fingerprints`, so every reader of one tree names the same file.
     """
-    notes = []
+    notes: dict[str, tuple[Path, Note]] = {}
     for path, _ in scan_notes_dir(notes_dir):
         try:
             note = read_note(path)
@@ -157,9 +212,21 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
             log.warning("skipping unparseable note %s: %s", path, exc)
             record_metric(lambda m: m.increment("chemclaw_notes_unparseable_total"))
             continue
-        if note is not None:
-            notes.append(note)
-    return notes
+        if note is None:
+            continue
+        claimed = notes.get(note.id)
+        if claimed is not None:
+            log.warning(
+                "skipping %s: note id %r is already defined by %s — one of the two is "
+                "unreachable until the duplicate is resolved",
+                path,
+                note.id,
+                claimed[0],
+            )
+            record_metric(lambda m: m.increment("chemclaw_notes_duplicate_id_total"))
+            continue
+        notes[note.id] = (path, note)
+    return [note for _, note in notes.values()]
 
 
 def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
@@ -175,30 +242,58 @@ def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
     exactly that token and nothing else. A second derivation that computed its own fingerprint
     would pay the stat scan twice and, worse, could disagree with this one about whether the corpus
     had changed.
+
+    **Concurrent misses wait rather than duplicate.** The scan and the parse happen under this
+    directory's `_corpus_lock`, so eight threads arriving on a cold cache together produce one
+    parse and seven waiters instead of eight parses fighting over the GIL — measured at 6,219 ms
+    against the 198 ms of the single parse they were all repeating. A waiter that reaches the lock
+    finds the answer it queued for and never rescans, because the winner has just stamped
+    `_LAST_SCAN`.
     """
     if not settings.graph_cache_enabled:
         return None, _parse_notes(notes_dir)
     key = str(notes_dir)
     ttl = settings.graph_cache_ttl_seconds
-    now = time.monotonic()
-    if ttl > 0:
+    warm = _within_ttl(key, ttl)
+    if warm is not None:
+        return warm
+    with _corpus_lock(key):
+        # Re-checked after the wait, and this is the whole of the fix — the check above is only the
+        # fast path for callers that never had to queue.
+        warm = _within_ttl(key, ttl)
+        if warm is not None:
+            return warm
+        now = time.monotonic()
+        fingerprint = _dir_fingerprint(notes_dir)
         with _CACHE_LOCK:
+            _LAST_SCAN[key] = now
             cached = _NOTES_CACHE.get(key)
-            scanned_at = _LAST_SCAN.get(key)
-            if cached is not None and scanned_at is not None and now - scanned_at < ttl:
-                # Inside the window: trust the last scan and skip it. The cached fingerprint is
-                # returned unchanged so `build_graph` still keys its own cache consistently.
-                return cached[0], cached[1]
-    fingerprint = _dir_fingerprint(notes_dir)
+            if cached is not None and cached[0] == fingerprint:
+                return fingerprint, cached[1]
+        notes = _parse_notes(notes_dir)
+        with _CACHE_LOCK:
+            _NOTES_CACHE[key] = (fingerprint, notes)
+        return fingerprint, notes
+
+
+def _within_ttl(key: str, ttl: float) -> tuple[NotesFingerprint, list[Note]] | None:
+    """The cached entry for `key` while its last scan is still inside `ttl`, else None.
+
+    Inside the window the last scan is trusted and this one is skipped: the scan is O(notes) and is
+    paid even on a cache hit, so it is the floor on interactive latency (DA-5). The cached
+    fingerprint comes back unchanged, so `build_graph` still keys its own cache consistently.
+
+    A function rather than an inlined branch because `cached_notes` asks the question twice — once
+    to stay off the lock, once after waiting on it — and the two must not drift.
+    """
+    if ttl <= 0:
+        return None
     with _CACHE_LOCK:
-        _LAST_SCAN[key] = now
         cached = _NOTES_CACHE.get(key)
-        if cached is not None and cached[0] == fingerprint:
-            return fingerprint, cached[1]
-    notes = _parse_notes(notes_dir)
-    with _CACHE_LOCK:
-        _NOTES_CACHE[key] = (fingerprint, notes)
-    return fingerprint, notes
+        scanned_at = _LAST_SCAN.get(key)
+        if cached is not None and scanned_at is not None and time.monotonic() - scanned_at < ttl:
+            return cached
+    return None
 
 
 def load_notes(notes_dir: Path) -> list[Note]:
@@ -235,6 +330,10 @@ def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
     does not arise: two notes standing in several relations at once is rare, and a tuple represents
     it exactly as well for every query anyone actually runs. The cost is that an edge is a set of
     relations rather than one, which is why the attribute is named in the plural.
+
+    One node per id is `_parse_notes`'s guarantee, not this loop's: `add_node` would happily
+    overwrite, and did, which is why the duplicate is now resolved and reported where the files are
+    still in hand to name.
     """
     graph: nx.DiGraph = nx.DiGraph()
     for note in notes:
@@ -260,21 +359,27 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
     skips reassembly entirely. The cached graph is **frozen** (`nx.freeze`) rather than copied:
     copying a large graph would give back most of the saving, and freezing makes the shared
     instance safe for the same reason `Note` is frozen — no reader can corrupt it for the next
-    query. Readers (`find_notes`, `expand_note`, `neighborhood`) only traverse; a caller that
-    genuinely needs a mutable graph should take `graph.copy()`.
+    query. Readers (`expand_note`, `neighborhood`) only traverse; a caller that genuinely needs a
+    mutable graph should take `graph.copy()`.
+
+    The corpus lock is taken around the parse *and* the assembly, not around each separately, so
+    concurrent cold callers share one of each. `_corpus_lock` is re-entrant for exactly this:
+    `cached_notes` takes it again inside, and re-acquiring a lock this thread already holds is the
+    difference between one assembly and one per caller.
     """
-    fingerprint, notes = cached_notes(notes_dir)
-    if fingerprint is None:
-        return _assemble_graph(notes)
     key = str(notes_dir)
-    with _CACHE_LOCK:
-        cached = _GRAPH_CACHE.get(key)
-        if cached is not None and cached[0] == fingerprint:
-            return cached[1]
-    graph = nx.freeze(_assemble_graph(notes))
-    with _CACHE_LOCK:
-        _GRAPH_CACHE[key] = (fingerprint, graph)
-    return graph
+    with _corpus_lock(key):
+        fingerprint, notes = cached_notes(notes_dir)
+        if fingerprint is None:
+            return _assemble_graph(notes)
+        with _CACHE_LOCK:
+            cached = _GRAPH_CACHE.get(key)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
+        graph = nx.freeze(_assemble_graph(notes))
+        with _CACHE_LOCK:
+            _GRAPH_CACHE[key] = (fingerprint, graph)
+        return graph
 
 
 def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None) -> list[str]:

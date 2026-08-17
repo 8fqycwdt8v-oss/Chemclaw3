@@ -242,6 +242,42 @@ def test_poll_survives_transient_launcher_blips(
     assert poll.calls == 4  # both blips were absorbed by the loop, not surfaced as attempt failures
 
 
+def test_a_blip_at_the_artifact_store_does_not_discard_a_finished_run(
+    _nextflow_poll: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fetch shares the poll's error tolerance, because by then the science is already paid for.
+
+    `fetch_artifacts` used to sit *below* the `except`, so the poll got
+    `hpc_poll_max_consecutive_errors` attempts at a transient fault and the fetch got zero.
+    Measured: an artifact store returning 503 for a few seconds while it published the object burned
+    all five of Temporal's activity attempts in 1.51 s and failed the job — after a run that may
+    have taken twenty hours. The energy existed on the cluster and nothing persisted it, so the next
+    identical request paid for the whole run again.
+
+    A store is not more reliable than the launcher in front of it — usually a different service with
+    its own restarts — so absorbing a poll blip while treating a fetch blip as fatal had it exactly
+    backwards.
+    """
+    poll = _ScriptedPoll([nextflow.RunState.SUCCEEDED] * 3)
+    monkeypatch.setattr(nextflow, "poll_run", poll)
+    attempts: list[int] = []
+
+    async def _flaky_fetch(handle: object) -> str:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise httpx.ConnectError("artifact store publishing")
+        return "energy=-1.500000 converged=True"
+
+    monkeypatch.setattr(nextflow, "fetch_artifacts", _flaky_fetch)
+
+    output = asyncio.run(
+        ActivityEnvironment().run(poll_hpc_status, HpcJobHandle(scheduler_job_id="run-79"))
+    )
+
+    assert output == "energy=-1.500000 converged=True"
+    assert len(attempts) == 3  # the loop absorbed both fetch failures rather than failing the run
+
+
 def test_failed_run_is_non_retryable(_nextflow_poll: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """A terminally FAILED run raises a non-retryable error — re-polling it cannot help."""
     monkeypatch.setattr(nextflow, "poll_run", _ScriptedPoll([nextflow.RunState.FAILED]))

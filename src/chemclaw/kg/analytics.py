@@ -99,9 +99,25 @@ def _undistilled_tags(notes: list[Note]) -> list[str]:
 
 
 def _hubs(graph: nx.DiGraph, top_n: int) -> list[tuple[str, int]]:
-    """The most-cited notes, most first. Ties break by id so the result is deterministic."""
+    """The most-cited *notes*, most first. Ties break by id so the result is deterministic.
+
+    **Only nodes that carry a note.** `build_graph` deliberately keeps a link to an unknown id as a
+    node with no `note` attribute, so `kg-validate` can report it — and this ranked those nodes
+    too, by the very citations that make them dangling. Measured on a corpus where four notes cite
+    a `compound-pending` that does not exist: it came back as *the most-cited note in the graph*.
+    That is not an exotic corruption but the state D-018 describes as normal — a fingerprint-indexed
+    reaction is citable before its note clears the PR-gate — so `find_knowledge_gaps` was telling a
+    chemist to check the hub that matters most, and `expand_note` on it raised.
+
+    A dangling target is not silently dropped by this filter, it is reported as what it is: it has
+    its own field, `GraphGaps.dangling_links`, which the same `analyze` fills from the same graph.
+    """
     ranked = sorted(
-        ((node, graph.in_degree(node)) for node in graph.nodes),
+        (
+            (node, graph.in_degree(node))
+            for node in graph.nodes
+            if graph.nodes[node].get("note") is not None
+        ),
         key=lambda item: (-item[1], item[0]),
     )
     return [(node, degree) for node, degree in ranked[:top_n] if degree > 0]

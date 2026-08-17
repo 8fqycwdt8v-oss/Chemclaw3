@@ -46,7 +46,9 @@ from temporalio.client import WorkflowExecutionStatus
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
+from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
+from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -373,8 +375,7 @@ def report(run: SmokeRun) -> str:
     lines = [
         "# Live durable-job smoke\n",
         f"Job `{SMOKE_JOB}` · workflow `{run.workflow_id}` · launched in {run.seconds:.1f}s",
-        f"· Temporal `{settings.temporal_address}` "
-        f"· Postgres `{settings.postgres_dsn.rsplit('@', 1)[-1]}`\n",
+        f"· Temporal `{settings.temporal_address}` · Postgres `{_redact(settings.postgres_dsn)}`\n",
         "| check | result | observed |",
         "| --- | --- | --- |",
     ]
@@ -403,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    configure_logging()
     run = asyncio.run(run_smoke(args.run_dir))
     text = report(run)
     print(text)

@@ -167,6 +167,16 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_notes_unparseable_total": (
         "Note files skipped by the indexer because they failed to parse; they are not retrievable."
     ),
+    # The same defect wearing a different disguise, and the one that used to leave no trace at all:
+    # two files claiming one note id. The indexer keeps the first in path order and drops the
+    # second, so one of two curated notes is unreachable by every query — previously decided by
+    # which directory sorted last, and reported nowhere. Like the counter above this is a corpus
+    # problem rather than a traffic one, and it names the state an rsync that lands a renamed note
+    # before removing the old one leaves behind.
+    "chemclaw_notes_duplicate_id_total": (
+        "Note files skipped by the indexer because another file already claimed their id; "
+        "one of the two is not retrievable."
+    ),
     # The counterpart to the line above, and the reason it could not stand alone: a best-effort
     # publish that fails is logged inside a workflow and swallowed, because the science is already
     # durable and a dead git remote must not fail a completed job. That is the right call about the
@@ -175,6 +185,23 @@ _COUNTERS: dict[str, str] = {
     # make the difference visible and give the alert a ratio to fire on.
     "chemclaw_notes_publish_failures_total": (
         "Knowledge notes that could not be opened on a branch; the knowledge was lost."
+    ),
+    # A fan-out child that exhausted its retries and was dropped (`durable/orchestrator.py`).
+    # Isolate-and-drop is the right policy — one poison input must not restart its siblings — but
+    # until this counter existed the drop's only trace was a `workflow.logger.warning`, so the
+    # parent completed *successfully* with a short list and every operator-visible signal said
+    # healthy. Measured: a live fan-out returned two results from four inputs with nothing but log
+    # lines to show for it.
+    #
+    # The failure this makes visible: the PR-gate's git credential expires, every
+    # `PublishNoteWorkflow` child fails, and all three memory-synthesis jobs complete green
+    # returning `[]` every night — `/schedules` showing `runs_total` climbing and no failures — for
+    # as long as it takes someone to notice that nothing has been proposed in months.
+    # `chemclaw_notes_publish_failures_total` above does not cover it: that one is incremented by
+    # `publish_note_best_effort`, which the memory fan-out does not use.
+    "chemclaw_fan_out_children_dropped_total": (
+        "Fan-out children that failed their retries and were dropped; their work is missing from "
+        "an otherwise successful parent."
     ),
     # The gate's outcomes, which the two counters above cannot express: they count submissions,
     # and the question an operator actually has is whether anything is being *reviewed*. A rising

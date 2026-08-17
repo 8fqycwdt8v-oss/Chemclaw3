@@ -20,7 +20,8 @@ checked with one `grep` instead of an argument. A row that cannot name one is no
 queued.
 
 **A row is a claim about the code, and claims go stale.** A 2026-08-17 pass opened every anchor in
-this file and found that roughly a third of the queue was not workable as written: four rows
+the forty rows this file then held and found that roughly a third of them were not workable as
+written: four rows
 described code that a merged decision had already deleted or fixed, eight were misstated in a way
 that would have sent someone to the wrong function, and three carried their own deferral trigger and
 belonged in `DEFERRED.md`. Two stated the opposite of what the tree does — one pointed at a
@@ -28,6 +29,10 @@ belonged in `DEFERRED.md`. Two stated the opposite of what the tree does — one
 `make user-erase` implements it across nine tables with a dry run and per-table counts. **Before
 working a row, check it against `HEAD`**; if it is wrong, the fix is to correct or delete the row,
 and that is as much a contribution as the code would have been.
+
+Ten further rows arrived from concurrent reviews while that pass ran and are carried here unedited —
+they postdate it and have not been re-verified against `HEAD` by anyone but their author, which is
+exactly the state the paragraph above is about.
 
 Related registers: [`DEFERRED.md`](DEFERRED.md) (postponed with the trigger that would revisit each),
 [`docs/decisions/`](../decisions/) (why the system is the way it is; its README indexes the record by
@@ -102,6 +107,21 @@ topic).
       is a coordinated three-repo change) and the SQL column (a merged migration is never edited);
       delete the contextvar trio, `record_handoff`, `HandoffSignal` and the audit write. ~120 lines
       out. That ADR simply did not sweep these.
+
+- [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
+      [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
+      `calculation_results` primary key as `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`
+      (`infra/sql/001_calculation_results.sql:7`), and `calc_version` is not guaranteed free of `@`
+      or `:` — `docs/decisions/D-2026-08-16-the-physics-leaves-the-cache-stays.md` gives real
+      examples (`esol-delaney@2004`, `cal-0.28733:-29.3116`). Two different `(calc_type,
+      calc_version)` pairs can serialise to the identical string (`calc_type="a", calc_version="b@c"`
+      vs. `calc_type="a@b", calc_version="c"`); if the hash pair also matched, one calculator's
+      `ON CONFLICT (key) DO UPDATE` (`science/calc/postgres_store.py:32`) would silently overwrite
+      another calculator's cached row with a different `result`. The fix — deriving the key from
+      `stable_hash` over the four components as a mapping, the way `molecule_hash`/`input_hash`
+      already do — changes every existing row's key, which under D-011 ("never recomputed") is a
+      full-cache invalidation on deploy; that trade needs an ADR and a migration plan, not a quiet
+      change to `as_str`.
 
 ## 2 — Answers that are wrong without saying so
 
@@ -192,6 +212,46 @@ topic).
       missing is any **link from a job to a plan step** — the surface gets `JobStartedEvent` and
       `job_records` but nothing joins them to a todo. That is a design task.
 
+- [ ] **The digest is written to a mailbox with no reader, and the watermark advances anyway** —
+      [L]. `durable/digest.py:146-166` writes to `session_events` under session id `digest-<owner>`
+      with `kind="digest"`, and the only consumer in the tree is `GET /sessions/{id}/events`, which
+      claims `kinds=("job_completed","job_failed")` and sits behind `resolve_session` — so it 404s
+      that id and would filter the kind out anyway. Measured: the route's exact claim against a real
+      `digest` row returned `[]` and left it unconsumed. `notify_session_best_effort` returns `True`
+      on a successful *insert*, so `acknowledge_digest` fires and `mark_reported` moves the
+      watermark past notes the subscriber will never see; `_is_new` can never re-qualify them, and
+      `retention.py:122` (`consumed_at IS NOT NULL`) makes the orphaned rows immortal. The same
+      dead end exists for `system-eval-drift`, whose must-deliver stance therefore guarantees
+      delivery to nobody. Needs a route (`GET /digests` claiming `kinds=("digest",)`) — and until
+      one exists, `digest_enabled` should plan no Schedule, since shipping the ack without the
+      reader loses matches permanently rather than merely not delivering them.
+
+- [ ] **A rejoined durable run never reaches the second chemist** — [M].
+      `connectors/jobs.py:386-403`: on `WorkflowAlreadyStartedError` the launcher returns the id and
+      deliberately emits no `record_job_started`, and the running workflow's `session_id` belongs to
+      the *first* launcher. So chemist B gets no turn-stream `job_started`, no `job_completed`, and
+      `agent/job_results.py` cannot wait on it either — they are told "in progress" and must poll by
+      hand forever. The comment justifies the silence with "it may already be finished";
+      `handle.describe()` answers exactly that question, so the ~3-line fix is to describe once on
+      the rejoin path and announce it when the status is RUNNING. Full push-back to a second session
+      is the larger change behind it.
+
+- [ ] **The sixteen periodic workflows can still hang instead of failing** — [M]. The job path now
+      declares `failure_exception_types` and `tests/test_workflow_registry.py` holds it
+      (`D-2026-08-16-a-job-that-cannot-fail-is-a-job-that-hangs`), scoped deliberately: for a run
+      nobody is waiting on, parking a redeploy bug until someone ships a fix is a defensible trade
+      and the opposite of the one taken there. Decide it per workflow rather than by widening the
+      test — retention and the memory jobs are the ones worth arguing about, since a parked run
+      there is invisible in exactly the way the fan-out drop was.
+
+- [ ] **`connector_job_timeout_seconds` bounds a 20-second job and a 24-hour job identically** —
+      [M]. `core/config/connectors.py:71`: one global 90,000 s ceiling is the child's
+      `execution_timeout` for every bundle, so if the `calc` worker is down a 20 s xTB job sits
+      `running` for a day with no signal, while the setting is sized entirely by the QM path. An
+      optional `JobSpec.timeout_seconds` applied as `min(declared, setting)` would let a bundle
+      lower its own ceiling while the deployment keeps the maximum, leaving
+      `_the_job_ceiling_covers_the_poll_it_bounds` untouched.
+
 ## 4 — Operating it
 
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
@@ -240,6 +300,57 @@ topic).
       pagination — `session_store.list_for_owner` truncates at `service_max_listed_sessions` with no
       cursor, so older sessions are unreachable, and (b) `DELETE /sessions/{id}`, which `leaver`
       does not offer because it is actor-scoped, not session-scoped.
+- [ ] **`session_owners` and `session_turns` grow without any age-based disposal** — [S].
+      `infra/sql/README.md`'s own `session_owners` row already flags this ("survives its session's
+      pruned history; BACKLOG") but no row existed here to match it — this closes that dangling
+      cross-reference. Neither table is in `durable/retention.py`'s `_PRUNABLE` set, and the only
+      `DELETE` against either is `agent/leaver.py`'s manual, actor-scoped erasure — so every session a
+      client ever created (the companion UI creates one on the first keystroke, before any message is
+      sent) leaves a `session_owners` row forever, even after `session_messages` for that session is
+      fully pruned by age. Needs a policy decision — prune once a session has no remaining
+      `session_messages` and is past the retention window, or explicitly accept unbounded growth and
+      say so — not a code change made unilaterally.
+
+- [ ] **`observations_status_idx` does not cover the query it was built for** — [S].
+      `infra/sql/025_observations.sql:50` indexes `(status, last_seen DESC)`, with a comment saying
+      "the retrieval bucket wants open observations newest-first" — but `memory/observations.py:122`
+      (`_SELECT_OPEN`) actually sorts `ORDER BY cardinality(evidence_note_ids) DESC, last_seen DESC`,
+      an expression the index does not cover. The index serves the `status='open'` filter only; every
+      read still sorts all open rows in memory by an unindexed expression. Whether the fix is an
+      expression index matching the real sort or a correction to which one is authoritative is a
+      product call — the migration's stated rationale and the code that ships disagree about what the
+      "newest and most-evidenced first" bucket actually orders by.
+
+- [ ] **`connectors.<name>.enabled` in the chart never reaches the agent** — [M].
+      `values.yaml:135` says "CHEMCLAW_CONNECTORS_ENABLED in `config` below decides which bundles
+      the agent loads at all" — and that key is in none of the 33 `config` entries. The chart derives
+      `CHEMCLAW_CONNECTOR_URLS`, `SERVICE_FLEET_REPLICAS` and `PG_FLEET_POOLED_PROCESSES` from
+      `.Values.connectors` and not the enable list, so `enabled: false` removes the pods and leaves
+      the tool on the agent's surface: the launcher starts the wrapper on the polled queue and its
+      child on `connector-qm`, which nobody polls, and the chemist is told "running" until the 25 h
+      ceiling. Latent today (all seven shipped entries are `enabled: true`); it fires the first time
+      someone uses the switch the file documents. Fix is a `chemclaw.connectorsEnabled` helper
+      mirroring `connectorUrls`, plus deleting the sentence that points at the absent key.
+
+- [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
+      derives its target from `health_url(manifest)`, which is `None` for a bundle with no
+      `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
+      `chemclaw_connectors_unhealthy` counts only `unreachable`, and `check_connectors_at_startup`
+      raises only on `unreachable`. The fail-fast posture an operator opts into is structurally
+      blind to the failure with the largest blast radius. `describe_task_queue(bundle_queue(name))`
+      in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
+      of the manifest check `connector-validate` now does — and it catches the row above too.
+
+- [ ] **One `replicas` knob drives two differently-shaped Deployments** — [S].
+      `templates/deployment-connectors.yaml:35` and `:98` both read `$cfg.replicas`, so scaling
+      `calc`'s MCP server to 4 also scales its Temporal worker to 4, and `pooledProcesses` counts it
+      twice against the `pg_fleet_max_connections` startup ceiling. Worse, the guard requires
+      `replicas` only when there is no `url`, while the worker block is deliberately not conditioned
+      on `url` — so a `url:` bundle that owns durable work renders an empty `replicas` (Kubernetes
+      defaults to 1) and contributes `nil | int` = 0 to the declared fleet. Split into
+      `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
+      require it whenever `worker` is set.
+
 
 ---
 

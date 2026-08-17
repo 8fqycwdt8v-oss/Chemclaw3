@@ -1,130 +1,114 @@
-# Deep review of the LangGraph migration, the GxP removal and the tool exodus
+# Make the agentic backend lean to read
 
-Range reviewed: `7336f1d..84148a1` — 569 files, +53,599 / −33,521. Four parallel review agents
-(agent core · GxP/persistence · science+connectors after the exodus · front door/evals), each
-required to verify by reading code and running it rather than by reading docstrings.
+Scope: readability only. No behaviour change anywhere — every gate, event, refusal, metric and
+audit row must be byte-identical in effect. The suite is the proof, not the argument.
 
-## Baseline, measured before any change
+## Why these three and not "cut the docstrings"
 
-Docker, Postgres and Temporal started first, because a local `pytest` without them skips ~157
-Postgres tests and still prints green.
+Measured before planning, because the obvious move is the wrong one. `agent/` holds **422
+docstrings, 5,400 lines, median 9 lines, mean 12.8** — a healthy median with a long tail: **42
+docstrings over 30 lines carry 1,770 of those lines**. So the prose is not uniformly bloated and a
+mass cut would destroy the measurements this tree keeps deliberately. The reading cost is
+concentrated in three structural places instead.
 
-| | result |
-|---|---|
-| `pytest` (infra up) | **3978 passed, 0 skipped, 0 failed** |
-| `ruff check` / `ruff format --check` | clean, 590 files |
-| `mypy --strict` | clean, 590 files |
+## 1 — `api/runner.py::run_turn` is one 483-line async generator
 
-**Every defect below is invisible to that suite.** That is the finding behind the findings: the gate
-was green throughout, so nothing here is a regression the tooling could have caught — each one is a
-gap between what a declaration claims and what the code does.
+- [ ] `_TurnLedger` dataclass for the state that crosses stage boundaries (`answered`,
+      `run_complete`, `answer_parts`, `started_jobs`, `tool_exchanges`, usage).
+- [ ] `_turn_ambient(...)` sync `@contextmanager` stamping and resetting all five contextvars —
+      makes "nothing in the teardown may await" structural rather than a comment.
+- [ ] `_stream_into(...)` async generator shared by the main run and the mid-turn resume (the
+      answer-part loop is currently written twice).
+- [ ] `_resume_on_job_results(...)` for the mid-turn resume block.
+- [ ] `_loop_cap_event(...)` / `_empty_answer_event(...)` returning `ErrorEvent | None`.
+- [ ] `_book_turn_spend(...)` for the metrics + cost-ledger tail (sync, no await).
+- [ ] `run_turn` left as orchestration a reader can hold in their head.
 
-## Fixed (each proven by reproduction)
+**Hazards, each of which the current code documents and must keep:** the teardown clause must
+still catch `CancelledError` as well as `GeneratorExit` (D-130 — production disconnects arrive as
+the former); the rollback predicate stays `run_complete`, never `answered`; `finally` must not
+`await`; `consume_turn_approval` stays out of `finally`; `empty_answer` must still `return` rather
+than fall through.
 
-- [x] **CRITICAL — the grant reconciliation stripped write access to every LangGraph table on the
-      second deploy.** `REVOKE ALL ON ALL TABLES` reaches the six tables `setup()` creates; the
-      enumerated re-grants named none. Reproduced in Postgres 16: the app role *owns* `checkpoints`
-      and still ends with `INSERT=f SELECT=t`. The guard was blind — `_tables()` knew only
-      `infra/sql/*.sql`, so `_DYNAMIC`'s explicit `checkpoints` entry was discarded. ADR
-      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name`.
-- [x] **HIGH — a dry run could write a durable memory.** Fixed with a path-aware predicate rather
-      than by adding names: one verb serves `/memories/` and `/scratch/`.
-- [x] **HIGH — a template step read a tool's refusal as its answer**, and the audit trail booked the
-      refused call as `ok`. Measured: on the plain-args form this path used, a failed MCP tool
-      returns a bare `str`. Invoking with the whole call was tried and rejected — it stringifies a
-      `job` step's dict payload.
-- [x] **HIGH — every failed tool call emitted both `tool_failed` and `tool_result`, and the error
-      text joined the corpus `score_answer` grades grounding against.** `graph_stream` read a
-      `status` that `answered_failure` rewrites to `"success"`; `ToolFailureSignal` now carries
-      `call_id` and the stream suppresses on the turn's own failure set.
-- [x] **HIGH — a subagent's tool calls, results and plan were emitted as the main agent's.** Work
-      below the root is now marked, and its plan withheld rather than relabelled — `PlanEvent` has
-      no `agent` field, so there is nowhere to say whose it is.
-- [x] **HIGH — subject erasure missed the full text of every tool result.** `tool_result_blobs` is
-      now erased by the session its links name. The links themselves are left to the cascade, which
-      is what lets the grant keep withholding DELETE on that table — a conflict the grants test
-      caught.
-- [x] **HIGH — the remote calc client had no session timeout**, so the only live bound was httpx's
-      un-overridden 300 s rather than the 900 s its setting names, and it fires *silently*. Both
-      bounds are now set, session-first.
-- [x] **HIGH — `CALCULATION_EPOCH` reached no calc cache key.** Folded into `remote_key`'s params
-      hash; the three documents that prescribed bumping it now describe something that works.
-- [x] **MEDIUM — a Postgres failure was reported as a calculation-server outage.** The blanket
-      `except` spanned the `yield`, so the caller's `cached_compute` body re-entered it. Narrowed,
-      with `_call` converting its own transport failures.
-- [x] **MEDIUM — a reaction result stamped a locally-configured `method`** describing a calculation
-      this process did not run. `SpeciesEnergy` now carries the server's.
-- [x] **MEDIUM — an empty-answer turn also yielded an empty answer** and booked itself
-      `completed=True` in the cost ledger.
-- [x] **MEDIUM — the reference UI spliced a subagent's prose into the answer bubble.**
-- [x] **MEDIUM — `calc_session` had no test at all**, which is why the three defects in it were
-      invisible to a green suite.
-- [x] **MEDIUM — the image still installed xtb and crest** (~200 MB, and a GPL-3.0 redistribution
-      decision) for two modules that left with the physics; **and nothing in `deploy/` pointed
-      anything at the calculation server**, so `helm install` produced a `calc` bundle failing
-      against loopback.
-- [x] Record drift: `ARCHITECTURE.md`'s specialist team, `science/__init__.py` calling `calc` "the
-      physics", the dead `SafetyRulesError` entry, the unbounded
-      `xtb_minimum_refinement_attempts`, the present-tense handoff docstrings, `CLAUDE.md`'s three
-      non-existent backlog rows, and the one closed `[x]` row.
+## 2 — Relocate the long-tail prose — **attempted on the worst case, and it yields nothing**
 
-Suite after: **3991 passed**, `ruff` and `mypy --strict` clean, seven of eight validators green
-(`helm-validate` needs the `helm` binary, absent here; the chart change is covered by
-`tests/test_helm_chart.py` and `tests/test_deploy_chart.py`).
+The plan assumed these docstrings were narrative that could move to a README behind a pointer, and
+estimated 1,000–1,400 lines. **That estimate was wrong and the attempt is what showed it.**
 
-## Open
+Tried on the single biggest, `agent/checkpointer.py`'s 93-line module docstring, which looked like
+the best possible case: it explicitly says its measurements are run by
+`tests/test_checkpointer_schema.py`, and each of its four measured bullets does correspond to a
+test whose *name* states the same finding. Real duplication, provably.
 
-Queued as `docs/planning/BACKLOG.md` rows, each naming an anchor.
+- First attempt — bullets collapsed into a prose pointer: **93 → 88 lines**, and materially worse
+  to read. A dense paragraph carrying four test names is not leaner than the list it replaced.
+- Second attempt — keep the bullets, append the test name to each, drop the restated numbers:
+  **93 → 93 lines.** Zero.
 
-**Two of the eleven closed before this branch merged**, from `main` rather than here: the dead
-calculator settings went with `main`'s own sweep (this branch removed the one it missed,
-`xtb_engine`, whose comment still described a backend resolution that no longer exists), and
-`D-2026-08-16-a-result-too-big-for-its-row-is-an-artifact` gave the artifact store a writer again —
-`connectors/calc/compose.py:216`. Their rows are deleted rather than struck through. The rest:
+**So the compression is not available.** These are measurement records attached to the code they
+constrain, not narrative wrapped around it. Three things block the move independently: merged ADRs
+are never edited, so the natural destination is unavailable; a README breaks the locality that
+makes a measurement useful, since it is read when standing at the code; and a pointer to prose
+elsewhere is the stale-pointer defect the previous PR existed to fix.
 
-- **`tblite` is a runtime dependency with no importer**, kept alive by the test that derives
-  `ALPB_SOLVENTS` — a launch gate for four durable jobs — from a local install rather than from the
-  server that now decides it.
-- **The stored-message conversion is a destructive in-place rewrite run as a `pre-upgrade` hook**,
-  against data the previous release is still serving. Needs an ADR, not a patch.
-- **`xtb_geometry_decimals` still shapes half of every remote cache key.**
-- **No live lane in this repo can start**, and the e2e harness does what `calc`'s manifest forbids.
-- **A retrieval leg that raised is indistinguishable from one that found nothing.**
-- **The audit trail's `agent` column can never be non-empty**, and `memory_store()` repeats the
-  cold-start race `checkpointer.py` was fixed for.
-- **Retention's checkpoint `LIMIT` bounds the deletes, not the scan.**
-- **`message_from_row` degrades on one branch and mislabels the speaker on the other.**
+- [x] Measured on the worst case rather than assumed across all 26.
+- [x] The checkpointer edit is **kept** — same length, but every measured claim now names the
+      executable test that proves it, so the prose can no longer drift from the behaviour. That is
+      a staleness fix, and it is honestly not a leanness one.
+- [ ] The remaining 25 are **not** touched. There is no yield to have.
 
-## Checked and found sound
+## 3 — Cut the import fan-out — **measured, and not done, because it works against the goal**
 
-Recorded so the next reviewer does not re-derive them. **Auth is not stubbed** — the `entra_*`
-settings that looked reader-less are read via the derived `entra_issuer_url` / `entra_jwks_endpoint`
-(`api/auth.py:124,160`); RS256 is pinned, audience/issuer/exp checked, `kid`-less headers refused,
-JWKS refetch rate-limited, 503 separated from 401. Also verified: no import breakage anywhere; the
-token budget is booked on the disconnect path inside an `await`-free `finally`; audit coverage
-survives the GxP removal intact and no code path issues UPDATE/DELETE on `audit_events`;
-`message_from_row` really is the single deserializer; compaction is non-destructive; content is
-suppressed on all 14 OpenInference `hide_*` paths by default and LangSmith egress is pinned off
-(verified with the adversarial import ordering); no attacker-influenced metric label; the
-admission/budget overshoot bound holds; the Helm chart correctly renders no Deployment for `chem`
-and `safety`; and every tool name in `data/profiles/*.yaml` still resolves.
+Static closure of `api.runner`: **156 modules, 529 internal edges.** Every edge was tried.
+
+- **447 of the 529 save nothing at all.** The graph is densely reconnected, so a cut usually just
+  routes around itself — `kg.note` alone is imported by **22** modules inside the closure.
+- The best single cut is `durable.connector_job -> durable.memory_jobs` (−10), and it is the
+  riskiest place in the tree to touch: it sits inside `workflow.unsafe.imports_passed_through()`,
+  where an import change is a Temporal determinism/replay question.
+- Greedily stacking the eight best cuts reaches **156 → 98 (37%)**.
+
+**The 37% is real and is still the wrong trade.** Each of the eight is an import moved from a
+module header into a function body, and the eight are `langgraph_agent`, `graph_tools`,
+`research_tools`, `memory_tools`, `report_workflow`, `note_index`, `template_job`, `memory_jobs` —
+every one of which a live front door imports on its *first turn* anyway. So the saving is startup
+latency, not steady state, and it is bought by hiding the dependency structure inside function
+bodies. That makes the tree harder to read, which is the thing this task exists to fix.
+
+- [x] Measured exhaustively rather than argued.
+- [ ] **Not implemented.** Reported to the requester with the numbers; theirs to overrule if the
+      startup-time win is wanted for its own sake.
+
+The fan-out does point at one genuine layering question — `agent/durable_tools.py` imports workflow
+*implementations* in order to launch them, where D-002 says durability lives only in Temporal. That
+is an architectural change needing its own ADR, not a readability edit.
+
+## Verification
+
+- [ ] `make lint type test` on a **full clone** with Docker up, so nothing skips for want of
+      Postgres/Temporal. Report what skipped, if anything.
+- [ ] PR, merge on green CI.
 
 ## Review
 
-**What the instruction to measure bought.** Three claims changed under measurement rather than
-argument. The `astream` tuple-arity coupling looked unpinned and turned out to be exercised by a
-real compiled graph. The `entra_*` settings looked dead and are read through derived properties —
-an auth "critical" that was a grep artefact. And the template-step fix I first wrote (invoke with
-the whole call) was correct about the diagnosis and wrong as a remedy; only running the suite showed
-it stringifying a `job` step's payload.
+**One of the three was worth doing, and the other two are worth having measured.**
 
-**What was harder than expected.** The grant fix's first draft planned to add `checkpoint_migrations`
-to `CHECKPOINT_TABLES`. That constant is deliberately the conversation-bearing set and feeds
-`DELETE … WHERE thread_id`, which `checkpoint_migrations` has no column for — the change would have
-broken erasure and retention in order to fix a grant. The grant needed its own derivation.
+`run_turn` was the whole reading cost: **483 lines → 194, of which 90 are code**. Nothing was
+deleted — every hazard comment moved onto the function that now owns it, which is the actual gain.
+The D-130 cancellation rule now sits on the rollback that depends on it; the
+`run_complete`-not-`answered` distinction is stated once, on the field; the "nothing here may
+`await`" rule stopped being a comment and became the type of the thing, because `_turn_ambient` and
+`_book_turn_spend` are synchronous and cannot acquire an `await`. One duplicated loop
+(`_stream_into`, written twice — once for the model run, once for the resume) became one.
 
-**A failed approach, recorded so it is not retried.** Grouping the new grants per `setup()` and
-guarding each group once. A `GRANT` on a missing table raises, and a raise anywhere in the `DO`
-block aborts the whole reconciliation — so one interrupted `setup()` would have left *every* table
-in the file ungranted, turning a narrow bug into a total one. Found by running it against a database
-holding only `checkpoints`. Guarded per table instead.
+The other two were both **estimates I made before measuring, and both were wrong in the same
+direction**: I sized them by eye from a line count and proposed them as wins. Measured, the docstring
+compression yields *zero* lines once readability is held constant, and the import work yields 37%
+of a number that only describes process startup — bought by hiding eight dependencies inside
+function bodies, which makes the tree harder to read. Neither is a defensible trade for a task whose
+whole purpose is readability.
+
+**Lesson for `tasks/lessons.md`:** a line count is not a measure of reading cost. `agent/` is 58%
+prose and that prose is mostly measurements; the file that was genuinely hard to read was the one
+with a 483-line function in it. Size the work by structure, not by ratio — and measure the
+candidate before pitching it, not after it is approved.

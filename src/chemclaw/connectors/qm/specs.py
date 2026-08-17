@@ -70,14 +70,25 @@ def qm_job_key(spec: QmJobSpec) -> str:
     the Nextflow run name, and the result note's id. One definition, three callers. Shares
     `chemclaw.core.ids.stable_hash` (SHA-256) with every other identity key in the system.
 
-    Includes the HPC pipeline version **only when one is configured** (plan F5-T3): a real pipeline
-    update changes the numbers, so it must be a cache *miss*, not a stale hit (D-011/D-033).
+    Includes the HPC pipeline **name and version**, each only when configured (plan F5-T3): a
+    pipeline update changes the numbers, so it must be a cache *miss*, not a stale hit
+    (D-011/D-033).
+    The name is here for the reason `connectors.qm.cache.calculation_key` records — measured, two
+    pipelines tagged `1.0.0` produced one key — and it matters twice over on this function, because
+    this digest is also the *note id* (`connectors.qm.knowledge`): without the name, a result note
+    from one pipeline and a note from another collide on id, so the second silently proposes an
+    edit to the first instead of a new finding.
+
+    Each is added only when set, which keeps every `mock` and dev key byte-identical: neither is
+    configured there, and `Settings._hpc_launch_config` requires both under `nextflow`.
     """
     payload = {
         "smiles": require_canonical_smiles(spec.molecule_smiles),
         "method": spec.method,
         "basis_set": spec.basis_set,
     }
+    if settings.hpc_pipeline_name:
+        payload["pipeline_name"] = settings.hpc_pipeline_name
     if settings.hpc_pipeline_version:
         payload["pipeline_version"] = settings.hpc_pipeline_version
     return stable_hash(payload)

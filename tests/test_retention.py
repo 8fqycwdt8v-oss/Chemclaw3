@@ -406,6 +406,64 @@ def test_a_failure_part_way_through_keeps_what_the_sweep_already_removed() -> No
     )
 
 
+def test_a_failed_table_does_not_starve_the_tables_after_it() -> None:
+    """The outer per-table loop's own version of the fix above.
+
+    `_PRUNABLE` iterates `session_events`, `session_messages`, `tool_result_blobs`, `checkpoints` in
+    that order, and a `session_messages` failure used to propagate straight out of
+    `prune_expired_rows` before `tool_result_blobs` was ever reached — so a persistent problem
+    confined to one table stopped every table after it from being pruned at all, on every retry.
+    Injected the same way as the test above (`droppable_rows` failing on the fourth call), but this
+    one asserts on the table that comes *after* the one that fails.
+    """
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        await _seed_expired_sessions(6, "sweep-order-")
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM tool_result_blobs WHERE content_hash = %s", ("sweep-order-test",)
+            )
+            await cur.execute(
+                "INSERT INTO tool_result_blobs (content_hash, byte_size, data, created_at) "
+                "VALUES (%s, %s, %s, now() - make_interval(days => 400))",
+                ("sweep-order-test", 1, b"x"),
+            )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 365)
+        calls = {"n": 0}
+        real = droppable_rows
+
+        def _fail_on_the_fourth(rows: object, expired: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == 4:
+                raise RuntimeError("statement timeout part way through the sweep")
+            return real(rows, expired)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(retention, "droppable_rows", _fail_on_the_fourth)
+        try:
+            with pytest.raises(RuntimeError):
+                await prune_expired_rows()
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s",
+                ("sweep-order-test",),
+            )
+            row = await cur.fetchone()
+        return int(row[0]) if row else -1
+
+    remaining = asyncio.run(_run())
+    assert remaining == 0, (
+        "tool_result_blobs comes after session_messages in _PRUNABLE; a failure in the earlier "
+        "table must not stop the later one from being pruned in the same pass"
+    )
+
+
 def test_one_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
     """An unbounded first pass spends an attempt and commits only what it reached.
 
