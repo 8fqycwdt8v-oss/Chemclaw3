@@ -503,3 +503,18 @@ Two process mistakes in one session, both cheap to avoid:
 - `pkill -f "pytest -q"` matched the bash wrapper the harness runs my own commands in, killing my
   waiters (exit 144). **Rule:** kill by pid from `pgrep -f "python3 -m pytest" | head -1`, never by
   a loose pattern that my own command line also contains.
+
+## "Not answering" is a claim about the network; check the server's own log (2026-08-17)
+
+Four storm checks failed with `CalcServerError: the calculation service is not answering`. I was
+one step from filing a Temporal durability defect. The server's access log said `401 Unauthorized`
+— it was answering every single call, and refusing the credential.
+
+Two rules from it. **When an error message names a subsystem's state, verify that state at the
+subsystem**, not from the message: the message is the caller's belief, and here the caller could
+not tell a refused connection from a refused credential. And **a retryable error class is an
+assertion that waiting helps** — misclassifying a 401 as an outage does not just mislead a reader,
+it spends the whole retry budget proving the same thing.
+
+I also killed my own shell with `pkill -f` a second time, after writing the rule not to. Use
+`pgrep -f <pattern> | head -1` and kill the pid.

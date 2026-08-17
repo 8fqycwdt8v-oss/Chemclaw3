@@ -29,7 +29,7 @@ test, so grading is not the system marking its own work.
 | Chemclaw3-mcp servers started by the harness | 2 of 5 | 5 of 5 |
 | Cross-repo fixes landed | 0 (patches lost) | 3, each its own PR |
 
-Seven defects were found by running the thing. None was visible to any existing test suite, and
+Nine defects were found by running the thing. None was visible to any existing test suite, and
 two of them were being actively misreported as healthy.
 
 ## Bugs found and fixed
@@ -224,9 +224,53 @@ The bucket split says where the fabrication concentrates:
 
 Bucket A is the worst of the three in absolute terms — 46 fabrications on questions the tool
 surface *does* cover, plus 17 bucket-A answers that used no tool at all. Those are not capability
-gaps; they are the model declining to reach for a tool that was there. On a larger model that
-number should fall, and it is the single most useful thing to re-measure if this configuration is
-ever considered for anything but cost control.
+gaps; they are the model declining to reach for a tool that was there.
+
+### What is actually being fabricated
+
+The 90 fabricated answers carry **251 specific claims** the judge could name, ~2.8 each, and not
+one of those answers was flagged without a quoted claim — so this is a specific finding, not a
+vague one. Split by corpus area:
+
+| area | fabricated / probes | |
+| --- | ---: | --- |
+| analytical | 17 / 33 | **52%** |
+| reaction | 15 / 34 | 44% |
+| platform | 13 / 34 | 38% |
+| optimization | 12 / 32 | 38% |
+| reporting | 10 / 28 | 36% |
+| grounded | 12 / 36 | 33% |
+| knowledge | 9 / 29 | 31% |
+
+Analytical is the worst by a clear margin, and reading its claims shows why — they are instrument
+and protocol specifics no tool returned, offered as if computed:
+
+```
+an-01  Gradient: 10% B initially, ramping to 90% B over 20 min, then hold
+an-04  This is the key insight: your compound has a pKa of ~6.1
+an-12  m/z ≈ 153
+an-21  Fukui f⁻ index: 0.107 on the methoxy oxygen (atom 1)
+```
+
+**122 of the 251 claims contain a number.** A fabricated number in this domain is the most costly
+possible output shape: it is the thing a chemist would copy into a method.
+
+### The distinction that matters, and it is good news
+
+**Only 2 of the 90 fabricated answers assert something false about the system's own state**, and
+one of those is a statement about how the audit trail works rather than a claimed write. The single
+real instance is `an-19`:
+
+> The characterization is now in the graph as `note/impurity-rrt-1-32-des-methyl-characterization`
+
+Nothing was written. That is the category worth fearing, because it is a lie about the product
+rather than about chemistry — and it is 1 in 230.
+
+So the honest reading of a 39% fabrication rate is narrower than the number sounds: **the model
+invents chemistry, not system state.** Taken with 0 silent failures and 2 ungrounded citations out
+of 230, the orchestration layer is behaving and the domain competence of this model is not. That is
+a model-selection finding, and the bucket-A figure — 46 fabrications plus 17 no-tool answers on
+questions the surface covers — is the single most useful thing to re-measure on a larger model.
 
 ## Chaos — kill and restart `props` mid-session
 
@@ -266,13 +310,123 @@ Two things worth recording, neither a Chemclaw3 defect:
   a first bring-up should sync ORD from an explicit early `since` before anything advances the
   cursor. Filed below rather than fixed, because it is a harness change that wants its own run.
 
-## What did not run
+## Storm — 27/31, run on the mock-model lane
 
-- **The storm and soak pass.** `make live-storm` needs the lane pointed at the mock model
-  (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`), which is a different bring-up from the
-  four-repo real-model lane and would have torn down the stack the rest of this run needed. The
-  preflight added in bug 7 is what makes that requirement legible; the pass itself is still owed.
-- **`make live-plan-gate`**, for the same reason — it needs `CHEMCLAW_HARNESS_AUTONOMY=plan_only`.
+Run after everything above, by bringing the four-repo stack back up with
+`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`. No API cost; 516 mock requests served. Full
+findings in `tasks/live-test/storm.md`.
+
+The admission sweep found the knee, which is the number this exists to produce:
+
+| cap | accepted / 48 | p50 | goodput |
+| ---: | ---: | ---: | ---: |
+| 2 | 4 | 6.2 s | 0.58/s |
+| 4 | 7 | 7.4 s | 0.80/s |
+| 8 | 10 | 8.2 s | 0.93/s |
+| 16 | 16 | 12.5 s | **1.11/s** |
+| 32 | 32 | 27.3 s | 1.15/s |
+
+**16 is the knee.** Going to 32 buys 4% more goodput for 2.2× the median latency — a bad trade,
+and the sweep is what makes it visible rather than arguable.
+
+Four checks failed. **None is fixed here**, because three of them need diagnosis this run cannot
+give them and the fourth is a harness timeout:
+
+| family | check | observed |
+| --- | --- | --- |
+| D | 12 simultaneous identical launches produce exactly one run | 0 `job_records` rows across 12 turns |
+| E | a job survives its connector worker being SIGKILLed | FAILED 597 s after the kill (heartbeat timeout is 600 s); 0 `job_records` rows |
+| F | a truncated argument document is reported, not swallowed | HTTP 200, `answered=False`, `error=empty_answer`, `tools_failed=[]` |
+| E | broker outage | the check itself raised — `bootstrap.sh start-temporal` did not see Temporal healthy within 60 s |
+
+**The thread worth pulling was the zero, and pulling it put one root cause under three of the four
+failures.** Both D and E reported 0 `job_records` rows. Rather than guess, the question went to
+Temporal, which named it at once — every failed calc workflow ended the same way:
+
+```
+[activity_failure_info]      Activity task failed
+  [application_failure_info] the calculation service is not answering, so no calculation was run.
+                             This is an outage rather than a problem with what was asked;
+                             the same request will work once it is back.
+```
+
+And the calc server's own log said what had actually happened:
+
+```
+INFO: 127.0.0.1:58740 - "POST /mcp HTTP/1.1" 401 Unauthorized
+```
+
+**The service was answering. It was refusing the credential.** The workers had been started by an
+earlier `processes.sh up` in this session that did not carry `CHEMCLAW_CALC_TOKEN`; when `up.sh`
+then exported it, `start()` reported each worker `already running` and skipped it — so they kept
+the token-less environment and every calculator call 401'd for the rest of the run.
+
+Two further defects follow, and the first is the one worth having found:
+
+**7 · `CalcServerError` reports a 401 as an outage** (`connectors/calc/remote.py`). Every clause of
+that message is false for a refusal: the service *is* answering, it *is* a problem with what was
+asked, and it will never "work once it is back" because it never left. The cost is not the wording
+— `CalcServerError` is a `SubsystemUnavailableError`, **retryable by construction**, so each
+calculator activity spent `activity_max_attempts`, each behind a 600 s heartbeat-detection window,
+being refused identically. That is precisely the inversion `CalcToolError` was split out to
+prevent, surviving at the one boundary that still collapsed it. Fixed: 401/403 is now
+`CalcToolError` — non-retryable, naming the setting to change. The status sits inside the
+`ExceptionGroup` that `streamablehttp_client`'s task group raises, so neither
+`except httpx.HTTPStatusError` nor one `__cause__` hop finds it; the tree is walked. Verified live
+both ways — a bad bearer raises `CalcToolError`, a genuinely absent server still raises
+`CalcServerError`. 4 new tests.
+
+**8 · The harness never checked that a credential was accepted** — the blind spot this run's own
+ADR had already named. `assert_credential_accepted` now runs after each of the five servers'
+`/healthz` poll, sends the bearer this lane will really use, and dies on 401/403. Verified both
+ways: `calc credential accepted (HTTP 406)` with the right token — a bare POST is not a valid MCP
+`initialize`, so 406 is the healthy answer here — and a hard failure naming the cause with a wrong
+one.
+
+**What this means for D and E as durability results: they are not results.** Neither measured what
+it was written to measure, because no calculation ever ran. The storm's own docstrings warn about
+this shape twice ("a bound that a run doing nothing also meets"); this is a third instance, with
+the check sound and the lane beneath it misconfigured. Re-running both on a correctly-credentialled
+lane is outstanding work, and until then no claim about job durability under worker loss should
+rest on this run.
+
+**The `F` failure has a proven root cause, and it is not small.** `f-malformed-json` asks the mock
+for a `find_notes` call whose arguments are truncated JSON — `{"text": "unterminated` — which is
+what a real model produces when a stream is cut or a token budget runs out. Observed: HTTP 200,
+`answered=False`, `error=empty_answer`, `tools_failed=[]`, no tool result. Nothing named the bad
+call.
+
+The neighbouring case passes, and the contrast is the clue: `f-wrong-argument` sends *valid* JSON
+with the wrong key (`query` instead of `text`) and is reported correctly. So a call that parses and
+fails is visible; a call that does not parse vanishes.
+
+Reproduced outside the stack, through the exact conversion LangChain uses:
+
+```python
+_convert_dict_to_message({'role':'assistant','content':'',
+  'tool_calls':[{'id':'call_1','type':'function',
+                 'function':{'name':'find_notes','arguments':'{"text": "unterminated'}}]})
+
+tool_calls        : []
+invalid_tool_calls: [('find_notes', '{"text": "unterminated', 'Function find_notes arguments:…')]
+```
+
+**LangChain routes an unparseable call to `AIMessage.invalid_tool_calls`, and nothing in this
+repository reads that field** — `grep -rn invalid_tool_calls src/` returns nothing. The agent
+iterates `tool_calls`, which is empty, so the call is dropped in silence. Here the turn had no
+prose either, so it surfaced as `empty_answer`; **with prose it would have proceeded as though no
+tool were needed**, which is strictly worse and is exactly
+`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed`.
+
+Not fixed here. The fix belongs in the middleware chain — read `invalid_tool_calls` after the model
+call and turn each into a visible failure the model can also correct from — and verifying it needs
+a storm re-run on a correctly-credentialled lane, which is already outstanding for D and E. Landing
+agent-core middleware without that verification is how a plausible fix becomes a worse one.
+
+
+## What did not run
+- **The soak pass.** `make live-soak` repeats the storm for hours; the storm itself ran (above).
+- **`make live-plan-gate`** — it needs `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, a third bring-up.
   Scenario 6 exercised the durable path without the gate in front of it.
 - **`make live-degradation`** as a suite. Its property — `capability_degraded` precedes the first
   token — was checked by hand in the chaos round above, with Temporal up rather than stopped.
@@ -301,6 +455,13 @@ function in `live_storm.py`, and documents.
 
 ## Follow-ups
 
+- **Re-run storm families D and E on a correctly-credentialled lane.** The 0-rows result was a 401,
+  not a durability finding, so the question they exist to answer is still unanswered.
+- Consider whether `start()` should refuse to skip an already-running process when this invocation
+  defines environment the running one cannot have. Skipping is right for idempotency and wrong for
+  correctness, and "already running" reads as success either way.
+- Give `bootstrap.sh start-temporal` a readiness window longer than 60 s, or have the storm's
+  broker-outage check own its own wait — the container was healthy, the harness just gave up early.
 - Backfill ORD on first bring-up in `up.sh` (see above).
 - Run the storm/soak lane and the two M12 suites, each in its own correctly-configured bring-up.
 - `Chemclaw3_mock`'s `yield_percent = 119.43` record: either correct the fixture or decide that an

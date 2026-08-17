@@ -673,3 +673,64 @@ def test_no_setting_shapes_the_bytes_the_server_hashes() -> None:
         "`arguments` is hashed on the other side, so a deployment could re-key its own "
         "calculations — silently, because a miss is not an error."
     )
+
+
+def _status_error(status: int) -> httpx.HTTPStatusError:
+    """An `httpx.HTTPStatusError` carrying `status`, shaped as the transport really raises it."""
+    request = httpx.Request("POST", settings.calc_server_url)
+    return httpx.HTTPStatusError(
+        f"Client error '{status}' for url",
+        request=request,
+        response=httpx.Response(status, request=request),
+    )
+
+
+def test_a_refused_credential_is_not_an_outage() -> None:
+    """A 401 is a refusal, and calling it an outage costs a durable job its whole retry budget.
+
+    Measured against a live `calc` server before this was classified: a bad bearer produced
+    `CalcServerError("the calculation service is not answering ... the same request will work once
+    it is back")`, of which every clause is false. The service answered — with 401. It *is* a
+    problem with what was asked. And it will never work once "it is back", because it never left.
+
+    The cost is not the wording. `CalcServerError` is `SubsystemUnavailableError`, which is
+    retryable by construction, so every calculator activity spent `activity_max_attempts` — each
+    one behind a heartbeat-detection window — being refused identically. That is precisely the
+    inversion `CalcToolError` exists to prevent, surviving at the one boundary that still collapsed
+    it.
+    """
+    assert remote._auth_rejection(_status_error(401)) == 401
+    assert remote._auth_rejection(_status_error(403)) == 403
+
+
+def test_the_rejection_is_found_inside_the_task_groups_exception_group() -> None:
+    """The status is nested, so neither `except HTTPStatusError` nor one `__cause__` hop sees it.
+
+    `streamablehttp_client` runs its transport in an anyio task group, so the real shape at this
+    boundary is `ExceptionGroup(... [HTTPStatusError(401)])` reached through `__cause__`. This is
+    the assertion that would have failed had the fix caught the exception by type, which was the
+    obvious implementation and the wrong one.
+    """
+    nested = ExceptionGroup("unhandled errors in a TaskGroup", [_status_error(401)])
+    wrapper = RuntimeError("connect failed")
+    wrapper.__cause__ = nested
+
+    assert remote._auth_rejection(wrapper) == 401
+
+
+def test_a_server_that_is_genuinely_down_stays_an_outage() -> None:
+    """The negative half: only 401 and 403 are refusals.
+
+    A 500 or a 502 is the server failing and may well pass on retry, so it must keep the retryable
+    classification. A fix that turned every HTTP status into bad data would trade one wrong answer
+    for another.
+    """
+    assert remote._auth_rejection(_status_error(500)) is None
+    assert remote._auth_rejection(_status_error(502)) is None
+    assert remote._auth_rejection(ConnectionRefusedError("no listener")) is None
+
+
+def test_the_refusal_lands_in_the_non_retryable_hierarchy() -> None:
+    """What `durable/publish.py` actually matches on, asserted rather than assumed."""
+    assert issubclass(CalcToolError, ChemclawError)
+    assert not issubclass(CalcToolError, SubsystemUnavailableError)

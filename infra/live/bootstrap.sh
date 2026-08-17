@@ -194,11 +194,49 @@ stop_postgres() {
 
 # ---------------------------------------------------------------------------- temporal
 
+# Is the compose stack the thing serving Temporal right now?
+#
+# This matters because `stop-temporal`/`start-temporal` are the chaos round's broker-outage
+# primitive, and they were native-only while `up`/`down` above branch on Docker. On a Docker lane
+# — the one CLAUDE.md tells you to bring up, and the only one this environment has — the pair
+# silently targeted a native server that was never there: `stop_temporal` found no pidfile and
+# returned "temporal not running" with the container untouched, then `start_temporal` shelled to a
+# `temporal` CLI that is not installed and reported `did not become healthy within 60s`.
+#
+# So the check that exists to prove the system survives a broker outage never caused one, and then
+# blamed a timeout. Measured: the container read `Up 2 hours` throughout. Widening the window — the
+# obvious fix — would have preserved both halves of the lie.
+compose_temporal_id() {
+  docker_available || return 1
+  local id
+  id="$(docker compose -f "$REPO_ROOT/infra/docker-compose.yml" ps -aq temporal 2>/dev/null)"
+  [ -n "$id" ] || return 1
+  printf '%s' "$id"
+}
+
+# Readiness without the `temporal` CLI: the gRPC port accepting a connection. Weaker than
+# `operator cluster health`, and it has to be — that binary is absent on a Docker lane, which is
+# precisely how the native path failed silently.
+temporal_port_open() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$TEMPORAL_PORT") 2>/dev/null && exec 3<&- && exec 3>&-
+}
+
 start_temporal() {
+  if compose_temporal_id >/dev/null; then
+    log "starting the compose temporal container"
+    docker compose -f "$REPO_ROOT/infra/docker-compose.yml" start temporal >/dev/null
+    for _ in $(seq 1 90); do
+      if temporal_port_open; then log "temporal up on $TEMPORAL_PORT (compose)"; return; fi
+      sleep 1
+    done
+    die "the compose temporal container did not accept connections on $TEMPORAL_PORT within 90s"
+  fi
   if temporal operator cluster health --address "127.0.0.1:$TEMPORAL_PORT" >/dev/null 2>&1; then
     log "temporal already serving on $TEMPORAL_PORT"
     return
   fi
+  command -v temporal >/dev/null 2>&1 || die \
+    "no compose temporal container and no \`temporal\` CLI on PATH — nothing here can start a broker"
   mkdir -p "$LIVE_DIR"
   # A file-backed dev server, not the in-memory one: workflow history has to survive a worker
   # restart for the durability claim to mean anything, and the whole point of this lane is to
@@ -220,6 +258,11 @@ start_temporal() {
 }
 
 stop_temporal() {
+  if compose_temporal_id >/dev/null; then
+    log "stopping the compose temporal container"
+    docker compose -f "$REPO_ROOT/infra/docker-compose.yml" stop temporal >/dev/null
+    return
+  fi
   [ -f "$LIVE_DIR/temporal.pid" ] || { log "temporal not running"; return; }
   kill "$(cat "$LIVE_DIR/temporal.pid")" 2>/dev/null || true
   rm -f "$LIVE_DIR/temporal.pid"
