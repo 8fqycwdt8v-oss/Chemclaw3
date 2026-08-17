@@ -59,8 +59,15 @@ class _Retriever:
 
 
 def _swept(sources: list[_Retriever]) -> list[list[EvidenceChunk]]:
-    """Run one sweep and return its per-source ranked lists."""
-    return asyncio.run(sweep_sources([(s.name, s) for s in sources], "q", {}))
+    """Run one sweep and return its per-source ranked lists.
+
+    Drops the second half of `sweep_sources`' return — the names of the sources that raised — so
+    the order and cap tests below keep asking exactly what they asked before it existed. The
+    failure channel has its own tests; folding it into this helper would make every test here
+    quietly depend on it.
+    """
+    lists, _failed = asyncio.run(sweep_sources([(s.name, s) for s in sources], "q", {}))
+    return lists
 
 
 def test_the_fan_in_is_in_source_order_not_completion_order() -> None:
@@ -224,7 +231,7 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
 
     async def sweep(query: str) -> str:
         """Stand in for `gather_evidence`: the same fan-out, sources that need no database."""
-        lists = await sweep_sources(
+        lists, _failed = await sweep_sources(
             [(s.name, s) for s in (_Retriever("graph", 4), _Retriever("lexical", 0))], query, {}
         )
         return f"{sum(len(chunks) for chunks in lists)} chunks"
@@ -257,3 +264,43 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
 
     reports = [e for e in asyncio.run(_turn()) if isinstance(e, EvidenceSourceEvent)]
     assert {r.source: r.chunks for r in reports} == {"graph": 4, "lexical": 0}
+
+
+def test_a_failed_source_is_named_and_a_silent_one_is_not() -> None:
+    """A source that was asked and found nothing is not one that could not be asked.
+
+    The sweep already distinguished a source that was not asked from one that returned nothing.
+    It could not distinguish either from one that *raised*: a failing branch contributed `[]`,
+    exactly like a healthy branch matching nothing, and the caller had no value to tell them apart
+    by. That is what fed `gather_evidence` an empty list it then presented to the model as
+    "nothing on file".
+    """
+    lists, failed = asyncio.run(
+        sweep_sources(
+            [
+                (s.name, s)
+                for s in (
+                    _Retriever("graph", 2),
+                    _Retriever("lexical", 1, fails=True),
+                    _Retriever("dense", 0),
+                )
+            ],
+            "q",
+            {},
+        )
+    )
+    # Positions are unchanged: the failed leg still contributes an empty list where it stood.
+    assert [len(chunks) for chunks in lists] == [2, 0, 0]
+    # ...but only the leg that raised is named. `dense` ran fine and matched nothing.
+    assert failed == ["lexical"]
+
+
+def test_a_sweep_where_nothing_failed_names_nothing() -> None:
+    """The control: an all-healthy sweep must not report a phantom degradation."""
+    lists, failed = asyncio.run(
+        sweep_sources(
+            [(s.name, s) for s in (_Retriever("graph", 1), _Retriever("dense", 0))], "q", {}
+        )
+    )
+    assert [len(chunks) for chunks in lists] == [1, 0]
+    assert failed == []

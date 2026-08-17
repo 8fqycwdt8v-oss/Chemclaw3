@@ -46,7 +46,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from typing_extensions import TypedDict
 
-from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.turn_signals import stream_writer_or_none
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 
@@ -74,9 +74,15 @@ class FanState(TypedDict):
     `ranked` is `operator.add` over `(index, chunks)` pairs rather than over the chunk lists
     themselves, because the fan-in has to be re-ordered afterwards and a bare concatenation loses
     the only thing that could re-order it (see the module docstring).
+
+    `failed` carries the names of the sources that *raised*. It is a separate channel rather than a
+    sentinel inside `ranked` because the two are different facts and the caller acts on them
+    differently: an empty hit-list means "asked, found nothing", and a name here means "could not
+    ask". Collapsing them is the defect this channel exists to end — see `sweep_sources`.
     """
 
     ranked: Annotated[list[tuple[int, list[EvidenceChunk]]], operator.add]
+    failed: Annotated[list[str], operator.add]
 
 
 async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
@@ -98,14 +104,19 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     try:
         chunks = await retriever.retrieve(configurable[_QUERY], configurable[_FILTERS])
     except Exception:
-        logger.exception("evidence source %r failed; the sweep continues without it", name)
+        # Through `degraded()` rather than a bare `logger.exception` plus a private counter: this is
+        # the repository's chokepoint for "we continued with less", and a swallow that does not go
+        # through it is invisible to `chemclaw_degradations_total` and to `tests/test_degraded.py`,
+        # which reads the subsystem names out of the source and pins the set.
+        degraded(logger, "evidence_source", "evidence source %r failed; the sweep continues", name)
         record_metric(lambda m: m.increment("chemclaw_evidence_source_failures_total", 1))
-        chunks = []
+        _report(name, 0, failed=True)
+        return {"ranked": [(index, [])], "failed": [name]}
     _report(name, len(chunks))
-    return {"ranked": [(index, list(chunks))]}
+    return {"ranked": [(index, list(chunks))], "failed": []}
 
 
-def _report(name: str, found: int) -> None:
+def _report(name: str, found: int, *, failed: bool = False) -> None:
     """Publish one branch's contribution, to whoever is watching this turn.
 
     Two audiences, one fact. `get_stream_writer` reaches a surface watching the turn live, which is
@@ -124,7 +135,12 @@ def _report(name: str, found: int) -> None:
     if writer is None:  # no graph runtime, or nothing consuming a custom stream
         logger.debug("evidence source %r contributed %d chunk(s)", name, found)
     else:
-        writer({"evidence_source": name, "chunks": found})
+        # `failed` is on the event because without it this branch published
+        # `{"evidence_source": "graph", "chunks": 0}` for a source that ran fine and matched
+        # nothing *and* for a source whose database was unreachable — byte-identical. The module
+        # docstring above claims the branch exists to tell "returned nothing" from "was not asked";
+        # it could not tell either from "raised" until this field existed.
+        writer({"evidence_source": name, "chunks": found, "failed": failed})
 
 
 def _fan(state: FanState, config: RunnableConfig) -> list[Send]:
@@ -154,8 +170,8 @@ async def sweep_sources(
     sources: list[tuple[str, SourceRetriever]],
     query: str,
     filters: dict[str, Any],
-) -> list[list[EvidenceChunk]]:
-    """Ask every source the same question at once; return their ranked hit-lists, in source order.
+) -> tuple[list[list[EvidenceChunk]], list[str]]:
+    """Ask every source the same question at once; return their hit-lists **and what failed**.
 
     Args:
         sources: `(name, retriever)` per source, in the order the merge downstream expects. The
@@ -166,13 +182,22 @@ async def sweep_sources(
         filters: The graph filters (type/tag/date window), applied by the sources that honour them.
 
     Returns:
-        One ranked list per source, **in the order `sources` was given** — never in completion
-        order. Both merge modes downstream depend on that (see the module docstring).
+        `(ranked_lists, failed_names)`. One ranked list per source, **in the order `sources` was
+        given** — never in completion order; both merge modes downstream depend on that (see the
+        module docstring). `failed_names` holds the sources that raised.
+
+    **Returning the failures is the whole reason this signature changed.** It used to return the
+    hit-lists alone, so a source whose database was unreachable was indistinguishable from a source
+    that ran and matched nothing: both contributed `[]`. `gather_evidence` then handed the model an
+    empty list under a docstring that tells it, in as many words, that empty means *nothing on
+    file, never invented* — so a chemist asking "have we run this nitration before?" during a
+    Postgres blip was told the company has no prior art, confidently, with nothing anywhere saying
+    a source was down. A caller cannot make that distinction from a value that does not carry it.
     """
     if not sources:
-        return []
+        return [], []
     state: FanState = await _FANOUT.ainvoke(
-        {"ranked": []},
+        {"ranked": [], "failed": []},
         {
             "configurable": {
                 _SOURCES: sources,
@@ -182,4 +207,4 @@ async def sweep_sources(
         },
     )
     by_index = dict(state["ranked"])
-    return [by_index.get(index, []) for index in range(len(sources))]
+    return [by_index.get(index, []) for index in range(len(sources))], list(state["failed"])
