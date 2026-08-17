@@ -110,6 +110,13 @@ def test_a_source_that_fails_costs_its_own_leg_and_not_the_sweep() -> None:
     The same trade the connector transport makes: losing a capability is a much smaller failure
     than losing the turn. The failed source contributes an empty list *in its own position*, so the
     sources after it keep their places and the merge downstream is unaffected.
+
+    **The `[2, 0, 2]` here is about the merge, not about observability.** `sweep_sources` returns
+    ranked hit-lists and nothing else, so a failed leg is an empty list here by construction —
+    there is no third value a `list[EvidenceChunk]` could take. That is correct for this return
+    type and was wrong as the *whole* record of the failure, which is what
+    `test_a_failed_leg_and_an_empty_leg_report_differently` now covers on the channel that has
+    somewhere to put it.
     """
     lists = _swept(
         [_Retriever("graph", 2), _Retriever("lexical", 1, fails=True), _Retriever("dense", 2)]
@@ -118,23 +125,9 @@ def test_a_source_that_fails_costs_its_own_leg_and_not_the_sweep() -> None:
     assert [chunk.retriever for chunk in lists[2]] == ["dense", "dense"]
 
 
-def test_no_sources_is_an_empty_sweep_and_not_an_error() -> None:
-    """Every source disabled is a real deployment, not a misconfiguration to raise on."""
-    assert _swept([]) == []
-
-
-def test_each_branch_reports_what_it_contributed() -> None:
-    """The point of the branch existing: a starved leg is visible while the sweep runs.
-
-    In an aggregate hit-list a source returning nothing and a source nobody asked are the same
-    observation. Here they are not — the branch reports zero, which is what
-    `D-2026-08-01-a-cap-that-starves-a-source` needed and had no way to see.
-
-    Read off the graph's own custom stream, which is how a surface receives it during a real turn.
-    """
+def _reports(sources: list[_Retriever]) -> list[dict[str, Any]]:
+    """Every custom-stream payload one sweep publishes, in arrival order."""
     from chemclaw.retrieval.fanout import _FANOUT, _FILTERS, _QUERY, _SOURCES
-
-    sources = [_Retriever("graph", 3), _Retriever("lexical", 0), _Retriever("dense", 2)]
 
     async def _stream() -> list[dict[str, Any]]:
         return [
@@ -152,7 +145,66 @@ def test_each_branch_reports_what_it_contributed() -> None:
             )
         ]
 
-    reported = {item["evidence_source"]: item["chunks"] for item in asyncio.run(_stream())}
+    return asyncio.run(_stream())
+
+
+def test_a_failed_leg_and_an_empty_leg_report_differently() -> None:
+    """The two ways to contribute nothing, told apart on the channel a chemist watches.
+
+    A retriever that raises degrades to an empty list, so for as long as a branch reported only a
+    count the broken leg and the genuinely-quiet leg published the identical payload — the exact
+    collapse this fan-out exists to undo, reproduced one level down. They are not the same finding:
+    "the corpus has nothing on this" is an answer, "the index is down" is an outage, and a surface
+    that renders them alike sends someone to fix the wrong thing.
+
+    Asserted as a *difference* between two legs in one sweep rather than as a flag on one, because
+    the defect was never "the flag was false" — it was that the two payloads were equal.
+    """
+    sources = [_Retriever("graph", 2), _Retriever("lexical", 0), _Retriever("dense", 1, fails=True)]
+    by_source = {payload["evidence_source"]: payload for payload in _reports(sources)}
+
+    quiet, broken = by_source["lexical"], by_source["dense"]
+    assert quiet["chunks"] == broken["chunks"] == 0, "the precondition: both contributed nothing"
+    assert quiet != broken, "a failed leg is still indistinguishable from an empty one"
+    assert quiet["failed"] is False
+    assert broken["failed"] is True
+    assert by_source["graph"] == {"evidence_source": "graph", "chunks": 2, "failed": False}
+
+
+def test_the_failure_counter_names_the_source_that_failed() -> None:
+    """The across-turns half of the same distinction, and why the label had to be added.
+
+    The chunk counter has always been labelled `{source}` and the failure counter carried no labels
+    at all, so the two series could not be joined: "some source raised" and "the dense leg went
+    dark" were two numbers with no way to decide whether they described one event or two. That is
+    the correlation `D-2026-08-01-a-cap-that-starves-a-source` needed and did not have, and an
+    unlabelled counter cannot supply it however long it is retained.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _swept([_Retriever("graph", 1), _Retriever("dense", 1, fails=True)])
+    rendered = METRICS.render()
+
+    assert 'chemclaw_evidence_source_failures_total{source="dense"}' in rendered
+    assert 'chemclaw_evidence_source_failures_total{source="graph"}' not in rendered
+
+
+def test_no_sources_is_an_empty_sweep_and_not_an_error() -> None:
+    """Every source disabled is a real deployment, not a misconfiguration to raise on."""
+    assert _swept([]) == []
+
+
+def test_each_branch_reports_what_it_contributed() -> None:
+    """The point of the branch existing: a starved leg is visible while the sweep runs.
+
+    In an aggregate hit-list a source returning nothing and a source nobody asked are the same
+    observation. Here they are not — the branch reports zero, which is what
+    `D-2026-08-01-a-cap-that-starves-a-source` needed and had no way to see.
+
+    Read off the graph's own custom stream, which is how a surface receives it during a real turn.
+    """
+    sources = [_Retriever("graph", 3), _Retriever("lexical", 0), _Retriever("dense", 2)]
+    reported = {item["evidence_source"]: item["chunks"] for item in _reports(sources)}
     assert reported == {"graph": 3, "lexical": 0, "dense": 2}
 
 
@@ -212,6 +264,10 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
     inside a tool, inside a `Send` branch of the agent's own model→tools edge, and the report has
     to cross both boundaries to arrive. Asserting on `_custom_event` alone would prove the mapping
     and skip the part that was in doubt.
+
+    A third source is added that *raises*, because `failed` has the same two boundaries to cross
+    and a flag set on the branch but dropped by the translator would be indistinguishable, from the
+    chemist's side, from never having been set.
     """
     from langchain_core.tools import StructuredTool
 
@@ -224,9 +280,12 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
 
     async def sweep(query: str) -> str:
         """Stand in for `gather_evidence`: the same fan-out, sources that need no database."""
-        lists = await sweep_sources(
-            [(s.name, s) for s in (_Retriever("graph", 4), _Retriever("lexical", 0))], query, {}
+        legs = (
+            _Retriever("graph", 4),
+            _Retriever("lexical", 0),
+            _Retriever("dense", 3, fails=True),
         )
+        lists = await sweep_sources([(s.name, s) for s in legs], query, {})
         return f"{sum(len(chunks) for chunks in lists)} chunks"
 
     class _Usage:
@@ -256,4 +315,8 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
         ]
 
     reports = [e for e in asyncio.run(_turn()) if isinstance(e, EvidenceSourceEvent)]
-    assert {r.source: r.chunks for r in reports} == {"graph": 4, "lexical": 0}
+    assert {r.source: (r.chunks, r.failed) for r in reports} == {
+        "graph": (4, False),
+        "lexical": (0, False),
+        "dense": (0, True),
+    }

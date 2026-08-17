@@ -90,22 +90,33 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     retriever whose backing store is down should degrade the evidence, exactly as an unreachable
     connector costs its tools and not the turn. The failure is logged and counted, never swallowed
     silently.
+
+    **And it is reported as a failure rather than as a zero.** Both paths end with an empty list, so
+    for as long as the report carried only a count the two converged on one indistinguishable
+    `0` — the exact collapse this fan-out exists to undo one level up, reintroduced one level down.
+    "This source had nothing to say" is a fact about the corpus and "this source is broken" is a
+    fact about the deployment; they have different fixes and different urgencies, and a surface
+    that renders them identically sends a chemist looking for the wrong one.
     """
     configurable: dict[str, Any] = dict(config.get("configurable") or {})
     sources: list[tuple[str, SourceRetriever]] = configurable[_SOURCES]
     index = state["index"]
     name, retriever = sources[index]
+    failed = False
     try:
         chunks = await retriever.retrieve(configurable[_QUERY], configurable[_FILTERS])
     except Exception:
         logger.exception("evidence source %r failed; the sweep continues without it", name)
-        record_metric(lambda m: m.increment("chemclaw_evidence_source_failures_total", 1))
+        record_metric(
+            lambda m: m.increment("chemclaw_evidence_source_failures_total", 1, {"source": name})
+        )
         chunks = []
-    _report(name, len(chunks))
+        failed = True
+    _report(name, len(chunks), failed=failed)
     return {"ranked": [(index, list(chunks))]}
 
 
-def _report(name: str, found: int) -> None:
+def _report(name: str, found: int, *, failed: bool) -> None:
     """Publish one branch's contribution, to whoever is watching this turn.
 
     Two audiences, one fact. `get_stream_writer` reaches a surface watching the turn live, which is
@@ -114,6 +125,14 @@ def _report(name: str, found: int) -> None:
     nothing on every query is a broken deployment. The writer call is guarded because this graph is
     also invoked outside any streaming consumer (the CLI, a Temporal activity), and
     a sweep must not fail for want of an audience.
+
+    `failed` is what tells a dark leg from a broken one, on both audiences at once. On the stream it
+    rides beside the count, because a consumer reading `chunks == 0` cannot recover the difference
+    afterwards. For the counters the same distinction is a *label*: the failure counter is labelled
+    with the source exactly as the chunk counter already is, so the two series can be joined —
+    unlabelled, "which source is dark" and "which source is raising" were two numbers that could
+    only be correlated by guessing, which is the shape of blindness
+    `D-2026-08-01-a-cap-that-starves-a-source` was found in.
     """
     record_metric(
         lambda m: m.increment("chemclaw_evidence_source_chunks_total", found, {"source": name})
@@ -122,9 +141,14 @@ def _report(name: str, found: int) -> None:
     # one upstream call is how a change breaks one of them silently (`turn_signals` says which).
     writer = stream_writer_or_none()
     if writer is None:  # no graph runtime, or nothing consuming a custom stream
-        logger.debug("evidence source %r contributed %d chunk(s)", name, found)
+        logger.debug(
+            "evidence source %r contributed %d chunk(s)%s",
+            name,
+            found,
+            " after failing" if failed else "",
+        )
     else:
-        writer({"evidence_source": name, "chunks": found})
+        writer({"evidence_source": name, "chunks": found, "failed": failed})
 
 
 def _fan(state: FanState, config: RunnableConfig) -> list[Send]:

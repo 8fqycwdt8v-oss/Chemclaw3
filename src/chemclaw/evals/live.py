@@ -38,7 +38,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import yaml
@@ -55,17 +55,25 @@ from chemclaw.kg.note import cited_ids
 
 logger = logging.getLogger(__name__)
 
-# The one phrase in `agent/plan_gate.plan_approval_refusal` that identifies a refusal as the plan
-# gate's rather than any other tool failure. Matched against the `tool_failed` event's message,
-# which is where the refusal surfaces: `announce_tool_failures` is attached innermost, so it sees
-# `PlanNotApprovedError` raw and puts it on the chemist's stream before either converter turns it
-# into the value the model reads.
+# The `tool_failed` event's `reason`, when the failure is the plan gate refusing an unapproved
+# state-changing call rather than a tool falling over. That refusal surfaces as a tool failure
+# because `announce_tool_failures` sees `PlanNotApprovedError` raw and puts it on the chemist's
+# stream before either converter turns it into the value the model reads; `api/graph_stream`
+# stamps this discriminator on the way past.
 #
-# A literal here and **not** an import of `plan_approval_refusal`, so loading a probe run does not
-# build the agent layer — the same reason `evals/probe.py` validates `expects_tools` in a test
-# rather than in the schema. `tests/test_m12_probes.py` pins the literal against the live sentence,
-# which is the declaration-versus-surface check this repository applies to every such copy.
-PLAN_GATE_MARKER = "has not been approved yet"
+# **This used to be a phrase of the refusal sentence** ("has not been approved yet"), matched as a
+# substring of `message`. That made a *reword* of prose written for chemists silently reclassify
+# every gated turn: `plan_refusals` and `tools_failed` are opposite findings — the control holding
+# versus a fault — and the harness would have started reporting the second for the first, with the
+# tests still green because they pinned the same copy of the same sentence. A field is a
+# classification the producer makes once; a substring is one this reader guesses at.
+#
+# A literal here and **not** an import of `plan_gate`, so loading a probe run does not build the
+# agent layer — the same reason `evals/probe.py` validates `expects_tools` in a test rather than
+# in the schema. `tests/test_m12_probes.py` pins the literal against the live constant *and*
+# against `ToolFailedEvent`'s declared value set, which is the declaration-versus-surface check
+# this repository applies to every such copy.
+PLAN_GATE_REASON: Final = "plan_gate"
 
 # The events that are the turn beginning to *answer*, as opposed to the turn working. Both, not
 # only `token`: a deployment that does not stream — or a turn whose whole reply arrives at once —
@@ -233,9 +241,9 @@ class ProbeOutcome(BaseModel):
     # the pre-teams behaviour and the single-agent control arm's expected shape.
     specialists: list[str] = Field(default_factory=list)
     # State-changing tools this turn announced and the plan gate refused, identified by
-    # `PLAN_GATE_MARKER` on the `tool_failed` message. Separate from `tools_failed` because a plan
-    # refusal is not a broken tool — it is the gate working — and folding them together would make
-    # a correctly-gated turn indistinguishable from a turn whose tools fell over.
+    # `PLAN_GATE_REASON` on the `tool_failed` event's `reason` field. Separate from `tools_failed`
+    # because a plan refusal is not a broken tool — it is the gate working — and folding them
+    # together would make a correctly-gated turn indistinguishable from one whose tools fell over.
     plan_refusals: list[str] = Field(default_factory=list)
     # What this turn's session cost, per the ledger. `None` means the ledger could not be asked —
     # no Postgres session store, or the row had not landed inside the wait — which is a different
@@ -530,10 +538,10 @@ async def run_turn(
                     # A plan-gate refusal reaches this stream as a tool failure — the innermost
                     # middleware announces the raw `PlanNotApprovedError` before either converter
                     # turns it into the value the model reads — so the two are told apart by the
-                    # refusal's own sentence. Recorded on both lists is wrong and this is not it:
-                    # a refusal is the gate working, and counting it in `tools_failed` would make a
-                    # correctly-gated turn read as a turn whose tools fell over.
-                    if PLAN_GATE_MARKER in str(event.get("message", "")):
+                    # event's own discriminator. Recorded on both lists is wrong and this is not
+                    # it: a refusal is the gate working, and counting it in `tools_failed` would
+                    # make a correctly-gated turn read as a turn whose tools fell over.
+                    if str(event.get("reason", "")) == PLAN_GATE_REASON:
                         outcome.plan_refusals.append(tool)
                     else:
                         outcome.tools_failed.append(tool)
