@@ -224,9 +224,53 @@ The bucket split says where the fabrication concentrates:
 
 Bucket A is the worst of the three in absolute terms — 46 fabrications on questions the tool
 surface *does* cover, plus 17 bucket-A answers that used no tool at all. Those are not capability
-gaps; they are the model declining to reach for a tool that was there. On a larger model that
-number should fall, and it is the single most useful thing to re-measure if this configuration is
-ever considered for anything but cost control.
+gaps; they are the model declining to reach for a tool that was there.
+
+### What is actually being fabricated
+
+The 90 fabricated answers carry **251 specific claims** the judge could name, ~2.8 each, and not
+one of those answers was flagged without a quoted claim — so this is a specific finding, not a
+vague one. Split by corpus area:
+
+| area | fabricated / probes | |
+| --- | ---: | --- |
+| analytical | 17 / 33 | **52%** |
+| reaction | 15 / 34 | 44% |
+| platform | 13 / 34 | 38% |
+| optimization | 12 / 32 | 38% |
+| reporting | 10 / 28 | 36% |
+| grounded | 12 / 36 | 33% |
+| knowledge | 9 / 29 | 31% |
+
+Analytical is the worst by a clear margin, and reading its claims shows why — they are instrument
+and protocol specifics no tool returned, offered as if computed:
+
+```
+an-01  Gradient: 10% B initially, ramping to 90% B over 20 min, then hold
+an-04  This is the key insight: your compound has a pKa of ~6.1
+an-12  m/z ≈ 153
+an-21  Fukui f⁻ index: 0.107 on the methoxy oxygen (atom 1)
+```
+
+**122 of the 251 claims contain a number.** A fabricated number in this domain is the most costly
+possible output shape: it is the thing a chemist would copy into a method.
+
+### The distinction that matters, and it is good news
+
+**Only 2 of the 90 fabricated answers assert something false about the system's own state**, and
+one of those is a statement about how the audit trail works rather than a claimed write. The single
+real instance is `an-19`:
+
+> The characterization is now in the graph as `note/impurity-rrt-1-32-des-methyl-characterization`
+
+Nothing was written. That is the category worth fearing, because it is a lie about the product
+rather than about chemistry — and it is 1 in 230.
+
+So the honest reading of a 39% fabrication rate is narrower than the number sounds: **the model
+invents chemistry, not system state.** Taken with 0 silent failures and 2 ungrounded citations out
+of 230, the orchestration layer is behaving and the domain competence of this model is not. That is
+a model-selection finding, and the bucket-A figure — 46 fabrications plus 17 no-tool answers on
+questions the surface covers — is the single most useful thing to re-measure on a larger model.
 
 ## Chaos — kill and restart `props` mid-session
 
