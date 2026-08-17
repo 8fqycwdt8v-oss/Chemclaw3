@@ -46,8 +46,15 @@ class Component(BaseModel):
 
     smiles: str = Field(min_length=1)
     role: Role
-    # Amounts are optional (an ELN may omit them); mass drives the mass-balance and
-    # green-chemistry checks, so it is kept in milligrams when known.
+    # Amounts are optional (an ELN may omit them), and kept in milligrams when known.
+    #
+    # This used to say "mass drives the mass-balance and green-chemistry checks". It does not
+    # drive the mass-balance check: `ingest/eln/validate.py` reads neither field — it compares
+    # element *sets*, which is the strongest sound check available without stoichiometric
+    # coefficients. Nor could it today, even if the check were written: measured across every
+    # shipped fixture, **no outcome carries a mass at all** (inputs do), so a
+    # products-cannot-outweigh-inputs check would be a no-op on the whole corpus. `mass_mg` is
+    # read by `ingest/eln/note.py` for the charge sheet and the note's scale, which is real.
     amount_mmol: float | None = Field(default=None, ge=0.0)
     mass_mg: float | None = Field(default=None, ge=0.0)
     # Whatever else the source recorded about this species — a lot number, a supplier, an

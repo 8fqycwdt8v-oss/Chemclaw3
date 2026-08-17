@@ -1748,3 +1748,34 @@ def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
     assert note.outgoing_relations() == [], "the ELN must not be able to author a graph edge"
     # Neutralized, not deleted: a reviewer still reads what the chemist actually wrote.
     assert "contradicts:reaction-1234" in note.body
+
+
+def test_mass_balance_catches_a_new_element_and_nothing_weaker() -> None:
+    """The check's real reach, pinned in both directions so its docstring cannot overstate it.
+
+    Element-set subsumption is a sound *necessary* condition and nothing more: it rejects a product
+    introducing an element no input supplies, and admits every fabrication assembled from elements
+    already present. Asserting the misses deliberately — a test that only showed the catch would
+    read as though mass balance validated the chemistry, which is what the docstring used to imply
+    and what a reviewer must not be told.
+
+    The backlog's own example for this gap (`benzene + methanol >> paracetamol`) is in the *caught*
+    group: paracetamol has nitrogen and neither input supplies it. Swapping benzene for aniline is
+    what actually gets through, which is why the example is here rather than in the row.
+    """
+
+    def rx(inputs: list[str], outcomes: list[str]) -> OrdReaction:
+        return OrdReaction(
+            reaction_id="t",
+            inputs=[Component(smiles=s, role=Role.REACTANT) for s in inputs],
+            outcomes=[Component(smiles=s, role=Role.PRODUCT) for s in outcomes],
+            provenance="p",
+        )
+
+    paracetamol = "CC(=O)Nc1ccc(O)cc1"
+    caught = validate_ord(rx(["c1ccccc1", "CO"], [paracetamol]))
+    assert caught == ["mass balance: products contain N but no input supplies it"]
+
+    # Every one of these is chemically fabricated and every one validates.
+    assert validate_ord(rx(["Nc1ccccc1", "CO"], [paracetamol])) == []
+    assert validate_ord(rx(["C"], ["CCCCCCCCCCCCCCCCCCCC"])) == []
