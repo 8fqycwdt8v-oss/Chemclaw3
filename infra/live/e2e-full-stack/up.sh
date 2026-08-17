@@ -67,6 +67,38 @@ wait_for() {
   die "$name did not become ready at $url — see $LIVE_DIR/e2e-$name.log"
 }
 
+# Assert the server accepts the bearer this lane will actually send it.
+#
+# `wait_for` above proves the process is up, and that is all it proves: `/healthz` is
+# unauthenticated on every server in this fleet, so a token mismatch leaves the connector reading
+# `healthy` while every `/mcp` call is refused. That is not hypothetical — this lane spent a whole
+# storm run in it, and the misdiagnosis went all the way to Temporal: 401s surfaced as
+# `CalcServerError: the calculation service is not answering`, four storm checks failed, and the
+# only honest evidence was a `401 Unauthorized` line in the server's own log.
+#
+# `D-2026-08-17-a-harness-that-starts-two-of-five-servers...` names this blind spot — "/readyz says
+# nothing about whether the caller holds the credential that backend verifies" — and this is the
+# check that closes it for the lane. Any status but 401/403 counts as accepted: a bare POST is not
+# a valid MCP `initialize`, so 400 and 406 are the *expected* healthy answers here. We are asking
+# one question only, and it is not "does this call work".
+assert_credential_accepted() {
+  local name="$1" url="$2" token="$3"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H "Authorization: Bearer $token" -H 'content-type: application/json' \
+    -d '{}' "$url" || echo 000)"
+  case "$code" in
+    401|403)
+      die "$name is running but refused this lane's credential (HTTP $code at $url). The server
+      verifies a different value than the one exported here — check that the same token reaches
+      both halves. A restarted process that predates this invocation keeps its old environment,
+      which is the usual cause."
+      ;;
+    000) die "$name did not answer $url at all while checking its credential" ;;
+    *) log "$name credential accepted (HTTP $code)" ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------- Chemclaw3-mcp
 # The four servers this harness runs share one uv workspace at the repo root, so one resolved
 # interpreter serves them all (same reasoning as processes.sh's python_bin()).
@@ -104,6 +136,7 @@ start_props() {
   CHEMCLAW_PROPS_TOKEN="${CHEMCLAW_PROPS_TOKEN:-dev-token}" \
     start props "$python" -m uvicorn chemclaw_mcp_props.app:app --host 127.0.0.1 --port 8850
   wait_for props "http://127.0.0.1:8850/healthz"
+  assert_credential_accepted props "http://127.0.0.1:8850/mcp" "${CHEMCLAW_PROPS_TOKEN:-dev-token}"
 }
 
 start_rxnpredict() {
@@ -116,6 +149,7 @@ start_rxnpredict() {
     CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}" \
     start rxnpredict "$python" -m uvicorn chemclaw_mcp_rxnpredict.app:app --host 127.0.0.1 --port 8857
   wait_for rxnpredict "http://127.0.0.1:8857/healthz"
+  assert_credential_accepted rxnpredict "http://127.0.0.1:8857/mcp" "${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}"
 }
 
 start_chem() {
@@ -123,6 +157,7 @@ start_chem() {
   CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}" \
     start chem "$python" -m uvicorn chemclaw_mcp_chem.app:app --host 127.0.0.1 --port 8858
   wait_for chem "http://127.0.0.1:8858/healthz"
+  assert_credential_accepted chem "http://127.0.0.1:8858/mcp" "${CHEMCLAW_CHEM_TOKEN:-dev-token}"
 }
 
 start_safety() {
@@ -130,6 +165,7 @@ start_safety() {
   CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}" \
     start safety "$python" -m uvicorn chemclaw_mcp_safety.app:app --host 127.0.0.1 --port 8859
   wait_for safety "http://127.0.0.1:8859/healthz"
+  assert_credential_accepted safety "http://127.0.0.1:8859/mcp" "${CHEMCLAW_SAFETY_TOKEN:-dev-token}"
 }
 
 # Not a connector — see the fleet comment above. `calc_server_url` defaults to 8860.
@@ -138,6 +174,7 @@ start_calc() {
   CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}" \
     start calc "$python" -m uvicorn chemclaw_mcp_calc.app:app --host 127.0.0.1 --port 8860
   wait_for calc "http://127.0.0.1:8860/healthz"
+  assert_credential_accepted calc "http://127.0.0.1:8860/mcp" "${CHEMCLAW_CALC_TOKEN:-dev-token}"
 }
 
 # ---------------------------------------------------------------------------- Chemclaw3_mock

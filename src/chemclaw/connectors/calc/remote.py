@@ -216,11 +216,63 @@ async def calc_session() -> AsyncIterator[ClientSession]:
     except Exception as exc:
         if connected:
             raise
+        rejected = _auth_rejection(exc)
+        if rejected is not None:
+            raise CalcToolError(
+                f"the calculation service refused this client's credential "
+                f"(HTTP {rejected} from {settings.calc_server_url}). The service is running and "
+                f"answering; it does not accept the bearer taken from "
+                f"{settings.calc_server_token_env}. Set that variable to the value the server "
+                f"verifies — retrying will not help."
+            ) from exc
         raise CalcServerError(
             "the calculation service is not answering, so no calculation was run. This is an "
             "outage rather than a problem with what was asked; the same request will work once "
             "it is back."
         ) from exc
+
+
+def _auth_rejection(exc: BaseException) -> int | None:
+    """The HTTP status if this connect failure was the server *refusing the credential*.
+
+    A rejection is not an outage, and the difference is the retry. `CalcServerError` is
+    `SubsystemUnavailableError` — retryable, because an unreachable host comes back. A 401 never
+    comes back on its own: the identical call is refused identically until someone changes a
+    setting, so a durable job that treats it as transient spends `activity_max_attempts` and a
+    heartbeat-detection window each time to be told the same thing.
+
+    This is the distinction `CalcServerError` and `CalcToolError` were split to draw, applied at
+    the one boundary that still collapsed it. Measured against a live server: a bad bearer surfaces
+    here as `httpx.HTTPStatusError` (401) nested inside the `ExceptionGroup` that
+    `streamablehttp_client`'s task group raises, so neither `except httpx.HTTPStatusError` nor a
+    single `__cause__` hop finds it — the tree has to be walked.
+
+    Only 401 and 403 count. Every other status is left to the caller's outage path, because a 500
+    or a 502 genuinely is the server failing and genuinely may pass on retry.
+
+    Args:
+        exc: The exception raised while opening the session.
+
+    Returns:
+        The refusing status code, or `None` when this was not an authentication failure.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, httpx.HTTPStatusError) and current.response.status_code in (
+            401,
+            403,
+        ):
+            return current.response.status_code
+        stack.extend(getattr(current, "exceptions", ()))
+        for nested in (current.__cause__, current.__context__):
+            if nested is not None:
+                stack.append(nested)
+    return None
 
 
 def _token() -> str | None:

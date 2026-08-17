@@ -29,7 +29,7 @@ test, so grading is not the system marking its own work.
 | Chemclaw3-mcp servers started by the harness | 2 of 5 | 5 of 5 |
 | Cross-repo fixes landed | 0 (patches lost) | 3, each its own PR |
 
-Seven defects were found by running the thing. None was visible to any existing test suite, and
+Nine defects were found by running the thing. None was visible to any existing test suite, and
 two of them were being actively misreported as healthy.
 
 ## Bugs found and fixed
@@ -295,17 +295,56 @@ give them and the fourth is a harness timeout:
 | F | a truncated argument document is reported, not swallowed | HTTP 200, `answered=False`, `error=empty_answer`, `tools_failed=[]` |
 | E | broker outage | the check itself raised — `bootstrap.sh start-temporal` did not see Temporal healthy within 60 s |
 
-**The thread worth pulling is the zero.** Both D and E report **0 `job_records` rows**, and that is
-not obviously a product defect: `make live-jobs` wrote those rows correctly earlier in this same
-session (`calc/compute_reaction_energy by service-account`), and the table held 4 rows. The
-difference is that the storm drives jobs *through the agent with a mock model*, so the honest
-reading is that either the mock's tool calls never reach a durable launch — in which case the two
-checks are measuring the mock, not the system — or job recording really does break on the agent
-path. Those are different bugs and this run cannot distinguish them. Deciding which is a follow-up.
+**The thread worth pulling was the zero, and pulling it put one root cause under three of the four
+failures.** Both D and E reported 0 `job_records` rows. Rather than guess, the question went to
+Temporal, which named it at once — every failed calc workflow ended the same way:
 
-The broker-outage failure is the least interesting: the Temporal container was never actually
-unhealthy — it shows `Up 2 hours` afterwards and the front door answered `200` throughout — so what
-failed is `bootstrap.sh`'s 60-second readiness window, not the broker.
+```
+[activity_failure_info]      Activity task failed
+  [application_failure_info] the calculation service is not answering, so no calculation was run.
+                             This is an outage rather than a problem with what was asked;
+                             the same request will work once it is back.
+```
+
+And the calc server's own log said what had actually happened:
+
+```
+INFO: 127.0.0.1:58740 - "POST /mcp HTTP/1.1" 401 Unauthorized
+```
+
+**The service was answering. It was refusing the credential.** The workers had been started by an
+earlier `processes.sh up` in this session that did not carry `CHEMCLAW_CALC_TOKEN`; when `up.sh`
+then exported it, `start()` reported each worker `already running` and skipped it — so they kept
+the token-less environment and every calculator call 401'd for the rest of the run.
+
+Two further defects follow, and the first is the one worth having found:
+
+**7 · `CalcServerError` reports a 401 as an outage** (`connectors/calc/remote.py`). Every clause of
+that message is false for a refusal: the service *is* answering, it *is* a problem with what was
+asked, and it will never "work once it is back" because it never left. The cost is not the wording
+— `CalcServerError` is a `SubsystemUnavailableError`, **retryable by construction**, so each
+calculator activity spent `activity_max_attempts`, each behind a 600 s heartbeat-detection window,
+being refused identically. That is precisely the inversion `CalcToolError` was split out to
+prevent, surviving at the one boundary that still collapsed it. Fixed: 401/403 is now
+`CalcToolError` — non-retryable, naming the setting to change. The status sits inside the
+`ExceptionGroup` that `streamablehttp_client`'s task group raises, so neither
+`except httpx.HTTPStatusError` nor one `__cause__` hop finds it; the tree is walked. Verified live
+both ways — a bad bearer raises `CalcToolError`, a genuinely absent server still raises
+`CalcServerError`. 4 new tests.
+
+**8 · The harness never checked that a credential was accepted** — the blind spot this run's own
+ADR had already named. `assert_credential_accepted` now runs after each of the five servers'
+`/healthz` poll, sends the bearer this lane will really use, and dies on 401/403. Verified both
+ways: `calc credential accepted (HTTP 406)` with the right token — a bare POST is not a valid MCP
+`initialize`, so 406 is the healthy answer here — and a hard failure naming the cause with a wrong
+one.
+
+**What this means for D and E as durability results: they are not results.** Neither measured what
+it was written to measure, because no calculation ever ran. The storm's own docstrings warn about
+this shape twice ("a bound that a run doing nothing also meets"); this is a third instance, with
+the check sound and the lane beneath it misconfigured. Re-running both on a correctly-credentialled
+lane is outstanding work, and until then no claim about job durability under worker loss should
+rest on this run.
 
 The `F` failure is real but small: an empty answer *was* surfaced loudly (`answered=False`,
 `error=empty_answer`), so nothing was swallowed; what is missing is the truncation being named.
@@ -341,10 +380,11 @@ function in `live_storm.py`, and documents.
 
 ## Follow-ups
 
-- **Settle the storm's `0 job_records` finding**: drive a durable job through the *agent* path and
-  check whether the row appears. If it does, families D and E are measuring the mock model and
-  their checks need rewriting; if it does not, job recording is broken on the agent path and the
-  direct-launch path that `live-jobs` exercises is hiding it. One script decides it.
+- **Re-run storm families D and E on a correctly-credentialled lane.** The 0-rows result was a 401,
+  not a durability finding, so the question they exist to answer is still unanswered.
+- Consider whether `start()` should refuse to skip an already-running process when this invocation
+  defines environment the running one cannot have. Skipping is right for idempotency and wrong for
+  correctness, and "already running" reads as success either way.
 - Give `bootstrap.sh start-temporal` a readiness window longer than 60 s, or have the storm's
   broker-outage check own its own wait — the container was healthy, the harness just gave up early.
 - Backfill ORD on first bring-up in `up.sh` (see above).
